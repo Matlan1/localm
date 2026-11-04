@@ -31,11 +31,11 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import socket
 import subprocess
 from typing import Optional
 
+from localm import sysprog
 from localm.debuglog import logger
 
 _DEFAULT_NAME = "localm"
@@ -134,10 +134,10 @@ _status_memo: object = _STATUS_UNSET
 
 
 def _tailscale_cli() -> Optional[str]:
-    """Path to the ``tailscale`` CLI if it is on PATH, else None. We only trust
-    PATH (never a hardcoded install location), so a machine where Tailscale is not
-    installed simply skips Tailscale integration."""
-    return shutil.which("tailscale") or shutil.which("tailscale.exe")
+    """Full path of the ``tailscale`` CLI (:func:`localm.sysprog.find`, never the
+    current folder), else None, so a machine where Tailscale is not installed
+    simply skips Tailscale integration."""
+    return sysprog.find("tailscale")
 
 
 def _run_tailscale_status() -> Optional[dict]:

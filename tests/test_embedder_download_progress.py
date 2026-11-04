@@ -163,6 +163,48 @@ class TestXetDownloads:
         assert lines and "2 of 4 MB" in lines[-1], lines
 
 
+    def test_xet_transfer_bytes_report_progress_before_the_file_is_reconstructed(self):
+        from types import SimpleNamespace
+
+        from huggingface_hub.utils._xet_progress_reporting import (
+            XetDownloadProgressReporter,
+        )
+        lines = []
+        cls = embedder._download_progress_class("m", lines.append, every=0.0)
+        reporter = XetDownloadProgressReporter(
+            reconstruction_desc="model.gguf", total=4 * MB, log_level=logging.INFO,
+            name="huggingface_hub.xet_get", tqdm_class=cls)
+        report = SimpleNamespace(
+            total_bytes=4 * MB, total_transfer_bytes=4 * MB,
+            total_bytes_completed=0, total_bytes_completion_rate=0.0,
+            total_transfer_bytes_completed=1 * MB,
+            total_transfer_bytes_completion_rate=0.5 * MB)
+        reporter.update_progress(report, {})
+        assert lines == ["Downloading m: 1 of 4 MB (25%)..."], lines
+        later = SimpleNamespace(**{**vars(report), "total_transfer_bytes_completed": 3 * MB})
+        reporter.update_progress(later, {})
+        assert lines[-1] == "Downloading m: 3 of 4 MB (75%)...", lines
+
+    def test_http_chunks_counted_by_both_methods_are_not_doubled(self):
+        lines = []
+        cls = embedder._download_progress_class("m", lines.append, every=0.0)
+        bar = cls(total=4 * MB, desc="f")
+        bar.update(MB)
+        bar.update_transfer(MB)
+        bar.close()
+        assert lines and all("2 of 4 MB" not in line for line in lines), lines
+        assert lines[-1] == "Downloading m: 1 of 4 MB (25%)..."
+
+    def test_a_resumed_download_never_reports_negative_progress(self):
+        lines = []
+        cls = embedder._download_progress_class("m", lines.append, every=0.0)
+        bar = cls(total=4 * MB, initial=MB, desc="f")
+        bar.update(-MB)
+        bar.update_transfer(-MB)
+        bar.close()
+        assert lines and all("Downloading m: 0 of 4 MB" in line for line in lines), lines
+
+
 class TestGetEmbedderForwardsProgress:
     def test_a_first_use_download_reports_to_the_caller(self, monkeypatch):
         monkeypatch.setattr(embedder, "_EMBEDDER", None)

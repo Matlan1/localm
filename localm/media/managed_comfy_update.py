@@ -73,21 +73,10 @@ def _requirements_changed(root: Path, new_tree: Path) -> bool:
 
 
 def _staging(root: Path, what: str) -> Path:
-    """A fresh, absent folder beside *root* for *what* (a download or a backup)."""
+    """A fresh, absent folder beside *root* for *what* (a download)."""
     path = root.parent / f".{root.name}-{what}-{os.getpid()}"
     if path.exists():
         mc.rmtree_robust(path)
-    return path
-
-
-def _new_backup(root: Path) -> Path:
-    """An absent folder beside *root* for a backup of its files. A backup an
-    earlier failed update kept is left alone: the next free numbered name is
-    used instead."""
-    base = root.parent / f".{root.name}-backup-{os.getpid()}"
-    path, n = base, 1
-    while os.path.lexists(source_archive.long_path(path)):
-        path, n = base.with_name(f"{base.name}-{n}"), n + 1
     return path
 
 
@@ -113,7 +102,7 @@ def _replace_source(root: Path, repo: str, commit: str, changes: list,
         deps_changed = _requirements_changed(root, new)
         try:
             changes.append(source_archive.apply_tree(new, root, old_files,
-                                                     _new_backup(root)))
+                                                     source_archive.new_backup_path(root)))
         except source_archive.TreeRollbackError as e:
             changes.append(e.change)
             return False, f"could not write the new source into {root}: {e.cause}", False

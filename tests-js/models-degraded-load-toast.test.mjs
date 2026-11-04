@@ -95,7 +95,7 @@ test("a backend that cannot report placement (no gpu_layers_* fields) still toas
   assert.ok(!toastEl.className.includes("error"));
 });
 
-test("a load with MoE experts in system RAM warns with the expert count, not a layer split", async () => {
+test("a load with MoE experts in system RAM is information naming the expert layers, not a layer split", async () => {
   const { window } = loadApp();
   stubLoad(window, {
     status: "loaded", model: "moe-model",
@@ -105,10 +105,12 @@ test("a load with MoE experts in system RAM warns with the expert count, not a l
   await selectAndLoad(window, "moe-model");
 
   const toastEl = window.document.getElementById("toast");
-  assert.match(toastEl.textContent, /moe-model \(experts of 18 layers in system RAM - slower\)/);
+  assert.match(toastEl.textContent,
+    /moe-model \(18 of 48 layers keep their experts in system RAM\)/);
   assert.ok(!/48\/48 layers on GPU/.test(toastEl.textContent),
     "every layer is on the GPU, so no layer split is named");
-  assert.ok(toastEl.className.includes("error"));
+  assert.ok(!/slower/.test(toastEl.textContent), "the planned placement is not a slowdown");
+  assert.ok(!toastEl.className.includes("error"), "the planned placement is not a warning");
 });
 
 test("a MoE load names how much of the experts each token reads from system RAM", async () => {
@@ -123,7 +125,22 @@ test("a MoE load names how much of the experts each token reads from system RAM"
 
   const toastEl = window.document.getElementById("toast");
   assert.match(toastEl.textContent,
-    /experts of 18 layers in system RAM, about 1\.50 GB read from RAM per token - slower/);
+    /18 of 48 layers keep their experts in system RAM; each token reads only its active experts there \(about 1\.50 GB\)/);
+  assert.ok(!toastEl.className.includes("error"));
+});
+
+test("a MoE load that also moved layers to the CPU still warns", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "moe-model",
+    gpu_layers_offloaded: 30, gpu_layers_total: 48, moe_cpu_layers: 48, degraded: true,
+  });
+
+  await selectAndLoad(window, "moe-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent, /30\/48 layers on GPU, rest on CPU; 48 of 48 layers keep their experts in system RAM - slower/);
+  assert.ok(toastEl.className.includes("error"));
 });
 
 test("a model running from disk-backed memory warns even when every layer is on the GPU", async () => {

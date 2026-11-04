@@ -2891,14 +2891,6 @@
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 31,
-                    "endColumn": 48,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 31,
                     "endColumn": 42,
                     "lineCount": 1
                 }
@@ -3134,22 +3126,6 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 77,
-                    "endColumn": 87,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 68,
-                    "endColumn": 80,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
                     "startColumn": 33,
                     "endColumn": 39,
                     "lineCount": 1
@@ -3200,22 +3176,6 @@
                 "range": {
                     "startColumn": 48,
                     "endColumn": 51,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 58,
-                    "endColumn": 68,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalOperand",
-                "range": {
-                    "startColumn": 55,
-                    "endColumn": 65,
                     "lineCount": 1
                 }
             },

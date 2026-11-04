@@ -264,6 +264,20 @@ def test_a_file_that_cannot_be_put_back_is_named_and_its_original_kept(tmp_path,
     assert (root / "b.py").read_text(encoding="utf-8") == "old"
 
 
+def test_a_new_backup_path_leaves_a_kept_backup_and_stays_out_of_custom_nodes(tmp_path):
+    root = tmp_path / "comfyui"
+    node = root / "custom_nodes" / "Node"
+    node.mkdir(parents=True)
+    first = sa.new_backup_path(root)
+    assert first.parent == tmp_path and "-backup-" in first.name
+    first.mkdir()
+    (first / "kept.py").write_text("x", encoding="utf-8")
+    second = sa.new_backup_path(root)
+    assert second != first and not second.exists()
+    assert (first / "kept.py").exists()
+    assert sa.new_backup_path(node).parent == root
+
+
 def test_plain_path_drops_the_extended_length_prefix():
     assert sa.plain_path("\\\\?\\D:\\a\\b") == "D:\\a\\b"
     assert sa.plain_path("\\\\?\\UNC\\host\\share\\x") == "\\\\host\\share\\x"

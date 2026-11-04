@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
-import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { $, GIB, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { applyI18n, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
@@ -1203,17 +1203,60 @@ function _showServedModel() {
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
 
-async function _postLoad(model, force, asChat = false, activate = true) {
+async function _postLoad(model, force, asChat = false, activate = true, keepOthers = false) {
   const r = await fetch("/api/models/load", {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({
       model, ...(force ? { force: true } : {}), ...(asChat ? { as_chat: true } : {}),
-      ...(activate ? {} : { activate: false }),
+      ...(activate ? {} : { activate: false }), ...(keepOthers ? { keep_others: true } : {}),
     }),
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
   return await r.json().catch(() => ({ status: "loaded", model }));
+}
+
+// The names a confirm_required load result says would be unloaded: its
+// unloaded models, the shared models (unloads_shared) and other instances'
+// models (peers), quoted and in the GUI's language.
+function _unloadNames(data) {
+  const busy = Array.isArray(data.busy) ? data.busy : [];
+  const names = (Array.isArray(data.unloaded) ? data.unloaded : []).map(
+    (n) => (busy.includes(n) ? t("models.switch.busyModel", { model: n }) : `'${n}'`));
+  if (data.unloads_shared) names.push(t("models.switch.sharedModels"));
+  if (data.unloads_peers) names.push(t("models.switch.peerModels"));
+  for (const p of Array.isArray(data.peers) ? data.peers : []) {
+    names.push(t("models.switch.peerModel", { model: p }));
+  }
+  return names;
+}
+
+// The question a confirm_required load result asks, in the GUI's language:
+// a "degraded_load" result is worded from its figures (plan_mb, full_mb,
+// free_mb, moe, unloaded, unloads_shared, unloads_peers), an "unload_ask" or
+// "unload_choice" result from what it would unload; any other result shows the
+// server's detail.
+export function confirmLoadText(data) {
+  if (data && data.reason === "unload_ask") {
+    const names = _unloadNames(data).join(", ");
+    return data.freed_mb > 0
+      ? t("models.switch.unloadAskFreed", { model: data.model, names, freed: data.freed_mb })
+      : t("models.switch.unloadAsk", { model: data.model, names });
+  }
+  if (data && data.reason === "unload_choice") {
+    return t(data.fits_with_experts_in_ram ? "models.switch.unloadChoiceMoe" : "models.switch.unloadChoice", {
+      model: data.model, plan: data.plan_mb, full: data.full_mb, free: data.free_mb,
+      names: _unloadNames(data).join(", ") });
+  }
+  if (!data || data.reason !== "degraded_load" || typeof data.plan_mb !== "number") {
+    return (data && data.detail) || "";
+  }
+  const names = _unloadNames(data);
+  const where = names.length
+    ? t("models.switch.freeAfterUnload", { free: data.free_mb, names: names.join(", ") })
+    : t("models.switch.freeNow", { free: data.free_mb });
+  return t(data.moe ? "models.switch.degradedMoe" : "models.switch.degradedDense", {
+    model: data.model, plan: data.plan_mb, full: data.full_mb, where });
 }
 
 // Switch the active model. Returns the server status object
@@ -1250,14 +1293,37 @@ export async function switchModel(model, { local = false, activate = true, selec
     setStatus("busy", t("sidebar.status.loading", { model }));
     let force = false;
     let asChat = false;
+    let keepOthers = false;
     data = await _postLoad(model, false, false, activate);
     while (data.status === "confirm_required") {
       const notChat = data.reason === "not_chat_model";
+      const unloadAsk = data.reason === "unload_ask";
       // A confirm the server repeats after its flag was already sent is a failed load.
-      if (notChat ? asChat : force) throw new Error(data.detail || t("sidebar.status.loadFailed"));
+      if (notChat ? asChat : (force || keepOthers)) throw new Error(data.detail || t("sidebar.status.loadFailed"));
+      if (data.reason === "unload_choice") {
+        const names = _unloadNames(data).join(", ");
+        const choice = await chooseAsync(t("models.switch.confirmTitle"), confirmLoadText(data), [
+          { key: "beside", label: t("models.switch.loadBeside") },
+          { key: "unload", label: t("models.switch.unloadForThis", { names }), danger: true },
+        ]);
+        if (!choice) {
+          setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+          _showServedModel();
+          refreshModels().then(_showServedModel);
+          return { status: "cancelled", reason: "declined by user", model };
+        }
+        if (choice === "beside") keepOthers = true;
+        else force = true;
+        setStatus("busy", t("sidebar.status.loading", { model }));
+        data = await _postLoad(model, force, asChat, activate, keepOthers);
+        continue;
+      }
       const confirmed = await confirmDangerAsync(
-        t(notChat ? "models.notChat.title" : "models.switch.confirmTitle"), data.detail,
-        t(notChat ? "models.notChat.confirmLabel" : "models.switch.confirmLabel"));
+        t(notChat ? "models.notChat.title"
+          : unloadAsk ? "models.switch.unloadAskTitle" : "models.switch.confirmTitle"),
+        confirmLoadText(data),
+        t(notChat ? "models.notChat.confirmLabel"
+          : unloadAsk ? "models.switch.unloadAskLabel" : "models.switch.confirmLabel"));
       if (!confirmed) {
         setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
         _showServedModel();
@@ -1267,7 +1333,7 @@ export async function switchModel(model, { local = false, activate = true, selec
       if (notChat) asChat = true;
       else force = true;
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = await _postLoad(model, force, asChat, activate);
+      data = await _postLoad(model, force, asChat, activate, keepOthers);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
@@ -1365,12 +1431,11 @@ function _markUnloaded(model) {
 
 // Toast the outcome of a switchModel() call, headed by *head* ("Model switched
 // to <model>" by default). A model too big to fully fit
-// VRAM still loads (the backend deliberately defers to a partial/zero GPU
-// offload rather than refusing), so a plain "switched" toast would read as
-// success even when the load quietly fell back to (slow) CPU layers -
-// res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total,
-// and moe_cpu_layers when routed experts stayed in system RAM)
-// says so; warn instead of a bare success toast. res.mmap_from_disk marks a
+// VRAM still loads with some layers on the CPU (gpu_layers_offloaded below
+// gpu_layers_total): that toast is a warning. A Mixture-of-Experts load that
+// keeps every layer on the GPU and only the routed experts of moe_cpu_layers
+// layers in system RAM is its planned placement: that toast is information,
+// naming the per-token RAM read (moe_ram_read_bytes). res.mmap_from_disk marks a
 // model that may not fit in available RAM and runs from disk-backed memory,
 // res.mmap_cpu_from_disk one whose CPU layers read it from disk on every token.
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
@@ -1385,20 +1450,22 @@ export function toastLoadResult(res, model, head = t("models.switch.doneToast", 
     ? t("models.switch.mmapCpuFromDiskSized", {
       read: gib(res.mmap_cpu_read_bytes), avail: gib(res.mmap_ram_available_bytes) })
     : t(cpuFromDisk ? "models.switch.mmapCpuFromDisk" : "models.switch.mmapFromDisk");
-  if (res && res.degraded) {
-    const parts = [];
-    if (res.gpu_layers_offloaded < res.gpu_layers_total) {
-      parts.push(t("models.switch.layersOnGpu", { offloaded: res.gpu_layers_offloaded, total: res.gpu_layers_total }));
-    }
-    if (res.moe_cpu_layers > 0) {
-      parts.push(t("models.switch.expertsInRam", { layers: res.moe_cpu_layers }));
-      if (res.moe_ram_read_bytes > 0) {
-        parts.push(t("models.switch.ramPerToken", { gb: (res.moe_ram_read_bytes / 1024 ** 3).toFixed(2) }));
-      }
-    }
-    const slow = t("models.switch.slower", { parts: parts.join(", ") || t("models.switch.partlyOnCpu") });
-    const extra = fromDisk ? `; ${diskNote}` : (res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");
-    toast(`${head} (${slow}${extra})`, true);
+  const moeText = res && res.moe_cpu_layers > 0
+    ? (res.moe_ram_read_bytes > 0
+      ? t("models.switch.moePlacement", {
+        moe: res.moe_cpu_layers, total: res.gpu_layers_total,
+        gb: (res.moe_ram_read_bytes / 1024 ** 3).toFixed(2) })
+      : t("models.switch.moePlacementNoRead", {
+        moe: res.moe_cpu_layers, total: res.gpu_layers_total }))
+    : "";
+  const extra = fromDisk ? `; ${diskNote}`
+    : (res && res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");
+  if (res && res.degraded && res.gpu_layers_offloaded < res.gpu_layers_total) {
+    const parts = [t("models.switch.layersOnGpu", { offloaded: res.gpu_layers_offloaded, total: res.gpu_layers_total })];
+    if (moeText) parts.push(moeText);
+    toast(`${head} (${t("models.switch.slower", { parts: parts.join("; ") })}${extra})`, true);
+  } else if (res && res.degraded && moeText) {
+    toast(`${head} (${moeText}${extra})`, !!extra);
   } else if (res && res.mmap_ram_short && res.mmap_note) {
     toast(`${head} (${res.mmap_note})`, true);
   } else if (fromDisk) {

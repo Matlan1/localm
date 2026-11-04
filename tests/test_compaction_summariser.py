@@ -597,7 +597,7 @@ def test_stream_overflow_after_compaction_is_reported_in_the_stream():
     text = "".join(d.get("content") or "" for d, _ in deltas)
     answers = [c for c in engine.calls if c[1].get("thinking") is not False]
     assert answers == []
-    assert "exceeds the model's maximum context capacity (4096 tokens)" in text
+    assert "exceeds the model's 4096-token context window" in text
     assert deltas[-1][1] == "error"
     assert r.status_code == 200
 
@@ -626,7 +626,7 @@ def test_non_stream_overflow_is_still_413():
     engine = _engine("Summary.")
     engine.count_messages_tokens.side_effect = lambda ms: 5000
     r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": False})
-    assert "exceeds the model's maximum context capacity" in r.json()["detail"]
+    assert "exceeds the model's 4096-token context window" in r.json()["detail"]
     assert r.status_code == 413
 
 

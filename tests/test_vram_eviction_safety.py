@@ -324,7 +324,7 @@ def test_an_unpinned_shortfall_still_asks_a_peer(monkeypatch):
     assert _chat(client, "model-a").status_code == 200
     hs._engines["model-a"].active_requests = 1        # busy, not evictable
     asked_before = len(asked)                         # ignore the first load's ask
-    assert _chat(client, "model-b").status_code == 200
+    asyncio.run(hs.switch_engine("model-b", hs._engine_factory, force=True))
 
     assert len(asked) > asked_before, (
         "an unpinned, genuinely exhausted shortfall must still ask a peer - "

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """localm.sysprog: system programs by full path, found without PATH."""
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -38,7 +39,11 @@ def test_a_program_in_the_current_folder_is_never_run_instead(tmp_path, monkeypa
     _exe(tmp_path / "cwd" / "relbin" / exe)
     on_path = _exe(tmp_path / "bin" / exe)
     monkeypatch.setattr(sysprog, "system_candidates", lambda name: [])
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
     monkeypatch.chdir(here.parent)
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    found = sysprog.find("tool")
+    assert found is not None and Path(found).samefile(on_path)
     monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "relbin", str(on_path.parent)]))
     found = sysprog.find("tool")
     assert found is not None and Path(found).samefile(on_path)
@@ -65,6 +70,15 @@ def test_a_name_with_a_folder_is_not_looked_up_on_path(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert sysprog.find("sub/tool") is None
     assert sysprog.path_candidates("") == []
+
+
+@pytest.mark.parametrize("module", ["localm/netname.py", "localm/uv_tool.py"])
+def test_a_program_these_modules_run_is_not_found_with_which(module):
+    source = (Path(__file__).resolve().parent.parent / module).read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(source))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "which"]
+    assert calls == []
 
 
 def test_a_missing_program_is_none(tmp_path, monkeypatch):

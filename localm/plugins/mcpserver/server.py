@@ -657,8 +657,10 @@ class EngineCache:
 
     def _fits_alongside(self, name: str, required: Optional[int]) -> bool:
         """True when ``name`` may load with NO eviction, next to the residents:
-        free VRAM covers ``required`` plus headroom and the backend's own
-        full-offload need (``_backend_need_bytes``)."""
+        free VRAM covers a GGUF load's own full-offload need
+        (``_backend_need_bytes``, compute overhead included), or, when that is
+        not known or the model is not a GGUF, the larger of ``required`` plus
+        headroom and that need."""
         if required is None:
             return False
         from localm import discover
@@ -684,8 +686,11 @@ class EngineCache:
             # (each lives in its own isolated worker subprocess), so they can
             # only over-report free space and are never trusted for the PERMIT
             # decision.
-            needed = max(required + DEFAULT_HEADROOM_BYTES,
-                         self._backend_need_bytes(name) or 0)
+            backend_need = self._backend_need_bytes(name)
+            if backend_need and self._is_gguf(name):
+                needed = backend_need
+            else:
+                needed = max(required + DEFAULT_HEADROOM_BYTES, backend_need or 0)
             return fits_alongside_residents(
                 free_vram=v_info.get("free"), vram_required=needed, headroom=0,
                 probe_ok=probe_ok, shortfall=shortfall,

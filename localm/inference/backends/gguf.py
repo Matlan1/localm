@@ -230,6 +230,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         adapters: Optional[list] = None,
         parallel_slots: ParallelSetting = 1,
         kv_cache_type: str = "f16",
+        ctx_reserve: int = 0,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -272,6 +273,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM/RAM at load
+        # Context window the load keeps usable (VramSizingMixin._ctx_reserve_tokens).
+        self.ctx_reserve = max(0, int(ctx_reserve or 0))
         # Auto-size how many layers go on the GPU from free VRAM at load, only
         # when n_gpu_layers is left at its everything default. An explicit -g is
         # never overridden.
@@ -999,7 +1002,6 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             n_ctx=self.n_ctx,
             n_gpu_layers=gpu_layers,
             n_ctx_max=ctx_max,
-            ctx_auto=bool(self.ctx_auto),
             n_ctx_grow=self.n_ctx_grow,
             # Give the worker's own _check_context_fit the same reserved overhead
             # this parent resolved, rather than the class-level default.
@@ -1178,12 +1180,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
                 if per_token > 0:
                     self.moe_ram_read_bytes = per_token
-                    gb = per_token / 1e9
+                    from localm.inference.engine import moe_ram_read_text
                     console.print(
-                        f"[dim]  moe speed: each generated token reads about "
-                        f"{gb:.2f} GB of expert weights from system RAM, so "
-                        f"generation speed is limited by RAM bandwidth (at most "
-                        f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
+                        f"[dim]  moe speed: {self.moe_cpu_layers} of "
+                        f"{len(by_layer) or n_cpu_moe} layers keep their experts "
+                        f"in system RAM; {moe_ram_read_text(per_token)}[/dim]")
 
         self._print_mmap_note()
         self._print_parallel_note()

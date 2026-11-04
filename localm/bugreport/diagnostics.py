@@ -192,12 +192,12 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
 # credential-scrubbed before they are rendered. The API key lives in auth.key,
 # never config.json.
 _SAFE_CONFIG_KEYS = (
-    "binary_dir", "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "n_gpu_layers",
+    "binary_dir", "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "ctx_reserve", "n_gpu_layers",
     "n_gpu_layers_auto", "n_cpu_moe", "moe_cache_mib", "use_mmap", "kv_cache_type", "mtp_enabled", "mtp_draft_tokens",
     "spec_source", "spec_draft_tokens", "spec_draft_model", "parallel_slots",
     "main_gpu_index",
     "gpu_split_indices", "gpu_split_ratios", "max_tokens",
-    "model_swap_policy", "idle_unload_seconds", "reload_llm_after_imagine",
+    "model_swap_policy", "unload_for_room", "idle_unload_seconds", "reload_llm_after_imagine",
     "port", "require_auth", "cors_origins", "mode", "chat_mode", "coder_mode",
     "net_mode", "comfy_launch_cmd", "comfy_workdir", "comfy_api_url",
     "net_search_url", "coder_reviewer", "coder_review", "voice_stt_model",
