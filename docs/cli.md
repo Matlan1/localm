@@ -615,7 +615,17 @@ localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of me
 
 When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
+`ctx_reserve` (default 16384) is the window every load keeps usable. A Mixture-of-Experts model sized automatically keeps more of its experts in system RAM so this window stays on the GPU; any other model keeps its layers, and past free VRAM the KV cache lives in system RAM. A request larger than the loaded window reloads the model with a larger one, up to the model's trained window, `n_ctx_max` with `ctx_auto` off, or 65536 with `ctx_auto` on and `n_ctx_max` above 0. The coding agent asks for 32768 tokens.
+
+```bash
+localm config ctx_reserve 32768  # keep a 32k window on every load
+```
+
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
+
+### Unloading other models to make room
+
+`unload_for_room` decides what a model switch does when the new model needs video memory other models hold: `always` (the default) unloads this instance's idle models, `ask` asks first and names them, `never` keeps them loaded and gives the new model the video memory that is left. A switch that does not fit under `never` offers to load beside them, slower, or to unload them for this load only. A model of another localm instance is unloaded only after you confirm a switch.
 
 ### Multi-GPU: picking the main device
 

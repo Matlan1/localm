@@ -1882,7 +1882,7 @@
   "settings.field.ctxReserve.label": "Kontextfenster (Minimum)",
   "settings.field.ctxReserve.help": "Jeder Ladevorgang hält ein Fenster von mindestens so vielen Tokens nutzbar. MoE-Modelle halten dafür mehr Experten im System-RAM, damit es auf der GPU bleibt; der Coding-Agent fordert 32768 an.",
   "settings.field.unloadForRoom.label": "Andere Modelle entladen, um Platz zu schaffen",
-  "settings.field.unloadForRoom.help": "always entlädt die ungenutzten Modelle dieser Instanz, wenn ein gewähltes Modell den VRAM braucht; ask fragt vorher; never lädt es mit dem verbleibenden VRAM daneben (langsamer). Das Modell einer anderen localm-Instanz wird nie ohne Nachfrage entladen.",
+  "settings.field.unloadForRoom.help": "always entlädt die ungenutzten Modelle dieser Instanz, wenn ein neues Modell ihren VRAM braucht; ask fragt vorher; never behält sie und nutzt den verbleibenden VRAM (langsamer). Beim Modell einer anderen Instanz wird immer gefragt.",
   "settings.field.kvCacheType.label": "KV-Cache-Typ",
   "settings.field.kvCacheType.help": "f16 ist der Standard. q8_0 speichert den KV-Cache in etwa halb so viel Speicher, sodass etwa 1,9-mal so viel Kontext in den VRAM passt, bei etwas langsamerer Dekodierung. q8_0 braucht Flash Attention.",
   "settings.field.voiceSttLanguage.help": "Erzwingt eine Sprache für die Transkription, z. B. en oder de. Leer erkennt sie automatisch aus dem Audio.",

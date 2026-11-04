@@ -2124,7 +2124,7 @@
   "settings.field.tts.voice.label": "Voz predeterminada",
   "settings.field.tts.wasmPaths.help": "Carpeta con el runtime WASM de onnxruntime, relativa a la carpeta static del plugin tts; conserva la barra final. En blanco usa la copia incluida con el plugin.",
   "settings.field.tts.wasmPaths.label": "Ruta WASM del runtime ONNX",
-  "settings.field.unloadForRoom.help": "always descarga los modelos inactivos de esta instancia cuando el modelo elegido necesita la VRAM; ask pregunta antes; never lo carga junto a ellos con la VRAM que queda (más lento). El modelo de otra instancia de localm nunca se descarga sin preguntar.",
+  "settings.field.unloadForRoom.help": "always descarga los modelos inactivos de esta instancia cuando un modelo nuevo necesita su VRAM; ask pregunta antes; never los mantiene y usa la VRAM que queda (más lento). Por el modelo de otra instancia siempre se pregunta.",
   "settings.field.unloadForRoom.label": "Descargar otros modelos para hacer sitio",
   "settings.field.updateAllowPrerelease.help": "Ofrece también versiones candidatas al buscar actualizaciones. Una versión preliminar se firma y verifica como una estable, pero está menos probada en uso real. Actívalo solo para ayudar a probar versiones rc.",
   "settings.field.updateAllowPrerelease.label": "Ofrecer actualizaciones preliminares",

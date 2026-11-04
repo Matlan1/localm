@@ -1632,7 +1632,7 @@ export const I18N_EN = {
   "settings.field.ctxReserve.label": "Context window (minimum)",
   "settings.field.ctxReserve.help": "Every load keeps a window of at least this many tokens usable. MoE models keep more experts in system RAM to hold it on the GPU; the coding agent asks for 32768.",
   "settings.field.unloadForRoom.label": "Unload other models to make room",
-  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a switched-to model needs the VRAM; ask asks first; never loads it beside them with the VRAM that is left (slower). Another localm instance's model is never unloaded without asking.",
+  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a new model needs their VRAM; ask asks first; never keeps them and uses the VRAM that is left (slower). Another instance's model is always asked about.",
   "settings.field.kvCacheType.label": "KV cache type",
   "settings.field.kvCacheType.help": "f16 is the default. q8_0 stores the KV cache in about half the memory, so about 1.9x the context fits in VRAM, with slightly slower decoding. q8_0 needs flash attention.",
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
