@@ -116,6 +116,8 @@ export function lockUI(message) {
   const app = $("app");
   if (app) app.style.display = "none";          // nothing of localm behind the gate
   showKeyGate(message || t("keygate.required"));
+  // The default message follows a language change, like the rest of the gate.
+  if (!message && $("key-gate-msg")) $("key-gate-msg").dataset.i18n = "keygate.required";
 }
 export function unlockUI() {
   window.__localmLocked = false;

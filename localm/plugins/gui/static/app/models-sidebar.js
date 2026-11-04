@@ -472,7 +472,10 @@ export async function reattachActivity() {
 export function showKeyGate(message) {
   const gate = $("key-gate");
   if (!gate) return;
-  if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
+  if (message) {
+    const m = $("key-gate-msg");
+    if (m) { m.textContent = message; delete m.dataset.i18n; }
+  }
   gate.style.display = "flex";
   // Show the "Install certificate" step only when the local CA is genuinely NOT
   // trusted yet (see updateKeyGateCertStep), so a returning trusted device is
@@ -568,6 +571,10 @@ export function addRevealToggle(input) {
     input.type = hidden ? "text" : "password";
     btn.textContent = t(hidden ? "keygate.hide" : "keygate.show");
   };
+  document.addEventListener("localm:language", () => {
+    btn.textContent = t(input.type === "password" ? "keygate.show" : "keygate.hide");
+    btn.setAttribute("aria-label", t("keygate.revealAria"));
+  });
   wrap.appendChild(btn);
 }
 window.addRevealToggle = addRevealToggle;
