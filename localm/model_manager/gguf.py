@@ -519,10 +519,24 @@ def _is_hf_model_dir(folder: Path) -> bool:
 TRANSFER_TEMP_PREFIX = ".localm-incoming-"
 
 
+LOOSE_MEDIA_SUFFIXES = (".safetensors", ".sft", ".pth", ".pt")
+
+
 def _find_model_units(d: Path, max_depth: int = 3, *,
                       skip_hidden: bool = False,
                       skip_dirs: Collection[str] = ()) -> tuple[list[Path], list[Path]]:
-    """``(gguf_first_parts, hf_model_dirs)`` found inside *d*, up to *max_depth*
+    """``(gguf_first_parts, hf_model_dirs)`` found inside *d*; see
+    :func:`_scan_model_units`, whose walk this is, minus the loose files."""
+    ggufs, hf_dirs, _media = _scan_model_units(
+        d, max_depth, skip_hidden=skip_hidden, skip_dirs=skip_dirs)
+    return ggufs, hf_dirs
+
+
+def _scan_model_units(d: Path, max_depth: int = 3, *,
+                      skip_hidden: bool = False,
+                      skip_dirs: Collection[str] = ()
+                      ) -> tuple[list[Path], list[Path], list[Path]]:
+    """``(gguf_first_parts, hf_model_dirs, loose_media_files)`` found inside *d*, up to *max_depth*
     folder levels (*d* itself is level 1, so a model sitting directly in *d* or
     a subfolder two levels down - LM Studio's ``<publisher>/<repo>/<file>`` -
     is within the default of 3).
@@ -541,11 +555,16 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
     that are already registered models). *skip_hidden* leaves out folders whose
     name starts with a dot (staging and cache folders).
 
+    *loose_media_files* are the files with a ``LOOSE_MEDIA_SUFFIXES`` extension
+    that sit outside any model directory; they are candidates only (the caller
+    decides which are image or video models).
+
     Breadth-first, and never opens a folder past *max_depth*, so an unrelated
     deep or wide subtree is never traversed. An unreadable folder is skipped.
-    Both lists are sorted."""
+    All three lists are sorted."""
     ggufs: list[Path] = []
     hf_dirs: list[Path] = []
+    media: list[Path] = []
     frontier: list[Path] = [d]
     level = 0
     while frontier and level < max_depth:
@@ -569,12 +588,15 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
                     elif (child.name.lower().endswith(".gguf") and child.is_file()
                           and not _is_non_first_split_part(child.name)):
                         ggufs.append(child)
+                    elif child.name.lower().endswith(LOOSE_MEDIA_SUFFIXES) and child.is_file():
+                        media.append(child)
             except OSError:
                 continue
         frontier = next_frontier
     ggufs.sort()
     hf_dirs.sort()
-    return ggufs, hf_dirs
+    media.sort()
+    return ggufs, hf_dirs, media
 
 
 _HUB_REPO_PREFIX = "models--"

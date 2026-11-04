@@ -283,6 +283,18 @@ def _logger_formats(path: Path) -> list[str]:
     ("localm/inference/embedder.py", "downloading embedding model",
      ("owner/repo", "f.gguf"), la.DOWNLOADING_RE),
     ("localm/voice.py", "downloading Whisper", ("owner/whisper",), la.DOWNLOADING_RE),
+    ("localm/inference/reranker.py", "reranker ready:", ("rr.gguf", "a,b"), la.READY_RE),
+    ("localm/inference/speech.py", "speech model ready:", ("tts", 24000, "cpu"), la.READY_RE),
+    ("localm/inference/backends/llamacpp/mtmd_gen.py", "speech model ready:",
+     ("tts", "v3", 24000, "cpu"), la.READY_RE),
+    ("localm/inference/backends/hf.py", "hf model ready:", ("my-hf-model",), la.READY_RE),
+    ("localm/plugins/builtin/exllama/backend.py", "exllama model ready:", ("my-exl2",), la.READY_RE),
+    ("localm/media/sdcpp/runner.py", "sd.cpp model ready:", ("flux.gguf",), la.READY_RE),
+    ("localm/media/sdcpp/runner.py", "sd.cpp upscaler ready:", ("esrgan.pth",), la.READY_RE),
+    ("localm/voice.py", "whisper model ready:", ("base",), la.READY_RE),
+    ("localm/media/comfy_client.py", "comfy: job uses model", ("wan.safetensors",), la.JOB_MODEL_RE),
+    ("localm/media/koboldcpp/music.py", "koboldcpp music: job uses model",
+     ("ace.gguf",), la.JOB_MODEL_RE),
 ])
 def test_patterns_match_localm_log_messages(rel, prefix, args, regex):
     formats = [f for f in _logger_formats(_REPO / rel) if f.startswith(prefix)]
@@ -338,3 +350,347 @@ def test_real_debug_log_written_by_localm(tmp_path):
         ("toast", "[toast /] Model switched (slower)"),
         ("model-load", "bge-small-en-v1.5-q4_k_m"),
     ]
+
+
+def _marker_home(tmp_path, *names):
+    home = tmp_path / "home"
+    (home / "run").mkdir(parents=True)
+    for name, text in names:
+        (home / "run" / name).write_text(text)
+    return home
+
+
+@pytest.mark.parametrize("files,left", [
+    ([("server-crash.abc.marker", "{}"), ("server-crash-trace.abc.txt", "")],
+     "run/server-crash.abc.marker"),
+    ([("server-crash.abc.marker", "")], "run/server-crash.abc.marker"),
+    ([("server-crash.marker", "{}")], "run/server-crash.marker"),
+    ([("server-crash.abc.stopping", "{}"), ("server-crash-trace.abc.txt", "")],
+     "run/server-crash.abc.stopping"),
+])
+def test_a_crash_marker_fails_the_audit_with_an_empty_or_absent_trace(tmp_path, capsys, files, left):
+    home = _marker_home(tmp_path, *files)
+    log = _write(tmp_path, "localm_j.log", CLEAN_LOG)
+    assert la.main(["--manifest", str(_manifest(tmp_path, {})), "--home", str(home), str(log)]) == 1
+    out = capsys.readouterr().out
+    assert f"crash marker {left}" in out
+    assert "UNEXPLAINED  error" in out
+
+
+def test_the_marker_the_real_guard_writes_is_an_event_until_a_clean_stop(tmp_path, monkeypatch, capsys):
+    from localm import bugreport
+    monkeypatch.setattr(bugreport, "_diagnostics_allowed", lambda: False)
+    home = tmp_path / "home"
+    home.mkdir()
+    log = _write(tmp_path, "localm_k.log", CLEAN_LOG)
+    argv = ["--manifest", str(_manifest(tmp_path, {})), "--home", str(home), str(log)]
+    assert bugreport.arm_crash_guard(home=home, instance_id="real") is True
+    try:
+        assert la.main(argv) == 1
+        assert "crash marker run/server-crash.real.marker" in capsys.readouterr().out
+        bugreport.clear_crash_marker(home=home, instance_id="real")
+        assert la.main(argv) == 1
+        assert "crash marker run/server-crash.real.stopping" in capsys.readouterr().out
+    finally:
+        bugreport.disarm_crash_guard(home=home, instance_id="real")
+    assert la.main(argv) == 0
+
+
+def test_a_manifest_can_name_a_crash_marker(tmp_path):
+    home = _marker_home(tmp_path, ("server-crash.abc.marker", "{}"))
+    log = _write(tmp_path, "localm_l.log", CLEAN_LOG)
+    manifest = _manifest(tmp_path, {"errors": [{"match": "crash marker *", "why": "step kills it"}]})
+    assert la.main(["--manifest", str(manifest), "--home", str(home), str(log)]) == 0
+
+
+FLAGGED = "2026-11-03 11:20:32,000 WARNING localm: expected warning\n"
+RAW_TRACEBACK = textwrap.dedent("""\
+    Traceback (most recent call last):
+      File "x.py", line 1, in <module>
+    ValueError: boom
+    """)
+
+
+@pytest.mark.parametrize("between", [
+    "native chatter from another thread\n",
+    "\n",
+    "2026-11-03 11:20:33,000 DEBUG   localm: GET /api/models -> 200 (5 ms)\n",
+])
+def test_a_traceback_not_directly_after_the_warning_is_an_error(tmp_path, capsys, between):
+    log = _write(tmp_path, "localm_m.log", CLEAN_LOG + FLAGGED + between + RAW_TRACEBACK)
+    manifest = _manifest(tmp_path, {"warnings": ["expected warning"]})
+    assert la.main(["--manifest", str(manifest), str(log)]) == 1
+    assert "UNEXPLAINED  error" in capsys.readouterr().out
+
+
+def test_a_second_traceback_after_the_warnings_own_is_an_error(tmp_path):
+    text = CLEAN_LOG + FLAGGED + RAW_TRACEBACK + RAW_TRACEBACK
+    events = _events(tmp_path, text)
+    assert [(e.kind, e.subject) for e in events] == [
+        ("warning", "expected warning"),
+        ("error", "Traceback (most recent call last):")]
+
+
+def _format_with_exc(exc):
+    import logging
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    rec = logging.LogRecord("localm", logging.WARNING, __file__, 1, "handled it", (),
+                            (type(exc), exc, exc.__traceback__))
+    return fmt.format(rec) + "\n"
+
+
+def _raises(fn):
+    try:
+        fn()
+    except Exception as e:
+        return e
+    raise AssertionError("did not raise")
+
+
+def _chained_from():
+    try:
+        raise ValueError("first")
+    except ValueError as e:
+        raise RuntimeError("second") from e
+
+
+def _raise_second():
+    raise RuntimeError("second")
+
+
+def _chained_during():
+    try:
+        raise ValueError("first")
+    except ValueError:
+        _raise_second()
+
+
+@pytest.mark.parametrize("fn", [_chained_from, _chained_during])
+def test_a_real_chained_exception_of_a_warning_stays_one_event(tmp_path, fn):
+    text = CLEAN_LOG + _format_with_exc(_raises(fn))
+    assert text.count("Traceback (most recent call last):") == 2
+    events = _events(tmp_path, text)
+    assert [(e.kind, e.subject) for e in events] == [("warning", "handled it")]
+
+
+def test_a_raw_chain_marker_without_an_owned_traceback_does_not_excuse_the_next(tmp_path):
+    text = CLEAN_LOG + FLAGGED + textwrap.dedent("""\
+        native chatter
+        During handling of the above exception, another exception occurred:
+
+        Traceback (most recent call last):
+        """)
+    events = _events(tmp_path, text)
+    assert [e.kind for e in events] == ["warning", "error"]
+
+
+GLUED = "....2026-11-03 11:00:00,000 WARNING localm: real problem\n"
+
+
+def test_a_record_glued_behind_a_partial_native_line_is_an_event(tmp_path, capsys):
+    log = _write(tmp_path, "localm_n.log", CLEAN_LOG + GLUED)
+    events, _lines, records = la.parse_log(log)
+    assert records == 4
+    assert [(e.kind, e.subject, e.time) for e in events] == [
+        ("warning", "real problem", "2026-11-03 11:00:00,000")]
+    assert la.main(["--manifest", str(_manifest(tmp_path, {})), str(log)]) == 1
+    assert "UNEXPLAINED  warning" in capsys.readouterr().out
+
+
+def test_the_native_text_before_a_glued_record_is_still_read(tmp_path):
+    text = CLEAN_LOG + "llama_decode: failed to decode 2026-11-03 11:00:00,000 DEBUG   localm: fine\n"
+    events = _events(tmp_path, text)
+    assert [(e.kind, e.subject) for e in events] == [
+        ("error", "llama_decode: failed to decode")]
+
+
+def test_a_record_quoting_a_record_is_one_record(tmp_path):
+    text = CLEAN_LOG + ("2026-11-03 11:00:00,000 DEBUG   localm: saw "
+                        "2026-11-03 10:00:00,000 WARNING localm: old line\n")
+    log = _write(tmp_path, "localm_o.log", text)
+    events, _lines, records = la.parse_log(log)
+    assert records == 4
+    assert events == []
+
+
+@pytest.mark.parametrize("msg,model", [
+    ("hf model ready: my-hf-model", "my-hf-model"),
+    ("exllama model ready: my-exl2", "my-exl2"),
+    ("sd.cpp model ready: flux1-dev-Q4_0.gguf", "flux1-dev-Q4_0"),
+    ("sd.cpp upscaler ready: esrgan.pth", "esrgan.pth"),
+    ("whisper model ready: base", "base"),
+    ("reranker ready: bge-reranker.gguf (labels=a,b)", "bge-reranker"),
+    ("speech model ready: tts-model (24000 Hz, projector on cpu)", "tts-model"),
+    ("speech model ready: tts-model (v3, 24000 Hz, mmproj on cpu)", "tts-model"),
+    ("comfy: job uses model wan/wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_fp16.safetensors"),
+    ("koboldcpp music: job uses model ace-step-dit.gguf", "ace-step-dit"),
+])
+def test_every_model_ready_line_is_a_model_load(tmp_path, msg, model):
+    text = CLEAN_LOG + f"2026-11-03 11:00:00,000 INFO    localm: {msg}\n"
+    assert [(e.kind, e.subject) for e in _events(tmp_path, text)] == [("model-load", model)]
+
+
+def _stub_sd_runner(monkeypatch, runner):
+    monkeypatch.setattr(runner, "_spawn", lambda: None)
+    monkeypatch.setattr(runner, "shutdown", lambda grace=5.0: None)
+    monkeypatch.setattr(runner, "is_alive", lambda: True)
+    monkeypatch.setattr(runner, "_request", lambda name, payload, timeout, **kw: {"name": name})
+
+
+@pytest.mark.parametrize("ctx,name", [
+    ({"model_path": "D:/m/flux1-dev-Q4_0.gguf"}, "flux1-dev-Q4_0.gguf"),
+    ({"model_path": "", "diffusion_model_path": "D:/m/unet.safetensors",
+      "vae_path": "D:/m/vae.safetensors"}, "unet.safetensors"),
+])
+def test_a_clean_sdcpp_load_logs_one_event_and_a_reuse_none(monkeypatch, caplog, ctx, name):
+    import logging
+
+    from localm.media.sdcpp.runner import SdRunner
+    runner = SdRunner()
+    _stub_sd_runner(monkeypatch, runner)
+    with caplog.at_level(logging.INFO, logger="localm"):
+        runner.ensure_loaded("k", "rt", ctx)
+        runner.ensure_loaded("k", "rt", ctx)
+    lines = [r.getMessage() for r in caplog.records if "ready" in r.getMessage()]
+    assert lines == [f"sd.cpp model ready: {name}"]
+    assert la.READY_RE.match(lines[0])
+
+
+def test_a_failed_sdcpp_load_logs_no_ready_line(monkeypatch, caplog):
+    import logging
+
+    from localm.media.sdcpp.runner import SdRunner, SdWorkerError
+    runner = SdRunner()
+    _stub_sd_runner(monkeypatch, runner)
+
+    def boom(name, payload, timeout, **kw):
+        raise SdWorkerError("no")
+    monkeypatch.setattr(runner, "_request", boom)
+    with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(SdWorkerError):
+        runner.ensure_loaded("k", "rt", {"model_path": "D:/m/x.gguf"})
+    assert not [r for r in caplog.records if "ready" in r.getMessage()]
+
+
+def test_an_sdcpp_upscale_logs_its_model(monkeypatch, caplog):
+    import logging
+
+    from localm.media.sdcpp.runner import SdRunner
+    runner = SdRunner()
+    _stub_sd_runner(monkeypatch, runner)
+    with caplog.at_level(logging.INFO, logger="localm"):
+        runner.upscale_image({"model_path": "D:/m/esrgan.pth"}, "rt")
+    assert [r.getMessage() for r in caplog.records if "ready" in r.getMessage()] == [
+        "sd.cpp upscaler ready: esrgan.pth"]
+
+
+class _ComfyResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_a_comfy_job_logs_each_model_of_the_shipped_workflow(monkeypatch, caplog):
+    import logging
+
+    from localm.media import comfy_client
+    workflow = json.loads((_REPO / "localm/video_gen/wan_workflow.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(comfy_client, "_comfy_urlopen",
+                        lambda req, timeout=None: _ComfyResponse(b'{"prompt_id": "p1"}'))
+    with caplog.at_level(logging.INFO, logger="localm"):
+        kind, value = comfy_client.comfy_submit_prompt("http://127.0.0.1:1", workflow)
+    assert (kind, value) == (comfy_client.SUBMIT_OK, "p1")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("comfy: job")]
+    assert sorted(lines) == ["comfy: job uses model umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                             "comfy: job uses model wan2.2_ti2v_5B_fp16.safetensors",
+                             "comfy: job uses model wan2.2_vae.safetensors"]
+    for line in lines:
+        assert la.JOB_MODEL_RE.match(line)
+
+
+def test_a_refused_comfy_job_logs_no_model(monkeypatch, caplog):
+    import logging
+    import urllib.error
+
+    from localm.media import comfy_client
+
+    def refused(req, timeout=None):
+        raise urllib.error.URLError("refused")
+    monkeypatch.setattr(comfy_client, "_comfy_urlopen", refused)
+    workflow = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}}}
+    with caplog.at_level(logging.INFO, logger="localm"):
+        kind, _value = comfy_client.comfy_submit_prompt("http://127.0.0.1:1", workflow)
+    assert kind == comfy_client.SUBMIT_URL_ERROR
+    assert not [r for r in caplog.records if r.getMessage().startswith("comfy: job")]
+
+
+def test_workflow_model_names_skip_what_is_not_a_model_file():
+    from localm.media.comfy_client import workflow_model_names
+    workflow = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "sub/u.GGUF"}},
+        "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": "a.safetensors",
+                                                         "clip_name2": "b.safetensors"}},
+        "3": {"class_type": "KSampler", "inputs": {"sampler_name": "euler", "model": ["1", 0]}},
+        "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x.safetensors"}},
+        "5": {"class_type": "UNETLoader", "inputs": {"unet_name": "sub/u.GGUF"}},
+        "6": {"class_type": "Custom", "inputs": {"model_name": ["1", 0]}},
+        "7": "not a node",
+        "8": {"class_type": "NoInputs"},
+    }
+    assert workflow_model_names(workflow) == ["sub/u.GGUF", "a.safetensors", "b.safetensors"]
+    assert workflow_model_names("nonsense") == []
+
+
+def test_a_clean_hf_load_logs_a_ready_line(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from localm.inference.backends import hf
+    model = tmp_path / "my-hf-model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+
+    class FakeRunner:
+        def spawn_and_load(self, params, timeout):
+            return {"device": "cpu"}
+    monkeypatch.setattr(hf, "HFRunner", FakeRunner)
+    backend = hf.HFBackend(str(model), device="cpu")
+    with caplog.at_level(logging.INFO, logger="localm"):
+        backend.load()
+    lines = [r.getMessage() for r in caplog.records if "ready" in r.getMessage()]
+    assert lines == ["hf model ready: my-hf-model"]
+
+
+def test_a_native_music_job_logs_its_models_by_their_real_names(monkeypatch, caplog):
+    import logging
+
+    from localm.media.koboldcpp import music, server
+    models = server.ModelSet(text_encoder="D:/m/te.gguf", dit="D:/m/ace-dit.gguf",
+                             vae="D:/m/vae.gguf", lm="D:/m/ace-lm.gguf")
+    monkeypatch.setattr(music, "resolve_models", lambda *a, **k: models)
+    monkeypatch.setattr(music, "runtime_paths", lambda m: server.ModelSet(
+        text_encoder="X~1", dit="DIT~1", vae="V~1", lm="LM~1"))
+    monkeypatch.setattr(music, "_ensure_runtime", lambda *a, **k: object())
+    monkeypatch.setattr(music.server, "run", lambda *a, **k: b"wav")
+    monkeypatch.setattr(music, "broken_reason", lambda data: None)
+    monkeypatch.setattr(music.runtime, "backend_worked", lambda b: True)
+    with caplog.at_level(logging.INFO, logger="localm"):
+        assert music.generate_wav({}, "cpu", {})[0] == b"wav"
+    assert [r.getMessage() for r in caplog.records if r.getMessage().startswith("koboldcpp music")] == [
+        "koboldcpp music: job uses model ace-dit.gguf",
+        "koboldcpp music: job uses model ace-lm.gguf"]
+
+
+def test_the_whisper_worker_writes_to_the_debug_log():
+    source = (_REPO / "localm/voice.py").read_text(encoding="utf-8")
+    worker = next(n for n in ast.parse(source).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_worker_main")
+    calls = {n.func.id for n in ast.walk(worker)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "attach_child_logging" in calls
