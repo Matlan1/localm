@@ -122,7 +122,7 @@ ggml-org b11480 then inserted a `size_t moe_cache_size` (device cache in bytes
 for MoE experts kept in host memory, default 0 = disabled) directly after
 `type_v`; b11479 is the last release without it. Every field from
 `abort_callback` onward moved 8 bytes later, which is `LlamaContextParamsV3`
-(the bundled amd-rocm build, lemonade b1349 / upstream b11719, has it).
+(every bundled amd-rocm build from lemonade b1349 / upstream b11719 on has it).
 No bare `LlamaContextParams` name - go through `_abi.context_params_class()` /
 `_api.llama_context_default_params()`.
 
