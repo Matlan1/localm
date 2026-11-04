@@ -1199,7 +1199,11 @@ async def rag_embedding_status(request: Request):
     # not stat'd for a non-owner.
     may_answer = is_owner or model in KNOWN_EMBEDDING_MODELS or model in load_registry()
     if may_answer:
-        installed = bool(resolve_embedding_model_path(allow_download=False))
+        try:
+            installed = bool(await run_in_threadpool_bounded(
+                resolve_embedding_model_path, allow_download=False, timeout=READ_TIMEOUT_S))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Could not check the embedding model: {e}") from e
         status = "ready" if installed else "not_installed"
     else:
         # No stat, no path, and no last_error: a load failure message quotes the
@@ -1268,8 +1272,10 @@ async def rag_embedding_download(request: Request):
     import localm.inference.http_server as _hs
     from localm import scopes
     from localm.config import load_config, load_registry
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded)
     from localm.inference.embedder import (
-        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS,
+        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, READ_TIMEOUT_S,
         resolve_embedding_model_path)
     if not _hs.caller_grants(request, scopes.CONFIG_WRITE):
         raise HTTPException(
@@ -1284,7 +1290,12 @@ async def rag_embedding_download(request: Request):
                  "internal downloadable models, so there is nothing to fetch "
                  "here. Use the embedding picker to select and set up a model "
                  "instead.")
-    if resolve_embedding_model_path(allow_download=False):
+    try:
+        present = await run_in_threadpool_bounded(
+            resolve_embedding_model_path, allow_download=False, timeout=READ_TIMEOUT_S)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Could not check the embedding model: {e}") from e
+    if present:
         return {"status": "already_installed", "model": model}
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():

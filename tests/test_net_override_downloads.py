@@ -947,6 +947,7 @@ class TestDomainListsBindDownloads:
         assert needle in (embedder.last_error() or "")
 
     def test_first_use_transcription_may_not_download_either(self, monkeypatch, tmp_path):
+        _fake_faster_whisper_present(monkeypatch)
         self._cfg(monkeypatch, tmp_path, net_deny=["huggingface.co"])
         plan = voice._stt_plan(None)
         assert plan["local_files_only"] is True, "the worker would download past the list"
@@ -954,6 +955,7 @@ class TestDomainListsBindDownloads:
 
     def test_first_use_transcription_downloads_when_the_list_names_the_host(
             self, monkeypatch, tmp_path):
+        _fake_faster_whisper_present(monkeypatch)
         self._cfg(monkeypatch, tmp_path, net_allow=["huggingface.co"])
         plan = voice._stt_plan(None)
         assert plan["local_files_only"] is False

@@ -156,7 +156,7 @@ class TestClearRouteDoesNotClaimSuccess:
         r = self._client().post("/api/auth/key/clear",
                                 headers={"Authorization": f"Bearer {KEY}"})
         assert r.status_code == 200
-        assert r.json() == {"cleared": True, "warnings": []}
+        assert r.json() == {"cleared": True, "warnings": [], "still_protected": None}
 
     def test_a_failed_session_revocation_is_not_reported_as_cleared(
             self, runner, monkeypatch):
