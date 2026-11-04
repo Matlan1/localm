@@ -39,7 +39,7 @@ _VERSION = 1
 _ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 _ORPHAN_ID_RE = re.compile(r"\Aorphan-[0-9a-f]{24}\Z")
 _REQUEST_KEYS = ("spec", "name", "sha256", "mmproj", "type", "redownload",
-                 "dest_dir", "register")
+                 "dest_dir", "register", "type_is_hint")
 
 
 class UnknownPull(KeyError):
@@ -662,6 +662,8 @@ def resume_args(rec: dict) -> list[str]:
         args += ["--sha256", str(req["sha256"])]
     if req.get("type") and req.get("type") != "auto":
         args += ["--type", str(req["type"])]
+        if req.get("type_is_hint"):
+            args += ["--type-hint"]
     if req.get("redownload"):
         args += ["--redownload"]
     if req.get("dest_dir"):

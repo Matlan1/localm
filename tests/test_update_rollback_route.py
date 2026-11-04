@@ -274,3 +274,66 @@ def test_the_gate_is_specific_not_a_blanket_block(protected):
     r = c.get("/api/update/rollback", headers={"Authorization": f"Bearer {scoped}"})
     assert r.status_code == 200, r.text
     assert r.json()["available"] is True
+
+
+# --------------------------------------------------------------------------- #
+#  the installed parts and the repair                                           #
+# --------------------------------------------------------------------------- #
+
+def test_scoped_config_write_key_cannot_repair_but_the_owner_can(protected, monkeypatch):
+    """Repair reinstalls packages and the native runtime: owner only, like a rollback."""
+    from localm import discover, updater_parts
+    c, scoped, _install, restarts = protected
+    calls = []
+
+    def repair(**kw):
+        calls.append((kw, discover._torch_probe_holds))
+        return {"parts": {}, "notes": ["reinstalled"], "restart_needed": True}
+    monkeypatch.setattr(updater_parts, "repair", repair)
+    r = c.post("/api/update/repair", headers={"Authorization": f"Bearer {scoped}"})
+    assert r.status_code == 403, r.text
+    assert calls == [] and restarts == []
+    r = c.post("/api/update/repair", headers={"Authorization": f"Bearer {OWNER_KEY}"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"repaired": True, "notes": ["reinstalled"], "restarting": True}
+    assert calls == [({"defer": True}, 1)], "deferred, with the GPU probes held"
+    assert len(restarts) == 1
+
+
+def test_a_repair_with_nothing_to_load_does_not_restart(protected, monkeypatch):
+    from localm import updater_parts
+    c, _scoped, _install, restarts = protected
+    monkeypatch.setattr(updater_parts, "repair", lambda **kw: {
+        "parts": {}, "notes": [], "restart_needed": False})
+    r = c.post("/api/update/repair", headers={"Authorization": f"Bearer {OWNER_KEY}"})
+    assert r.json() == {"repaired": True, "notes": [], "restarting": False}
+    assert restarts == []
+
+
+def test_a_failed_repair_is_reported_and_restarts_nothing(protected, monkeypatch):
+    from localm import updater_parts
+    from localm.bugreport import LocalmError
+    c, _scoped, _install, restarts = protected
+
+    def fail(**kw):
+        raise LocalmError("the dependencies could not be reinstalled", reason="uv exited 2")
+    monkeypatch.setattr(updater_parts, "repair", fail)
+    r = c.post("/api/update/repair", headers={"Authorization": f"Bearer {OWNER_KEY}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["repaired"] is False and "uv exited 2" in r.json()["error"]
+    assert restarts == []
+
+
+def test_parts_are_readable_with_config_read_and_paths_are_scrubbed(protected, monkeypatch):
+    from localm import updater_parts
+    from localm.config import home_dir
+    c, scoped, _install, _restarts = protected
+    secret = str(home_dir() / "updates" / "x.json")
+    monkeypatch.setattr(updater_parts, "installed_parts", lambda: {
+        "app": "9.9.9", "consistent": False, "problems": [f"bad {secret}"],
+        "last_steps": [{"part": "runtime", "state": "failed", "note": f"note {secret}", "at": 1.0}]})
+    d = c.get("/api/update/parts", headers={"Authorization": f"Bearer {scoped}"}).json()
+    assert d["consistent"] is False
+    assert secret not in d["problems"][0] and secret not in d["last_steps"][0]["note"]
+    owner = c.get("/api/update/parts", headers={"Authorization": f"Bearer {OWNER_KEY}"}).json()
+    assert secret in owner["problems"][0], "the owner sees the real folder"

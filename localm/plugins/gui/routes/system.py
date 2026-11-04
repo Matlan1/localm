@@ -135,6 +135,8 @@ def register(app: FastAPI, ctx) -> None:
         plugins, suggest = [], True
         if mgr is not None:
             mgr.load_enabled_pending()
+            from localm.plugins import catalog
+            await catalog.check_hardware_off_loop()
             state = mgr.api_state()
             suggest = bool(state.get("suggest_plugins", True))
             # Only surface plugins this key's scopes grant; renderNav still filters

@@ -1404,7 +1404,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "settings, or switch to the internal default (bge-small-en-v1.5).")
             return False
         if not path:
-            line(f"error: '{model}' is not a known embedding key, a registered "
+            why = last_error()
+            line(f"error: {why}" if why else
+                 f"error: '{model}' is not a known embedding key, a registered "
                  "model, or a GGUF path - or the download was blocked by the "
                  "network policy (net_mode). Pick a model from the list, or the "
                  "internal default (bge-small-en-v1.5).")

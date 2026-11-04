@@ -2278,6 +2278,25 @@ class TestModelEndpoints:
         assert r.status_code == 200
         assert captured["args"] == ["pull", "--type", model_type, "--", "owner/repo"]
 
+    def test_pull_type_hint_reaches_the_cli_as_a_hint(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull",
+                json={"spec": "owner/repo", "model_type": "embedding", "type_is_hint": True})
+        assert r.status_code == 200
+        assert captured["args"] == ["pull", "--type", "embedding", "--type-hint",
+                                    "--", "owner/repo"]
+
+    def test_pull_type_hint_without_a_type_adds_nothing(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull", json={"spec": "owner/repo", "type_is_hint": True})
+        assert r.status_code == 200
+        assert "--type-hint" not in captured["args"]
+
     def test_pull_model_type_omitted_when_not_requested(self, gui_app, monkeypatch):
         """The "Other"/"All" tabs never force a type - --type must not appear at
         all, so the CLI keeps today's auto-detect default."""

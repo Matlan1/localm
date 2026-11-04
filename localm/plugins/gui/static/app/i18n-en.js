@@ -2765,7 +2765,7 @@ export const I18N_EN = {
   // ---- Settings > Updates > Roll back ----
   "settings.rollback.subHead": "Roll back",
   "settings.rollback.help":
-    "Restore the build you were running before the last update, then restart. This is for an update that applied cleanly but turned out worse. It restores that build's files; it does not undo package installs an update made along the way.",
+    "Restore the build you were running before the last update, then restart. This is for an update that applied cleanly but turned out worse. It restores that build's files, its dependencies, its native runtime and its components.",
   "settings.rollback.rollbackButton": "Roll back",
   "settings.rollback.confirmTitle": "Roll back to the previous build?",
   "settings.rollback.confirmBody":
@@ -2777,6 +2777,14 @@ export const I18N_EN = {
   "settings.rollback.rollingBack": "Rolling back...",
   "settings.rollback.rolledBackTo": "Rolled back to {version}. Restarting...",
   "settings.rollback.failed": "Roll back failed: {message}",
+  "settings.parts.subHead": "Installed parts",
+  "settings.parts.help": "Some parts of this install are not at the installed localm version. Repair brings each one to it, then restarts.",
+  "settings.parts.repairButton": "Repair",
+  "settings.parts.repairing": "Repairing...",
+  "settings.parts.repaired": "Repaired. Restarting...",
+  "settings.parts.repairedNoRestart": "Repaired.",
+  "settings.parts.failed": "Repair failed: {message}",
+  "settings.parts.lastSteps": "Last runtime and component updates:",
 
   // ---- Settings > Updates > App launcher ----
   "settings.launcher.subHead": "App launcher",

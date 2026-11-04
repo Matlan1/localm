@@ -501,6 +501,14 @@ def test_resume_args_repeat_the_request():
         "--no-register", "--", "o/r:f.gguf"]
 
 
+def test_resume_args_keep_a_type_hint_a_hint():
+    rec = {"request": {"spec": "o/r:f.gguf", "type": "embedding", "type_is_hint": True}}
+    assert pending_pulls.resume_args(rec) == [
+        "--type", "embedding", "--type-hint", "--", "o/r:f.gguf"]
+    rec = {"request": {"spec": "o/r:f.gguf", "type": "auto", "type_is_hint": False}}
+    assert pending_pulls.resume_args(rec) == ["--", "o/r:f.gguf"]
+
+
 # ------------------------------------------------------------------ #
 #  CLI                                                                 #
 # ------------------------------------------------------------------ #

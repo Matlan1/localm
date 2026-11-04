@@ -18,6 +18,7 @@ This module holds NO plugin code and imports nothing heavy; it is just data.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -128,6 +129,30 @@ def _nvidia_linux() -> bool:
     process; hwdetect never raises)."""
     from localm import hwdetect
     return hwdetect.platform_key() == "linux" and "nvidia" in hwdetect.detect().vendors
+
+
+# Held across the hardware check, which is bounded by hwdetect's subprocess
+# timeout. Taken only on worker threads, and no other lock is taken under it.
+_hardware_check_lock = threading.Lock()
+_hardware_checked = False
+
+
+def check_hardware() -> None:
+    """Run the hardware check :func:`offered` depends on and cache its answer.
+    The first call of a process runs ``lspci`` on Linux, for up to 8 s, so call
+    this off the event loop. Concurrent callers wait for one check. Never raises."""
+    global _hardware_checked
+    with _hardware_check_lock:
+        _nvidia_linux()
+        _hardware_checked = True
+
+
+async def check_hardware_off_loop() -> None:
+    """:func:`check_hardware` on a worker thread, unless it has already run.
+    Afterwards :func:`offered` starts no process and can run on the event loop."""
+    if not _hardware_checked:
+        import asyncio
+        await asyncio.to_thread(check_hardware)
 
 
 def runnable_here(entry: CatalogEntry) -> bool:

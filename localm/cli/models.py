@@ -700,6 +700,9 @@ def spec_drafts(model):
 @click.option("--type", default="auto",
               type=click.Choice(["auto", *sorted(MODEL_TYPES)], case_sensitive=False),
               help="Model type/role.")
+@click.option("--type-hint", "type_hint", is_flag=True, hidden=True,
+              help="Internal: --type is a suggestion from a search result, not "
+                   "the user's choice, so the registry sync may still correct it.")
 @click.option("--store", default=None,
               type=click.Choice(["copy", "move"], case_sensitive=False),
               help="For a local PATH (not a HF/URL spec): bring the file/dir into "
@@ -727,7 +730,7 @@ def spec_drafts(model):
 @click.option("--dismiss-interrupted", "dismiss_id", default=None, metavar="ID",
               help="Stop offering the interrupted download ID; its files are "
                    "kept and --list-interrupted still shows it.")
-def pull(model_spec, name, sha256, redownload, mmproj, type, store,
+def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
          comfy_dest_dir, register, list_interrupted, resume, delete_id, dismiss_id):
     """Download a model from HuggingFace, CivitAI, or a URL.
 
@@ -789,13 +792,13 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
         if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
             _offer_interrupted(model_spec, name)
         rc = _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-                       comfy_dest_dir, register)
+                       comfy_dest_dir, register, type_hint)
     if rc:
         sys.exit(rc)
 
 
 def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-              comfy_dest_dir, register) -> int:
+              comfy_dest_dir, register, type_hint=False) -> int:
     """Run one pull as ``localm pull`` does; returns its exit code (0, 1, or
     130 when Ctrl+C stopped it)."""
     from ..model_manager.pull import forget_stopped_download
@@ -803,7 +806,8 @@ def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
     try:
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
-                        dest_dir=comfy_dest_dir, register=register)
+                        dest_dir=comfy_dest_dir, register=register,
+                        type_is_hint=type_hint)
     except KeyboardInterrupt:
         click.echo("\n" + _stopped_pull_message(), err=True)
         return 130
@@ -948,7 +952,7 @@ def _resume_interrupted(r: dict) -> int:
                      bool(req.get("redownload")), req.get("mmproj"),
                      req.get("type") or "auto", None,
                      Path(req["dest_dir"]) if req.get("dest_dir") else None,
-                     req.get("register") is not False)
+                     req.get("register") is not False, bool(req.get("type_is_hint")))
 
 
 def _delete_one(key: str) -> bool:

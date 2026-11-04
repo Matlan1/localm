@@ -485,7 +485,6 @@ def check_parts(pre_type: Optional[str], text: str, separators=()) -> None:
         check_text(pre_type, piece, part=True)
 
 
-_BLANK_CHAR = regex.compile(r"[\s\p{Z}\p{C}]")
 _BLANK_RUN = regex.compile(r"[\s\p{Z}\p{C}]+")
 
 
@@ -521,15 +520,16 @@ def chunk_cuts(text: str, separators=(), style: str = "words") -> list[int]:
     starts = [m[0] for m in merged]
     edges = sorted({edge for m in merged for edge in m})
     out = []
+    # Cuts ascend, so one pass over the blank runs serves them all.
+    runs = _BLANK_RUN.finditer(text)
+    run = next(runs, None)
     for c in cuts:
         i = bisect.bisect_right(starts, c) - 1
         if i >= 0 and c <= merged[i][1]:
             continue
-        lo = c
-        while lo > 0 and _BLANK_CHAR.match(text, lo - 1):
-            lo -= 1
-        hit = _BLANK_RUN.match(text, c)
-        hi = hit.end() if hit else c
+        while run is not None and run.end() < c:
+            run = next(runs, None)
+        lo, hi = run.span() if run is not None and run.start() <= c else (c, c)
         n = bisect.bisect_left(edges, lo)
         if n < len(edges) and edges[n] <= hi:
             continue
