@@ -119,12 +119,18 @@ class TestLauncherHint:
         assert field["action"]["endpoint"].startswith("/api/comfyui/create-launcher?workdir=")
 
     def test_a_network_path_is_not_probed(self, monkeypatch):
-        def probe(_folder):
-            raise AssertionError("probed a UNC path")
-
-        monkeypatch.setattr("localm.image_gen.comfy.discover_launch_cmd", probe)
+        probed = []
+        monkeypatch.setattr("localm.image_gen.comfy.discover_launch_cmd",
+                            lambda folder: probed.append(folder))
         field = self._field({"comfy": {"workdir": r"\\192.0.2.1\share"}}, {"comfy_target": "user"})
         assert "auto" not in field
+        assert probed == []
+
+    def test_localm_own_comfyui_gets_no_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("localm.media.managed_comfy.is_managed_comfy_installed", lambda: True)
+        field = self._field({"comfy": {"workdir": str(tmp_path)}}, {"comfy_target": "own"})
+        assert "auto" not in field
+        assert "action" not in field
 
     def test_a_lookup_failure_is_logged_not_raised(self, tmp_path, monkeypatch):
         logged = []
