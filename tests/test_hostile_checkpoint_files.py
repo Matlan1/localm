@@ -30,6 +30,9 @@ REPO = Path(localm.__file__).resolve().parent.parent
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 CHILD_TIMEOUT = 60
 GROWTH_LIMIT_MB = 100
+# A bomb read up to the 80 MB member limit before it is dropped: the output and one
+# reallocation of it.
+MEMBER_LIMIT_GROWTH_MB = 180
 BOMB_BYTES = 200 << 20
 
 ESRGAN = {"conv_first.weight": (4, 3, 3, 3), "conv_first.bias": (4,),
@@ -305,18 +308,135 @@ class TestLlamafile:
 
 
 class TestDocumentArchives:
-    def test_a_docx_with_an_lzma_body_is_refused_and_stays_small(self, tmp_path):
-        path = _zip(tmp_path / "x.docx", b"<a/>" + b" " * BOMB_BYTES, zipfile.ZIP_LZMA,
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+    def test_a_docx_bomb_stops_at_the_member_limit(self, tmp_path, method):
+        path = _zip(tmp_path / "x.docx", b"<a/>" + b" " * BOMB_BYTES, method,
                     member="word/document.xml")
         got = _read_in_child("docx", path, tmp_path)
         assert got["result"] == "'ExtractError'"
-        assert got["grew_mb"] < GROWTH_LIMIT_MB
+        assert got["grew_mb"] < MEMBER_LIMIT_GROWTH_MB
 
-    def test_a_zip_with_a_bzip2_member_skips_it_and_stays_small(self, tmp_path):
-        path = _zip(tmp_path / "x.zip", b"a" * BOMB_BYTES, zipfile.ZIP_BZIP2, member="bomb.txt")
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA, zipfile.ZIP_DEFLATED])
+    def test_a_zip_bomb_member_stops_at_the_member_limit(self, tmp_path, method):
+        path = _zip(tmp_path / "x.zip", b"a" * BOMB_BYTES, method, member="bomb.txt")
         got = _read_in_child("zip", path, tmp_path)
         assert "aaaa" not in got["result"]
+        assert got["grew_mb"] < MEMBER_LIMIT_GROWTH_MB
+
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+    def test_a_bomb_that_declares_a_small_size_stops_there_too(self, tmp_path, method):
+        path = _declare_size(_zip(tmp_path / "x.zip", b"a" * BOMB_BYTES, method,
+                                  member="bomb.txt"), 200)
+        got = _read_in_child("zip", path, tmp_path)
+        assert "aaaa" not in got["result"]
+        assert got["grew_mb"] < MEMBER_LIMIT_GROWTH_MB
+
+    def test_a_large_real_member_is_read_with_room_to_spare(self, tmp_path):
+        text = (b"a line of real text in the archive\n" * 900_000)[:30 << 20]
+        path = _zip(tmp_path / "x.zip", text, zipfile.ZIP_LZMA, member="big.txt")
+        got = _read_in_child("zip", path, tmp_path)
+        assert "a line of real text" in got["result"]
+        assert got["grew_mb"] < MEMBER_LIMIT_GROWTH_MB
+
+    def test_text_in_every_packing_is_read(self, tmp_path):
+        from localm.rag import extract
+        path = tmp_path / "x.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("a.txt", "stored words", compress_type=zipfile.ZIP_STORED)
+            zf.writestr("b.txt", "deflated words", compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("c.txt", "bzip2 words", compress_type=zipfile.ZIP_BZIP2)
+            zf.writestr("d.txt", "lzma words", compress_type=zipfile.ZIP_LZMA)
+        text = extract.extract_bytes(path.read_bytes(), path.name)
+        for words in ("stored words", "deflated words", "bzip2 words", "lzma words"):
+            assert words in text
+        assert "not read" not in text
+
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+    def test_a_docx_body_in_either_packing_is_read(self, tmp_path, method):
+        from localm.rag import extract
+        body = "<w:p><w:r><w:t>docx words</w:t></w:r></w:p>"
+        path = _zip(tmp_path / "x.docx", body.encode(), method, member="word/document.xml")
+        assert "docx words" in extract.extract_bytes(path.read_bytes(), path.name)
+
+    @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+    def test_a_member_that_does_not_match_its_crc_is_not_indexed(self, tmp_path, method):
+        from localm.rag import extract
+        path = tmp_path / "x.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("a.txt", "good words", compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("b.txt", "bad words", compress_type=method)
+        raw = bytearray(path.read_bytes())
+        struct.pack_into("<I", raw, raw.rfind(b"PK\x01\x02") + 16, 12345)
+        text = extract.extract_bytes(bytes(raw), path.name)
+        assert "good words" in text and "bad words" not in text
+
+    @staticmethod
+    def _refused_member(path: Path) -> bytes:
+        """A zip of a readable member and one whose LZMA header asks for a 4 GiB dictionary."""
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("a.txt", "readable words", compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("b.txt", "lost words", compress_type=zipfile.ZIP_LZMA)
+        raw = bytearray(path.read_bytes())
+        at = raw.rfind(b"PK\x03\x04")
+        data = at + 30 + struct.unpack_from("<H", raw, at + 26)[0]
+        struct.pack_into("<I", raw, data + 5, 0xFFFFFFFF)
+        path.write_bytes(bytes(raw))
+        return bytes(raw)
+
+    def test_a_refused_member_is_logged_and_noted_in_the_text(self, tmp_path, caplog):
+        import logging
+        from localm.rag import extract
+        raw = self._refused_member(tmp_path / "x.zip")
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            text = extract.extract_bytes(raw, "x.zip")
+        assert "readable words" in text and "lost words" not in text
+        assert "[1 archive member(s) not read" in text
+        assert "does not unpack" in caplog.text
+
+    def test_lzma_parameters_the_decompressor_does_not_take_are_noted(self, tmp_path):
+        from localm.rag import extract
+        raw = bytearray(self._refused_member(tmp_path / "x.zip"))
+        at = raw.rfind(b"PK\x03\x04")
+        data = at + 30 + struct.unpack_from("<H", raw, at + 26)[0]
+        struct.pack_into("<I", raw, data + 5, 1 << 16)
+        raw[data + 4] = 8
+        text = extract.extract_bytes(bytes(raw), "x.zip")
+        assert "readable words" in text and "[1 archive member(s) not read" in text
+
+    def test_a_refused_member_stays_small(self, tmp_path):
+        self._refused_member(tmp_path / "x.zip")
+        got = _read_in_child("zip", tmp_path / "x.zip", tmp_path)
+        assert "not read" in got["result"]
         assert got["grew_mb"] < GROWTH_LIMIT_MB
+
+    def test_a_method_there_is_no_decompressor_for_is_noted_too(self, tmp_path):
+        from localm.rag import extract
+        path = tmp_path / "x.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("a.txt", "readable words", compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("b.txt", "lost words", compress_type=zipfile.ZIP_DEFLATED)
+        raw = bytearray(path.read_bytes())
+        struct.pack_into("<H", raw, raw.rfind(b"PK\x01\x02") + 10, 9)
+        struct.pack_into("<H", raw, raw.rfind(b"PK\x03\x04") + 8, 9)
+        text = extract.extract_bytes(bytes(raw), path.name)
+        assert "readable words" in text and "[1 archive member(s) not read" in text
+
+    def test_a_zip_of_only_refused_members_has_no_extractable_text(self, tmp_path):
+        from localm.rag import extract
+        path = tmp_path / "x.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("b.txt", "lost words", compress_type=zipfile.ZIP_DEFLATED)
+        raw = bytearray(path.read_bytes())
+        struct.pack_into("<H", raw, raw.rfind(b"PK\x01\x02") + 10, 9)
+        with pytest.raises(extract.ExtractError, match="No extractable text"):
+            extract.extract_bytes(bytes(raw), path.name)
+
+    def test_the_note_fits_a_full_archive(self, tmp_path):
+        from localm.rag import extract
+        text = extract._join_archive(["x" * extract.MAX_TEXT_CHARS], True, 2)
+        assert len(text) <= extract.MAX_TEXT_CHARS
+        assert "[2 archive member(s) not read" in text
+        assert text.endswith(extract._ARCHIVE_TRUNCATED_NOTE)
 
     def test_a_deflated_zip_member_still_extracts(self, tmp_path):
         from localm.rag import extract
