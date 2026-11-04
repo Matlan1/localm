@@ -81,6 +81,18 @@ test("report: invalid JSON is rejected", async () => {
   assert.equal(r.status, 400);
 });
 
+for (const raw of ["null", "5", "\"text\"", "true"]) {
+  test(`report: a JSON ${raw} body is a 400 and no GitHub call`, async () => {
+    let called = false;
+    const restore = stubFetch(async () => { called = true; return new Response("{}", { status: 201 }); });
+    try {
+      const r = await worker.fetch(req(raw), ENV);
+      assert.equal(r.status, 400);
+      assert.equal(called, false);
+    } finally { restore(); }
+  });
+}
+
 test("report: empty body is rejected", async () => {
   const r = await worker.fetch(req({ title: "t", body: "   " }), ENV);
   assert.equal(r.status, 400);
@@ -186,6 +198,8 @@ const NOT_LOCALM = [
   { title: "t", body: "Filed via the standalone curl reporter" },
   { title: "t", body: "Filed via the standalone curl reporter (no Python available). OS: x" },
   { title: "t", body: "intro\n" + CURL_LINE },
+  { title: "t", body: CURL_LINE + "\nanything a script wants published" },
+  { title: "t", body: CURL_LINE + "\n\n## More\nmore text" },
 ];
 
 test("a body localm did not build makes no GitHub call and gets a 422 that does not echo it", async () => {
@@ -226,6 +240,8 @@ test("a standalone reporter's body is filed with no detail, CRLF line ends or a 
     STANDALONE.replace(/\n/g, "\r\n"),
     STANDALONE + "\n## Recent log tail\n```\nline\n```",
     "Filed via the standalone curl reporter (no Python available). OS: a. b. Details: it said \"no\" # x",
+    "Filed via the standalone curl reporter (no Python available). OS: x. Details:    ",
+    CURL_LINE + "\n\n",
   ];
   for (const report of variants) {
     const { res, upstream } = await postReport({ title: "t", body: report });

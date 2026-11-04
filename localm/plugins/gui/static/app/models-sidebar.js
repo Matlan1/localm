@@ -198,6 +198,42 @@ let _activityKnown = false;
 const _ACTIVITY_STALE_AFTER_READS = 3;
 let _activityStaleReads = 0;
 const _ACTIVITY_MODAL_TITLE = "Activity";
+// Server stall records from the last /api/activity read, and the ids already
+// toasted. On the first read, a stall that ended more than
+// _STALL_TOAST_RECENT_S before the server's "now" counts as already seen.
+let _activityStalls = [];
+const _seenStallIds = new Set();
+let _stallsPrimed = false;
+const _STALL_TOAST_RECENT_S = 120;
+
+// True while a stall that ended in the last _STALL_PILL_S seconds has not been
+// seen in the Activity window yet.
+const _STALL_PILL_S = 600;
+const _stallsShown = new Set();
+function _unseenStall() {
+  if (typeof _activityServerNow !== "number") return false;
+  return _activityStalls.some((s) => !s.ongoing && !_stallsShown.has(s.id)
+    && _activityServerNow - ((s.at || 0) + (s.seconds || 0)) < _STALL_PILL_S);
+}
+
+function _stallText(s) {
+  return t(s.kind === "loop" ? "activity.stall.loop" : "activity.stall.gil",
+    { seconds: Math.round(s.seconds), where: s.where });
+}
+
+// Toast each stall that has ended and was not toasted before.
+function _noteStalls(stalls, serverNow) {
+  _activityStalls = stalls;
+  for (const s of stalls) {
+    if (s.ongoing || _seenStallIds.has(s.id)) continue;
+    _seenStallIds.add(s.id);
+    const ended = (s.at || 0) + (s.seconds || 0);
+    if (!_stallsPrimed && typeof serverNow === "number"
+        && serverNow - ended > _STALL_TOAST_RECENT_S) continue;
+    toast(_stallText(s), true);
+  }
+  _stallsPrimed = true;
+}
 
 export function isActivityBusy() {
   return _activityOps.some((op) => op.status === "running");
@@ -253,6 +289,10 @@ export function renderActivityPill(ops) {
       pill.style.display = "";
       pill.title = "Click for details";
       pill.textContent = tn("activity.interruptedPill", interrupted);
+    } else if (_unseenStall()) {
+      pill.style.display = "";
+      pill.title = "Click for details";
+      pill.textContent = t("activity.stallPill");
     } else {
       pill.style.display = "none";
     }
@@ -345,6 +385,19 @@ function _buildActivityBody(body) {
     body.appendChild(el("h4", "", t("activity.interruptedHead")));
     body.appendChild(list);
   }
+  if (_activityStalls.length) {
+    body.appendChild(el("h4", "", t("activity.stallsHead")));
+    for (const s of _activityStalls.slice().reverse()) {
+      const row = el("div", "job-row");
+      row.appendChild(el("div", "", _stallText(s)));
+      if (Array.isArray(s.frames) && s.frames.length) {
+        const pre = el("pre", "job-log");
+        pre.textContent = s.frames.join("\n");
+        row.appendChild(pre);
+      }
+      body.appendChild(row);
+    }
+  }
 }
 
 onInterruptedChange(() => {
@@ -353,6 +406,8 @@ onInterruptedChange(() => {
 });
 
 export function showActivityDetails() {
+  for (const s of _activityStalls) _stallsShown.add(s.id);
+  renderActivityPill(_activityOps);
   openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
 }
 if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
@@ -393,6 +448,7 @@ async function _readActivity() {
     _activityServerNow = typeof data.now === "number" ? data.now : null;
     _activityKnown = true;
     _activityStaleReads = 0;
+    _noteStalls(Array.isArray(data.stalls) ? data.stalls : [], _activityServerNow);
     renderActivityPill(ops);
     _refreshActivityModalIfOpen();
     return ops;
@@ -912,9 +968,12 @@ export async function refreshModels() {
       const willServe = modelCache.active || modelCache.resumable || "";
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = t("sidebar.noModelLoaded");
+      const notLoaded = !modelCache.active && !!modelCache.resumable && !peerRoute;
+      placeholder.textContent = notLoaded
+        ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+        : t("sidebar.noModelLoaded");
       placeholder.disabled = true;
-      if (!willServe) placeholder.selected = true;
+      if (!willServe || notLoaded) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
@@ -922,7 +981,7 @@ export async function refreshModels() {
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
         if (peerRoute ? m.name === _peerSelected
-            : (m.active || (!modelCache.active && m.name === willServe))) opt.selected = true;
+            : m.active) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
@@ -1119,7 +1178,13 @@ let _peerSelected = null;
 // message (the active one, else the resumable one), or at the "No model
 // loaded" placeholder when there is none, even while the dropdown has focus.
 function _showServedModel() {
-  const shown = modelCache.active || modelCache.resumable || "";
+  const shown = modelCache.active || "";
+  const placeholder = [...modelSelect.options].find((o) => o.value === "" && o.disabled);
+  if (placeholder) {
+    placeholder.textContent = !shown && modelCache.resumable
+      ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+      : t("sidebar.noModelLoaded");
+  }
   modelSelect.value = shown;
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
@@ -1169,9 +1234,13 @@ export async function switchModel(model, { local = false, activate = true, selec
     if (routed) return routed;
     if (select) _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
+    let force = false;
+    let asChat = false;
     data = await _postLoad(model, false, false, activate);
-    if (data.status === "confirm_required") {
+    while (data.status === "confirm_required") {
       const notChat = data.reason === "not_chat_model";
+      // A confirm the server repeats after its flag was already sent is a failed load.
+      if (notChat ? asChat : force) throw new Error(data.detail || t("sidebar.status.loadFailed"));
       const confirmed = await confirmDangerAsync(
         t(notChat ? "models.notChat.title" : "models.switch.confirmTitle"), data.detail,
         t(notChat ? "models.notChat.confirmLabel" : "models.switch.confirmLabel"));
@@ -1181,8 +1250,10 @@ export async function switchModel(model, { local = false, activate = true, selec
         refreshModels().then(_showServedModel);
         return { status: "cancelled", reason: "declined by user", model };
       }
+      if (notChat) asChat = true;
+      else force = true;
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = notChat ? await _postLoad(model, false, true, activate) : await _postLoad(model, true, false, activate);
+      data = await _postLoad(model, force, asChat, activate);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
