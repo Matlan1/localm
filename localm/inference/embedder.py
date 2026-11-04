@@ -533,25 +533,34 @@ def _download_progress_class(label: str, on_progress, every: float = 2.0):
         def __init__(self, *args, **kwargs):
             self._report_total = kwargs.get("total")
             self._report_done = kwargs.get("initial") or 0
+            self._report_transfer = 0
             self._report_at = 0.0
             kwargs["disable"] = True
             super().__init__(*args, **kwargs)
 
+        def _report(self):
+            now = _time.monotonic()
+            if now - self._report_at < every:
+                return
+            self._report_at = now
+            done = int(max(self._report_done, self._report_transfer, 0))
+            if self._report_total:
+                done = min(done, int(self._report_total))
+            try:
+                on_progress(download_progress_line(label, done, self._report_total))
+            except Exception as e:
+                logger.debug("download progress callback raised: %s", e)
+
         def update(self, n=1):
             self._report_done += n or 0
-            now = _time.monotonic()
-            if now - self._report_at >= every:
-                self._report_at = now
-                try:
-                    on_progress(download_progress_line(
-                        label, self._report_done, self._report_total))
-                except Exception as e:
-                    logger.debug("download progress callback raised: %s", e)
+            self._report()
             return super().update(n)
 
         def update_transfer(self, n=1):
-            """Transfer bytes are not reported; huggingface_hub then routes a
-            Xet download through this one bar."""
+            """Network bytes received: a Xet download completes its file-level
+            bar only at the end, so these carry the progress in between."""
+            self._report_transfer += n or 0
+            self._report()
             return None
 
         def set_transfer_postfix_str(self, postfix="", refresh=False):
