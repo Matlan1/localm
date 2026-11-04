@@ -89,6 +89,8 @@ from .registry import (
     _looks_like_vision_gguf_name,
     _pick_mmproj_candidate,
     _prompt_duplicate_action,
+    _alias_duplicate,
+    _must_alias_for_type,
     _prompt_predownload_dup,
     _register,
     _register_with_dedup,
@@ -215,6 +217,7 @@ __all__ = [
     "_backup_registry", "sync_models_dir", "_register_with_dedup", "remove_model",
     "_add_local_gguf_dir", "add_local", "show_shortcuts", "_prompt_duplicate_action",
     "can_prompt", "prompts_disabled",
+    "_alias_duplicate", "_must_alias_for_type",
     "_prompt_predownload_dup", "_resolve_ollama_manifest", "MODEL_TYPES",
     "_store_into_models_dir", "_store_loose_gguf_dir", "_store_with_projector",
     # pull

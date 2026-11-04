@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from localm.debuglog import logger
+
 _ST_MAX_HEADER = 100 * 1024 * 1024
 _GGUF_MAX_TENSORS = 1_000_000
 _GGUF_MAX_DIMS = 8
@@ -784,7 +786,16 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     """Classify a file from its tensor names/shapes and GGUF architecture. A
     file of tensors none of the rules knows is ``unknown`` with ``read`` True
     in its detail, plus its ``arch`` and input ``latent`` channels when
-    known; no tensors at all is ``UNKNOWN``."""
+    known; no tensors at all, and names or shapes the rules cannot compute with
+    (logged at debug level), is ``UNKNOWN``. Never raises for what a file holds."""
+    try:
+        return _classify_tensors(tensors, arch)
+    except (ValueError, ArithmeticError, LookupError, TypeError) as e:
+        logger.debug("cannot classify these tensors: %s: %s", type(e).__name__, e)
+        return UNKNOWN
+
+
+def _classify_tensors(tensors: dict, arch: Optional[str]) -> FileInfo:
     if not tensors:
         return UNKNOWN
     from localm.model_manager.gguf import gguf_is_music_architecture
