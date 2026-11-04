@@ -179,6 +179,71 @@ def test_a_running_localm_is_stopped_first(tmp_path, venv_template):
             proc.wait(timeout=30)
 
 
+def _keep_copies(clone: Path, home: Path) -> tuple:
+    """The folders an update keeps beside the venv, made by the real code."""
+    from localm import updater_components as uc
+    snap = home / "updates" / "backup-components"
+    venv = clone / ".venv"
+    copy = uc._venv_copy_path(venv, snap, "deps")
+    uc._clone_venv(venv, copy, snap)
+    assert os.stat(venv / "Scripts" / "python.exe").st_nlink == 2, "they hold hard links"
+    return copy, uc._move_aside_dir(venv)
+
+
+def test_uninstall_removes_the_venv_copies_an_update_kept(tmp_path, venv_template):
+    clone = tmp_path / "clone"
+    p = _install(clone, venv_template)
+    copy, aside = _keep_copies(clone, p["home"])
+    (aside / "abc").mkdir(parents=True)
+    (aside / "abc" / "0-old.pyd").write_bytes(b"replaced")
+    out = _run(clone, "uninstall", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert not copy.exists() and not aside.exists(), out.stdout
+    assert _runtime_gone(clone), out.stdout
+    assert (p["home"] / "chats" / "c1.json").exists()
+    assert not (clone / im.MANIFEST_NAME).exists()
+    assert copy.name in out.stdout and "LocaLM was removed from this folder." in out.stdout
+
+
+def test_a_held_file_in_a_kept_folder_does_not_stop_the_uninstall(tmp_path, venv_template):
+    from tests._held_file import held
+    clone = tmp_path / "clone"
+    p = _install(clone, venv_template)
+    copy, aside = _keep_copies(clone, p["home"])
+    (aside / "abc").mkdir(parents=True)
+    (aside / "abc" / "0-old.pyd").write_bytes(b"replaced")
+    with held(aside / "abc" / "0-old.pyd"):
+        out = _run(clone, "uninstall", "--yes")
+    assert _runtime_gone(clone), out.stdout
+    assert not copy.exists(), out.stdout
+    assert aside.exists(), "the held file stays"
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "REFUSED" in out.stdout and str(aside) in out.stdout, out.stdout
+    assert "delete it by hand" in out.stdout, out.stdout
+
+
+def test_uninstall_with_a_process_running_from_replaced_files_stops_it(tmp_path, venv_template):
+    clone = tmp_path / "clone"
+    p = _install(clone, venv_template)
+    copy, aside = _keep_copies(clone, p["home"])
+    moved = aside / "abc"
+    shutil.copytree(clone / ".venv", moved)
+    proc = subprocess.Popen([str(moved / "Scripts" / "python.exe"), "-c",
+                             "import time; time.sleep(120)"], cwd=str(clone))
+    try:
+        time.sleep(1.0)
+        out = _run(clone, "uninstall", "--yes")
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        assert "Stopped:" in out.stdout, out.stdout
+        proc.wait(timeout=30)
+        assert not aside.exists() and not copy.exists(), out.stdout
+        assert _runtime_gone(clone), out.stdout
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=30)
+
+
 def test_without_any_python_only_the_fixed_folders_go(tmp_path, venv_template):
     clone = tmp_path / "clone"
     p = _install(clone, venv_template)

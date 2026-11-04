@@ -94,6 +94,25 @@ def test_uninstall_yes_removes_the_install_and_keeps_the_data(tmp_path, venv_tem
     assert "LocaLM was removed from this folder." in out.stdout
 
 
+def test_uninstall_removes_the_venv_copies_an_update_kept(tmp_path, venv_template):
+    from localm import updater_components as uc
+    clone = tmp_path / "clone"
+    p = _install(clone, venv_template)
+    snap = p["home"] / "updates" / "backup-components"
+    venv = clone / ".venv"
+    copy = uc._venv_copy_path(venv, snap, "deps")
+    uc._clone_venv(venv, copy, snap)
+    aside = uc._move_aside_dir(venv)
+    (aside / "abc").mkdir(parents=True)
+    (aside / "abc" / "0-old.so").write_bytes(b"replaced")
+    out = _run(clone, tmp_path, "--uninstall", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert not copy.exists() and not aside.exists(), out.stdout
+    assert not venv.exists()
+    assert (p["home"] / "chats" / "c1.json").exists()
+    assert copy.name in out.stdout
+
+
 def test_uninstall_purge_in_a_shared_folder_keeps_the_rest(tmp_path, venv_template):
     shared = tmp_path / "Shared AI"
     (shared / "models").mkdir(parents=True)

@@ -11,6 +11,10 @@ PATH so a broken ``localm`` package cannot stop the rollback. Run it via
 ``rollback.bat`` / ``rollback.sh`` in the install root, or
 ``python scripts/rollback_update.py``.
 
+It restores the code, the venv and the native runtime. ComfyUI and the uv inside
+localm take localm's own modules to restore, so it leaves them, says so and records
+it; the next start of localm brings them to the pins of the version it restored.
+
 It NEVER reports success it did not achieve: if there is no backup, the restore
 helper cannot load, or a restore step fails, it says so, keeps the backup intact,
 and exits non-zero, pointing at the backup dir for a manual copy.
@@ -23,10 +27,17 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # The install root is the parent of this script's scripts/ dir, derived from __file__.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
+# The last update results ``localm.updater_runtime`` and ``localm.updater_components``
+# read, in the updates folder.
+_RUNTIME_STATUS = "runtime-update.json"
+_COMPONENTS_STATUS = "components-update.json"
+# The parts an update's snapshot can hold that this script does not restore.
+_PARTS_LEFT = (("comfyui", "ComfyUI"), ("uv", "the uv inside localm"))
 
 
 def _read_cfg_line(marker: Path) -> str:
@@ -94,6 +105,61 @@ def _load_apply_update(install_root: Path, code_root=None):
     return _load_helper(install_root, "_apply_update", code_root)
 
 
+def _held_version(updates_dir: Path):
+    """The version the update backup holds, or None when it cannot be read."""
+    try:
+        return (updates_dir / "backup" / "VERSION").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _parts_left(updates_dir: Path) -> list:
+    """The names of the parts the update kept a copy of that this script does not
+    restore, unless they were kept for another backup than the one being restored.
+    Empty when the record cannot be read (:func:`_restore_venv` reports that)."""
+    try:
+        state = json.loads((updates_dir / "backup-components" / "state.json")
+                           .read_text(encoding="utf-8"))
+        comps, kept_for = state.get("components") or {}, state.get("backup_version")
+    except (OSError, ValueError, AttributeError):
+        return []
+    held = _held_version(updates_dir)
+    if kept_for and held and kept_for != held:
+        return []
+    return [label for name, label in _PARTS_LEFT if name in comps]
+
+
+def _left_note(left: list) -> str:
+    """The sentence naming the parts *left* behind."""
+    return (" and ".join(left) + " were not put back; if the update changed them, the next "
+            "start of localm with an internet connection returns them to this version's pins")
+
+
+def _record_rollback(updates_dir: Path, install_root: Path, left: list) -> None:
+    """Record the rollback as the last runtime and component update result, the way
+    ``localm.updater._record_rollback`` does, so Settings > Updates and ``localm
+    doctor`` do not go on reporting what the rolled-back update did. A file that
+    cannot be written is reported on stderr and does not fail the rollback."""
+    try:
+        version = (install_root / "VERSION").read_text(encoding="utf-8").strip() or None
+    except (OSError, ValueError):
+        version = None
+    note = f"the update was rolled back to localm {version or '(unknown version)'}"
+    if left:
+        note += "; " + _left_note(left)
+    common = {"state": "rolled_back", "note": note, "error": None, "version": version,
+              "at": time.time()}
+    for name, fields in ((_RUNTIME_STATUS, {"backend": None, "from": None, "to": None,
+                                            "holders": []}),
+                         (_COMPONENTS_STATUS, {"components": [],
+                                               "root": str(install_root.resolve())})):
+        try:
+            (updates_dir / name).write_text(json.dumps({**common, **fields}), encoding="utf-8")
+        except OSError as e:
+            print(f"Warning: could not record the rollback in {updates_dir / name}: {e}; "
+                  "Settings > Updates may still show what the update did.", file=sys.stderr)
+
+
 def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     """Put back the packages the update changed, kept in ``<updates>/backup-components``:
     what its PyTorch step changed, then what its dependency step changed (localm's own
@@ -114,10 +180,7 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     deps, torch = comps.get("venv"), comps.get("pytorch")
     if not deps and not torch:
         return [], None
-    try:
-        held = (updates_dir / "backup" / "VERSION").read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        held = None
+    held = _held_version(updates_dir)
     if state.get("backup_version") and held and state["backup_version"] != held:
         return [], None
     uc = _load_helper(install_root, "updater_components", code_root)
@@ -138,27 +201,33 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     keep = uc._venv_copy_path(venv, now, "deps")
     try:
         uc._clone_venv(venv, keep, now)
-    except OSError as e:
+    except Exception as e:
         return [f"could not keep a copy of the current packages: {e}"], None
 
     def undo():
         return uc._restore_venv(keep, venv, own=True)
     undo.keep = keep
     errors, restored = [], False
-    for copy, own, only in steps:
-        changed = uc.venv_changes(copy, venv, own=own)
-        if changed is None:
-            errors = [f"could not read the packages of {venv} or of {copy}"]
-            break
-        if only is not None:
-            changed = [n for n in changed if n in only]
-        if changed:
-            restored = True
-            errors = uc._restore_venv(copy, venv, own=own, only=changed)
-            if errors:
+    try:
+        for copy, own, only in steps:
+            changed = uc.venv_changes(copy, venv, own=own)
+            if changed is None:
+                errors = [f"could not read the packages of {venv} or of {copy}"]
                 break
+            if only is not None:
+                changed = [n for n in changed if n in only]
+            if changed:
+                restored = True
+                errors = uc._restore_venv(copy, venv, own=own, only=changed)
+                if errors:
+                    break
+    except Exception as e:
+        errors = [f"putting the packages back stopped with an error: {e}"]
     if errors or not restored:
-        back = undo() if errors else []
+        try:
+            back = undo() if errors else []
+        except Exception as e:
+            back = [f"putting the current packages back stopped with an error: {e}"]
         import shutil
         shutil.rmtree(keep, ignore_errors=True)
         return errors + back, None
@@ -218,7 +287,10 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
               f"is intact at {backup_dir}: to recover by hand, copy each entry there back "
               f"into {install_root}, overwriting the current files.", file=sys.stderr)
         return 2
-    errors, undo = _restore_venv(install_root, updates_dir, code_root)
+    try:
+        errors, undo = _restore_venv(install_root, updates_dir, code_root)
+    except Exception as e:
+        errors, undo = [f"the package restore helper stopped with an error: {e}"], None
     if errors:
         print("Rollback FAILED: the previous packages could not be put back: "
               + "; ".join(errors) + f"\nNothing else was changed; the backup is kept at "
@@ -237,9 +309,14 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
     if undo:
         import shutil
         shutil.rmtree(undo.keep, ignore_errors=True)
+    left = _parts_left(updates_dir)
+    _record_rollback(updates_dir, install_root, left)
     print("Rolled back to the previous version" + (" and its packages" if undo else "")
           + ". Start localm again to use it; Settings > Updates shows any other part that "
             "still differs.")
+    if left:
+        note = _left_note(left)
+        print(f"{note[0].upper()}{note[1:]}.")
     return 0
 
 

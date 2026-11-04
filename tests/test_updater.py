@@ -1159,6 +1159,52 @@ def test_apply_preserves_run_backup_when_swap_and_rollback_both_fail(tmp_path, m
     assert not (home / "updates" / "apply.lock").exists()   # still released despite the double failure
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the real hold is a Windows file handle")
+def test_a_failed_backup_leaves_no_run_behind_and_keeps_the_previous_manifest(
+        tmp_path, monkeypatch, sig_env):
+    from localm.bugreport import LocalmError
+    from tests._held_file import held
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    manifest = home / "updates" / "applied_names.json"
+    recorded = manifest.read_text(encoding="utf-8")
+    op, sig = _signed_build("0.3.0", ["click"])
+    errors = []
+    with held(inst / "localm" / "__init__.py", exclusive=True):
+        for _attempt in range(2):
+            try:
+                updater.apply(5, installed=inst, signature=sig, download_opener=op)
+            except LocalmError as e:
+                errors.append(e)
+    runs = home / "updates" / "runs"
+    assert not runs.exists() or list(runs.iterdir()) == [], "a retry on a full disk adds nothing"
+    assert manifest.read_text(encoding="utf-8") == recorded
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.2.0"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.2.0"
+    assert (home / "updates" / "backup" / "VERSION").read_text(encoding="utf-8") == "0.1.0"
+    assert len(errors) == 2 and "nothing was updated" in errors[0].summary
+
+
+def test_a_swap_that_was_undone_leaves_no_run_behind_and_keeps_the_previous_manifest(
+        tmp_path, monkeypatch, sig_env):
+    from localm import _apply_update as au
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    manifest = home / "updates" / "applied_names.json"
+    recorded = manifest.read_text(encoding="utf-8")
+    monkeypatch.setattr(au, "apply_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
+    op, sig = _signed_build("0.3.0", ["click"])
+    with pytest.raises(OSError, match="swap boom"):
+        updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    runs = home / "updates" / "runs"
+    assert not runs.exists() or list(runs.iterdir()) == []
+    assert manifest.read_text(encoding="utf-8") == recorded
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.2.0"
+
+
 # ------------------------ spawn_health_watchdog ---------------------------
 #
 # spawn_health_watchdog() never actually runs scripts/update_watchdog.py in these

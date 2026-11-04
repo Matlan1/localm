@@ -77,6 +77,12 @@ EXIT_UNAVAILABLE = 3     # current-data / prepare-data --keep-current: the data 
 RUNTIME_DIRS: dict[str, str] = {"python_dir": ".python", "cache_dir": ".cache",
                                 "uv_dir": ".uv"}
 DEFERRABLE = (".venv",) + tuple(RUNTIME_DIRS.values())
+# What an update keeps beside the venv (``localm.updater_components``): copies named
+# ``..venv-<snapshot>``, each with this marker inside, and the folder a venv restore
+# moves replaced files into.
+_VENV_COPY_PREFIX = "..venv-"
+_VENV_COPY_MARKER = ".localm-venv-copy"
+_VENV_REPLACED_DIR = ".venv.localm-replaced"
 
 _LIB_SENTINELS = (".gitignore", ".gitkeep")
 _DEFAULT_LIB = ("runtime", "localm_llama_runtime", "lib")
@@ -787,6 +793,15 @@ def _is_our_venv(venv: Path) -> bool:
 #  Removing things                                                             #
 # --------------------------------------------------------------------------- #
 
+def _long_path(path) -> str:
+    """*path* absolute and, on Windows, in the form that reaches a file deeper than
+    260 characters."""
+    text = os.path.abspath(path)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    return "\\\\?\\UNC\\" + text[2:] if text.startswith("\\\\") else "\\\\?\\" + text
+
+
 def _rmtree(path: Path) -> None:
     """``shutil.rmtree`` that also removes read-only files (a git checkout's
     object files on Windows). Links inside are removed, never followed."""
@@ -796,6 +811,7 @@ def _rmtree(path: Path) -> None:
         except OSError:
             pass
         func(p)
+    path = _long_path(path)
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=_retry)
     else:  # pragma: no cover - older interpreters
@@ -1194,6 +1210,26 @@ def _cfg_data_dir(root: Path) -> str:
         return ""
 
 
+def _kept_venv_folders(root: Path) -> list[Path]:
+    """The folders an update keeps beside the venv of the clone at *root*: venv copies
+    (hard links to the venv's files where they could be made, so removing one frees
+    only what the venv no longer holds) and replaced files. Links are not listed, and
+    a ``..venv-`` folder without the marker is not one of ours."""
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    out = []
+    for name in sorted(names):
+        p = root / name
+        if _is_link(p) or not p.is_dir():
+            continue
+        if name == _VENV_REPLACED_DIR or (name.startswith(_VENV_COPY_PREFIX)
+                                          and (p / _VENV_COPY_MARKER).is_file()):
+            out.append(p)
+    return out
+
+
 def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
           defer_runtime: bool, old_root: str = "") -> tuple[list[_Item], list]:
     items: list[_Item] = []
@@ -1235,6 +1271,8 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         else:
             items.append(_Item(venv, "venv", "keep",
                                "not a LocaLM environment (no setup marker)"))
+    for kept in _kept_venv_folders(root):
+        items.append(_Item(kept, "venv-copy", "remove"))
 
     # Portable Python tooling.
     for key, name in RUNTIME_DIRS.items():
@@ -1742,7 +1780,8 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
                              defer_runtime=defer_runtime, old_root=old_root)
     report["data"] = data_info
 
-    busy_dirs = [root / ".venv"] + [root / n for n in RUNTIME_DIRS.values()]
+    busy_dirs = ([root / ".venv"] + [root / n for n in RUNTIME_DIRS.values()]
+                 + _kept_venv_folders(root))
     for info in data_info:
         if info["delete"] and info["mode"] == "owned":
             busy_dirs.append(Path(info["path"]))
@@ -1915,7 +1954,7 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
             except OSError:
                 report["skipped"].append((it.path, "not empty - kept"))
                 return
-        elif it.kind in ("data", "runtime", "venv", "data-entry", "lib"):
+        elif it.kind in ("data", "runtime", "venv", "venv-copy", "data-entry", "lib"):
             _remove_entry(p)
         elif p.is_dir() and not _is_link(p):
             report["refused"].append((it.path, "expected a file, found a folder"))
@@ -1924,7 +1963,11 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
             _remove_entry(p)
         report["removed"].append(it.path)
     except OSError as e:
-        report["failed"].append((it.path, f"could not remove: {e}"))
+        if it.kind == "venv-copy":
+            report["refused"].append((it.path, f"could not remove it: {e} - delete it by hand"))
+            report["partial"] = True
+        else:
+            report["failed"].append((it.path, f"could not remove: {e}"))
 
 
 def _finish(report: dict, root: Path, m: Optional[dict], items: list[_Item],
