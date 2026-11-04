@@ -633,6 +633,27 @@ def test_curl_reporter_writes_the_shape_the_proxy_tests_use():
     assert body == _fixture("standalone_curl_report.md").strip()
 
 
+@pytest.mark.skipif(not shutil.which("bash") or "system32" in (shutil.which("bash") or "").lower(),
+                    reason="needs a POSIX bash, not the WSL launcher")
+@pytest.mark.parametrize("answer, expected", [
+    ("", "localm would not start"),
+    ("    ", "localm would not start"),
+    ("\t ", "localm would not start"),
+    ("it broke", "it broke"),
+    ("  it broke", "  it broke"),
+], ids=["empty", "spaces", "tab", "text", "indented"])
+def test_curl_reporter_treats_a_blank_answer_as_no_answer(answer, expected):
+    text = (_MOD_PATH.parent.parent / "report-issue.sh").read_text(encoding="utf-8")
+    line = re.search(r'^\[ -n .*\|\| summary="localm would not start"$', text, re.M)
+    assert line, "the summary default moved"
+    proc = subprocess.run(
+        [shutil.which("bash"), "-c", line.group(0) + '\nprintf %s "$summary"'],
+        capture_output=True, text=True, timeout=60, env={**os.environ, "summary": answer},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == expected
+
+
 class _ProxyStandIn(http.server.BaseHTTPRequestHandler):
     reply = (422, b'{"error": "report not filed", "filed": false}')
     received: list = []
