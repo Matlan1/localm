@@ -509,7 +509,7 @@ def test_a_silent_proxy_through_the_real_client_is_bounded(monkeypatch, fresh_re
 
 
 def test_the_issues_route_answers_inside_the_budget(monkeypatch, fresh_record, silent_proxy):
-    _record_numbers(monkeypatch, 3)
+    _record_numbers(monkeypatch, issue_tracker.MAX_LISTED)
     monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.8)
     monkeypatch.setattr(issue_tracker, "LOOKUP_TIMEOUT_S", 0.4)
     app, c = _client(monkeypatch)
@@ -522,5 +522,5 @@ def test_the_issues_route_answers_inside_the_budget(monkeypatch, fresh_record, s
     assert r.status_code == 200
     assert elapsed < 5
     data = r.json()
-    assert [i["number"] for i in data["issues"]] == [3, 2, 1]
+    assert [i["number"] for i in data["issues"]] == list(range(issue_tracker.MAX_LISTED, 0, -1))
     assert all("error" in i and "state" not in i for i in data["issues"])
