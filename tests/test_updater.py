@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
@@ -462,10 +463,8 @@ _UV_NAME = "uv.exe" if sys.platform == "win32" else "uv"
 
 
 def _fake_uv(directory):
-    """An executable-looking uv file in *directory*; returns its path."""
-    directory.mkdir(parents=True, exist_ok=True)
-    exe = directory / _UV_NAME
-    exe.write_bytes(b"")
+    """A uv program file in *directory*; returns its path."""
+    exe = write_exe_stub(directory / _UV_NAME)
     exe.chmod(0o755)
     return exe
 

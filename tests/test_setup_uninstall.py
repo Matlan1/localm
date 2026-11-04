@@ -26,6 +26,8 @@ import pytest
 
 from localm import install_manifest as im
 
+from tests._exe_stub import write_exe_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = os.name == "nt"
 
@@ -283,7 +285,7 @@ def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None, code: int = 42
     text = (ROOT / "setup-gui.bat").read_text(encoding="utf-8")
     assert text.count(_UV_RUN) == 1, "the window launch line moved"
     (clone / ".uv").mkdir(exist_ok=True)
-    (clone / ".uv" / "uv.exe").write_bytes(b"")
+    write_exe_stub(clone / ".uv" / "uv.exe")
     stub = tmp_path / "uvstub"
     stub.mkdir(exist_ok=True)
     (stub / "uv.cmd").write_text("@exit /b 1\r\n", encoding="ascii")

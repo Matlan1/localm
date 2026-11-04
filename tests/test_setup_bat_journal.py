@@ -22,6 +22,8 @@ import pytest
 
 from localm import install_manifest as im
 
+from tests._exe_stub import write_exe_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_BAT = ROOT / "setup.bat"
 
@@ -250,7 +252,7 @@ class TestACutShortVenv:
     def test_a_localm_venv_known_only_by_its_console_script_is_not_wiped_on_resume(
             self, folder, tmp_path, uv_stub_dir):
         (folder / ".venv" / "Scripts").mkdir(parents=True)
-        (folder / ".venv" / "Scripts" / "localm.exe").write_text("x", encoding="utf-8")
+        write_exe_stub(folder / ".venv" / "Scripts" / "localm.exe")
         (folder / ".localm-setup-journal").write_bytes(
             b"begin\tportable-choice\r\ndone\tportable-choice\r\nbegin\tvenv\r\n")
         log = tmp_path / "uv.log"

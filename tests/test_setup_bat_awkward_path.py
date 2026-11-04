@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._exe_stub import write_exe_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_BAT = ROOT / "setup.bat"
 
@@ -182,8 +184,7 @@ def test_the_app_shortcut_prefers_the_branded_exe_in_an_awkward_folder(tmp_path,
     block = _shortcut_block(bat_text, "2")
     folder = _awkward_dir(tmp_path, "it's here")
     exe = folder / ".venv" / "localm-app" / "LocaLM.exe"
-    exe.parent.mkdir(parents=True)
-    exe.write_bytes(b"")
+    write_exe_stub(exe)
     desktop = tmp_path / "desk"
     desktop.mkdir()
     probe = _bootstrap(bat_text) + '\nset "SCPICK=2"\nset "SCPATH="\n' + block + "\n"

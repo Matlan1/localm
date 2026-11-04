@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
+from tests._exe_stub import write_exe_stub
 
 _GUI_PATH = Path(__file__).resolve().parents[1] / "installer" / "gui.py"
 _REPO_ROOT = _GUI_PATH.parents[1]
@@ -311,8 +312,7 @@ class TestUvResolution:
     def _portable_uv(gui, root):
         d = root / ".uv"
         d.mkdir(parents=True, exist_ok=True)
-        exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
-        exe.write_bytes(b"")
+        exe = write_exe_stub(d / ("uv.exe" if gui.IS_WINDOWS else "uv"))
         exe.chmod(0o755)
         return exe
 
@@ -374,7 +374,7 @@ class TestUvResolution:
         exe = self._portable_uv(machine, tmp_path)
         onpath = tmp_path / "sysbin"
         onpath.mkdir()
-        (onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")).write_bytes(b"")
+        write_exe_stub(onpath / ("uv.exe" if machine.IS_WINDOWS else "uv"))
         monkeypatch.setenv("PATH", str(onpath))
         assert machine.find_uv(tmp_path) == str(exe)
 
@@ -394,8 +394,7 @@ class TestUvResolution:
         that lives nowhere the search looks is still reachable."""
         onpath = tmp_path / "sysbin"
         onpath.mkdir()
-        exe = onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")
-        exe.write_bytes(b"")
+        exe = write_exe_stub(onpath / ("uv.exe" if machine.IS_WINDOWS else "uv"))
         exe.chmod(0o755)
         monkeypatch.setenv("PATH", str(onpath))
         found = machine.find_uv(tmp_path)

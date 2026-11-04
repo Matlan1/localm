@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests import _no_window as nw
+from tests._exe_stub import write_exe_stub
 from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
 
 _needs_windows = pytest.mark.skipif(sys.platform != "win32", reason="Windows process creation")
@@ -558,4 +559,13 @@ def test_allow_window_skips_the_fake_exe_scan(stop_spy, tmp_path):
     with nw.allow_window():
         with pytest.raises(_Stop):
             subprocess.run(["cmd", "/c", "exit 0"], cwd=tmp_path)
+    assert len(stop_spy) == 1
+
+
+@_needs_windows
+def test_write_exe_stub_makes_a_file_the_guard_accepts(stop_spy, tmp_path):
+    exe = write_exe_stub(tmp_path / ".uv" / "uv.exe")
+    assert exe.read_bytes()[:2] == nw.PE_MAGIC
+    with pytest.raises(_Stop):
+        subprocess.run(["cmd", "/c", "exit 0"], cwd=tmp_path)
     assert len(stop_spy) == 1
