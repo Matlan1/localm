@@ -69,13 +69,15 @@ def register(app: FastAPI, ctx) -> None:
                         headers={"Cache-Control": "no-store"})
 
     @app.post("/api/pairing/qr",
-              dependencies=[Depends(require_scope(scopes.ADMIN))])
+              dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def pairing_qr_for_key(body: dict):
-        """Render a pairing QR for an ARBITRARY scoped key the owner JUST minted -
-        the plaintext is passed in the BODY so it never lands in a URL / access
-        log. Owner-gated, never persisted or cached: the key is rendered into the
-        SVG and discarded. The phone scans it exactly like the owner-key QR,
-        pairing that device with the LIMITED key instead of full admin."""
+        """Render a pairing QR for a scoped key the caller JUST minted - the
+        plaintext is passed in the BODY so it never lands in a URL / access log.
+        Needs keys:admin, the scope that mints keys (ADMIN implies it). The reply
+        encodes only the plaintext the caller sent. Never persisted or cached: the
+        key is rendered into the SVG and discarded. The phone scans it exactly like
+        the owner-key QR, pairing that device with the LIMITED key instead of full
+        admin."""
         key = (body or {}).get("key")
         if not isinstance(key, str) or not key.strip():
             raise HTTPException(400, "Provide the minted key plaintext as 'key'.")

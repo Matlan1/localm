@@ -52,6 +52,7 @@ from localm.media.comfy_client import (
     comfy_runs_on_amd,
     comfy_wait_heartbeat,
     comfy_submit_prompt,
+    apply_weight_dtype,
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
@@ -207,15 +208,7 @@ def _build_video_workflow(
     if create_video is not None and "fps" in create_video.get("inputs", {}):
         create_video["inputs"]["fps"] = fps
 
-    if float_type and float_type != "default":
-        for node in workflow.values():
-            if node.get("class_type") in (
-                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
-                "CheckpointLoaderSimple", "CheckpointLoader"
-            ):
-                if "inputs" not in node:
-                    node["inputs"] = {}
-                node["inputs"]["weight_dtype"] = float_type
+    apply_weight_dtype(workflow, float_type)
 
     # Image-to-video: upload the picture and feed it as the latent's start frame.
     # A fresh node id (not a hardcoded "20") avoids clobbering a user's own node.
@@ -552,7 +545,7 @@ def generate_video(
 
     # Fetch the file from ComfyUI and save locally
     try:
-        comfy_fetch_output(api_url, video_info, output_path, timeout=120)
+        output_sha256 = comfy_fetch_output(api_url, video_info, output_path, timeout=120)
     except Exception as e:
         return False, f"Failed to download generated clip from ComfyUI: {e}"
 
@@ -573,7 +566,9 @@ def generate_video(
         {"filename": video_info.get("filename"),
          "subfolder": video_info.get("subfolder", ""),
          "type": video_info.get("type", "output")},
+        comfy_workdir=workdir,
         uploaded_input=uploaded_name,
+        output_sha256=output_sha256,
         delete_outputs=delete_outputs,
     )
 

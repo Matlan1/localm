@@ -26,7 +26,9 @@ Covered:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import struct
 import threading
 import zlib
@@ -47,6 +49,7 @@ from localm.video_gen import comfy as video_comfy
 _UNC = r"\\192.0.2.1\share"
 _UNC_FWD = "//192.0.2.1/share"
 _DEVICE = r"\\.\PhysicalDrive0"
+_X_SHA256 = hashlib.sha256(b"X").hexdigest()
 
 
 def _is_unc_or_device(s: str) -> bool:
@@ -98,6 +101,7 @@ class _ComfyStub(HTTPServer):
         self.output_kind = "images"    # "images" | "audio" | gifs ...
         self.file_ext = ".png"
         self.media_bytes = None        # override what the save node writes
+        self.uploaded_names: list = []  # filename each upload was sent under
         self._counter = 0
 
     @property
@@ -167,7 +171,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"prompt_id": pid})
         if p.path == "/upload/image":
             s.input_dir.mkdir(parents=True, exist_ok=True)
-            name = "uploaded_input.png"
+            sent = re.search(rb'filename="([^"]+)"', body)
+            name = sent.group(1).decode() if sent else "uploaded_input.png"
+            s.uploaded_names.append(name)
             (s.input_dir / name).write_bytes(b"INPUTDATA")
             return self._json(200, {"name": name})
         if p.path == "/history":
@@ -243,6 +249,7 @@ def test_contain_with_dir_clears_history_and_deletes_copies(stub):
         {"filename": fn, "subfolder": "", "type": "output"},
         comfy_output_dir=str(stub.output_dir),
         uploaded_input="src.png",
+        output_sha256=_X_SHA256,
         delete_outputs=True,
     )
 
@@ -287,6 +294,7 @@ def test_contain_warns_when_history_clear_fails(stub):
         stub.base_url, "pidHF",
         {"filename": fn, "subfolder": "", "type": "output"},
         comfy_output_dir=str(stub.output_dir),
+        output_sha256=_X_SHA256,
         delete_outputs=True,
     )
 
@@ -385,6 +393,7 @@ class TestContainmentRejectsOutOfBoundsNames:
             {"filename": "ComfyUI_00007_.png", "subfolder": "batch01",
              "type": "output"},
             comfy_output_dir=str(stub.output_dir),
+            output_sha256=_X_SHA256,
             delete_outputs=True,
         )
 
@@ -531,6 +540,7 @@ class TestContainmentRejectsUntrustedRoot:
             stub.base_url, "pidOrd",
             {"filename": fn, "subfolder": "", "type": "output"},
             comfy_output_dir=str(stub.output_dir),
+            output_sha256=_X_SHA256,
             delete_outputs=True,
         )
         assert warn == ""
@@ -727,3 +737,208 @@ def test_generate_music_warns_when_the_track_is_not_a_container_it_can_strip(
     assert ok, msg
     assert out.read_bytes() == b"FAKEMEDIADATA"                 # bytes untouched
     assert "WARNING: generated file is not FLAC or MP3" in msg   # loud, not silent
+
+
+# --------------------------------------------------------------------------- #
+#  The file deleted is the one this job produced, on the instance that ran it  #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def managed_stub(tmp_path, monkeypatch):
+    """A stub standing in for localm's own ComfyUI, serving from
+    <LOCALM_HOME>/comfyui/output, with the user's own ComfyUI folder beside it
+    holding a same-named file."""
+    from localm.media import managed_comfy as mc
+    home = tmp_path / "home"
+    out = home / "comfyui" / "output"
+    inp = home / "comfyui" / "input"
+    out.mkdir(parents=True)
+    inp.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    srv = _ComfyStub(out, inp)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    monkeypatch.setattr(mc, "MANAGED_COMFY_API_URL", srv.base_url)
+    monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
+    user_comfy = tmp_path / "users-comfyui"
+    (user_comfy / "output").mkdir(parents=True)
+    (user_comfy / "input").mkdir()
+    srv.user_comfy = user_comfy
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=5)
+
+
+def _users_file(srv, name: str) -> Path:
+    victim = srv.user_comfy / "output" / name
+    victim.write_bytes(b"the user's own picture")
+    return victim
+
+
+@pytest.mark.parametrize("configured_workdir", [True, False])
+def test_managed_job_deletes_its_own_copy_and_never_the_users_file(
+        managed_stub, tmp_path, monkeypatch, configured_workdir):
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    cfg = {"comfy_target": "own"}
+    if configured_workdir:
+        cfg["comfy_workdir"] = str(managed_stub.user_comfy)
+    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+    victim = _users_file(managed_stub, "ComfyUI_00001_.png")
+
+    ok, msg = comfy.generate_image(
+        "a cat", tmp_path / "saved" / "img.png", api_url=managed_stub.base_url,
+        delete_outputs=True, write_sidecar=False)
+
+    assert ok, msg
+    assert victim.read_bytes() == b"the user's own picture", "a user's file was deleted"
+    assert list(managed_stub.output_dir.glob("ComfyUI_*")) == [], "the managed copy stayed"
+    assert "WARNING" not in msg
+
+
+@pytest.mark.parametrize("kind,ext,gen", [
+    ("audio", ".flac", "music"),
+    ("videos", ".mp4", "video"),
+])
+def test_managed_music_and_video_delete_their_own_copy_and_never_the_users_file(
+        managed_stub, tmp_path, monkeypatch, kind, ext, gen):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"comfy_target": "own",
+                                 "comfy_workdir": str(managed_stub.user_comfy)})
+    managed_stub.output_kind = kind
+    managed_stub.file_ext = ext
+    victim = _users_file(managed_stub, f"ComfyUI_00001_{ext}")
+    out = tmp_path / "saved" / f"out{ext}"
+
+    if gen == "music":
+        monkeypatch.setattr(music_comfy, "workflow_path", lambda: music_comfy._WORKFLOW_PATH)
+        ok, msg = music_comfy.generate_music(
+            "lofi", out, api_url=managed_stub.base_url, duration_seconds=5.0,
+            delete_outputs=True, write_sidecar=False)
+    else:
+        monkeypatch.setattr(video_comfy, "workflow_path", lambda: video_comfy._WORKFLOW_PATH)
+        ok, msg = video_comfy.generate_video(
+            "a fox", out, api_url=managed_stub.base_url, seconds=1.0,
+            delete_outputs=True, write_sidecar=False)
+
+    assert ok, msg
+    assert victim.read_bytes() == b"the user's own picture", "a user's file was deleted"
+    assert list(managed_stub.output_dir.glob("ComfyUI_*")) == [], "the managed copy stayed"
+    assert "WARNING" not in msg
+
+
+def test_managed_job_ignores_an_output_dir_naming_the_users_comfyui(managed_stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    monkeypatch.setattr("localm.config.load_config", lambda: {"comfy_target": "own"})
+    victim = _users_file(managed_stub, "ComfyUI_00001_.png")
+
+    ok, msg = comfy.generate_image(
+        "a cat", tmp_path / "saved" / "img.png", api_url=managed_stub.base_url,
+        comfy_output_dir=str(victim.parent), delete_outputs=True, write_sidecar=False)
+
+    assert ok, msg
+    assert victim.read_bytes() == b"the user's own picture"
+    assert list(managed_stub.output_dir.glob("ComfyUI_*")) == []
+    assert "WARNING" not in msg
+
+
+def test_job_on_another_instance_keeps_a_same_named_file_and_warns(stub, tmp_path, monkeypatch):
+    """The output folder names a different ComfyUI than the one that ran the job:
+    the file there has the job's name and other content."""
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    elsewhere = tmp_path / "elsewhere" / "output"
+    elsewhere.mkdir(parents=True)
+    victim = elsewhere / "ComfyUI_00001_.png"
+    victim.write_bytes(b"the user's own picture")
+
+    ok, msg = comfy.generate_image(
+        "a cat", tmp_path / "saved" / "img.png", api_url=stub.base_url,
+        comfy_output_dir=str(elsewhere), delete_outputs=True, write_sidecar=False)
+
+    assert ok, msg
+    assert victim.read_bytes() == b"the user's own picture"
+    assert "WARNING" in msg and "different content" in msg
+    assert list(stub.output_dir.glob("ComfyUI_*")), "the job's real copy was not found, so it stays"
+
+
+def test_deletion_that_finds_nothing_warns(stub, tmp_path):
+    empty = tmp_path / "empty-output"
+    empty.mkdir()
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidMissing",
+        {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"},
+        comfy_output_dir=str(empty), output_sha256="0" * 64, delete_outputs=True)
+    assert "WARNING" in warn and "not in the folder localm checked" in warn
+
+
+def test_deletion_without_a_checksum_keeps_the_file_and_warns(stub):
+    fn = "ComfyUI_00050_.png"
+    (stub.output_dir / fn).write_bytes(b"X")
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidNoSum",
+        {"filename": fn, "subfolder": "", "type": "output"},
+        comfy_output_dir=str(stub.output_dir), delete_outputs=True)
+    assert (stub.output_dir / fn).exists()
+    assert "WARNING" in warn and "checksum" in warn
+
+
+def test_failed_unlink_warns(stub, monkeypatch):
+    fn = "ComfyUI_00051_.png"
+    (stub.output_dir / fn).write_bytes(b"X")
+
+    def refuse(self, *a, **k):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidLocked",
+        {"filename": fn, "subfolder": "", "type": "output"},
+        comfy_output_dir=str(stub.output_dir), output_sha256=_X_SHA256, delete_outputs=True)
+    assert (stub.output_dir / fn).exists()
+    assert "could not delete" in warn
+
+
+def test_plugin_workdir_locates_the_output_folder(stub, monkeypatch):
+    """stub.output_dir is <workdir>/output; only the job's own workdir names it."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    fn = "ComfyUI_00052_.png"
+    (stub.output_dir / fn).write_bytes(b"X")
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidWd",
+        {"filename": fn, "subfolder": "", "type": "output"},
+        comfy_workdir=str(stub.output_dir.parent),
+        output_sha256=_X_SHA256, delete_outputs=True)
+    assert warn == ""
+    assert not (stub.output_dir / fn).exists()
+
+
+def test_input_copy_cleanup_cannot_reach_a_users_same_named_image(stub, tmp_path, monkeypatch):
+    """The user's own input folder holds photo.png, and the image they generate
+    from has that name too."""
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    users_photo = stub.input_dir / "photo.png"
+    users_photo.write_bytes(b"the user's own photo")
+    source = tmp_path / "photo.png"
+    source.write_bytes(_minimal_png())
+    out = tmp_path / "saved" / "img.png"
+
+    ok, msg = comfy.generate_image(
+        "a cat", out, api_url=stub.base_url, input_image=source, denoise=0.5,
+        comfy_output_dir=str(stub.output_dir), delete_outputs=True, write_sidecar=False)
+
+    assert ok, msg
+    assert users_photo.read_bytes() == b"the user's own photo", "a user's input image was deleted"
+    assert stub.uploaded_names and stub.uploaded_names[0].startswith("localm-input-")
+    assert [p.name for p in stub.input_dir.iterdir()] == ["photo.png"], "localm's upload stayed"
+    assert "WARNING" not in msg
+
+
+def test_input_copy_warns_when_the_input_folder_cannot_be_located(stub, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidInp",
+        {"filename": "x.png", "subfolder": "", "type": "temp"},
+        uploaded_input="localm-input-abc.png", delete_outputs=True)
+    assert "input image remains" in warn

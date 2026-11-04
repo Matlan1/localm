@@ -737,17 +737,17 @@ export function setWebAskSession(v) { webAskSession = v; }
 // before it runs (the settings promise: "ask = approve each request"). Read it
 // fresh from /v1/config so a change in Settings takes effect without a reload;
 // the cost is one small GET per message that makes a web request (the answer
-// is cached for the rest of that message). Unknown / unreachable -> do not block (the per-conversation
-// toggle is the standing consent; only "off", enforced server-side, blocks).
+// is cached for the rest of that message). A value that cannot be read (a key
+// without config:read, an unreachable server) counts as ask.
 export async function webModeIsAsk() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (r.ok) {
       const cfg = await r.json();
-      return !!(cfg && cfg.net_mode === "ask");
+      return !(cfg && typeof cfg.net_mode === "string" && cfg.net_mode !== "ask");
     }
-  } catch { /* server unreachable - fall through to "do not block" */ }
-  return false;
+  } catch { /* unreadable: ask */ }
+  return true;
 }
 window.webModeIsAsk = webModeIsAsk;
 

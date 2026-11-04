@@ -68,6 +68,7 @@ class TestDownloadKnown:
     @pytest.fixture
     def allow(self, monkeypatch):
         monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
+        monkeypatch.setattr("localm.netpolicy.download_refusal", lambda url: None)
 
     def test_progress_reaches_the_caller(self, tmp_path, monkeypatch, allow):
         monkeypatch.setattr("huggingface_hub.hf_hub_download",

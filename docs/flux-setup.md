@@ -117,15 +117,19 @@ rather than run by Python, so it will not start. If a launcher
 script expects to run from its own folder (common for batch scripts) and
 `comfy_workdir` is not set, localm runs it from the script's folder.
 
-localm resolves ComfyUI's URL in this order: the `FLUX_API_URL` environment
-variable, then a localm-managed ComfyUI instance if one is active, then the
-`comfy_api_url` config key, then the default `http://127.0.0.1:8188`. If
-ComfyUI is not on the default port, set one of these to match.
+localm resolves ComfyUI's URL for a generation in this order: the plugin's own
+ComfyUI API URL, then the `comfy_api_url` config key, then the `FLUX_API_URL`
+environment variable, then the default `http://127.0.0.1:8188`. With a
+localm-managed ComfyUI active, the first two are not used and it takes the place
+of the default. If ComfyUI is not on the default port, set one of these to match.
 
 To have localm clean up ComfyUI's duplicate output copy after each
-generation, set `comfy_delete_outputs` to `true`. If ComfyUI's output folder
-cannot be derived automatically from your launch command, also set the
+generation, set `comfy_delete_outputs` to `true`. localm's own ComfyUI needs
+nothing more. For your own ComfyUI, if its output folder is not the `output`
+folder inside the ComfyUI folder you configured, also set the
 `comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) to point at it.
+A file is deleted only when its content is what the generation produced;
+otherwise a warning says a copy may remain.
 
 ## Performance notes
 

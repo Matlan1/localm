@@ -29,6 +29,7 @@ function recordingFetch(webResults) {
     }
     if (String(url) === "/api/web/fetch")
       return jsonResp({ url: "https://example.com/", text: "page text", truncated: false });
+    if (String(url) === "/v1/config") return jsonResp({ net_mode: "allow" });
     return jsonResp({});   // /v1/chat/completions and everything else
   };
   return { impl, calls };

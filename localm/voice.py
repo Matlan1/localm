@@ -17,7 +17,8 @@ a bypass-ask-respect-off rule:
 under ``net_mode=allow`` the first use fetches automatically; under ``ask`` the
 fetch needs an explicit one-time authorization (``prefetch_stt_model``); under
 ``off`` nothing fetches, unless ``net_allow_model_downloads`` exempts an
-explicit fetch - off is still the default kill switch. The worker enforces
+explicit fetch - off is still the default kill switch. ``net_allow`` and
+``net_deny`` bind every fetch (``netpolicy.download_refusal``). The worker enforces
 this structurally: it is dispatched with ``local_files_only`` so it CANNOT
 download unless the policy decision in this (parent) process said so - and a
 cached model always loads with ``local_files_only=True``, so a routine load
@@ -350,7 +351,7 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     cached, name = stt_model_cached()
     if cached:
         return True, ""
-    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    from localm.netpolicy import download_refusal, downloads_allowed_when_off, network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
@@ -360,6 +361,11 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
         return False, reason
     if network_mode() == "off" and not downloads_allowed_when_off():
         reason = _stt_download_blocked_reason(name, "off")
+        logger.info(reason)
+        return False, reason
+    refusal = download_refusal(_STT_HUB_ENDPOINT)
+    if refusal:
+        reason = f"The Whisper '{name}' speech model was not downloaded: {refusal}"
         logger.info(reason)
         return False, reason
     repo = _stt_repo_for(name)
@@ -961,10 +967,14 @@ def _stt_plan(language: Optional[str]) -> dict:
     local_files_only = True
     blocked_reason = None
     if not cached:
-        from localm.netpolicy import downloads_allowed_when_off, network_mode
+        from localm.netpolicy import download_refusal, downloads_allowed_when_off, network_mode
         mode = network_mode()
         if mode == "allow" or (mode == "off" and downloads_allowed_when_off()):
-            local_files_only = False
+            refusal = download_refusal(_STT_HUB_ENDPOINT)
+            if refusal:
+                blocked_reason = f"The Whisper '{name}' speech model was not downloaded: {refusal}"
+            else:
+                local_files_only = False
         else:
             blocked_reason = _stt_download_blocked_reason(name, mode)
     return {"name": name, "language": lang, "timeout": timeout,

@@ -160,6 +160,7 @@ class TestFileDownloads:
             return str(out)
 
         monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+        monkeypatch.setattr("localm.netpolicy.download_refusal", lambda url: None)
         monkeypatch.setattr(embedder, "_EMBEDDING_PINS", {})
 
         embedder._download_known("m", "o/r", "e.gguf", tmp_path / "e.gguf", True)
@@ -195,6 +196,7 @@ class TestFileDownloads:
             seen.update(kw)
 
         monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot)
+        monkeypatch.setattr("localm.netpolicy.download_refusal", lambda url: None)
         monkeypatch.setattr(voice, "stt_cache_dir", lambda: tmp_path / "stt")
         monkeypatch.setattr(voice, "stt_model_cached", lambda: (False, "base"))
 

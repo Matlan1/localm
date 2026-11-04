@@ -40,6 +40,7 @@ from localm.media.comfy_client import (
     comfy_poll_until_done,
     comfy_wait_heartbeat,
     comfy_submit_prompt,
+    apply_weight_dtype,
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
@@ -149,15 +150,7 @@ def _build_music_workflow(
         if ckpt_loader is not None and "ckpt_name" in ckpt_loader.get("inputs", {}):
             ckpt_loader["inputs"]["ckpt_name"] = ckpt_name
 
-    if float_type and float_type != "default":
-        for node in workflow.values():
-            if node.get("class_type") in (
-                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
-                "CheckpointLoaderSimple", "CheckpointLoader"
-            ):
-                if "inputs" not in node:
-                    node["inputs"] = {}
-                node["inputs"]["weight_dtype"] = float_type
+    apply_weight_dtype(workflow, float_type)
 
     return True, ""
 
@@ -411,7 +404,7 @@ def generate_music(
 
     # Fetch the file from ComfyUI and save locally
     try:
-        comfy_fetch_output(api_url, audio_info, output_path, timeout=60)
+        output_sha256 = comfy_fetch_output(api_url, audio_info, output_path, timeout=60)
     except Exception as e:
         return False, f"Failed to download generated track from ComfyUI: {e}"
 
@@ -429,6 +422,8 @@ def generate_music(
         {"filename": audio_info.get("filename"),
          "subfolder": audio_info.get("subfolder", ""),
          "type": audio_info.get("type", "output")},
+        comfy_workdir=workdir,
+        output_sha256=output_sha256,
         delete_outputs=delete_outputs,
     )
 

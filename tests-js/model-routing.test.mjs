@@ -26,7 +26,8 @@ function setup({ routingHeader = null, models = null, active = "plain", headers:
       get: (k) => (k === "X-Localm-Model-Routing" && routingHeader
         ? JSON.stringify(routingHeader) : (extra[k] ?? null)),
     };
-    return { ok: true, status: 200, headers, json: async () => ({}), text: async () => "" };
+    const reply = String(url) === "/v1/config" ? { net_mode: "allow" } : {};
+    return { ok: true, status: 200, headers, json: async () => reply, text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl: impl });
   window.readSSE = async (_r, onData) => {

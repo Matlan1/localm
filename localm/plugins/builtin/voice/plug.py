@@ -42,26 +42,39 @@ async def voice_status(request: Request):
     ``can_download`` tells the GUI whether to offer the one-time "download the
     model now" action: the model is missing, the faster-whisper package is
     there (without it the download would produce a model nothing can load yet,
-    and the reason says to install the extra first), net_mode is not "off" (or
-    net_allow_model_downloads exempts it), and the caller could authorize it -
-    open mode, or a key granting config:write, the same scope that governs
-    net_mode itself. The flag only drives UI; POST /api/voice/model/download
-    re-checks all of it server-side."""
+    and the reason says to install the extra first), the network policy allows
+    the download (``netpolicy.download_refusal``), and the caller could
+    authorize it - open mode, or a key granting config:write, the same scope
+    that governs net_mode itself. ``download_blocked`` says why not when the
+    model is missing and the package is there, else it is "". The flag only
+    drives UI; POST /api/voice/model/download re-checks all of it server-side."""
     import importlib.util
     from localm.voice import stt_available, stt_model_cached
     ok, reason = stt_available()
     have_pkg = importlib.util.find_spec("faster_whisper") is not None
     cached, model_name = stt_model_cached() if have_pkg else (False, "")
     can_download = False
+    download_blocked = ""
     if have_pkg and not cached:
-        from localm.netpolicy import downloads_allowed_when_off, network_mode
-        if network_mode() != "off" or downloads_allowed_when_off():
-            import localm.inference.http_server as _hs
-            from localm import scopes
-            can_download = _hs.caller_grants(request, scopes.CONFIG_WRITE)
+        import localm.inference.http_server as _hs
+        from localm import scopes
+        from localm.netpolicy import download_refusal
+        from localm.voice import _STT_HUB_ENDPOINT
+        refusal = await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(), download_refusal, _STT_HUB_ENDPOINT)
+        if refusal:
+            download_blocked = refusal
+            if ok:
+                ok, reason = False, refusal
+        elif _hs.caller_grants(request, scopes.CONFIG_WRITE):
+            can_download = True
+        else:
+            download_blocked = ("Downloading the speech model needs the config:write "
+                                "scope (the same permission that governs the network "
+                                "policy).")
     return {"available": ok, "reason": reason,
             "model_cached": cached, "model": model_name,
-            "can_download": can_download}
+            "can_download": can_download, "download_blocked": download_blocked}
 
 
 @_router.post("/api/voice/model/download")

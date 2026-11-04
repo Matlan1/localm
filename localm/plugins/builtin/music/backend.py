@@ -42,6 +42,7 @@ from typing import Optional
 from localm import music_gen as _music_gen
 from localm.image_gen import comfy as _comfy
 from localm.media import backend_choice
+from localm.media.comfy_client import weight_dtype_warning
 from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
@@ -97,6 +98,7 @@ def settings(full_config: dict) -> dict:
     # whenever own_active is True.
     own_active = managed_comfy_active(full_config)
     api_url = ("" if own_active else comfy_blk.get("api_url")) \
+        or (None if own_active else full_config.get("comfy_api_url")) \
         or _comfy.default_api_url()
     # Sanitise the RESOLVED url: a per-plugin comfy.api_url short-circuits
     # before default_api_url()'s guard, so an admin-set link-local/metadata
@@ -105,6 +107,9 @@ def settings(full_config: dict) -> dict:
     # instead of only the debug log.
     api_url, url_warning = _comfy.sanitize_comfy_url_checked(api_url.rstrip("/"))
     warning = media_config.combine_warnings(warning, url_warning)
+    float_type = (comfy_blk or {}).get("float_type") or full_config.get("comfy_float_type")
+    warning = media_config.combine_warnings(
+        warning, weight_dtype_warning(float_type))
     launch_cmd = "" if own_active else (
         comfy_blk.get("launch_cmd")
         or legacy_comfy_value("comfy_launch_cmd", full_config) or "")
@@ -135,8 +140,7 @@ def settings(full_config: dict) -> dict:
         # Privacy mode forces deletion separately, in plug.py.
         "delete_outputs": bool(comfy_blk.get(
             "delete_outputs", full_config.get("comfy_delete_outputs", False))),
-        "float_type": comfy_blk.get("float_type")
-        or full_config.get("comfy_float_type"),
+        "float_type": float_type,
         "swap_policy": resolve_swap_policy(block, full_config),
         "vram_estimate_bytes": media_estimate_bytes("music", block),
         "warning": warning,

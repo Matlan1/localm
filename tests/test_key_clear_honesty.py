@@ -133,7 +133,28 @@ class TestClearRouteDoesNotClaimSuccess:
         r = c.post("/api/auth/key/clear",
                    headers={"Authorization": f"Bearer {auth.get_api_key()}"})
         assert r.status_code == 200
-        assert r.json() == {"cleared": True, "warnings": []}
+        assert r.json() == {"cleared": True, "warnings": [], "still_protected": None}
+
+    def test_clear_names_an_environment_key_that_still_protects(self, runner, monkeypatch):
+        runner.invoke(main, ["key", "generate"])
+        key = auth.get_api_key()
+        monkeypatch.setenv("LOCALM_API_KEY", key)
+        c = self._client()
+        r = c.post("/api/auth/key/clear", headers={"Authorization": f"Bearer {key}"})
+        assert r.json()["cleared"] is True
+        assert r.json()["still_protected"] == "key"
+        assert not auth.key_file().exists()
+        assert c.get("/v1/config").status_code == 401, "the server really is still protected"
+
+    def test_clear_names_require_auth_that_refuses_everyone(self, runner, monkeypatch):
+        runner.invoke(main, ["key", "generate"])
+        key = auth.get_api_key()
+        monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
+        c = self._client()
+        r = c.post("/api/auth/key/clear", headers={"Authorization": f"Bearer {key}"})
+        assert r.json()["cleared"] is True
+        assert r.json()["still_protected"] == "require_auth"
+        assert c.get("/v1/config").status_code == 401, "the server really refuses everyone"
 
     def test_failed_clear_reports_not_cleared_with_reasons(self, runner, monkeypatch):
         runner.invoke(main, ["key", "generate"])

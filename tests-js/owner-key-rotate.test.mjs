@@ -277,6 +277,41 @@ test("owner key: removing it POSTs the clear route and reports it", async () => 
     `no confirmation that the key was removed: ${JSON.stringify(t.all())}`);
 });
 
+for (const [reason, pattern] of [
+  ["key", /LOCALM_API_KEY environment variable still protects/],
+  ["require_auth", /Require an API key is on, so this server refuses everyone/],
+]) {
+  test(`owner key: a removal that leaves the server protected (${reason}) says so and stays on the page`, async () => {
+    const win = await ownerPanel({
+      "POST /api/auth/key/clear": () => ({
+        status: 200, body: { cleared: true, warnings: [], still_protected: reason } }),
+    });
+    await win.refreshOwnerKeyPanel();
+    autoConfirm(win);
+    const t = toasts(win);
+    runScript(win, "window.__reloads = 0; window.location.reload = () => { window.__reloads += 1; };");
+    win.document.getElementById("owner-key-clear").onclick();
+    await tick();
+
+    assert.ok(t.all().some((x) => pattern.test(x.msg) && !x.isErr), JSON.stringify(t.all()));
+    assert.ok(!t.all().some((x) => /open again/.test(x.msg)), "the server is not open");
+    assert.match(win.document.getElementById("owner-key-secret").textContent, pattern);
+    assert.equal(win.document.getElementById("owner-key-secret").style.display, "");
+  });
+}
+
+test("owner key: the server's refusal on a network bind reaches the user", async () => {
+  const win = await ownerPanel({
+    "POST /api/auth/key/clear": () => ({ status: 409, body: { detail: "this server is on the network" } }),
+  });
+  await win.refreshOwnerKeyPanel();
+  autoConfirm(win);
+  const t = toasts(win);
+  win.document.getElementById("owner-key-clear").onclick();
+  await tick();
+  assert.ok(t.all().some((x) => x.isErr && /on the network/.test(x.msg)), JSON.stringify(t.all()));
+});
+
 test("owner key: a refused removal is reported, not silently swallowed", async () => {
   const win = await ownerPanel({
     "POST /api/auth/key/clear": () => ({ status: 403, body: { detail: "nope" } }),

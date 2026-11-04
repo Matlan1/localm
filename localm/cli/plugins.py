@@ -739,7 +739,7 @@ def plugin_config(name, key, value):
       localm plugin config image workdir              # show one
       localm plugin config image workdir /srv/comfy   # set it for image only
       localm plugin config image workdir ""           # clear, back to the shared default
-      localm plugin config video float_type fp16
+      localm plugin config video float_type fp8_e4m3fn
       localm plugin config music use_config_from image
       localm plugin config tts voice af_heart
 

@@ -647,7 +647,7 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     policy-gated branches log at INFO regardless of whether the write is
     skipped; only the download-failure branch warns, deduped the same way as
     ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
-    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    from localm.netpolicy import download_refusal, downloads_allowed_when_off, network_mode
     mode = network_mode()
     probe_only = allow_download is False
     if allow_download is None:
@@ -674,6 +674,12 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         return None
     if network_mode() == "off" and not downloads_allowed_when_off():
         reason = f"embedding model {name!r} missing and network is off; lexical-only"
+        _set_resolve_outcome(name, reason)
+        logger.info(reason)
+        return None
+    refusal = download_refusal(_HF_ENDPOINT)
+    if refusal:
+        reason = f"embedding model {name!r} not downloaded: {refusal} Lexical-only until then"
         _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None

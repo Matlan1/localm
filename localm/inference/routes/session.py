@@ -189,7 +189,10 @@ def register(app: FastAPI, ctx) -> None:
         if warnings:
             return {"cleared": False, "warnings": warnings}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
-        return {"cleared": True, "warnings": []}
+        from localm.auth import any_key_configured, require_auth_enabled
+        still_protected = ("key" if any_key_configured()
+                           else "require_auth" if require_auth_enabled() else None)
+        return {"cleared": True, "warnings": [], "still_protected": still_protected}
 
     @app.post("/api/auth/key/rotate",
               dependencies=[Depends(require_scope(scopes.ADMIN))],

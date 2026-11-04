@@ -823,7 +823,7 @@ def generate_image(
     # 11. Fetch image from ComfyUI /view, save locally, strip metadata
     try:
         info = {"filename": filename, "subfolder": subfolder, "type": img_type}
-        comfy_fetch_output(api_url, info, output_path, timeout=10)
+        output_sha256 = comfy_fetch_output(api_url, info, output_path, timeout=10)
 
         # Strip PNG metadata/EXIF for privacy; a strip that did not run returns
         # a warning rather than an empty string.
@@ -836,7 +836,9 @@ def generate_image(
         contain_warning = contain_comfy_artifacts(
             api_url, prompt_id, info,
             comfy_output_dir=comfy_output_dir,
+            comfy_workdir=workdir,
             uploaded_input=uploaded_name,
+            output_sha256=output_sha256,
             delete_outputs=delete_outputs,
         )
 

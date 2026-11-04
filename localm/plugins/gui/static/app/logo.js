@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { $, authHeaders, safeStorageGet, safeStorageSet } from "./helpers.js";
+import { $, authHeaders, safeStorageGet, safeStorageSet, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 
 // The three sidebar wordmark styles. The choice is stored in server config
@@ -36,15 +36,21 @@ export function applyLogoStyle(id) {
   return style.id;
 }
 
-// Apply a pick locally, then persist it to the server config.
+// Apply a pick locally, then persist it to the server config. Returns whether the
+// server saved it; a failure shows an error toast.
 export async function setLogoStyle(id) {
   const applied = applyLogoStyle(id);
   try {
-    await fetch("/v1/config", {
+    const r = await fetch("/v1/config", {
       method: "PATCH", headers: authHeaders(),
       body: JSON.stringify({ logo_style: applied }),
     });
-  } catch { /* ignored */ }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  } catch {
+    toast(t("appearance.logoStyle.saveFailed"), true);
+    return false;
+  }
+  return true;
 }
 
 // Apply the wordmark style recorded in the server config.

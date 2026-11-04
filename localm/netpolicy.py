@@ -30,9 +30,11 @@ net_search_url     None = the built-in search: DuckDuckGo, then Brave Search
 What this module does NOT govern
 --------------------------------
 Child processes spawned by run_shell (pip, npm, git, …) talk to the network
-on their own; the shell-command approval is the gate for those. Model pulls
-and online coder providers (OpenAI/Anthropic opt-ins) are explicit user
-choices outside this policy.
+on their own; the shell-command approval is the gate for those. Online coder
+providers (OpenAI/Anthropic opt-ins) are explicit user choices outside this
+policy. Explicit model downloads (pulls, the embedding and speech models) are
+checked here too, with net_allow_model_downloads applied to the off floor: see
+:func:`download_refusal`.
 
 SSRF guard: the hostname is resolved and validated once, then the socket is
 pinned to the validated IPs (see netpin.py), so the connection cannot
@@ -421,6 +423,21 @@ def check_url(url: str, *, allow_when_off: bool = False,
             _check_search_backend_address(host)
         else:
             _check_public_address(host)
+
+
+def download_refusal(url: str) -> Optional[str]:
+    """None when the policy allows an explicit model download from *url*, else
+    the reason it does not. Runs :func:`check_url` with
+    net_allow_model_downloads applied to the net_mode=off floor, so net_mode,
+    net_deny, net_allow and the address check all bind. Resolves DNS, so call it
+    off the event loop. Never raises: an error while checking is a refusal."""
+    try:
+        check_url(url, allow_when_off=downloads_allowed_when_off())
+    except NetworkPolicyError as e:
+        return str(e)
+    except Exception as e:
+        return f"the network policy could not be checked ({type(e).__name__}: {e})"
+    return None
 
 
 # Special-use ranges that the stdlib marks is_global=True (so neither

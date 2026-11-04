@@ -13,6 +13,7 @@ workflow shaping (which nodes to inject, which output keys to read).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -2411,8 +2412,10 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     """
     Upload a local image to ComfyUI via POST /upload/image.
 
-    Returns the filename ComfyUI assigned (used in the LoadImage node).
-    Raises on failure.
+    Sent as ``localm-input-<sha256 prefix><extension>``, so a later cleanup of
+    that name can only reach a file localm uploaded, and uploading the same
+    image twice reuses one file. Returns the filename ComfyUI assigned (used in
+    the LoadImage node). Raises on failure.
 
     Sniffs the magic bytes FIRST, before reading the body or opening the socket.
     This upload TRANSMITS the file, and sanitize_comfy_url permits
@@ -2437,10 +2440,12 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     boundary = "LocalcoderUploadBoundary"
     img_bytes = image_path.read_bytes()
     content_type = "image/jpeg" if image_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+    extension = "".join(c for c in image_path.suffix.lower() if c == "." or c.isalnum())
+    upload_name = f"localm-input-{hashlib.sha256(img_bytes).hexdigest()[:32]}{extension}"
 
     body = (
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="image"; filename="{image_path.name}"\r\n'
+        f'Content-Disposition: form-data; name="image"; filename="{upload_name}"\r\n'
         f"Content-Type: {content_type}\r\n"
         f"\r\n"
     ).encode() + img_bytes + f"\r\n--{boundary}--\r\n".encode()
@@ -2475,11 +2480,17 @@ def _upload_image(image_path: Path, api_url: str) -> str:
 #  return a loud warning rather than silently leaving a copy the user asked to
 #  remove. Shared by image, music, and video generation.
 
-def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]:
-    """ComfyUI's output/ directory, or None when it cannot be resolved.
+def _comfy_output_root(comfy_output_dir: Optional[str] = None, *,
+                       api_url: Optional[str] = None,
+                       comfy_workdir: Optional[str] = None) -> Optional[Path]:
+    """The output/ directory of the ComfyUI at *api_url*, or None when it cannot
+    be resolved.
 
-    Order: explicit arg, COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config
-    key, then a derived ``<comfy_workdir>/output`` when that exists.
+    Order: localm's own ComfyUI's ``output`` folder when *api_url* is that
+    instance, where none of the settings below applies; explicit arg,
+    COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config key; then a derived
+    ``output`` folder that exists, under *comfy_workdir* and after that under the
+    ``comfy_workdir`` config key.
 
     ``comfy_output_dir`` (the arg, env var, and config key alike) is settable
     by a caller holding only the config:write scope - privileged, but NOT
@@ -2494,6 +2505,17 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
     it. A write-side check alone would also leave an ALREADY-PERSISTED config
     value unguarded, so read time is authoritative here rather than a backup
     for a config-write-side check."""
+    if api_url:
+        try:
+            from localm.media.managed_comfy import (
+                managed_comfy_api_url_if_active, managed_comfy_paths)
+            if api_url.rstrip("/") == managed_comfy_api_url_if_active():
+                return managed_comfy_paths().root / "output"
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("could not tell whether %s is localm's own ComfyUI (%s); "
+                           "not resolving an output folder for it", api_url, e)
+            return None
     cand = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
     if not cand:
         try:
@@ -2501,11 +2523,11 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
             cfg = load_config()
             cand = cfg.get("comfy_output_dir")
             if not cand:
-                wd = cfg.get("comfy_workdir")
-                if wd:
-                    derived = Path(wd) / "output"
-                    if derived.is_dir():
-                        return derived
+                for wd in (comfy_workdir, cfg.get("comfy_workdir")):
+                    if wd and not is_unc_or_device_path(str(wd)):
+                        derived = Path(wd) / "output"
+                        if derived.is_dir():
+                            return derived
         except Exception:
             return None
     if not cand:
@@ -2547,7 +2569,9 @@ def contain_comfy_artifacts(
     info: dict,
     *,
     comfy_output_dir: Optional[str] = None,
+    comfy_workdir: Optional[str] = None,
     uploaded_input: Optional[str] = None,
+    output_sha256: Optional[str] = None,
     delete_outputs: bool = False,
 ) -> str:
     """Optionally remove ComfyUI's own copies of a generation.
@@ -2556,9 +2580,15 @@ def contain_comfy_artifacts(
     entry and its on-disk output, because a user may run ComfyUI for its own
     gallery and want them. When the user opts in (or privacy mode forces no-trace),
     it clears the history entry and deletes ComfyUI's duplicate output plus any
-    img2img source we uploaded into input/. Returns a WARNING string when
-    containment was requested but a copy could NOT be removed (so the user is told
-    a copy remains), or "" otherwise."""
+    img2img source we uploaded into input/.
+
+    The output file is deleted only when its sha256 equals *output_sha256*, the
+    value ``comfy_fetch_output`` returned for this job; a file of that name with
+    other content stays where it is, and without *output_sha256* nothing is
+    deleted.
+
+    Returns a WARNING string when containment was requested but a copy could NOT
+    be removed (so the user is told a copy remains), or "" otherwise."""
     if not delete_outputs:
         return ""   # keep ComfyUI's history + on-disk copy by default
 
@@ -2567,7 +2597,8 @@ def contain_comfy_artifacts(
         warnings.append(
             "ComfyUI's /history entry for this generation could not be cleared "
             "and remains visible in its Queue/History panel")
-    root = _comfy_output_root(comfy_output_dir)
+    root = _comfy_output_root(comfy_output_dir, api_url=api_url,
+                              comfy_workdir=comfy_workdir)
     # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
     # output/). Surface a failure (do not silence): it is still a stray copy of
     # the user's input that they asked to contain.
@@ -2592,9 +2623,17 @@ def contain_comfy_artifacts(
             try:
                 if inp.exists():
                     inp.unlink()
+                else:
+                    warnings.append(
+                        "a copy of your input image may remain in ComfyUI's input "
+                        "folder: it is not beside the output folder localm checked")
             except OSError as e:
                 warnings.append(
                     f"a copy of your input image remains in ComfyUI's input folder ({e})")
+    elif uploaded_input:
+        warnings.append(
+            "a copy of your input image remains in ComfyUI's input folder: localm "
+            "cannot tell where that folder is until you set the ComfyUI output dir")
 
     # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
     # by ComfyUI, so only a real "output" artifact needs removing.
@@ -2621,13 +2660,35 @@ def contain_comfy_artifacts(
                     f"({rel!r}); its copy in ComfyUI's output folder was not "
                     f"removed")
             else:
-                try:
-                    if copy.exists():
-                        copy.unlink()
-                except OSError as e:
-                    warnings.append(f"could not delete ComfyUI's copy of the output ({e})")
+                refusal = _delete_job_output(copy, output_sha256)
+                if refusal:
+                    warnings.append(refusal)
 
     return ("WARNING: " + "; ".join(warnings) + ".") if warnings else ""
+
+
+def _delete_job_output(copy: Path, expected_sha256: Optional[str]) -> str:
+    """Delete *copy* when its sha256 equals *expected_sha256*. Returns "" once it
+    is deleted, else the reason it stays. Never raises for a filesystem error."""
+    set_folder = ("set the ComfyUI output dir (Settings -> Media, or: localm config "
+                  "comfy_output_dir <path>) if your ComfyUI saves elsewhere")
+    try:
+        if not copy.is_file():
+            return ("a copy of this file may remain in ComfyUI's output folder: it "
+                    f"is not in the folder localm checked; {set_folder}")
+        if expected_sha256 is None:
+            return ("a copy of this file remains in ComfyUI's output folder: localm "
+                    "has no checksum proving which file this job produced")
+        with open(copy, "rb") as f:
+            actual = hashlib.file_digest(f, "sha256").hexdigest()
+        if actual != expected_sha256:
+            return ("a copy of this file may remain in ComfyUI's output folder: the "
+                    "file with its name in the folder localm checked holds different "
+                    f"content, so it was left alone; {set_folder}")
+        copy.unlink()
+    except OSError as e:
+        return f"could not delete ComfyUI's copy of the output ({e})"
+    return ""
 
 
 def interrupt_comfy(api_url: str) -> bool:
@@ -2951,12 +3012,36 @@ def select_output_info(entry: dict, output_keys) -> Optional[dict]:
     return None
 
 
+# The values ComfyUI's UNETLoader accepts for its weight_dtype input.
+UNET_WEIGHT_DTYPES = ("default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2")
+
+
+def apply_weight_dtype(workflow: dict, float_type: Optional[str]) -> None:
+    """Write *float_type* into ``weight_dtype`` of each UNETLoader in *workflow*.
+    A no-op for None, "default" and any value not in ``UNET_WEIGHT_DTYPES``. Other
+    loaders have no such input and are left as they are."""
+    if float_type == "default" or float_type not in UNET_WEIGHT_DTYPES:
+        return
+    for node in workflow.values():
+        if node.get("class_type") == "UNETLoader":
+            node.setdefault("inputs", {})["weight_dtype"] = float_type
+
+
+def weight_dtype_warning(float_type: Optional[str]) -> Optional[str]:
+    """The note for a stored Model weight dtype ComfyUI would refuse, else None."""
+    if not float_type or float_type in UNET_WEIGHT_DTYPES:
+        return None
+    return (f"Model weight dtype {float_type!r} is not one ComfyUI accepts, so the "
+            "workflow's own value is used; choose another in Settings -> Media")
+
+
 def comfy_fetch_output(api_url: str, info: dict, output_path: Path, *,
-                       timeout: float) -> None:
+                       timeout: float) -> str:
     """Download a finished artifact from ComfyUI (GET /view?filename&subfolder&type)
     and write the bytes to *output_path* (creating parent dirs). Builds the query
     from *info*'s ``filename`` / ``subfolder`` / ``type`` (``type`` defaults to
-    "output"). Raises on any failure - the caller wraps it in its own error text."""
+    "output"). Returns the sha256 hex digest of the bytes ComfyUI served. Raises
+    on any failure - the caller wraps it in its own error text."""
     params = urllib.parse.urlencode({
         "filename": info.get("filename"),
         "subfolder": info.get("subfolder", ""),
@@ -2964,4 +3049,6 @@ def comfy_fetch_output(api_url: str, info: dict, output_path: Path, *,
     })
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with _comfy_urlopen(f"{api_url}/view?{params}", timeout=timeout) as response:
-        output_path.write_bytes(response.read())
+        data = response.read()
+    output_path.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()

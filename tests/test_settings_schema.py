@@ -181,8 +181,8 @@ class TestComfyFloatTypeGlobalKey:
         assert by_key["comfy_float_type"].options == per_plugin.options
 
     def test_validates_like_the_per_plugin_options(self):
-        assert ss.validate_update({"comfy_float_type": "fp16"}) == {
-            "comfy_float_type": "fp16"}
+        assert ss.validate_update({"comfy_float_type": "fp8_e4m3fn"}) == {
+            "comfy_float_type": "fp8_e4m3fn"}
         assert ss.validate_update({"comfy_float_type": ""}) == {
             "comfy_float_type": None}
         with pytest.raises(ValueError):

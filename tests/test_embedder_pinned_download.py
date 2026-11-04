@@ -16,6 +16,7 @@ from localm.inference import embedder
 @pytest.fixture
 def allow(monkeypatch):
     monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
+    monkeypatch.setattr("localm.netpolicy.download_refusal", lambda url: None)
 
 
 def _fake_download(content: bytes, seen: dict):
