@@ -198,6 +198,11 @@ and the crash/restart breadcrumb log are already kept automatically in
 toggle, in any session mode. So in privacy mode the toggle turns on all
 three; in `log`/`full` mode it only adds the debug log.
 
+The debug log, the crash guard's trace and the stall watchdog read the setting
+when the server starts, so changing the Settings toggle reaches them from the next
+server start. The hang dump, the restart breadcrumbs, the next model load's crash
+trace and the bug report follow the toggle at once.
+
 ---
 
 ## 3. Bug reports: what's redacted, and what needs your OK

@@ -1903,7 +1903,7 @@ export const I18N_EN = {
   "settings.field.autopruneMissingModels.label": "Auto-remove entries for missing files",
   "settings.field.autopruneMissingModels.help": "When a model file in the models folder has gone, delete its registry entry automatically instead of flagging it as missing. Models added from other folders are only flagged.",
   "settings.field.hfToken.label": "Hugging Face API token",
-  "settings.field.hfToken.help": "Optional: raises rate limits and unlocks gated/login-required Hugging Face models. Blank uses the HF_TOKEN environment variable, then a saved huggingface-cli login, else anonymous access.",
+  "settings.field.hfToken.help": "Optional: raises rate limits and unlocks gated/login-required Hugging Face models. Blank uses the HF_TOKEN environment variable, else anonymous access. A saved huggingface-cli login then covers downloads only; model search and its file lists stay anonymous.",
   "settings.field.hfToken.link.label": "Get a token",
   "settings.field.civitaiApiKey.label": "CivitAI API key",
   "settings.field.civitaiApiKey.help": "Optional: raises rate limits and unlocks gated/login-required CivitAI models. Blank = anonymous access. Falls back to the CIVITAI_API_KEY environment variable.",
@@ -2013,7 +2013,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Diagnostics
   "settings.field.keepDiagnostics.label": "Keep diagnostics for bug reports",
-  "settings.field.keepDiagnostics.help": "From the next server start, writes crash and hang diagnostics (stack traces, restart breadcrumbs, a debug log) even in privacy mode. Code and operational logs only, never chat content.",
+  "settings.field.keepDiagnostics.help": "Writes crash and hang diagnostics (stack traces, restart breadcrumbs, a debug log) even in privacy mode. Code and operational logs only, never chat content. The debug log, crash guard and stall watchdog change from the next server start, the rest at once.",
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
@@ -2161,7 +2161,7 @@ export const I18N_EN = {
   "settings.field.media.nativeT5xxl.label": "Native T5-XXL text encoder",
   "settings.field.media.nativeT5xxl.help": "Optional (FLUX, SD3, Chroma, Hunyuan Video). Wan video models take their umt5-xxl encoder here.",
   "settings.field.media.nativeLlm.label": "Native LLM text encoder",
-  "settings.field.media.nativeLlm.help": "Optional (Z-Image, Qwen Image, FLUX.2, Ovis, Anima, ERNIE, Hunyuan Video, LTX-2).",
+  "settings.field.media.nativeLlm.help": "Optional (Z-Image, Qwen Image, FLUX.2, Ovis, Anima, ERNIE, Hunyuan Video).",
   "settings.field.media.nativeClipVision.label": "Native CLIP vision encoder",
   "settings.field.media.nativeClipVision.help": "Optional (Wan image-to-video).",
   "settings.field.media.nativeDit.label": "Native diffusion model",
@@ -2233,6 +2233,7 @@ export const I18N_EN = {
   "settings.toast.saved": "Saved",
   "settings.toast.savedEngine": "Saved - applies on the next model load",
   "settings.toast.savedRestart": "Saved - restart localm for this to take effect",
+  "settings.toast.savedDiagnostics": "Saved - the debug log, crash guard and stall watchdog change from the next server start, the rest at once",
   "settings.toast.saveFailed": "Save failed",
   "settings.loadFailed": "Could not load settings: {message}",
   "settings.sectionHeading.media": "Media",
