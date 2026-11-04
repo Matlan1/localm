@@ -483,6 +483,28 @@ class TestCompactionComesBeforeGrowth:
         assert backend.effective_ctx_max > 9000
 
 
+class TestCompactionAvoidsGrowth:
+    def test_a_refused_count_does_not_choose_compaction(self):
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
+
+        class _Refusing(_GrowableBackend):
+            def count_messages_tokens(self, messages):
+                raise PretokenizerUnsafeInputError("unbroken run")
+
+        engine = _EngineWithBackend(_Refusing(capacity=16384))
+
+        assert hs.compaction_avoids_growth(engine, _long_chat(19), 16000, 16384) is False
+
+    def test_a_backend_that_cannot_reserve_does_not_count(self):
+        backend = _MockBackend(capacity=16384)
+        counted = []
+        backend.count_messages_tokens = lambda messages: counted.append(messages) or 0
+
+        assert hs.compaction_avoids_growth(
+            _EngineWithBackend(backend), _long_chat(19), 16000, 16384) is False
+        assert counted == []
+
+
 class TestRoomAfterCompaction:
     @staticmethod
     def _count(messages):

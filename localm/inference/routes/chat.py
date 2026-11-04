@@ -462,13 +462,10 @@ def register(app: FastAPI, ctx) -> None:
             wanted = _hs.context_window_wanted(engine, prompt_tokens, declared, capacity)
             # A conversation compaction can bring inside the window compacts
             # instead of growing it, unless the client declared a window.
-            if wanted is not None and not declared:
-                try:
-                    if await loop.run_in_executor(None, _hs.compaction_avoids_growth, engine,
-                                                  messages, prompt_tokens, capacity):
-                        wanted = None
-                except PretokenizerUnsafeInputError as e:
-                    raise HTTPException(400, str(e)) from e
+            if (wanted is not None and not declared
+                    and await loop.run_in_executor(None, _hs.compaction_avoids_growth, engine,
+                                                   messages, prompt_tokens, capacity)):
+                wanted = None
             if wanted is not None:
                 engine = await _hs.grow_context_window(engine, wanted, on_status=say)
                 capacity = engine.context_capacity()

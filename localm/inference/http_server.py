@@ -7603,16 +7603,20 @@ def compaction_avoids_growth(engine, messages, prompt_tokens, capacity) -> bool:
     *capacity* tokens grown: *engine* can reserve a window, the request needs
     compaction (``_needs_compaction``), and compaction can make it fit with its
     reply buffer free (``compact.room_after_compaction``, which counts tokens,
-    so this runs off the event loop). Raises what
-    ``engine.count_messages_tokens`` raises."""
+    so this runs off the event loop). False when the pre-tokenizer refuses that
+    count."""
     from localm.inference.compact import compactable, room_after_compaction
     can = getattr(engine, "can_reserve_context", None)
-    return (callable(can) and can() is True
+    if not (callable(can) and can() is True
             and _needs_compaction(capacity, prompt_tokens, messages,
                                   encoder_decoder=_engine_is_encoder_decoder(engine),
                                   reply_reserve=_engine_reply_reserve(engine))
-            and compactable(messages)
-            and room_after_compaction(messages, capacity, engine.count_messages_tokens))
+            and compactable(messages)):
+        return False
+    try:
+        return room_after_compaction(messages, capacity, engine.count_messages_tokens)
+    except PretokenizerUnsafeInputError:
+        return False
 
 
 def engine_context_limit(engine) -> tuple[Optional[int], Optional[str]]:
