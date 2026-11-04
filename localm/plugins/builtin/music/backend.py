@@ -107,7 +107,7 @@ def settings(full_config: dict) -> dict:
     # instead of only the debug log.
     api_url, url_warning = _comfy.sanitize_comfy_url_checked(api_url.rstrip("/"))
     warning = media_config.combine_warnings(warning, url_warning)
-    float_type = comfy_blk.get("float_type") or full_config.get("comfy_float_type")
+    float_type = (comfy_blk or {}).get("float_type") or full_config.get("comfy_float_type")
     warning = media_config.combine_warnings(
         warning, weight_dtype_warning(float_type))
     launch_cmd = "" if own_active else (
