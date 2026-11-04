@@ -32,6 +32,41 @@ def test_path_is_the_last_place_looked(tmp_path, monkeypatch):
     assert found is not None and os.path.isabs(found) and Path(found).samefile(on_path)
 
 
+def test_a_program_in_the_current_folder_is_never_run_instead(tmp_path, monkeypatch):
+    exe = "tool.exe" if sysprog.IS_WINDOWS else "tool"
+    here = _exe(tmp_path / "cwd" / exe)
+    _exe(tmp_path / "cwd" / "relbin" / exe)
+    on_path = _exe(tmp_path / "bin" / exe)
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [])
+    monkeypatch.chdir(here.parent)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "relbin", str(on_path.parent)]))
+    found = sysprog.find("tool")
+    assert found is not None and Path(found).samefile(on_path)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "relbin"]))
+    assert sysprog.find("tool") is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PATHEXT is Windows-only")
+def test_path_entries_are_tried_with_each_pathext_extension(tmp_path, monkeypatch):
+    script = _exe(tmp_path / "bin" / "tool.cmd")
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [])
+    monkeypatch.setenv("PATH", str(script.parent))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    found = sysprog.find("tool")
+    assert found is not None and Path(found).samefile(script)
+    assert Path(sysprog.find("tool.cmd")).samefile(script)
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    assert sysprog.find("tool") is None
+
+
+def test_a_name_with_a_folder_is_not_looked_up_on_path(tmp_path, monkeypatch):
+    _exe(tmp_path / "bin" / "sub" / ("tool.exe" if sysprog.IS_WINDOWS else "tool"))
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [])
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert sysprog.find("sub/tool") is None
+    assert sysprog.path_candidates("") == []
+
+
 def test_a_missing_program_is_none(tmp_path, monkeypatch):
     monkeypatch.setattr(sysprog, "system_candidates", lambda name: [str(tmp_path / "none")])
     monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))

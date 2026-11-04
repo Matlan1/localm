@@ -795,6 +795,33 @@ def test_a_dropped_comfy_snapshot_leaves_nothing_and_is_never_restored(tmp_path,
     assert (root / "main.py").read_text(encoding="utf-8") == "v1 patched\n"
 
 
+def test_a_comfy_restore_that_cannot_put_a_file_back_names_the_mixed_tree(tmp_path,
+                                                                          monkeypatch):
+    root, kept = tmp_path / "comfyui", tmp_path / "kept"
+    for folder, text, commit in ((root, "v2\n", "2" * 40), (kept, "v1\n", "1" * 40)):
+        folder.mkdir()
+        (folder / "main.py").write_text(text, encoding="utf-8")
+        (folder / "nodes.py").write_text(text, encoding="utf-8")
+        source_archive.write_record(folder, "https://github.com/o/ComfyUI.git", commit,
+                                    ["main.py", "nodes.py"])
+    real = source_archive.shutil.copy2
+    refused = []
+
+    def flaky(src, dst, *a, **k):
+        if str(dst).endswith("main.py") and "-restore-" not in str(dst):
+            refused.append(dst)
+            raise OSError("main.py is in use")
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(source_archive.shutil, "copy2", flaky)
+    errors = uc._restore_tree(kept, root)
+    assert len(refused) == 2
+    backup = tmp_path / f".comfyui-restore-{os.getpid()}"
+    assert len(errors) == 1 and "main.py is in use" in errors[0]
+    assert "holds a mix of old and new files" in errors[0] and str(backup) in errors[0]
+    assert (backup / "main.py").read_text(encoding="utf-8") == "v2\n"
+
+
 def test_a_comfy_snapshot_an_older_localm_kept_is_restored_without_git(tmp_path, home,
                                                                        monkeypatch):
     from localm.media import managed_comfy_fresh as f

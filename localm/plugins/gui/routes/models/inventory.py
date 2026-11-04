@@ -435,18 +435,17 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # authoritative status: loaded, already_active, superseded (a newer
         # selection took over), or cancelled (aborted for any other reason) -
         # none of these is an error.
+        # force, activate and keep_others are passed only when they differ from
+        # their defaults, so a single-argument switch_model callable keeps working.
+        options = {}
+        if req.force:
+            options["force"] = True
+        if not req.activate:
+            options["activate"] = False
+        if req.keep_others:
+            options = {"keep_others": True, **({"activate": False} if not req.activate else {})}
         try:
-            # Omit force entirely when False (the overwhelming common case):
-            # switch_model is a pluggable callback, and every test double
-            # across the suite still implements the older single-arg
-            # contract. Passing force=True is still forwarded when a caller
-            # actually asks for it.
-            if req.keep_others:
-                result = await switch_model(req.model, keep_others=True)
-            else:
-                result = await (
-                    switch_model(req.model, force=True) if req.force
-                    else switch_model(req.model))
+            result = await switch_model(req.model, **options)
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}") from e
         # A switch_model that does not report a status (a minimal/legacy callable)
