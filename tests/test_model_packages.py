@@ -263,13 +263,23 @@ def test_a_plan_is_taken_once_and_expires(monkeypatch):
 def fake_uv(monkeypatch):
     """Records the uv commands install runs and the requirements file it passed."""
     calls = SimpleNamespace(cmds=[], reqs=None, import_error=None, rc=0, uninstall_rc=0,
-                            recorded=[])
+                            recorded=[], installed={}, leaves_nothing=False, install_error=None,
+                            uninstall_error=None)
 
     def stream(cmd, on_progress):
         calls.cmds.append(cmd)
         if "-r" in cmd:
             calls.reqs = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8")
+            if not calls.leaves_nothing:
+                calls.installed["timm"] = "1.0.30"
+            if calls.install_error is not None:
+                raise calls.install_error
             return calls.rc, "uv output"
+        if calls.uninstall_error is not None:
+            raise calls.uninstall_error
+        if calls.uninstall_rc == 0:
+            for name in cmd[cmd.index("--python") + 2:]:
+                calls.installed.pop(name, None)
         return calls.uninstall_rc, "uv output"
 
     monkeypatch.setattr(mpk, "check_network", lambda backend: None)
@@ -277,7 +287,7 @@ def fake_uv(monkeypatch):
     monkeypatch.setattr(mpk, "_stream", stream)
     monkeypatch.setattr(mpk, "_imports_fail", lambda modules: calls.import_error)
     monkeypatch.setattr(mpk, "_record", lambda p: calls.recorded.append(p))
-    monkeypatch.setattr(mpk, "installed_distributions", lambda: {"timm": "1.0.30"})
+    monkeypatch.setattr(mpk, "installed_distributions", lambda: dict(calls.installed))
     return calls
 
 
@@ -335,8 +345,8 @@ def test_a_failed_removal_is_reported(fake_uv):
     assert not result.ok and "removing the packages added failed too: uv output" in result.error
 
 
-def test_a_failed_uv_install_that_left_nothing_uninstalls_nothing(fake_uv, monkeypatch):
-    monkeypatch.setattr(mpk, "installed_distributions", lambda: {})
+def test_a_failed_uv_install_that_left_nothing_uninstalls_nothing(fake_uv):
+    fake_uv.leaves_nothing = True
     fake_uv.rc = 2
     result = mpk.install(_plan())
     assert not result.ok and "removed again" not in result.error
@@ -381,6 +391,82 @@ def test_install_rechecks_the_network_policy(fake_uv, monkeypatch):
 def test_the_import_check_runs_in_a_fresh_interpreter():
     assert mpk._imports_fail(["json", "pytest"]) is None
     assert "localm_no_such_package_zz" in mpk._imports_fail(["localm_no_such_package_zz"])
+
+
+def test_the_import_check_does_not_run_a_module_planted_in_the_current_folder(
+        tmp_path, monkeypatch):
+    marker = tmp_path / "ran.txt"
+    (tmp_path / "localm_planted_zz.py").write_text(
+        f"open({str(marker)!r}, 'w').write('ran')\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    error = mpk._imports_fail(["localm_planted_zz"])
+    assert error is not None and "localm_planted_zz" in error
+    assert not marker.exists()
+
+
+def test_stream_reads_utf8_output_whatever_the_locale_code_page():
+    text = "Using environment at: C:\\Users\\\u7528\u6237\\.venv"
+    code = f"import sys; sys.stdout.buffer.write({text!r}.encode('utf-8'))"
+    rc, out = mpk._stream([sys.executable, "-c", code], None)
+    assert rc == 0 and out == text
+
+
+def test_stream_survives_bytes_that_are_not_text():
+    code = "import sys; sys.stdout.buffer.write(b'before \\xff\\xfe after\\n')"
+    rc, out = mpk._stream([sys.executable, "-c", code], None)
+    assert rc == 0 and "before" in out and "after" in out and "\ufffd" in out
+
+
+def test_plan_decodes_uv_output_as_utf8_with_replacement(online, available):
+    run = FakeRun(stdout=_compile_output(("timm", "1.0.30")))
+    mpk.plan(["timm"], run=run)
+    kw = run.calls[0][1]
+    assert kw["encoding"] == "utf-8" and kw["errors"] == "replace" and "text" not in kw
+
+
+def test_an_install_that_crashes_mid_stream_still_removes_what_it_added(fake_uv):
+    fake_uv.install_error = UnicodeDecodeError("cp936", b"\xff", 0, 1, "illegal multibyte sequence")
+    result = mpk.install(_plan())
+    assert not result.ok and "stopped unexpectedly" in result.error
+    assert "removed again" in result.error
+    assert fake_uv.installed == {} and fake_uv.recorded == []
+    assert fake_uv.cmds[-1][:3] == ["uv", "pip", "uninstall"]
+
+
+def test_an_install_whose_uv_cannot_be_started_reports_it(fake_uv):
+    fake_uv.leaves_nothing = True
+    fake_uv.install_error = FileNotFoundError("uv")
+    result = mpk.install(_plan())
+    assert not result.ok and "uv could not be started" in result.error
+    assert fake_uv.recorded == []
+
+
+def test_a_removal_that_cannot_start_uv_is_reported(fake_uv):
+    fake_uv.import_error = "ImportError: boom"
+    fake_uv.uninstall_error = OSError("no uv")
+    result = mpk.install(_plan())
+    assert not result.ok and "removing the packages added failed too: no uv" in result.error
+
+
+def test_a_stale_plan_whose_package_another_install_added_installs_nothing(fake_uv):
+    """The first of two plans that both list torchvision has installed it since."""
+    second = mpk.Plan(modules=["open_clip"],
+                      adds=[("open-clip-torch", "3.3.0"), ("torchvision", "0.24.0")],
+                      requirements="y\n")
+    fake_uv.installed.update({"timm": "1.0.30", "torchvision": "0.24.0"})
+    fake_uv.import_error = "ImportError: boom"
+    result = mpk.install(second)
+    assert not result.ok and "out of date" in result.error and "torchvision" in result.error
+    assert fake_uv.cmds == []
+    assert fake_uv.installed == {"timm": "1.0.30", "torchvision": "0.24.0"}
+    assert fake_uv.recorded == []
+
+
+def test_a_plan_made_after_the_first_install_still_installs(fake_uv):
+    fake_uv.installed.update({"torchvision": "0.24.0"})
+    p = mpk.Plan(modules=["timm"], adds=[("timm", "1.0.30")], requirements="x\n")
+    result = mpk.install(p)
+    assert result.ok and fake_uv.installed == {"torchvision": "0.24.0", "timm": "1.0.30"}
 
 
 # ----------------------------------------------------------------- the install record
@@ -535,6 +621,64 @@ def test_folder_state_scans_the_code_again_only_after_it_changed(tmp_path, trust
     monkeypatch.setattr(mp, "is_importable", lambda m: m not in ("timm", "open_clip"))
     assert mpk.folder_state(folder).missing == ["open_clip", "timm"]
     assert len(calls) == 2
+
+
+TIMM_TEXT = ("TimmWrapperModel requires the timm library but it was not found in your "
+             "environment. You can install it with pip: `pip install timm`.")
+
+
+def _folder_without_auto_map(tmp_path: Path) -> Path:
+    folder = tmp_path / "Some-Model"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({
+        "architectures": ["Gemma3nForConditionalGeneration"], "model_type": "gemma3n"}),
+        encoding="utf-8")
+    return folder
+
+
+def _offers_the_install(sentence: str) -> bool:
+    return "install-packages" in sentence or "Models page" in sentence
+
+
+def test_a_package_a_native_model_needs_is_not_offered_for_install(tmp_path, trusted, monkeypatch):
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "timm")
+    folder = _folder_without_auto_map(tmp_path)
+    assert mpk.folder_state(folder).addable == []
+    sentence = mp.rewrite_import_error("Some-Model", TIMM_TEXT, str(folder))
+    assert sentence is not None and not _offers_the_install(sentence)
+    assert "package timm" in sentence and "cannot add it for this model" in sentence
+    assert "pip" not in sentence.lower()
+
+
+def test_a_package_behind_a_guarded_import_is_not_offered_for_install(tmp_path, trusted,
+                                                                    monkeypatch):
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "timm")
+    folder = _model(tmp_path, "try:\n    import timm\nexcept ImportError:\n    timm = None\n")
+    assert mpk.folder_state(folder).addable == []
+    sentence = mp.rewrite_import_error("Some-Model", TIMM_TEXT, str(folder))
+    assert sentence is not None and not _offers_the_install(sentence)
+
+
+def test_a_package_the_models_code_imports_is_still_offered_for_install(tmp_path, trusted,
+                                                                      monkeypatch):
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "timm")
+    folder = _model(tmp_path, "import timm\n")
+    assert mpk.folder_state(folder).addable == ["timm"]
+    sentence = mp.rewrite_import_error("Some-Model", TIMM_TEXT, str(folder))
+    assert sentence is not None and "`localm install-packages Some-Model`" in sentence
+
+
+def test_a_load_error_with_no_folder_offers_no_install():
+    sentence = mp.rewrite_import_error("Some-Model", TIMM_TEXT)
+    assert sentence is not None and not _offers_the_install(sentence)
+
+
+def test_the_load_error_of_a_native_model_does_not_offer_an_install(tmp_path, trusted,
+                                                                  monkeypatch):
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "timm")
+    folder = _folder_without_auto_map(tmp_path)
+    out = hf_backend._without_pip_advice(str(folder), RuntimeError(TIMM_TEXT))
+    assert not _offers_the_install(str(out))
 
 
 def test_folder_state_checks_nothing_while_custom_code_is_not_trusted(tmp_path, monkeypatch):

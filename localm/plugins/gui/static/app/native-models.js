@@ -547,13 +547,19 @@ export function cleanEnhancedPrompt(raw) {
   return text;
 }
 
-/** Asks the loaded chat model to rewrite *prompt*. Throws an Error whose
- *  message is for the user when no chat model is loaded, the request fails or
- *  the reply is empty. */
-export async function requestEnhancedPrompt({ media, prompt, family = "", familyLabel = "" }) {
+/** Asks the active chat model, else the resumable one (the request reloads
+ *  it, and *onLoading* is called with its name first), to rewrite *prompt*.
+ *  Throws an Error whose message is for the user when there is no chat model,
+ *  the request fails or the reply is empty. */
+export async function requestEnhancedPrompt({ media, prompt, family = "", familyLabel = "", onLoading = null }) {
   await refreshModels();
-  const model = modelCache.active;
-  if (!model) throw new Error(t("enhance.noModel"));
+  const model = modelCache.active || modelCache.resumable || "";
+  if (!model) {
+    const err = new Error(t("enhance.noModel"));
+    err.noChatModel = true;
+    throw err;
+  }
+  if (!modelCache.active && onLoading) onLoading(model);
   const r = await fetch("/v1/chat/completions", {
     method: "POST",
     headers: authHeaders(),
@@ -572,6 +578,7 @@ export async function requestEnhancedPrompt({ media, prompt, family = "", family
   });
   let data = null;
   try { data = await r.json(); } catch { /* reported below by status */ }
+  if (r.ok && !modelCache.active) await refreshModels();
   if (!r.ok) {
     const detail = data && data.detail
       ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : r.statusText;
@@ -615,7 +622,8 @@ export function mountEnhanceButton({ media, fieldId, familyOf }) {
     try {
       const fam = (familyOf && familyOf()) || {};
       const text = await requestEnhancedPrompt({
-        media, prompt, family: fam.family || "", familyLabel: fam.label || "" });
+        media, prompt, family: fam.family || "", familyLabel: fam.label || "",
+        onLoading: (name) => { button.textContent = t("enhance.loadingModel", { model: name }); } });
       original = field.value;
       field.value = text;
       field.dispatchEvent(new Event("input", { bubbles: true }));
@@ -623,6 +631,10 @@ export function mountEnhanceButton({ media, fieldId, familyOf }) {
       toast(t("enhance.done"));
     } catch (e) {
       toast(t("enhance.failed", { message: e.message }), true);
+      if (e.noChatModel) {
+        const picker = document.getElementById("model-select");
+        if (picker) picker.focus();
+      }
     } finally {
       button.disabled = false;
       button.textContent = t("enhance.button");
