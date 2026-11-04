@@ -137,8 +137,13 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
     """Generate one track. Returns (WAV bytes, backend that produced it)."""
     say = on_progress or (lambda _m: None)
     order = backend_order(choice)
-    models = runtime_paths(resolve_models(native_cfg, use_lm=plan, pull_missing=False,
-                                          on_progress=say, cancel_check=cancel_check))
+    resolved = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
+                              on_progress=say, cancel_check=cancel_check)
+    from localm.debuglog import logger
+    for path in (resolved.dit, resolved.lm):
+        if path:
+            logger.info("koboldcpp music: job uses model %s", Path(path).name)
+    models = runtime_paths(resolved)
     errors: list[str] = []
     auto = choice.strip().lower() == "auto"
     for i, backend in enumerate(order):
