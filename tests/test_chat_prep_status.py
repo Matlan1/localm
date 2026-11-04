@@ -515,6 +515,50 @@ class TestMemoryInletAnnouncesRecall:
         assert order == [DOWNLOADING_EMBEDDER_STATUS, "embedder",
                          RECALLING_MEMORY_STATUS, "recall"]
 
+    @staticmethod
+    def _first_run(monkeypatch, tmp_path, order):
+        """A writable memory home with no embedding model on disk yet: the first
+        _embed_fn() call downloads it."""
+        import types
+        from localm.plugins.builtin.memory import plug
+        resolved = []
+        monkeypatch.setattr(plug, "_home", lambda: tmp_path)
+        monkeypatch.setattr(plug, "_recall_enabled", lambda: True)
+        monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
+        monkeypatch.setattr(
+            plug, "_embed_fn",
+            lambda: order.append("embedder") or resolved.append(True) or None)
+        monkeypatch.setattr("localm.inference.embedder.will_download_on_first_use",
+                            lambda: not resolved)
+        return types.SimpleNamespace(model_id="", principal=None, stream=False,
+                                     request_id="r1", state={}, scopes=())
+
+    def test_a_remember_request_announces_the_download_before_storing(
+            self, monkeypatch, tmp_path):
+        from localm.inference.protocol import DOWNLOADING_EMBEDDER_STATUS
+        from localm.plugins.builtin.memory import plug
+        order = []
+        ctx = self._first_run(monkeypatch, tmp_path, order)
+        plug._memory_inlet([{"role": "user", "content": "remember that I love RPG games"}],
+                           ctx, announce=order.append)
+        assert ctx.state["memory_saved"] == {"text": "I love RPG games", "status": "saved"}
+        assert order[:2] == [DOWNLOADING_EMBEDDER_STATUS, "embedder"]
+        assert order.count(DOWNLOADING_EMBEDDER_STATUS) == 1
+        assert RECALLING_MEMORY_STATUS in order
+
+    def test_a_legacy_import_announces_the_download_before_embedding(
+            self, monkeypatch, tmp_path):
+        from localm.inference.protocol import DOWNLOADING_EMBEDDER_STATUS
+        from localm.plugins.builtin.memory import plug
+        order = []
+        ctx = self._first_run(monkeypatch, tmp_path, order)
+        (tmp_path / "chat-memory.md").write_text("- likes green tea\n", encoding="utf-8")
+        plug._memory_inlet([{"role": "user", "content": "what tea do I like"}],
+                           ctx, announce=order.append)
+        assert [r.text for r in plug._chat_store().all()] == ["likes green tea"]
+        assert order[:2] == [DOWNLOADING_EMBEDDER_STATUS, "embedder"]
+        assert order.count(DOWNLOADING_EMBEDDER_STATUS) == 1
+
     def test_recall_that_does_not_run_announces_nothing(self, monkeypatch):
         from localm.plugins.builtin.memory import plug
         monkeypatch.setattr(plug, "_recall_enabled", lambda: False)

@@ -547,7 +547,7 @@ def _run_rag(job: Job) -> str:
     try:
         result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
                              model_name=model_name,
-                             on_progress=lines.append)
+                             on_progress=lambda t, **_: lines.append(t))
     except CollectionLockedError as e:
         # Another localm process (or a hand-run `localm rag add|resync`) holds this
         # collection. The scheduled tick waits a bounded time and then stands down,
