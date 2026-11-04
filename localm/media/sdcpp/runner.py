@@ -12,6 +12,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import queue as _queue
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 _POLL_INTERVAL = 0.2
@@ -38,6 +39,12 @@ class SdBudgetRefused(SdWorkerError):
 
 
 EventCallback = Callable[[tuple], None]
+
+
+def _ctx_model_name(ctx: dict) -> str:
+    """The file name of the main model in the sd.cpp context *ctx*: its
+    ``model_path`` or else its ``diffusion_model_path``."""
+    return Path(str(ctx.get("model_path") or ctx.get("diffusion_model_path") or "?")).name
 
 
 class SdRunner:
@@ -215,6 +222,8 @@ class SdRunner:
         self.loaded_key = key
         self.load_info = info
         self.loaded_ctx = dict(ctx)
+        from localm.debuglog import logger
+        logger.info("sd.cpp model ready: %s", _ctx_model_name(ctx))
         return info
 
     def attention_rate(self, runtime_dir, head_dim: int = 128,
@@ -261,8 +270,11 @@ class SdRunner:
             self._spawn()
         payload = dict(params, runtime_dir=str(runtime_dir),
                        extra_dirs=[str(d) for d in extra_dirs or []])
-        return self._request("upscale_image", payload, timeout,
-                             on_event=on_event, cancel_check=cancel_check)
+        result = self._request("upscale_image", payload, timeout,
+                               on_event=on_event, cancel_check=cancel_check)
+        from localm.debuglog import logger
+        logger.info("sd.cpp upscaler ready: %s", Path(str(params.get("model_path") or "?")).name)
+        return result
 
     def generate_video(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
                        on_event: Optional[EventCallback] = None,

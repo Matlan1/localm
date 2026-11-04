@@ -3,6 +3,9 @@
 reports this install filed, and the per-number lookups through the proxy."""
 
 import json
+import socket
+import threading
+import time
 
 import pytest
 
@@ -304,3 +307,220 @@ def test_deeply_nested_record_is_read_as_empty_and_logged(monkeypatch, fresh_rec
     with caplog.at_level("WARNING"):
         assert issue_tracker.recorded() == []
     assert "not valid JSON" in caplog.text
+
+
+@pytest.mark.parametrize("content", ['{"issues": 5}', '{"issues": "abc"}', '{"issues": {"number": 1}}',
+                                     '{"issues": null}', '{}', '[1, 2]', '5', 'null'])
+def test_a_record_without_an_issue_list_is_read_as_empty_and_logged(
+        monkeypatch, fresh_record, caplog, content):
+    _mode(monkeypatch, "log")
+    _record_file().parent.mkdir(parents=True, exist_ok=True)
+    _record_file().write_text(content, encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert issue_tracker.recorded() == []
+    assert "has no list of issues" in caplog.text
+    assert issue_tracker.record_filed(50, "after") is True
+    assert issue_tracker.recorded() == [{"number": 50, "title": "after"}]
+
+
+def test_a_failed_write_leaves_the_record_whole(monkeypatch, fresh_record, caplog):
+    import os
+    _mode(monkeypatch, "log")
+    issue_tracker.record_filed(1, "one")
+    issue_tracker.record_filed(2, "two")
+    before = _record_file().read_bytes()
+    real_write = os.write
+
+    def half_then_die(fd, data):
+        real_write(fd, bytes(data)[:len(data) // 2])
+        raise OSError(28, "No space left on device")
+    with monkeypatch.context() as m, caplog.at_level("WARNING"):
+        m.setattr("os.write", half_then_die)
+        assert issue_tracker.record_filed(3, "three") is False
+    assert _record_file().read_bytes() == before
+    assert "could not record filed issue #3" in caplog.text
+
+
+def test_the_replace_is_the_only_moment_the_record_changes(monkeypatch, fresh_record):
+    import os
+    _mode(monkeypatch, "log")
+    issue_tracker.record_filed(1, "one")
+    before = _record_file().read_bytes()
+    real_replace = os.replace
+    seen = []
+
+    def checking_replace(src, dst):
+        seen.append(_record_file().read_bytes())
+        real_replace(src, dst)
+    monkeypatch.setattr("os.replace", checking_replace)
+    assert issue_tracker.record_filed(2, "two") is True
+    assert seen == [before]
+    assert [e["number"] for e in issue_tracker.recorded()] == [1, 2]
+
+
+def _record_numbers(monkeypatch, count):
+    _mode(monkeypatch, "log")
+    for n in range(1, count + 1):
+        assert issue_tracker.record_filed(n, f"report {n}") is True
+
+
+def test_the_budget_gives_the_first_lookup_its_full_timeout():
+    assert issue_tracker.FILED_STATUS_BUDGET_S >= issue_tracker.LOOKUP_TIMEOUT_S
+
+
+def test_rows_past_the_deadline_are_not_requested_and_say_so(monkeypatch, fresh_record):
+    _record_numbers(monkeypatch, issue_tracker.MAX_LISTED)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.5)
+    calls = []
+
+    def slow(method, url, data, headers, timeout):
+        calls.append(url)
+        time.sleep(0.2)
+        n = int(url.split("number=")[1])
+        return 200, json.dumps({"issue": {"number": n, "state": "open"}}).encode("utf-8")
+    monkeypatch.setattr("localm._proxy._default_opener", slow)
+    rows = issue_tracker.filed_status()
+    assert [r["number"] for r in rows] == list(range(issue_tracker.MAX_LISTED, 0, -1))
+    assert rows[0]["state"] == "open" and "error" not in rows[0]
+    assert rows[-1] == {"number": 1, "title": "report 1", "error": issue_tracker.NOT_CHECKED}
+    time.sleep(1.0)
+    assert 1 <= len(calls) <= 4
+
+
+def test_a_lookup_that_never_returns_cannot_hold_the_answer(monkeypatch, fresh_record):
+    _record_numbers(monkeypatch, 3)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.3)
+    release = threading.Event()
+
+    def stuck(method, url, data, headers, timeout):
+        release.wait(20)
+        return 200, b'{"issue": {"number": 3, "state": "open"}}'
+    monkeypatch.setattr("localm._proxy._default_opener", stuck)
+    started = time.monotonic()
+    try:
+        rows = issue_tracker.filed_status()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert elapsed < 5
+    assert [r.get("error") for r in rows] == [issue_tracker.NOT_CHECKED] * 3
+    assert all("state" not in r for r in rows)
+
+
+def test_a_late_answer_does_not_change_the_returned_rows(monkeypatch, fresh_record):
+    _record_numbers(monkeypatch, 1)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.2)
+    answered = threading.Event()
+
+    def late(method, url, data, headers, timeout):
+        time.sleep(0.5)
+        answered.set()
+        return 200, b'{"issue": {"number": 1, "state": "open"}}'
+    monkeypatch.setattr("localm._proxy._default_opener", late)
+    rows = issue_tracker.filed_status()
+    assert answered.wait(5)
+    time.sleep(0.1)
+    assert rows == [{"number": 1, "title": "report 1", "error": issue_tracker.NOT_CHECKED}]
+
+
+def test_each_lookup_gets_only_the_time_that_is_left(monkeypatch, fresh_record):
+    _record_numbers(monkeypatch, 2)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 4.0)
+    timeouts = []
+
+    def op(method, url, data, headers, timeout):
+        timeouts.append(timeout)
+        return 200, b'{"issue": null}'
+    monkeypatch.setattr("localm._proxy._default_opener", op)
+    issue_tracker.filed_status()
+    assert len(timeouts) == 2
+    assert all(0 < t <= 4.0 for t in timeouts)
+    assert timeouts[1] <= timeouts[0]
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 100.0)
+    timeouts.clear()
+    issue_tracker.filed_status()
+    assert timeouts == [issue_tracker.LOOKUP_TIMEOUT_S] * 2
+
+
+def test_a_failed_row_keeps_its_error_beside_rows_past_the_deadline(monkeypatch, fresh_record):
+    _record_numbers(monkeypatch, 3)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.4)
+
+    def op(method, url, data, headers, timeout):
+        if url.endswith("number=3"):
+            return 502, b"deleted upstream"
+        if url.endswith("number=2"):
+            return 200, b'{"issue": {"number": 2, "state": "closed"}}'
+        time.sleep(1)
+        return 200, b'{"issue": {"number": 1, "state": "open"}}'
+    monkeypatch.setattr("localm._proxy._default_opener", op)
+    rows = {r["number"]: r for r in issue_tracker.filed_status()}
+    assert rows[3]["error"] == "the localm proxy returned an error"
+    assert rows[2]["state"] == "closed"
+    assert rows[1]["error"] == issue_tracker.NOT_CHECKED
+
+
+def test_an_unexpected_lookup_failure_stays_on_its_row(monkeypatch, fresh_record, caplog):
+    _record_numbers(monkeypatch, 2)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+
+    def op(method, url, data, headers, timeout):
+        if url.endswith("number=2"):
+            raise ValueError("bad status line")
+        return 200, b'{"issue": {"number": 1, "state": "open"}}'
+    monkeypatch.setattr("localm._proxy._default_opener", op)
+    with caplog.at_level("WARNING"):
+        rows = {r["number"]: r for r in issue_tracker.filed_status()}
+    assert rows[2]["error"] == "the lookup failed" and "state" not in rows[2]
+    assert rows[1]["state"] == "open"
+    assert "issue #2" in caplog.text
+
+
+@pytest.fixture
+def silent_proxy():
+    """A local port that takes connections and never answers."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(64)
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}"
+    finally:
+        server.close()
+
+
+def test_a_silent_proxy_through_the_real_client_is_bounded(monkeypatch, fresh_record, silent_proxy):
+    _record_numbers(monkeypatch, issue_tracker.MAX_LISTED)
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": silent_proxy})
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 1.5)
+    monkeypatch.setattr(issue_tracker, "LOOKUP_TIMEOUT_S", 0.5)
+    started = time.monotonic()
+    rows = issue_tracker.filed_status()
+    elapsed = time.monotonic() - started
+    assert elapsed < 5
+    assert len(rows) == issue_tracker.MAX_LISTED
+    assert all("error" in r and "state" not in r for r in rows)
+    assert rows[0]["error"] == "could not reach the localm proxy"
+    assert rows[-1]["error"] == issue_tracker.NOT_CHECKED
+
+
+def test_the_issues_route_answers_inside_the_budget(monkeypatch, fresh_record, silent_proxy):
+    _record_numbers(monkeypatch, issue_tracker.MAX_LISTED)
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 0.8)
+    monkeypatch.setattr(issue_tracker, "LOOKUP_TIMEOUT_S", 0.4)
+    app, c = _client(monkeypatch)
+    monkeypatch.setattr(issue_tracker, "endpoint", lambda: (silent_proxy, None))
+    with c:
+        started = time.monotonic()
+        r = c.get("/api/issues",
+                  headers={"Authorization": f"Bearer {app.state.shell_token}"})
+        elapsed = time.monotonic() - started
+    assert r.status_code == 200
+    assert elapsed < 5
+    data = r.json()
+    assert [i["number"] for i in data["issues"]] == list(range(issue_tracker.MAX_LISTED, 0, -1))
+    assert all("error" in i and "state" not in i for i in data["issues"])

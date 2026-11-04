@@ -12,16 +12,28 @@ EXPECTED (a manifest entry matches it) or UNEXPLAINED:
               error``, ``CUDA error``, ...); a ggml abort (``file.cu:88: ...``);
               ``GGML_ASSERT``; ``Fatal Python error``, ``Windows fatal
               exception``, ``Segmentation fault``, ``Exception in thread``,
-              ``Exception ignored in``; a ``Traceback`` that does not belong to
-              a WARNING-or-higher record; and, with ``--home``, every non-empty
-              crash or hang trace the run left in its data dir
-              (``run/server-crash-trace*.txt``, ``logs/crash_*.txt``,
-              ``logs/hang_*.log``)
+              ``Exception ignored in``; a ``Traceback`` that does not start on
+              the line directly after a WARNING-or-higher record (a chained
+              exception of that record's own traceback stays part of it, so a
+              raw traceback that lands on exactly that line is read as the
+              record's own); and, with ``--home``, every non-empty crash or hang
+              trace the run left in its data dir (``run/server-crash-trace*.txt``,
+              ``logs/crash_*.txt``, ``logs/hang_*.log``) and every server crash
+              marker or stopping record whatever its size
+              (``run/server-crash*.marker``, ``run/server-crash*.stopping``:
+              a server that was killed or crashed leaves one even with no trace)
   toast       a GUI report sent through ``POST /api/gui-error`` (logged at
               WARNING as ``gui: [source page] message``)
-  model-load  a llama.cpp model loader banner (``loaded meta data ... from``),
-              an mtmd projector load (``loaded N tensors from``), ``embedding
-              model ready: ...`` or ``switch_engine: loaded '...'``
+  model-load  a load localm's own log reports: a llama.cpp model loader banner
+              (``loaded meta data ... from``), an mtmd projector load (``loaded N
+              tensors from``), ``embedding model ready: ...``, ``switch_engine:
+              loaded '...'``, or ``... ready: <model>`` from the HF, ExLlama,
+              sd.cpp (model and upscaler), speech, reranker and Whisper loaders.
+              ComfyUI and koboldcpp load inside their own processes, so for them
+              this is a job naming a model (``comfy: job uses model ...``,
+              ``koboldcpp music: job uses model ...``), logged whether or not that
+              process already held it. A model a plugin, an external server or
+              any other process loads without one of these lines is not seen.
   download    ``downloading ... model ... (one-time)``, ``pull: downloading
               ...`` (every remote pull: CLI, MCP, GUI), ``Model pull ...
               started`` (a GUI pull job) or a tqdm progress bar (``name:  42%|``)
@@ -33,7 +45,11 @@ WARNING-or-higher record whose first line is empty takes its text from the next
 line.
 
 A log that simply stops (the process was killed) is not detectable from the log
-alone; pass ``--home`` so a crash leaves an event.
+alone; pass ``--home`` so a crash leaves an event, and audit after the server has
+stopped, since a running server holds a marker. The marker belongs to a server
+(``localm serve``, ``localm gui``), so a one-shot command that dies leaves none. A
+record glued behind a partial native line is read as a record, and the text before
+it as a line of its own.
 
 Manifest (JSON object; every key optional, any other key is an error):
 
@@ -79,11 +95,14 @@ KIND_KEYS = {"model-load": "models", "download": "downloads", "warning": "warnin
              "error": "errors", "toast": "toasts"}
 
 RECORD_RE = re.compile(
-    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
+    r"^(?P<prefix>.*?)(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(?P<logger>[\w.\-]+):(?: (?P<msg>.*))?$")
 GUI_TOAST_RE = re.compile(r"^gui: (?P<text>.*)$")
 EMBED_READY_RE = re.compile(r"^embedding model ready: (?P<model>.+?) \(dim=")
 SWITCH_LOADED_RE = re.compile(r"^switch_engine: loaded '(?P<model>[^']+)'")
+READY_RE = re.compile(r"^(?:hf model|exllama model|sd\.cpp model|sd\.cpp upscaler|speech model"
+                      r"|reranker|whisper model) ready: (?P<model>.+?)(?: \(.*\))?\s*$")
+JOB_MODEL_RE = re.compile(r"^(?:comfy|koboldcpp music): job uses model (?P<model>.+?)\s*$")
 DOWNLOADING_RE = re.compile(r"^downloading .*?model (?P<id>\S+) \(one-time\)")
 PULL_STARTED_RE = re.compile(r"^Model pull (?P<id>.+?) started\b")
 PULL_LOG_RE = re.compile(r"^pull: downloading (?P<id>.+?)\s*$")
@@ -97,11 +116,15 @@ NATIVE_ABORT_RE = re.compile(r"^\S+\.(?:c|cc|cpp|cu|h|hpp|m|mm):\d+: ")
 FATAL_RE = re.compile(r"GGML_ASSERT|^Exception in thread |^Exception ignored in|^Fatal Python error"
                       r"|^Windows fatal exception|^Segmentation fault")
 TRACEBACK_RE = re.compile(r"^Traceback \(most recent call last\):")
+CHAINED_RE = re.compile(r"^(?:During handling of the above exception, another exception occurred:"
+                        r"|The above exception was the direct cause of the following exception:)$")
 PY_WARNING_RE = re.compile(r"^.+\.py:\d+: (?P<cat>\w*Warning): (?P<msg>.*)$")
 TQDM_RE = re.compile(r"^(?P<name>[^\s|][^|]*?):\s+\d{1,3}%\|")
 
 # Files localm writes only when something crashed or hung, relative to its data dir.
 CRASH_ARTEFACT_GLOBS = ("run/server-crash-trace*.txt", "logs/crash_*.txt", "logs/hang_*.log")
+# Files a server leaves behind when it did not finish a clean stop; empty or not.
+CRASH_MARKER_GLOBS = ("run/server-crash*.marker", "run/server-crash*.stopping")
 
 
 class AuditError(Exception):
@@ -176,7 +199,9 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
     events: list[Event] = []
     records = 0
     cur_time = ""
-    cur_flagged = False
+    # The next non-empty line may be the traceback of the record before it.
+    traceback_owned = False
+    in_owned_traceback = False
     pending: Optional[Event] = None
     last_load: Optional[Event] = None
     last_tqdm: Optional[Event] = None
@@ -194,46 +219,34 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
             return
         last_load = add("model-load", subject, n)
 
-    for n, raw in enumerate(lines, start=1):
-        m = RECORD_RE.match(raw)
-        line = raw.rstrip()
-        if m:
-            records += 1
-            pending = None
-            cur_time = m.group("time")
-            level, msg = m.group("level"), (m.group("msg") or "").rstrip()
-            cur_flagged = level in ("WARNING", "ERROR", "CRITICAL")
-            if cur_flagged:
-                toast = GUI_TOAST_RE.match(msg)
-                if toast:
-                    ev = add("toast", toast.group("text"), n)
-                else:
-                    ev = add("warning" if level == "WARNING" else "error", msg, n)
-                if not ev.subject.strip():
-                    pending = ev
-            for rx in (EMBED_READY_RE, SWITCH_LOADED_RE):
-                lm = rx.match(msg)
-                if lm:
-                    add_load(_model_name(lm.group("model")), n)
-            for rx in (DOWNLOADING_RE, PULL_STARTED_RE, PULL_LOG_RE):
-                dm = rx.match(msg)
-                if dm:
-                    add("download", dm.group("id"), n)
-            continue
+    def scan_raw(line: str, n: int) -> None:
+        nonlocal pending, last_tqdm, traceback_owned, in_owned_traceback
         if not line:
-            continue
+            if not in_owned_traceback:
+                traceback_owned = False
+            return
         if pending is not None:
             pending.subject = f"{pending.subject} {line.strip()}".strip()
             pending.lines.append(n)
             pending = None
-        if BACKEND_ERROR_RE.search(line) or NATIVE_ABORT_RE.match(line) or FATAL_RE.search(line) or \
-                (TRACEBACK_RE.match(line) and not cur_flagged):
+        if TRACEBACK_RE.match(line):
+            in_owned_traceback = traceback_owned
+            traceback_owned = False
+            if not in_owned_traceback:
+                add("error", line, n)
+                return
+        elif in_owned_traceback and CHAINED_RE.match(line):
+            traceback_owned = True
+            return
+        else:
+            traceback_owned = False
+        if BACKEND_ERROR_RE.search(line) or NATIVE_ABORT_RE.match(line) or FATAL_RE.search(line):
             add("error", line, n)
-            continue
+            return
         lm = LLAMA_LOADER_RE.match(line) or MTMD_LOADED_RE.match(line)
         if lm:
             add_load(_model_name(lm.group("path")), n)
-            continue
+            return
         tq = TQDM_RE.match(line)
         if tq:
             name = tq.group("name").strip()
@@ -242,13 +255,44 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
                 last_tqdm.lines.append(n)
             else:
                 last_tqdm = add("download", name, n)
-            continue
+            return
         pw = PY_WARNING_RE.match(line)
         if pw:
             add("warning", f"{pw.group('cat')}: {pw.group('msg')}", n)
-            continue
+            return
         if NATIVE_ERROR_RE.match(line):
             add("error", line, n)
+
+    for n, raw in enumerate(lines, start=1):
+        m = RECORD_RE.match(raw)
+        if m:
+            records += 1
+            if m.group("prefix").strip():
+                scan_raw(m.group("prefix").rstrip(), n)
+            pending = None
+            cur_time = m.group("time")
+            level, msg = m.group("level"), (m.group("msg") or "").rstrip()
+            flagged = level in ("WARNING", "ERROR", "CRITICAL")
+            traceback_owned = flagged
+            in_owned_traceback = False
+            if flagged:
+                toast = GUI_TOAST_RE.match(msg)
+                if toast:
+                    ev = add("toast", toast.group("text"), n)
+                else:
+                    ev = add("warning" if level == "WARNING" else "error", msg, n)
+                if not ev.subject.strip():
+                    pending = ev
+            for rx in (EMBED_READY_RE, SWITCH_LOADED_RE, READY_RE, JOB_MODEL_RE):
+                lm = rx.match(msg)
+                if lm:
+                    add_load(_model_name(lm.group("model")), n)
+            for rx in (DOWNLOADING_RE, PULL_STARTED_RE, PULL_LOG_RE):
+                dm = rx.match(msg)
+                if dm:
+                    add("download", dm.group("id"), n)
+            continue
+        scan_raw(raw.rstrip(), n)
     if records == 0:
         raise AuditError(f"{path} holds no localm log record (not a --debug log?)")
     return events, len(lines), records
@@ -256,8 +300,9 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
 
 def crash_artefacts(home: Path) -> list[Event]:
     """One error event per non-empty crash or hang trace in the localm data dir
-    *home* (``CRASH_ARTEFACT_GLOBS``). Raises AuditError when *home* is not a
-    folder."""
+    *home* (``CRASH_ARTEFACT_GLOBS``) and per server crash marker or stopping
+    record there, whatever its size (``CRASH_MARKER_GLOBS``). Raises AuditError
+    when *home* is not a folder."""
     if not home.is_dir():
         raise AuditError(f"--home {home} is not a folder")
     out = []
@@ -270,6 +315,10 @@ def crash_artefacts(home: Path) -> list[Event]:
             if size > 0:
                 out.append(Event("error", f"crash artefact {p.relative_to(home).as_posix()}"
                                           f" ({size} bytes)", str(p), 0, "", [0]))
+    for pattern in CRASH_MARKER_GLOBS:
+        for p in sorted(home.glob(pattern)):
+            out.append(Event("error", f"crash marker {p.relative_to(home).as_posix()}",
+                             str(p), 0, "", [0]))
     return out
 
 
@@ -316,8 +365,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="also fail when a models or downloads entry matched nothing")
     ap.add_argument("--json", type=Path, help="also write the events as JSON to this file")
     ap.add_argument("--home", type=Path, action="append", default=[],
-                    help="localm data dir of the run; its crash and hang traces become error events"
-                         " (repeatable)")
+                    help="localm data dir of the run; its crash and hang traces and server crash"
+                         " markers become error events; audit after the server stopped (repeatable)")
     args = ap.parse_args(argv)
     try:
         events, rules, info = audit(args.logs, args.manifest, tuple(args.home))
