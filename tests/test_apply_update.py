@@ -198,8 +198,9 @@ def test_a_file_held_during_the_swap_leaves_the_previous_files_in_place(tmp_path
     staged.mkdir()
     _fake_install(inst)
     _staged_build(staged)
+    (inst / "localm" / "z_last.py").write_text("old", encoding="utf-8")
     raised = None
-    with held(inst / "localm" / "gone.py"):
+    with held(inst / "localm" / "z_last.py"):
         try:
             au.swap_with_backup(staged, inst, bdir)
         except RuntimeError as e:
