@@ -265,7 +265,7 @@ class _CollectionIndexing:
             say(f"indexed {f.name} ({len(new_chunks)} chunks)")
 
         if added or updated:
-            self._save()
+            self._save(on_progress)
         elif roots_changed or self.corrupt:
             # Nothing was indexed (every file skipped as unchanged, or every one
             # failed), so chunks and vectors are exactly as _load() read them.
@@ -346,7 +346,7 @@ class _CollectionIndexing:
             }
             _finished(n_done, f"indexed {filename} ({len(new_chunks)} chunks)")
 
-        self._save()
+        self._save(on_progress)
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
 

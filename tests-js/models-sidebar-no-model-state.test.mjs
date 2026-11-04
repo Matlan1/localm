@@ -245,3 +245,34 @@ test("an in_use reply is NOT reported as unloaded, and the model stays selected"
   assert.doesNotMatch(toast.textContent, /^Unloaded/);
   assert.equal(select.value, "model-a", "the model is still loaded and selected");
 });
+
+test("(e) unloaded but resumable: the dropdown says '<model> (not loaded)' and re-picking that model loads it", async () => {
+  const models = [{ name: "model-a", size_bytes: 1000 }, { name: "model-b", size_bytes: 2000 }];
+  const calls = [];
+  const base = makeFetch({ models, active: "" }, calls);
+  const fetchImpl = async (url, opts) => {
+    const r = await base(url, opts);
+    if (String(url).startsWith("/api/models?type=llm")) {
+      const body = await r.json();
+      return { ...r, json: async () => ({ ...body, resumable: "model-a" }) };
+    }
+    return r;
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await render(win);
+
+  const select = win.document.getElementById("model-select");
+  assert.equal(select.selectedOptions[0].textContent, "model-a (not loaded)");
+  assert.equal(select.selectedOptions[0].disabled, true, "the status line is inert");
+  assert.equal(select.value, "");
+  const real = [...select.options].find((o) => o.value === "model-a");
+  assert.equal(real.selected, false, "the real model option is not the selected one, so picking it fires change");
+
+  select.value = "model-a";
+  runScript(win, "window.__onchange = modelSelect.onchange;");
+  await win.__onchange();
+  await new Promise((r) => setTimeout(r, 0));
+  const loads = calls.filter((c) => c.url.startsWith("/api/models/load"));
+  assert.equal(loads.length, 1);
+  assert.deepEqual(loads[0].body, { model: "model-a" });
+});

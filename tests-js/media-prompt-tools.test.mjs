@@ -22,14 +22,21 @@ function previewFor(model) {
   return null;
 }
 
-function makeApp({ active = "qwen3", reply, finish, chatStatus = 200, importResult, importStatus = 200 } = {}) {
+function makeApp({ active = "qwen3", resumable = "", reply, finish, chatStatus = 200, importResult, importStatus = 200 } = {}) {
   const calls = [];
+  let chatServed = false;
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
     calls.push({ u, opts });
     const ok = (body, status = 200) => ({ ok: status < 400, status, statusText: "ERR", json: async () => body, text: async () => "" });
-    if (u.startsWith("/api/models")) return ok({ models: active ? [{ name: active }] : [], active });
+    if (u.startsWith("/api/models")) {
+      const names = [active, resumable].filter(Boolean);
+      const live = chatServed && resumable ? resumable : active;
+      return ok({ models: names.map((name) => ({ name })), active: live,
+                  ...(resumable && !live ? { resumable } : {}) });
+    }
     if (u.includes("/v1/chat/completions")) {
+      chatServed = true;
       if (chatStatus !== 200) return ok({ detail: "model is busy" }, chatStatus);
       return ok({ choices: [{ message: { content: reply ?? "an enhanced prompt" },
                               finish_reason: finish ?? "stop" }] });
@@ -88,6 +95,32 @@ test("Enhance with no chat model loaded fails loudly and leaves the prompt alone
   assert.equal(chatCalls(calls).length, 0);
   assert.match($("toast").textContent, /No chat model is loaded/);
   assert.ok($("toast").className.includes("error"));
+});
+
+test("Enhance with the chat model unloaded but resumable sends the request to it and shows it loading", async () => {
+  const { win, calls, $ } = makeApp({ active: "", resumable: "llama-8b" });
+  await settle(300);
+  $("img-prompt").value = "a fox";
+  const btn = enhanceBtn($, "img-prompt");
+  const labels = [];
+  const seen = new win.MutationObserver(() => labels.push(btn.textContent));
+  seen.observe(btn, { childList: true, characterData: true, subtree: true });
+  await click(win, btn);
+  assert.equal(chatCalls(calls).length, 1);
+  assert.equal(JSON.parse(chatCalls(calls)[0].opts.body).model, "llama-8b");
+  assert.equal($("img-prompt").value, "an enhanced prompt");
+  assert.ok(labels.includes("Loading llama-8b..."), `labels seen: ${labels.join(" | ")}`);
+  runScript(win, "globalThis.__active = modelCache.active;");
+  assert.equal(win.__active, "llama-8b", "the model list is re-read once the model has loaded");
+});
+
+test("Enhance with no chat model at all says so and focuses the sidebar picker", async () => {
+  const { win, calls, $ } = makeApp({ active: "", resumable: "" });
+  $("img-prompt").value = "a fox";
+  await click(win, enhanceBtn($, "img-prompt"));
+  assert.equal(chatCalls(calls).length, 0);
+  assert.match($("toast").textContent, /No chat model is loaded/);
+  assert.equal(win.document.activeElement, $("model-select"));
 });
 
 test("a chat error and an empty reply are reported and leave the prompt alone", async () => {

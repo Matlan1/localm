@@ -13,11 +13,13 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Iterable
 
 
-def atomic_write(path: Path, data: str) -> None:
+def atomic_write(path: Path, data: str | Iterable[str]) -> None:
     """Write *data* to *path* atomically: write a unique per-writer temp
-    file, then replace *path* with it.
+    file, then replace *path* with it. *data* is a string, or an iterable of
+    strings written one after another.
 
     The temp name is unique per (pid, thread), so two independent writers
     never collide on the same temp file even outside a lock (e.g. a sidecar
@@ -31,8 +33,13 @@ def atomic_write(path: Path, data: str) -> None:
     """
     path = Path(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(data, encoding="utf-8")
     try:
+        if isinstance(data, str):
+            tmp.write_text(data, encoding="utf-8")
+        else:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for piece in data:
+                    fh.write(piece)
         for attempt in range(5):
             try:
                 tmp.replace(path)
@@ -42,7 +49,8 @@ def atomic_write(path: Path, data: str) -> None:
                     raise
                 time.sleep(0.02)
     finally:
-        # Removes the temp file when the replace gave up; a no-op on success.
+        # Removes the temp file when the write or the replace failed; a no-op
+        # on success.
         try:
             tmp.unlink(missing_ok=True)
         except OSError as e:

@@ -251,8 +251,9 @@ def register(app: FastAPI, ctx) -> None:
     async def issues_ep():
         """The bug reports this install filed, each looked up by number through
         the proxy. Rows are ``{number, title, state, closed_at, html_url}``; a row
-        whose lookup failed carries ``error`` instead of ``state``. ``persisted``
-        is False when the record is kept in memory only (privacy mode)."""
+        whose lookup failed, or that ``filed_status``'s time budget did not reach,
+        carries ``error`` instead of ``state``. ``persisted`` is False when the
+        record is kept in memory only (privacy mode)."""
         from localm import issue_tracker
         if not issue_tracker.available():
             return {"available": False, "issues": []}

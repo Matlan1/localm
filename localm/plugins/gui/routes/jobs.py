@@ -86,12 +86,17 @@ def register(app: FastAPI, jobs) -> None:
 
         For a caller other than the local operator every string in a row is
         path-scrubbed (``path_formatter``).
+
+        ``stalls`` lists the server's recent stalls, oldest first
+        (``localm.inference._stall_watch.StallWatch.records``); [] when the
+        stall watch is not running.
         """
         rows = jobs.snapshot(visible=lambda owner: job_owner_ok(request, owner))
         show = path_formatter(request)
         if show is not str:
             rows = map_strings(rows, show)
-        return {"now": time.time(), "operations": rows}
+        from localm.inference._stall_watch import recent_stalls
+        return {"now": time.time(), "operations": rows, "stalls": recent_stalls()}
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
     async def job_events(request: Request, job=Depends(owned_job)):
