@@ -654,6 +654,26 @@ def test_curl_reporter_treats_a_blank_answer_as_no_answer(answer, expected):
     assert proc.stdout == expected
 
 
+@pytest.mark.skipif(not shutil.which("bash") or "system32" in (shutil.which("bash") or "").lower(),
+                    reason="needs a POSIX bash, not the WSL launcher")
+@pytest.mark.parametrize("answer, expected", [
+    ("a\tb", "a b"),
+    ("a\x01b", "a b"),
+    ('say "hi" \\ there', 'say "hi" \\ there'),
+], ids=["tab", "control", "quote-and-backslash"])
+def test_curl_reporter_payload_is_valid_json_for_any_answer(answer, expected):
+    text = (_MOD_PATH.parent.parent / "report-issue.sh").read_text(encoding="utf-8")
+    clean = re.search(r"^summary=.*tr '\[:cntrl:\]' ' '.*$", text, re.M)
+    esc = re.search(r"^esc\(\) \{.*\}$", text, re.M)
+    assert clean and esc, "the summary clean-up or esc() moved"
+    script = (clean.group(0) + "\n" + esc.group(0) + '\nprintf \'{"title":"%s"}\' "$(esc "$summary")"')
+    proc = subprocess.run([shutil.which("bash"), "-c", script], capture_output=True, timeout=60,
+                          env={**os.environ, "summary": answer},
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.decode("utf-8"))["title"] == expected
+
+
 class _ProxyStandIn(http.server.BaseHTTPRequestHandler):
     reply = (422, b'{"error": "report not filed", "filed": false}')
     received: list = []
