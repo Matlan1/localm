@@ -811,11 +811,11 @@ def _rmtree(path: Path) -> None:
         except OSError:
             pass
         func(p)
-    path = _long_path(path)
+    target = _long_path(path)
     if sys.version_info >= (3, 12):
-        shutil.rmtree(path, onexc=_retry)
+        shutil.rmtree(target, onexc=_retry)
     else:  # pragma: no cover - older interpreters
-        shutil.rmtree(path, onerror=lambda f, p, e: _retry(f, p, e[1]))
+        shutil.rmtree(target, onerror=lambda f, p, e: _retry(f, p, e[1]))
 
 
 def _remove_entry(p: Path) -> None:
