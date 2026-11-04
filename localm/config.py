@@ -1834,10 +1834,7 @@ def keep_diagnostics_enabled() -> bool:
     the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
     ``--keep-diagnostics`` flag, a per-run override) OR the persistent
     ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
-    launcher and the in-app toggle both take effect. Reads the config on every
-    call, so a reader that asks per event sees a change at once; the debug log,
-    the crash guard and the stall watchdog ask once at server start and change
-    from the next start. Never raises."""
+    launcher and the in-app toggle both take effect. Never raises."""
     if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
             "1", "true", "on", "yes"):
         return True
