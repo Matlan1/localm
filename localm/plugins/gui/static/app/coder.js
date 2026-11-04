@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { addMessageRow, lsSetScoped, statusLabel } from "./chat.js";
+import { addMessageRow, isWarnStatus, lsSetScoped, statusLabel } from "./chat.js";
 import { $, authHeaders, autoGrow, chooseAsync, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
@@ -88,6 +88,7 @@ export function tickCoderBusyIndicator() {
     }
   }
   node.textContent = text;
+  node.classList.toggle("st-warn", !!s.statusWarn);
 }
 setInterval(tickCoderBusyIndicator, 1000);
 
@@ -753,13 +754,14 @@ export function handleCoderEvent(s, ev) {
   if (ev.type !== "token" && ev.type !== "reasoning" && ev.type !== "status") {
     (s.eventLog = s.eventLog || []).push(ev);
   }
-  if (ev.type !== "status") s.statusText = null;
+  if (ev.type !== "status") { s.statusText = null; s.statusWarn = false; }
   switch (ev.type) {
     case "status": {
       // What the model is doing before it answers; shown in the busy pill
       // until the next event.
       if (!s.busy) break;
-      s.statusText = statusLabel(ev.text || "", ev.code || null);
+      s.statusText = statusLabel(ev.text || "", ev.code || null, ev.args || null);
+      s.statusWarn = isWarnStatus(ev.text || "", ev.code || null);
       if (s.info.id === coder.activeId) tickCoderBusyIndicator();
       break;
     }
@@ -1565,6 +1567,10 @@ $("coder-compact").onclick = async () => {
 // both session listings for the new language.
 function repaintCoderI18n() {
   renderSessionSelect();
+  const activeOption = $("setup-model")?.options[0];
+  if (activeOption && activeOption.value === "") {
+    activeOption.textContent = t("coder.setup.activeModelOption", { name: modelCache.active || "?" });
+  }
   const node = $("coder-state");
   setCoderState(node.dataset.stateKey || "");
   const s = activeSession();

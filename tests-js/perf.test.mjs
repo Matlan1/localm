@@ -24,7 +24,8 @@ async function waitFor(fn, timeout = 800) {
 // Records calls; serves config + estimate + the bootstrap endpoints.
 function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
                             gpuSplitRatios = null, free = 11 * GIB, held = undefined,
-                            active = "", unloadStatus = "unloaded", loadFails = false } = {}) {
+                            active = "", unloadStatus = "unloaded", loadFails = false,
+                            config = { n_ctx: 8192, n_gpu_layers: 99 }, configFails = false } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
@@ -47,7 +48,8 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
       return { ok: true, status: 200, json: async () => ({ status: "loaded", model: body.model }) };
     }
     if (u.endsWith("/v1/config") && method === "GET")
-      return { ok: true, status: 200, json: async () => ({ n_ctx: 8192, n_gpu_layers: 99 }) };
+      return configFails ? { ok: false, status: 500, json: async () => ({}) }
+        : { ok: true, status: 200, json: async () => config };
     if (u.endsWith("/v1/config") && method === "PATCH")
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     if (u.includes("/api/models"))
@@ -58,6 +60,13 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
     return { ok: true, status: 200, json: async () => ({}) };
   };
 }
+
+function setPerf(window, id, value) {
+  const control = window.document.getElementById(id);
+  if (value !== undefined) control.value = value;
+  control.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+const patches = (calls) => calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH");
 
 test("perf card seeds sliders from config and renders the estimate", async () => {
   const calls = [];
@@ -264,12 +273,62 @@ test("Apply PATCHes n_ctx and n_gpu_layers to /v1/config", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls) });
   await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
+  setPerf(window, "perf-ctx", "16384");
+  setPerf(window, "perf-gpu-layers", "50");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => patches(calls).length > 0), "Apply issues a PATCH");
+  assert.deepEqual(JSON.parse(patches(calls)[0].body), { n_gpu_layers: 50, n_ctx: 16384 });
+});
+
+test("Apply keeps a saved context window above the slider's range", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { config: { n_ctx: 65536, n_gpu_layers: 99 } }) });
+  const ctx = window.document.getElementById("perf-ctx");
+  assert.ok(await waitFor(() => ctx.value === "65536"), `the slider shows the saved value, got ${ctx.value}`);
+  setPerf(window, "perf-gpu-layers", "50");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => patches(calls).length > 0));
+  assert.deepEqual(JSON.parse(patches(calls)[0].body), { n_gpu_layers: 50 },
+    "a GPU layers change does not write the context window");
+});
+
+test("Apply keeps a saved context window the slider's step would round", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { config: { n_ctx: 5000, n_gpu_layers: 99 } }) });
+  await waitFor(() => window.document.getElementById("perf-ctx").value !== "4096");
+  assert.equal(window.document.getElementById("perf-ctx-val").textContent, "5000",
+    "the help names the saved value, not the slider's rounded one");
+  assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/vram-estimate?n_ctx=5000"))),
+    "the estimate uses the saved value");
+  setPerf(window, "perf-gpu-layers", "50");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => patches(calls).length > 0));
+  assert.equal("n_ctx" in JSON.parse(patches(calls)[0].body), false);
+});
+
+test("Apply with an unread config never writes the markup's 999 and turns auto-fit off", async () => {
+  const calls = [];
+  const toasts = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { configFails: true }) });
+  window.toast = (msg) => toasts.push(String(msg));
+  await waitFor(() => calls.some((c) => c.u.endsWith("/v1/config")));
+  await settle(30);
+  assert.equal(window.document.getElementById("perf-gpu-layers").value, "999", "precondition: the markup default");
+  window.document.getElementById("perf-apply").click();
+  await settle(50);
+  assert.deepEqual(patches(calls), []);
+  assert.ok(toasts.some((m) => /Nothing to apply/.test(m)), JSON.stringify(toasts));
+});
+
+test("Apply with nothing changed reloads the running model and writes nothing", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m" }) });
+  await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
+  assert.ok(await waitFor(() => window.document.getElementById("model-select").value === "m"));
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => calls.some(
-    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "Apply issues a PATCH");
-  const patch = calls.find((c) => c.u.endsWith("/v1/config") && c.method === "PATCH");
-  const body = JSON.parse(patch.body);
-  assert.ok("n_ctx" in body && "n_gpu_layers" in body, "PATCH carries both engine keys");
+    (c) => c.u.includes("/api/models/load") && c.method === "POST")));
+  assert.deepEqual(patches(calls), []);
 });
 
 test("estimate flags a model that may not fit (negative)", async () => {
@@ -619,6 +678,7 @@ test("Apply reloads the running model after saving", async () => {
   await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
   assert.ok(await waitFor(() => window.document.getElementById("model-select").value === "m"),
     "the running model is known to the page");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => calls.some(
     (c) => c.u.includes("/api/models/load") && c.method === "POST")), "the model is loaded again");
@@ -634,6 +694,7 @@ test("Apply with no running model only saves", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls) });
   await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => calls.some(
     (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "Apply issues a PATCH");
@@ -646,6 +707,7 @@ test("Apply on a busy running model saves and does not load it again", async () 
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", unloadStatus: "in_use" }) });
   await waitFor(() => window.document.getElementById("model-select").value === "m");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/models/unload"))));
   await settle(100);
@@ -656,6 +718,7 @@ test("Apply whose reload fails leaves the status on the failure, not on loading"
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", loadFails: true }) });
   await waitFor(() => window.document.getElementById("model-select").value === "m");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   const toastEl = window.document.getElementById("toast");
   assert.ok(await waitFor(() => /reloading m failed: boom/.test(toastEl.textContent), 3000),

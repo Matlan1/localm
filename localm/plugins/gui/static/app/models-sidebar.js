@@ -6,7 +6,7 @@
 import { lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
 import { $, GIB, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
-import { t, tn } from "./i18n.js";
+import { applyI18n, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -112,7 +112,7 @@ export function renderHwStats(data) {
         } else {
           // The "total" word is required: the VRAM label means used/total
           // everywhere else, so a bare figure would read as a full card.
-          add("vram", `${gib(d.total)} GB total`);
+          add("vram", t("sidebar.hw.gbTotal", { gb: gib(d.total) }));
         }
       });
     } else if (v.used != null) {
@@ -120,7 +120,7 @@ export function renderHwStats(data) {
     } else {
       // The "total" word is required here for the same reason as the per-card
       // branch above.
-      add("vram", `VRAM ${gib(v.total)} GB total`);
+      add("vram", t("sidebar.hw.vramGbTotal", { gb: gib(v.total) }));
     }
   }
   el.textContent = "";
@@ -197,7 +197,6 @@ let _activityKnown = false;
 // has actually confirmed lately.
 const _ACTIVITY_STALE_AFTER_READS = 3;
 let _activityStaleReads = 0;
-const _ACTIVITY_MODAL_TITLE = "Activity";
 // Server stall records from the last /api/activity read, and the ids already
 // toasted. On the first read, a stall that ended more than
 // _STALL_TOAST_RECENT_S before the server's "now" counts as already seen.
@@ -287,11 +286,11 @@ export function renderActivityPill(ops) {
     const interrupted = interruptedCount();
     if (interrupted) {
       pill.style.display = "";
-      pill.title = "Click for details";
+      pill.title = t("activity.clickForDetails");
       pill.textContent = tn("activity.interruptedPill", interrupted);
     } else if (_unseenStall()) {
       pill.style.display = "";
-      pill.title = "Click for details";
+      pill.title = t("activity.clickForDetails");
       pill.textContent = t("activity.stallPill");
     } else {
       pill.style.display = "none";
@@ -309,20 +308,21 @@ export function renderActivityPill(ops) {
     // determined") rather than inventing new CSS for the same meaning.
     pill.classList.add("st-unknown");
     pill.classList.remove("st-running");
-    pill.title = "Could not reach the server for an activity update - showing the last known state.";
+    pill.title = t("activity.staleTitle");
     const label = running.length === 1 ? activityLabel(running[0])
       : running.length > 1 ? activityCountText(running) : null;
-    pill.textContent = label ? `${label} - status unknown` : "Status unknown";
+    pill.textContent = label ? t("activity.statusUnknownFor", { label }) : t("activity.statusUnknown");
     return;
   }
   pill.classList.remove("st-unknown");
   pill.classList.add("st-running");
-  pill.title = "Click for details";
+  pill.title = t("activity.clickForDetails");
   if (running.length === 1) {
     const op = running[0];
     const pct = typeof op.pct === "number" ? ` ${Math.round(op.pct)}%` : "";
-    pill.textContent = activityLabel(op) +
-      (activityState(op) === "queued" ? " - queued" : pct);
+    pill.textContent = activityState(op) === "queued"
+      ? t("activity.queuedFor", { label: activityLabel(op) })
+      : activityLabel(op) + pct;
   } else {
     pill.textContent = activityCountText(running);
   }
@@ -335,12 +335,11 @@ function _buildActivityBody(body) {
     // Never render "Nothing running." for a question that was never
     // successfully asked (R1) - this only shows before the very first
     // poll/reattach resolves, or if every attempt so far has failed.
-    body.appendChild(el("p", "sub", "Checking…"));
+    body.appendChild(el("p", "sub", t("activity.checking")));
     return;
   }
   if (_activityStaleReads >= _ACTIVITY_STALE_AFTER_READS) {
-    body.appendChild(el("p", "sub",
-      "Could not reach the server for an update - showing the last known state below."));
+    body.appendChild(el("p", "sub", t("activity.staleBody")));
   }
   if (!_activityOps.length) body.appendChild(el("p", "sub", t("activity.nothingRunning")));
   for (const op of _activityOps) {
@@ -351,9 +350,8 @@ function _buildActivityBody(body) {
     const age = activityAge(op);
     if (age) head.appendChild(el("span", "sub", age));
     if (op.status === "running" && op.cancellable) {
-      const stop = el("button", "btn-secondary", "Stop");
-      stop.title = "Stop this operation. A download keeps what it has fetched so far; "
-        + "start it again to continue from there.";
+      const stop = el("button", "btn-secondary", t("activity.stop"));
+      stop.title = t("activity.stopTitle");
       stop.onclick = async () => {
         stop.disabled = true;
         await cancelJob(op.id);
@@ -408,7 +406,7 @@ onInterruptedChange(() => {
 export function showActivityDetails() {
   for (const s of _activityStalls) _stallsShown.add(s.id);
   renderActivityPill(_activityOps);
-  openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
+  openModal(t("activity.modalTitle"), _buildActivityBody);
 }
 if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
 
@@ -425,7 +423,7 @@ function _refreshActivityModalIfOpen() {
   const modal = $("modal");
   const title = $("modal-title");
   if (!modal || modal.style.display !== "flex") return;
-  if (!title || title.textContent !== _ACTIVITY_MODAL_TITLE) return;
+  if (!title || title.textContent !== t("activity.modalTitle")) return;
   const body = $("modal-body");
   if (!body) return;
   body.textContent = "";
@@ -518,8 +516,8 @@ export async function reattachActivity() {
       });
     }
     toast(running.length === 1
-      ? `Reattached to a running ${activityLabel(running[0])}`
-      : `Reattached to ${running.length} running operations`);
+      ? t("activity.reattachedOne", { label: activityLabel(running[0]) })
+      : t("activity.reattachedMany", { count: running.length }));
   } catch { /* server unreachable at boot - same as reattachSessions() */ }
 }
 
@@ -530,7 +528,10 @@ export async function reattachActivity() {
 export function showKeyGate(message) {
   const gate = $("key-gate");
   if (!gate) return;
-  if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
+  if (message) {
+    const m = $("key-gate-msg");
+    if (m) { m.textContent = message; delete m.dataset.i18n; }
+  }
   gate.style.display = "flex";
   // Show the "Install certificate" step only when the local CA is genuinely NOT
   // trusted yet (see updateKeyGateCertStep), so a returning trusted device is
@@ -618,14 +619,18 @@ export function addRevealToggle(input) {
   const wrap = el("div", "input-reveal");
   if (input.parentNode) input.parentNode.insertBefore(wrap, input);
   wrap.appendChild(input);
-  const btn = el("button", "reveal-btn", "show");
+  const btn = el("button", "reveal-btn", t("keygate.show"));
   btn.type = "button";          // never submit a surrounding form
-  btn.setAttribute("aria-label", "Show or hide the key");
+  btn.setAttribute("aria-label", t("keygate.revealAria"));
   btn.onclick = () => {
     const hidden = input.type === "password";
     input.type = hidden ? "text" : "password";
-    btn.textContent = hidden ? "hide" : "show";
+    btn.textContent = t(hidden ? "keygate.hide" : "keygate.show");
   };
+  document.addEventListener("localm:language", () => {
+    btn.textContent = t(input.type === "password" ? "keygate.show" : "keygate.hide");
+    btn.setAttribute("aria-label", t("keygate.revealAria"));
+  });
   wrap.appendChild(btn);
 }
 window.addRevealToggle = addRevealToggle;
@@ -683,7 +688,7 @@ export async function startQrScan() {
   const overlay = $("qr-scanner"), video = $("qr-video"), status = $("qr-scan-status");
   if (!overlay || !video) return;
   overlay.style.display = "flex";
-  if (status) status.textContent = "Starting camera…";
+  if (status) status.textContent = t("qr.starting");
 
   // Prefer the native BarcodeDetector; otherwise load the bundled jsQR decoder.
   let detector = null;
@@ -694,19 +699,19 @@ export async function startQrScan() {
   let jsqr = null;
   if (!detector) {
     try { jsqr = await loadJsQR(); }
-    catch { if (status) status.textContent = "QR scanning is not available here."; return; }
+    catch { if (status) status.textContent = t("qr.unavailable"); return; }
   }
 
   try {
     _qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" }, audio: false });
   } catch {
-    if (status) status.textContent = "Could not open the camera (permission denied?).";
+    if (status) status.textContent = t("qr.cameraFailed");
     return;
   }
   video.srcObject = _qrStream;
   try { await video.play(); } catch { /* autoplay guard */ }
-  if (status) status.textContent = "Point at the QR in the computer's Settings.";
+  if (status) status.textContent = t("qr.pointAt");
 
   // Decode one video frame -> the QR text, or null. BarcodeDetector reads the
   // <video> directly; jsQR needs the pixels sampled onto a canvas first.
@@ -767,8 +772,10 @@ export function isIOSSafari() {
 // Show exactly one of: installed confirmation, the native Install button, the
 // iOS Add-to-Home-Screen steps, or the generic hint. env = {standalone, ios,
 // canPrompt, certNeeded, certUntrusted}; missing fields are treated as false.
+let _installEnv = null;
 export function applyInstallUI(env) {
   env = env || {};
+  _installEnv = env;
   const btn = document.getElementById("install-app");
   const hint = document.getElementById("install-hint");
   const ios = document.getElementById("install-ios");
@@ -796,6 +803,7 @@ export function applyInstallUI(env) {
     hint.style.display = "";
     return;
   }
+  applyI18n(hint.parentNode || undefined);
   hint.style.display = "";   // generic browser-menu hint (default)
 }
 
@@ -1061,11 +1069,11 @@ export function renderModelSplitLine(split) {
   const devices = split && Array.isArray(split.devices) ? split.devices : [];
   if (devices.length < 2) { line.hidden = true; line.textContent = ""; return; }
   const parts = devices.map(
-    (d) => `GPU ${d.index} ${Math.round((d.share || 0) * 100)}%`);
-  const why = split.source === "auto" ? " (by free VRAM)"
-    : split.source === "pinned" ? " (pinned)"
-    : split.source === "equal" ? " (equal)" : "";
-  line.textContent = `Split: ${parts.join(" · ")}${why}`;
+    (d) => `GPU ${d.index} ${Math.round((d.share || 0) * 100)}%`).join(" · ");
+  const key = split.source === "auto" ? "sidebar.split.lineAuto"
+    : split.source === "pinned" ? "sidebar.split.linePinned"
+    : split.source === "equal" ? "sidebar.split.lineEqual" : "sidebar.split.line";
+  line.textContent = t(key, { parts });
   line.hidden = false;
 }
 
@@ -1101,7 +1109,7 @@ function _offerPeerRoute(model, peer) {
         body.appendChild(input);
       }
       const row = el("div", "actions");
-      const cancel = el("button", "btn-secondary", "Cancel");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(null);
       const ok = el("button", "btn-secondary",
         t(needsKey ? "sidebar.peerRoute.routeButton" : "sidebar.peerRoute.useButton"));
@@ -1173,6 +1181,12 @@ async function _maybeRoutePeer(model) {
 // so refreshModels keeps this selected for as long as the server still holds
 // its route (data.peer_routes).
 let _peerSelected = null;
+
+/** True while this tab's selection answers through an accepted peer route, so
+ *  modelCache.active names a model that is not loaded on this instance. */
+export function isPeerSelected() {
+  return _peerSelected !== null;
+}
 
 // Point the model dropdown at the model modelCache says serves the next
 // message (the active one, else the resumable one), or at the "No model
@@ -1359,9 +1373,12 @@ export async function switchModel(model, { local = false, activate = true, selec
 // {status: "in_use"} when the model is busy and was not unloaded.
 // Reloading a model that is not the active one leaves the active model, and
 // this tab's selection, as they are, also when the reload fails or is cancelled.
-// Whether *model* is the server's active model is read from its modelCache
-// entry; whether it is this tab's selection, from modelCache.active.
+// modelCache is re-read from the server first. Whether *model* is the server's
+// active model is read from its modelCache entry; whether it is this tab's
+// selection, from modelCache.active.
 export async function reloadModel(model) {
+  setStatus("busy", t("sidebar.status.unloading", { model }));
+  await refreshModels();
   const wasActive = model === modelCache.active;
   const entry = (modelCache.models || []).find((m) => m.name === model);
   const serverActive = entry && typeof entry.active === "boolean" ? entry.active : wasActive;
@@ -1424,7 +1441,7 @@ function _markUnloaded(model) {
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
 // warning is res.mmap_note. A res.mmap_cpu_from_disk load with
 // res.mmap_cpu_read_bytes and res.mmap_ram_available_bytes names both sizes.
-export function toastLoadResult(res, model, head = "Model switched to " + model) {
+export function toastLoadResult(res, model, head = t("models.switch.doneToast", { model })) {
   const fromDisk = !!(res && res.mmap_from_disk);
   const cpuFromDisk = !!(res && res.mmap_cpu_from_disk);
   const gib = (n) => (n / 1024 ** 3).toFixed(1);
@@ -1444,9 +1461,9 @@ export function toastLoadResult(res, model, head = "Model switched to " + model)
   const extra = fromDisk ? `; ${diskNote}`
     : (res && res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");
   if (res && res.degraded && res.gpu_layers_offloaded < res.gpu_layers_total) {
-    const parts = [`${res.gpu_layers_offloaded}/${res.gpu_layers_total} layers on GPU, rest on CPU`];
+    const parts = [t("models.switch.layersOnGpu", { offloaded: res.gpu_layers_offloaded, total: res.gpu_layers_total })];
     if (moeText) parts.push(moeText);
-    toast(`${head} (${parts.join("; ")} - slower${extra})`, true);
+    toast(`${head} (${t("models.switch.slower", { parts: parts.join("; ") })}${extra})`, true);
   } else if (res && res.degraded && moeText) {
     toast(`${head} (${moeText}${extra})`, !!extra);
   } else if (res && res.mmap_ram_short && res.mmap_note) {
@@ -1480,7 +1497,7 @@ modelSelect.onchange = async () => {
       refreshPerfEstimate();
     }
   } catch (e) {
-    toast("Model load failed: " + e.message, true);
+    toast(t("models.switch.loadFailedToast", { message: e.message }), true);
   }
 };
 
@@ -1499,7 +1516,7 @@ async function _postUnload(model, force) {
     body: JSON.stringify(force ? { model, force: true } : { model }),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || "Unload failed");
+  if (!r.ok) throw new Error(data.detail || t("models.unload.failed"));
   return data;
 }
 
@@ -1532,7 +1549,7 @@ if (sidebarUnloadBtn) {
         toast(t("models.unload.inUse", { name: model }), true);
         return;
       }
-      toast(`Unloaded '${model}'`);
+      toast(t("models.unload.toast", { name: model }));
       // Publish immediately, same reasoning as switchModel's own comment
       // above (REG-471): without this the dropdown/status would keep
       // showing `model` as active until the next 30s poll. setStatus also
@@ -1547,7 +1564,7 @@ if (sidebarUnloadBtn) {
       refreshPerfEstimate();
     } catch (e) {
       setStatus("err", t("sidebar.status.unloadFailed"));
-      toast("Unload failed: " + e.message, true);
+      toast(t("models.unload.failedToast", { message: e.message }), true);
     } finally {
       sidebarUnloadBtn.disabled = false;
     }
@@ -1556,4 +1573,7 @@ if (sidebarUnloadBtn) {
 
 // The model dropdown's placeholder and the status pill are written by
 // refreshModels, so they are redrawn when the interface language changes.
-document.addEventListener("localm:language", () => { refreshModels(); });
+document.addEventListener("localm:language", () => {
+  refreshModels();
+  if (_installEnv) applyInstallUI(_installEnv);
+});

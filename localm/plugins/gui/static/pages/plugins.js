@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast, whileBusy } from "../app/helpers.js";
-import { t, tn } from "../app/i18n.js";
+import { t, tn, tOr } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
@@ -31,6 +31,12 @@ function pluginErrorLine(name, err) {
   return line;
 }
 
+/** A plugin's description in the interface language: a first-party plugin's from
+ *  the catalog, any other plugin's own text. */
+function pluginDescription(p) {
+  return p.builtin ? tOr(`plugins.desc.${p.name}`, p.description) : p.description;
+}
+
 export function _catalogRow(p) {
   const tr = el("tr");
   const nameTd = el("td", "name-cell shrink-cell");
@@ -50,7 +56,7 @@ export function _catalogRow(p) {
   const statusTd = el("td", "shrink-cell");
   statusTd.appendChild(el("span", ("job-state " + statusCls).trim(), status));
   tr.appendChild(statusTd);
-  const descTd = el("td", "grow-cell", p.description);
+  const descTd = el("td", "grow-cell", pluginDescription(p));
   // Warn when a plugin needs other plugins that are not installed.
   const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
   if (missing.length) {
@@ -208,25 +214,26 @@ export async function installPluginDeps(name, opts = {}) {
     r = await fetch(`/api/plugins/${encodeURIComponent(name)}/install-deps`,
                     { method: "POST", headers: authHeaders() });
   } catch (e) {
-    if (!opts.silent) toast(`install deps failed: ${e.message}`, true);
+    if (!opts.silent) toast(t("plugins.deps.failedToast", { message: e.message }), true);
     return;
   }
   if (r.status === 403) {
     if (!opts.silent) {
-      toast(`Install ${name}'s dependencies on the host, e.g.:  `
-            + `localm plugin install-deps ${name}`, true);
+      toast(t("plugins.deps.onHostToast", { name }), true);
     }
     return;
   }
   const started = await r.json().catch(() => ({}));
   if (!r.ok) {
-    if (!opts.silent) toast(`install deps: ${started.detail || "failed"}`, true);
+    if (!opts.silent) toast(started.detail
+      ? t("plugins.deps.refusedToast", { detail: started.detail })
+      : t("plugins.deps.failedPlain"), true);
     return;
   }
   // A small progress panel that updates with the latest installer line.
   const panel = el("div", "dep-install-progress");
   panel.dataset.plugin = name;
-  panel.appendChild(el("div", "sub", `Installing ${name} dependencies...`));
+  panel.appendChild(el("div", "sub", t("plugins.deps.installing", { name })));
   const lineEl = el("div", "mono dep-install-line", "");
   panel.appendChild(lineEl);
   if (box) box.prepend(panel);
@@ -247,10 +254,11 @@ export async function installPluginDeps(name, opts = {}) {
   } catch { /* stream ended or dropped; fall through to a re-render */ }
   panel.remove();
   if (end && end.ok) {
-    toast(`${name}: dependencies installed`);
+    toast(t("plugins.deps.installed", { name }));
   } else {
-    toast(`${name}: dependency install `
-          + (end ? "failed: " + (end.error || "unknown") : "did not complete"),
+    toast(end
+      ? t("plugins.deps.installFailed", { name, message: end.error || t("plugins.deps.unknownError") })
+      : t("plugins.deps.installIncomplete", { name }),
           true);
   }
   renderCatalogPlugins();
@@ -352,7 +360,7 @@ export async function refreshPluginsPage() {
         nameLine.appendChild(el("span", "name", p.name));
         tr.appendChild(nameTd);
         tr.appendChild(el("td", "mono shrink-cell", p.version));
-        tr.appendChild(el("td", "grow-cell", p.description));
+        tr.appendChild(el("td", "grow-cell", pluginDescription(p)));
         tr.appendChild(el("td", "mono",
           (p.tool_exports || []).length ? p.tool_exports.join(", ") : ""));
         const actions = el("td", "actions-cell");

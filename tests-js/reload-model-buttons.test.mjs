@@ -37,17 +37,29 @@ function makeFetch(s, calls) {
     if (u === "/v1/plugins/settings") return json({ plugins: [] });
     if (u.includes("/api/vram-estimate")) return json({ needed: 1, weights: 1, kv_cache: 0, overhead: 0 });
     if (u.includes("/api/gpus")) return json({ gpus: [] });
-    if (u.includes("/api/models/unload") && method === "POST")
+    if (u.includes("/api/models/unload") && method === "POST") {
+      if (s.hangModelsAfterUnload) s.hangModels = true;
+      if (s.stateful && s.active === JSON.parse(opts.body).model) {
+        s.resumable = s.active;
+        s.active = "";
+      }
+      s.unloaded = true;
       return json({ status: s.unloadStatus || "unloaded" });
+    }
     if (u.includes("/api/models/load") && method === "POST") {
       if (s.loadFails) return json({ detail: "boom" }, 500);
-      return json({ status: "loaded", model: JSON.parse(opts.body).model });
+      const req = JSON.parse(opts.body);
+      if (s.stateful && req.activate !== false) { s.active = req.model; s.resumable = ""; }
+      return json({ status: "loaded", model: req.model });
     }
     if (u.endsWith("/v1/config") && method === "PATCH") return json({});
     if (u.endsWith("/v1/config")) return json({ n_ctx: 4096, n_gpu_layers: 99 });
     if (u.startsWith("/api/models") && s.hangModels) return new Promise(() => {});
     if (u.startsWith("/api/models")) {
-      return json({ models: s.models, active: s.active || "", peer_routes: s.peerRoutes || {} });
+      const models = s.stateful
+        ? s.models.map((m) => ({ ...m, active: m.name === s.active })) : s.models;
+      return json({ models, active: s.active || "", resumable: s.resumable || "",
+                    peer_routes: s.peerRoutes || {} });
     }
     return json({ models: [], active: "", conversations: [], plugins: [] });
   };
@@ -108,7 +120,8 @@ test("Models tab: reload unloads then loads the same model, then toasts the resu
   assert.equal(JSON.parse(calls.find((c) => c.u.includes("/api/models/load")
     && c.method === "POST").body).model, "run");
   assert.ok(toasts.some((x) => /Reloading run/.test(x.msg)), JSON.stringify(toasts));
-  assert.ok(toasts.some((x) => /Model switched to run/.test(x.msg)), JSON.stringify(toasts));
+  assert.ok(toasts.some((x) => /Reloaded run/.test(x.msg)), JSON.stringify(toasts));
+  assert.ok(!toasts.some((x) => /switched to/.test(x.msg)), JSON.stringify(toasts));
 });
 
 test("Models tab: a busy model is not reloaded and the toast says so", async () => {
@@ -186,7 +199,7 @@ test("Models tab: a failed reload of a model that is not active keeps the active
   const s = { ...PENDING(), loadFails: true };
   const { window, toasts } = await boot(s);
   await showModels(window);
-  s.hangModels = true;
+  s.hangModelsAfterUnload = true;
   await reloadButton(window, "base").onclick();
   assert.ok(toasts.some((x) => x.isErr && /Reloading base failed: boom/.test(x.msg)),
     JSON.stringify(toasts));
@@ -217,7 +230,7 @@ test("Models tab: a failed reload of the active model leaves it to reload on the
   const before = window.fetch;
   window.fetch = async (url, opts = {}) => {
     const u = String(url);
-    if (u.startsWith("/api/models?")) {
+    if (u.startsWith("/api/models?") && s.unloaded) {
       return { ok: true, status: 200, json: async () => ({ models: s.models, active: "", resumable: "run" }),
                text: async () => "" };
     }
@@ -228,6 +241,54 @@ test("Models tab: a failed reload of the active model leaves it to reload on the
   const after = activeModel(window);
   assert.equal(after.active, "");
   assert.equal(after.resumable, "run");
+});
+
+// A sidebar switch updates modelCache.active only; the rows stay as last polled.
+async function switchedAtoB() {
+  const s = { stateful: true, active: "a", models: [LLM("a", { loaded: true }), LLM("b", { loaded: true })] };
+  const ctx = await boot(s);
+  runScript(ctx.window, 'window.__p = switchModel("b");');
+  await ctx.window.__p;
+  assert.equal(s.active, "b", "precondition: the server made b active");
+  runScript(ctx.window, 'window.__row = modelCache.models.find((m) => m.name === "a").active;');
+  assert.equal(ctx.window.__row, true, "precondition: the rows are stale, no poll ran");
+  ctx.calls.length = 0;
+  return { ...ctx, s };
+}
+
+test("reload right after a sidebar switch keeps the switched-to model active", async () => {
+  const { window, calls, s } = await switchedAtoB();
+  runScript(window, 'window.__p = reloadModel("b");');
+  await window.__p;
+  assert.equal("activate" in loadBody(calls), false, JSON.stringify(loadBody(calls)));
+  assert.equal(s.active, "b");
+  assert.equal(activeModel(window).active, "b");
+});
+
+test("reload of the old model's stale row after a switch does not make it active again", async () => {
+  const { window, calls, s } = await switchedAtoB();
+  runScript(window, 'window.__p = reloadModel("a");');
+  await window.__p;
+  assert.equal(loadBody(calls).model, "a");
+  assert.equal(loadBody(calls).activate, false);
+  assert.equal(s.active, "b");
+  assert.equal(activeModel(window).active, "b");
+});
+
+test("with a peer route selected no reload is offered and a save does not load a local copy", async () => {
+  const s = { active: "run", peerRoutes: { peer: { host: "10.0.0.2", port: 8642 } },
+              models: [LLM("run", { active: true, loaded: true }), LLM("peer")] };
+  const { window, calls, toasts } = await boot(s);
+  runScript(window, "_peerSelected = 'peer';");
+  await window.refreshModels();
+  await window.refreshPerfEstimate();
+  assert.equal(window.document.getElementById("perf-reload").hidden, true);
+  runScript(window, "window.__p = reloadActiveModelAfterSave();");
+  await window.__p;
+  assert.deepEqual(sideEffects(calls), [], "nothing unloaded or loaded");
+  assert.ok(toasts.some((x) => /applies on the next model load/.test(x.msg)), JSON.stringify(toasts));
+  runScript(window, "window.__peer = _peerSelected;");
+  assert.equal(window.__peer, "peer", "the tab keeps its selection");
 });
 
 async function renderSettings(s) {

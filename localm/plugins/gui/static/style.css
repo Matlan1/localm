@@ -1449,7 +1449,7 @@ pre:hover .canvas-btn { opacity: 1; }
 /* #pull-spec takes flex:4 against #pull-name and #pull-sha256's flex:1.
    See tests-e2e/card-row-select-width.spec.mjs. */
 #pull-spec { flex: 4; }
-.card .actions { margin-top: 14px; display: flex; gap: 10px; }
+.card .actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
 /* ---- the "Advanced" disclosure (one pattern, four surfaces) ---- */
@@ -1649,9 +1649,6 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .media-subsection .settings-fields {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
-/* .card .actions is a nowrap flex row page-wide; the same narrow-card reason
-   as .settings-fields above applies to the Copy-from/Save button row. */
-.media-subsection .actions { flex-wrap: wrap; }
 .media-sub-head { margin: 0; font-size: 14px; }
 /* A field inheriting the shared default (no per-plugin override yet): the whole
    row reads dimmer (label AND the value box) so an override clearly stands out
@@ -1970,6 +1967,10 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 #coder-state.st-running { animation: mic-pulse 1.2s infinite; }
+#coder-state.st-running.st-warn {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
 /* interrupted: the server stopped while the operation was in flight, so its
    outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
    "needs attention", the same treatment st-skipped/st-unknown get - not the red

@@ -918,7 +918,12 @@ class HTTPBackend(BaseLLMBackend):
                     self.last_reply_compacted = True
                 if status and on_status is not None:
                     try:
-                        on_status(status, delta.get("status_code"))
+                        code = delta.get("status_code")
+                        args = delta.get("status_args")
+                        if isinstance(code, str) and isinstance(args, dict):
+                            from localm.inference.protocol import StatusText
+                            status = StatusText(status, code, args)
+                        on_status(status, code)
                     except Exception:
                         pass  # a broken sink must not kill the stream
                 # Reasoning delta: routed to on_reasoning (a SEPARATE channel

@@ -360,6 +360,27 @@ test("dismissing one recent error leaves the others in order and updates storage
   assert.deepEqual(texts(), []);
 });
 
+test("dismissing a recent error moves focus to the next entry, then to the empty note", async () => {
+  const { window, doc } = await boot({ mode: "full" });
+  for (const n of ["e1", "e2"]) window.toast(n, true);
+  const row = (i) => doc.querySelectorAll("#recent-errors-list .recent-error")[i];
+  row(0).querySelector(".recent-error-dismiss").focus();
+  row(0).querySelector(".recent-error-dismiss").click();
+  assert.equal(doc.activeElement, row(0).querySelector(".recent-error-dismiss"),
+    "the next entry's dismiss button takes focus");
+  row(0).querySelector(".recent-error-dismiss").click();
+  assert.equal(doc.activeElement, doc.getElementById("recent-errors-empty"));
+});
+
+test("a rebuild leaves focus alone when it was outside the list", async () => {
+  const { window, doc } = await boot({ mode: "full" });
+  window.toast("e1", true);
+  const outside = doc.getElementById("recent-errors-clear");
+  outside.focus();
+  window.toast("e2", true);
+  assert.equal(doc.activeElement, outside);
+});
+
 test("dismissing one recent error in privacy mode touches no storage", async () => {
   const { window, doc } = await boot({ mode: "privacy" });
   for (const n of ["p1", "p2", "p3"]) window.toast(n, true);
