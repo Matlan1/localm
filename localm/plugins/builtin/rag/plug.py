@@ -336,6 +336,20 @@ def _get_collection(name: str):
     return coll
 
 
+def _get_collection_unloaded(name: str):
+    """``_get_collection`` without reading the collection's files: only the 400
+    and 404 checks. For a write whose ``Collection`` method loads the
+    collection itself under its lock (``add_paths``, ``add_uploads``)."""
+    from localm.rag import Collection
+    try:
+        coll = Collection(name, load=False)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not coll.exists():
+        raise HTTPException(404, f"No such collection: {name}")
+    return coll
+
+
 async def _get_collection_off_loop(name: str):
     """``_get_collection`` on the plugin pool: on a snapshot-cache miss it parses
     chunks.jsonl and vectors.json, which must not run on the event loop."""
@@ -714,7 +728,7 @@ async def rag_delete(name: str, request: Request):
 @_router.post("/api/rag/collections/{name}/add")
 async def rag_add(name: str, req: RagAddRequest, request: Request):
     from localm.rag import CollectionLockedError
-    coll = await _get_collection_off_loop(name)
+    coll = _get_collection_unloaded(name)
     paths = [Path(p).expanduser() for p in req.paths if p.strip()]
     if not paths:
         raise HTTPException(400, "No paths given")
@@ -832,7 +846,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     decoding, so no oversized payload is ever materialized in memory; a zip bomb is
     caught during extraction."""
     from localm.rag import CollectionLockedError
-    coll = await _get_collection_off_loop(name)
+    coll = _get_collection_unloaded(name)
     if not req.files:
         raise HTTPException(400, "No files given")
     if len(req.files) > 50:
@@ -1388,7 +1402,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "settings, or switch to the internal default (bge-small-en-v1.5).")
             return False
         if not path:
-            line(f"error: '{model}' is not a known embedding key, a registered "
+            why = last_error()
+            line(f"error: {why}" if why else
+                 f"error: '{model}' is not a known embedding key, a registered "
                  "model, or a GGUF path - or the download was blocked by the "
                  "network policy (net_mode). Pick a model from the list, or the "
                  "internal default (bge-small-en-v1.5).")

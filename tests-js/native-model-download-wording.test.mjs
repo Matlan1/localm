@@ -42,6 +42,27 @@ test("a native missing model without a size is offered without mentioning a work
   assert.doesNotMatch(text, /workflow/i);
 });
 
+test("downloading a native missing model sends its recommended type as a hint", async () => {
+  const pulls = [];
+  const base = fetchWith([NATIVE]);
+  const { window: win } = loadApp({
+    fetchImpl: (url, opts = {}) => {
+      if (String(url) === "/api/models/pull") pulls.push(JSON.parse(opts.body));
+      return base(url, opts);
+    },
+  });
+  runScript(win, `globalThis.__done = checkModelsBeforeGenerate("music", null);`);
+  for (let i = 0; i < 50 && win.document.getElementById("modal").style.display === "none"; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  [...win.document.querySelectorAll("#modal .actions button")]
+    .find((b) => /^download/i.test(b.textContent)).click();
+  for (let i = 0; i < 50 && !pulls.length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(pulls.length, 1);
+  assert.equal(pulls[0].model_type, "vae");
+  assert.equal(pulls[0].type_is_hint, true);
+});
+
 test("a ComfyUI missing model still names the workflow", async () => {
   const text = await dialogText({
     filename: "ace.safetensors", class_type: "CheckpointLoaderSimple", input_name: "ckpt_name",

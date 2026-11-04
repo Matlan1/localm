@@ -31,6 +31,10 @@ links in a folder beside the venv; the uv folder. A component that fails
 restores every component this run replaced, and a later rollback of the update
 restores them too (:func:`restore`). A new runtime directory of sd.cpp or
 KoboldCpp never replaces the old one, which stays in place for a rollback.
+
+The same snapshot keeps the venv as it was before the update's dependency step
+(:data:`DEPS`), so a rollback also puts back every dependency and the install
+record of localm itself.
 """
 
 from __future__ import annotations
@@ -64,6 +68,10 @@ COMPONENT_COMMANDS = frozenset({"run", "serve", "gui", "image", "music", "video"
 
 # The order components are updated in.
 ORDER = ("pytorch", "sdcpp", "koboldcpp", "comfyui", "uv")
+# The snapshot entry for the whole venv as it was before an update's
+# dependency step (dependencies and the install's own install record). Kept
+# and restored like a component, never planned or updated as one.
+DEPS = "venv"
 
 LABELS = {"pytorch": "PyTorch stack",
           "sdcpp": "stable-diffusion.cpp image runtime",
@@ -776,11 +784,14 @@ def _updates_dir(create: bool = True) -> Path:
     return updater._updates_dir(create=create)
 
 
-def write_pending(plans, *, root, version: str) -> None:
+def write_pending(plans, *, root, version: str, repair: bool = False) -> None:
     """Record that the components of *plans* (:func:`needs_finish`) must be
-    finished in the install at *root*, for :func:`finish_pending`. Raises OSError."""
+    finished in the install at *root*, for :func:`finish_pending`; *repair*
+    marks a repair of the installed version (a failure rolls nothing back).
+    Raises OSError."""
     data = {"root": str(Path(root).resolve()), "version": version,
-            "components": [p["name"] for p in plans if p["update"] or p.get("check")]}
+            "components": [p["name"] for p in plans if p["update"] or p.get("check")],
+            "repair": bool(repair)}
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -843,12 +854,13 @@ def last_status() -> Optional[dict]:
     return _read_json(_updates_dir(create=False) / STATUS_FILE)
 
 
-def catch_up(root=None) -> Optional[list]:
+def catch_up(root=None, *, repair: bool = False) -> Optional[list]:
     """Record a pending component update when none is pending and a component
     installed for the install at *root* (default the running install) is not
     at the pin that install's own release ships (:func:`plan` of the install
-    against itself). Returns the plans when it recorded one, else None. Raises
-    OSError when the marker cannot be written.
+    against itself); *repair* marks it as in :func:`write_pending`. Returns the
+    plans when it recorded one, else None. Raises OSError when the marker cannot
+    be written.
 
     Checks once per install root and version: after the components were found
     at their pins (:func:`finish_pending` or this check) it returns None at
@@ -872,7 +884,7 @@ def catch_up(root=None) -> Optional[list]:
     if not any(p["update"] for p in plans):
         _mark_checked(root, version)
         return None
-    write_pending(plans, root=root, version=version)
+    write_pending(plans, root=root, version=version, repair=repair)
     return plans
 
 
@@ -885,10 +897,11 @@ def snapshot_dir(backup_dir) -> Path:
     return backup_dir.with_name(backup_dir.name + "-components")
 
 
-def _venv_copy_path(venv: Path, dest: Path) -> Path:
+def _venv_copy_path(venv: Path, dest: Path, kind: str = "") -> Path:
     """Where the snapshot *dest* keeps its copy of the venv at *venv*: a folder
-    beside the venv (same volume, so its files are hard links)."""
-    return venv.parent / f".{venv.name}-{dest.name}"
+    beside the venv (same volume, so its files are hard links). *kind* ``"deps"``
+    names the copy :data:`DEPS` keeps, apart from the PyTorch one."""
+    return venv.parent / (f".{venv.name}-{dest.name}" + (f"-{kind}" if kind else ""))
 
 
 def _link(src: Path, dst: Path) -> None:
@@ -915,7 +928,8 @@ def _own_copy(info: Optional[dict], src: Path) -> Optional[Path]:
     if not raw:
         return None
     copy = Path(str(raw))
-    if not copy.name.startswith(".") or not copy.name.endswith(f"-{src.name}"):
+    if not copy.name.startswith(".") or not (copy.name.endswith(f"-{src.name}")
+                                             or copy.name.endswith(f"-{src.name}-deps")):
         return None
     try:
         owner = _copy_owner(copy)
@@ -958,45 +972,147 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
-def _restore_venv(copy: Path, venv: Path) -> list:
-    """Put back, in *venv*, every distribution whose installed version differs
-    from the one kept in *copy* (by :func:`_clone_venv`), removing ones added
-    since: first every changed distribution's files are removed, then every
-    kept one's files are put back, so a file two distributions share ends up
-    restored. The install's own package is left alone, and nothing outside
-    *venv* is removed. Returns the failures."""
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether *a* and *b* are one file or hold the same bytes. False when
+    either cannot be read."""
+    try:
+        if os.path.samefile(a, b):
+            return True
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                ca, cb = fa.read(1 << 20), fb.read(1 << 20)
+                if ca != cb:
+                    return False
+                if not ca:
+                    return True
+    except OSError:
+        return False
+
+
+def venv_changes(copy: Path, venv: Path, *, own: bool = False) -> Optional[list]:
+    """The canonical names of the distributions whose installed version in
+    *venv* differs from the one kept in *copy* (by :func:`_clone_venv`), added
+    or removed ones included; the install's own package only with *own*. None
+    when either side's packages cannot be found."""
     site_now, site_was = site_packages(venv), site_packages(copy)
     if site_now is None or site_was is None:
-        return [f"could not find the packages of {venv} or of its copy {copy}"]
+        return None
     now, was = dists(site_now), dists(site_was)
-    errors = []
-    changed = [name for name in sorted(set(now) | set(was))
-               if name not in _OWN_DISTS
-               and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
-    for name in changed:
-        if name in now:
-            for rel in _record(site_now, now[name]["dir"]):
-                p = (site_now / rel)
-                if _inside(p, venv) and p.is_file():
-                    try:
-                        p.unlink()
-                    except OSError as e:
-                        errors.append(f"remove {rel}: {e}")
-            shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
+    return [name for name in sorted(set(now) | set(was))
+            if (own or name not in _OWN_DISTS)
+            and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
+
+
+# The folder beside a venv that a venv restore moves replaced files into
+# before deleting them (a file a running process has loaded can be moved,
+# not deleted).
+_MOVED_ASIDE = ".localm-replaced"
+
+
+def _move_aside_dir(venv: Path) -> Path:
+    return venv.parent / f"{venv.name}{_MOVED_ASIDE}"
+
+
+def _clear_moved_aside(venv: Path) -> None:
+    """Delete what earlier venv restores moved aside; a file still in use is
+    left for the next one."""
+    d = _move_aside_dir(venv)
+    if d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> list:
+    """Put back, in *venv*, every distribution whose installed version differs
+    from the one kept in *copy* (by :func:`_clone_venv`), removing ones added
+    since, or only those of them named in *only*: the changed distributions'
+    files are moved aside, then the kept ones' files are put back, so a file
+    two distributions share ends up restored. A file both versions hold with
+    the same bytes is left in place. The install's own package (its install
+    record, entry points and editable path file) is restored only with *own*.
+    A folder left empty is removed. Nothing outside *venv* is touched.
+
+    A file is moved aside (``<venv>.localm-replaced``, deleted afterwards),
+    never deleted in place, so a module a running process has loaded (this
+    one included) can be replaced. When a file cannot be moved, every file
+    already moved is moved back and the restore is refused with nothing
+    changed. Returns the failures."""
+    import uuid
+    site_now, site_was = site_packages(venv), site_packages(copy)
+    changed = venv_changes(copy, venv, own=own)
+    if site_now is None or site_was is None or changed is None:
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
+    if only is not None:
+        wanted = {_canon(n) for n in only}
+        changed = [n for n in changed if n in wanted]
+    now, was = dists(site_now), dists(site_was)
+    copy_r, venv_r = copy.resolve(), venv.resolve()
+    keep = {}
     for name in changed:
         if name in was:
             for rel in _record(site_was, was[name]["dir"]):
-                src = (site_was / rel)
-                if not _inside(src, copy) or not src.is_file():
+                src = site_was / rel
+                if _inside(src, copy) and src.is_file():
+                    keep[(venv_r / src.resolve().relative_to(copy_r))] = src
+    unchanged, remove = set(), {}
+    for name in changed:
+        if name in now:
+            for rel in _record(site_now, now[name]["dir"]):
+                p = site_now / rel
+                if not (_inside(p, venv) and p.is_file()):
                     continue
-                dst = venv / src.resolve().relative_to(copy.resolve())
-                try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if dst.exists():
-                        dst.unlink()
-                    _link(src, dst)
-                except OSError as e:
-                    errors.append(f"restore {rel}: {e}")
+                pr = p.resolve()
+                kept = keep.get(pr)
+                if kept is not None and (pr in unchanged or _same_file(p, kept)):
+                    unchanged.add(pr)
+                    continue
+                remove[pr] = rel
+    remove.update({dst: str(dst.relative_to(venv_r)) for dst in keep
+                   if dst not in unchanged and dst not in remove and dst.exists()})
+    aside = _move_aside_dir(venv) / uuid.uuid4().hex
+    moved = []
+    try:
+        for pr in remove:
+            target = aside / f"{len(moved)}-{pr.name}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pr, target)
+            moved.append((pr, target))
+    except OSError as e:
+        back = []
+        for pr, target in reversed(moved):
+            try:
+                os.replace(target, pr)
+            except OSError as be:
+                back.append(f"{pr}: {be}")
+        if back:
+            return [f"{venv}: a file could not be replaced ({e}) AND putting the moved files "
+                    "back failed: " + "; ".join(back[:5])]
+        return [f"{venv}: not restored, a file is in use ({e}); nothing was changed. Close "
+                "every localm process and run the rollback again"]
+    errors = []
+    for name in changed:
+        if name in now:
+            shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
+    for dst, src in keep.items():
+        if dst in unchanged:
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _link(src, dst)
+        except OSError as e:
+            errors.append(f"restore {dst.relative_to(venv_r)}: {e}")
+    for pr, _target in moved:
+        d = pr.parent
+        while d != venv_r and venv_r in d.parents:
+            try:
+                if [e.name for e in d.iterdir()] == ["__pycache__"]:
+                    shutil.rmtree(d / "__pycache__", ignore_errors=True)
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
+    _clear_moved_aside(venv)
     return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
 
@@ -1155,16 +1271,131 @@ def _snapshot_torch(installed_root: Path, dest: Path) -> dict:
 
 
 def _restore_torch(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
+    """Put back what the PyTorch step changed (``"dists"``, every distribution
+    that differs when unrecorded). Nothing is stopped when nothing differs."""
+    copy = _own_copy(info, src)
+    if copy is None:
+        return [f"PyTorch stack: {info.get('venv_copy')} is not a venv copy of {src}"]
+    venv = installed_root / ".venv"
+    changed = venv_changes(copy, venv)
+    if changed is None:
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
+    only = info.get("dists")
+    if isinstance(only, list):
+        changed = [n for n in changed if n in only]
+    if not changed:
+        return []
     left = _stop_torch_holders(installed_root, say)
     if left:
         from localm import updater_runtime
         return ["the PyTorch stack is in use, so it was not restored: "
                 + updater_runtime.describe_holders(left)]
     say("Restoring the PyTorch stack...")
+    return _restore_venv(copy, venv, only=changed)
+
+
+def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
+    """Whether any of the distributions *changed* has a file in a folder the
+    PyTorch stack's processes hold (:data:`_TORCH_HELD`, :data:`_TORCH_HELD_GLOB`)
+    in *venv* or in its copy *copy*."""
+    import fnmatch
+    for site in (site_packages(venv), site_packages(copy)):
+        if site is None:
+            continue
+        d = dists(site)
+        for name in changed:
+            if name not in d:
+                continue
+            for rel in _record(site, d[name]["dir"]):
+                rel = rel.replace("\\", "/")
+                top = rel.split("/", 1)[0]
+                if any(rel.startswith(h + "/") for h in _TORCH_HELD) or fnmatch.fnmatch(
+                        top, _TORCH_HELD_GLOB):
+                    return True
+    return False
+
+
+def record_changes(src, name: str, root) -> None:
+    """Record, in the entry *name* (:data:`DEPS` or ``"pytorch"``) of the snapshot
+    *src*, the distributions that step changed in the venv of the install at
+    *root* (``"dists"``), so a rollback puts back only those and leaves what was
+    installed later (a plugin's packages). Raises OSError when it cannot be
+    recorded."""
+    src = Path(src)
+    state = _read_json(src / STATE_FILE)
+    info = (state or {}).get("components", {}).get(name) if state else None
+    copy = _own_copy(info, src)
+    if info is None or copy is None:
+        raise OSError(f"{src} holds no venv copy for {name}")
+    changed = venv_changes(copy, Path(root) / ".venv", own=name == DEPS)
+    if changed is None:
+        raise OSError(f"could not read the packages of {Path(root) / '.venv'}")
+    info["dists"] = changed
+    (src / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
+def backup_version(backup_dir) -> Optional[str]:
+    """The version the update backup *backup_dir* holds, or None when it cannot
+    be read."""
+    try:
+        return (Path(backup_dir) / "VERSION").read_text(encoding="utf-8").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def snapshot_is_for(src, version: Optional[str]) -> bool:
+    """Whether the snapshot *src* belongs to the update whose backup holds
+    *version*. False when it names another version: a build without these
+    snapshots applied a later update and replaced the backup, so what it keeps
+    is not what a rollback of that update puts back. True when either is
+    unknown."""
+    kept = (_read_json(Path(src) / STATE_FILE) or {}).get("backup_version")
+    return not kept or not version or kept == version
+
+
+def snapshot_readable(src) -> bool:
+    """False when the snapshot *src* has a state file that cannot be read (what
+    it keeps cannot be restored); True when it is readable or absent."""
+    path = Path(src) / STATE_FILE
+    if not path.exists():
+        return True
+    state = _read_json(path)
+    return isinstance(state, dict) and isinstance(state.get("components"), dict)
+
+
+def _restore_deps(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
+    """Put the venv kept before the update's dependency step back: every
+    distribution that step changed (``"dists"``, every one that differs when
+    unrecorded), the install's own install record included. Stops this
+    install's processes holding the PyTorch stack first when a PyTorch library
+    changes."""
     copy = _own_copy(info, src)
     if copy is None:
-        return [f"PyTorch stack: {info.get('venv_copy')} is not a venv copy of {src}"]
-    return _restore_venv(copy, installed_root / ".venv")
+        return [f"dependencies: {info.get('venv_copy')} is not a venv copy of {src}"]
+    venv = installed_root / ".venv"
+    changed = venv_changes(copy, venv, own=True)
+    if changed is None:
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
+    only = info.get("dists")
+    if isinstance(only, list):
+        changed = [n for n in changed if n in only]
+    if not changed:
+        return []
+    if _touches_torch(copy, venv, changed):
+        left = _stop_torch_holders(installed_root, say)
+        if left:
+            from localm import updater_runtime
+            return ["the dependencies are in use, so they were not restored: "
+                    + updater_runtime.describe_holders(left)]
+    say("Restoring the previous dependencies...")
+    return _restore_venv(copy, venv, own=True, only=changed)
+
+
+def _snapshot_deps(installed_root: Path, dest: Path) -> dict:
+    venv = installed_root / ".venv"
+    copy = _venv_copy_path(venv, dest, "deps")
+    _clone_venv(venv, copy, dest)
+    return {"venv_copy": str(copy)}
 
 
 def _snapshot_uv(installed_root: Path, dest: Path) -> dict:
@@ -1230,14 +1461,16 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
             _warn("update: could not remove the kept %s: %s", p, e)
 
 
-def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
+def snapshot(names, dest, *, root, home=None, add: bool = False,
+             for_backup: Optional[str] = None) -> dict:
     """Keep the components *names* of the install at *root* in *dest* and
     return the state :func:`restore` reads, also written to
     ``<dest>/state.json``. An earlier snapshot in *dest* is discarded first;
     with *add* it is kept instead and only the components it does not hold yet
     are added (what it already holds is the older state, the one a rollback
-    needs). Raises OSError; what this call kept is removed again when the
-    snapshot cannot be completed."""
+    needs). *for_backup* names the version the update backup holds
+    (:func:`snapshot_is_for`). Raises OSError; what this call kept is removed
+    again when the snapshot cannot be completed."""
     dest = Path(dest)
     root = Path(root)
     loaded = _read_json(dest / STATE_FILE) if add else None
@@ -1247,6 +1480,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
         discard(dest)
     elif loaded is not None:
         state = loaded
+    if for_backup and not state.get("backup_version"):
+        state["backup_version"] = for_backup
     dest.mkdir(parents=True, exist_ok=True)
     added: list = []
     try:
@@ -1258,6 +1493,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
                 state["components"][name] = _snapshot_comfy(comfy_root(home), dest)
             elif name == "pytorch":
                 state["components"][name] = _snapshot_torch(root, dest)
+            elif name == DEPS:
+                state["components"][name] = _snapshot_deps(root, dest)
             elif name == "uv":
                 state["components"][name] = _snapshot_uv(root, dest)
             else:
@@ -1271,7 +1508,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
                 _drop_one(dest, name, state["components"].pop(name, None)
                           or {"venv_copy": str(_venv_copy_path(
                               (comfy_root(home) / "venv") if name == "comfyui"
-                              else root / ".venv", dest))})
+                              else root / ".venv", dest,
+                              "deps" if name == DEPS else ""))})
             try:
                 (dest / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
             except OSError as w:
@@ -1286,7 +1524,9 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
     them in *names*, back in the install at *root*. Returns the failures as
     strings (empty on success, or when *src* holds nothing). sd.cpp and
     KoboldCpp need nothing: their earlier runtime directories are never
-    replaced."""
+    replaced. The PyTorch copy, taken after the dependency step, is restored
+    before the :data:`DEPS` copy taken before it, so the two steps are undone in
+    reverse order."""
     say = say or (lambda _m: None)
     src = Path(src)
     state = _read_json(src / STATE_FILE)
@@ -1297,6 +1537,8 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
              if names is None or k in names}
     if "pytorch" in comps:
         errors += _restore_torch(Path(root), src, comps["pytorch"], say)
+    if DEPS in comps:
+        errors += _restore_deps(Path(root), src, comps[DEPS], say)
     if "comfyui" in comps:
         errors += _restore_comfy(comfy_root(home), src, comps["comfyui"], say)
     if "uv" in comps:
@@ -1305,9 +1547,9 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
 
 
 def snapshot_names(src) -> list:
-    """The components a snapshot at *src* holds."""
+    """The components a snapshot at *src* holds, :data:`DEPS` included."""
     state = _read_json(Path(src) / STATE_FILE) or {}
-    return [n for n in ORDER if n in (state.get("components") or {})]
+    return [n for n in ORDER + (DEPS,) if n in (state.get("components") or {})]
 
 
 def installed_names(names, root, *, home=None) -> list:
@@ -1320,7 +1562,7 @@ def installed_names(names, root, *, home=None) -> list:
             continue
         if n == "uv" and uv_tool.contained_uv(root) is None:
             continue
-        if n == "pytorch" and site_packages(Path(root) / ".venv") is None:
+        if n in ("pytorch", DEPS) and site_packages(Path(root) / ".venv") is None:
             continue
         out.append(n)
     return out
@@ -1499,9 +1741,13 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         _write_status(status, root, installed_version)
         return status
 
-    snap = snapshot_dir(updater._backup_dir(create=True))
+    backup = updater._backup_dir(create=True)
+    snap = snapshot_dir(backup)
+    held_version = backup_version(backup)
+    if not snapshot_is_for(snap, held_version):
+        discard(snap)
     try:
-        snapshot(names, snap, root=root, home=home, add=True)
+        snapshot(names, snap, root=root, home=home, add=True, for_backup=held_version)
     except OSError as e:
         clear_pending()
         status.update(state="failed", error=f"could not keep a copy of the components: {e}",
@@ -1545,6 +1791,12 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         p["result"] = "updated"
     clear_pending()
     if problem is None:
+        if "pytorch" in names:
+            try:
+                record_changes(snap, "pytorch", root)
+            except OSError as e:
+                _warn("update: could not record which packages the PyTorch step changed: %s; "
+                      "a rollback puts back every package that differs", e)
         rest = summary([p for p in plans if not p["update"]])
         status.update(state="updated", note="; ".join(
             "updated the " + p["label"] + (f": {p['current']} -> {p['target']}"

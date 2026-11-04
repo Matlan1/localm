@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -2813,8 +2814,27 @@ SUBMIT_URL_ERROR = "url_error"
 SUBMIT_ERROR = "error"
 
 
+_WORKFLOW_MODEL_INPUT_RE = re.compile(r"_name\d*$")
+_MODEL_FILE_SUFFIXES = (".safetensors", ".sft", ".gguf", ".ckpt", ".pt", ".pth", ".bin")
+
+
+def workflow_model_names(workflow) -> list:
+    """The distinct model files the API-format *workflow*'s node inputs name, in
+    node order: a string input called ``*_name`` or ``*_name<N>`` that ends in a
+    model file suffix. Never raises."""
+    names: list = []
+    for node in workflow.values() if isinstance(workflow, dict) else ():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        for key, value in inputs.items() if isinstance(inputs, dict) else ():
+            if isinstance(value, str) and _WORKFLOW_MODEL_INPUT_RE.search(key) \
+                    and value.lower().endswith(_MODEL_FILE_SUFFIXES) and value not in names:
+                names.append(value)
+    return names
+
+
 def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
     """Queue *workflow* in ComfyUI (POST /prompt) and return ``(kind, value)``.
+    An accepted job logs each model it names at INFO (``workflow_model_names``).
 
     ``kind`` is one of the ``SUBMIT_*`` sentinels:
       - ``SUBMIT_OK``        -> value is the prompt_id (str)
@@ -2835,6 +2855,9 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
             return SUBMIT_NO_ID, None
+        from localm.debuglog import logger
+        for name in workflow_model_names(workflow):
+            logger.info("comfy: job uses model %s", name)
         return SUBMIT_OK, prompt_id
     except urllib.error.HTTPError as e:
         return SUBMIT_HTTP_ERROR, e

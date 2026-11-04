@@ -200,6 +200,7 @@ test("discover-filters: adding a result badged with a known type hints THAT type
   const pull = calls.find((c) => c.url === "/api/models/pull");
   assert.equal(pull.body.model_type, "diffusion-unet",
     "what you see badged is what it registers as - the detected type is the hint");
+  assert.equal(pull.body.type_is_hint, true, "a badge is not a type the user set by hand");
 });
 
 test("discover-filters: an 'unknown'-badged result hints the single narrowed-to type", async () => {
@@ -218,6 +219,7 @@ test("discover-filters: an 'unknown'-badged result hints the single narrowed-to 
   const pull = calls.find((c) => c.url === "/api/models/pull");
   assert.equal(pull.body.model_type, "vae",
     "a metadata-less VAE found while searching only VAEs registers as vae, not a guess");
+  assert.equal(pull.body.type_is_hint, true, "the narrowed filter is not a type the user set by hand");
 });
 
 test("discover-filters: an 'unknown'-badged result with MANY types checked forces no hint", async () => {

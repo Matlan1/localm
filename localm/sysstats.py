@@ -356,6 +356,17 @@ _VRAM_REFRESH_INTERVAL_S = 10.0   # much longer than _GPU_UTIL_REFRESH_INTERVAL_
                                   # changes on the timescale of plugging in
                                   # hardware, not of a ~2.5s UI poll.
 
+# A refresh asks list_gpus() (which starts a torch child process when torch is not
+# imported here) only when it must:
+#   * _VRAM_TOPOLOGY_INTERVAL_S: the device list is re-read this often while a
+#     torch-free source re-reads every device's used VRAM on each refresh.
+#   * _VRAM_UNCOVERED_INTERVAL_S: used VRAM is re-read this often while no
+#     torch-free source covers a device that reports free VRAM.
+# Torch already imported in this process, or no completed reading yet, asks every
+# refresh.
+_VRAM_TOPOLOGY_INTERVAL_S = 300.0
+_VRAM_UNCOVERED_INTERVAL_S = 60.0
+
 _vram_lock = threading.Lock()
 _vram_inflight = False
 _vram_last: dict | None = None      # last COMPLETED reading. May be {} (looked,
@@ -374,6 +385,11 @@ _vram_probe_epoch = 0               # bumped by _reset_vram_probe_cache() to
                                     # retire an in-flight probe; read (never
                                     # assigned) by _vram_probe. See that
                                     # function and _reset_vram_probe_cache.
+_vram_full_at: float | None = None  # monotonic time of the last list_gpus()-driven
+                                    # reading that completed GPU_PROBE_OK; None
+                                    # until one has, and again after one that did not.
+_full_status = threading.local()    # .value: probe status of the calling thread's
+                                    # last _compute_vram() reading.
 
 
 def _reset_vram_probe_cache() -> None:
@@ -386,8 +402,9 @@ def _reset_vram_probe_cache() -> None:
     unmocked probe from writing its reading afterwards. Bumping the epoch makes
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
-    global _vram_ready, _vram_last_is_seed
+    global _vram_ready, _vram_last_is_seed, _vram_full_at
     with _vram_lock:
+        _vram_full_at = None
         _vram_last = None
         _vram_last_is_seed = False
         _vram_last_at = None
@@ -435,10 +452,26 @@ def _compute_vram() -> dict:
     Joins a GPU probe already in flight (``wait_for_inflight``) instead of
     taking its instant BUSY answer: this runs on its own thread, and a BUSY
     reading is never trusted, so the figure would drop to ``total`` alone for a
-    whole refresh interval whenever another caller held the probe first."""
-    from localm.discover import (FREE_SCOPE_DEVICE as _FREE_SCOPE_DEVICE,
-                                 last_known_gpus, vram_capacity)
+    whole refresh interval whenever another caller held the probe first.
+
+    Always takes a fresh list_gpus() reading; :func:`_refresh_vram` decides when
+    that is needed. Leaves the reading's probe status in ``_full_status.value``
+    on the calling thread."""
+    from localm.discover import vram_capacity
     info, status = vram_capacity(return_status=True, wait_for_inflight=True)
+    _full_status.value = status
+    return _shape_vram(info, status)
+
+
+def _shape_vram(info: dict, status, devices: list | None = None) -> dict:
+    """The meter's ``{"vram": {...}}`` for a ``vram_capacity`` answer *info*
+    taken with probe *status*, or ``{}`` when it has no total.
+
+    *devices* is the per-device reading *info* was built from; None reads
+    ``last_known_gpus()`` and, when that is empty, the native runtime's device
+    list."""
+    from localm.discover import FREE_SCOPE_DEVICE as _FREE_SCOPE_DEVICE
+    from localm.discover import last_known_gpus
     total = info.get("total")
     if not total:
         return {}
@@ -454,8 +487,8 @@ def _compute_vram() -> dict:
     # devices, and with no split it falls back to vram_info(), the single MAIN GPU.
     #
     # No extra probes: this reads the reading vram_capacity() just took (see
-    # last_known_gpus). It sits inside _compute_vram, which is single-flighted onto
-    # a background thread and throttled to _VRAM_REFRESH_INTERVAL_S.
+    # last_known_gpus). It runs on the single-flighted background thread of
+    # _vram_probe, throttled to _VRAM_REFRESH_INTERVAL_S.
     #
     # The SAME trust gate applies per device: a process-scoped or stale reading
     # overstates free, so those devices report total only.
@@ -471,7 +504,7 @@ def _compute_vram() -> dict:
         # included; it is the fallback, read through the crash-isolated probe
         # daemon so the native runtime is never loaded into this process. None
         # means the registry could not be read this call: no breakdown.
-        raw = last_known_gpus()
+        raw = devices if devices is not None else last_known_gpus()
         if not raw:
             try:
                 from localm.discover import _apply_device_global_free
@@ -516,9 +549,151 @@ def _compute_vram() -> dict:
     return {"vram": vram}
 
 
+def _nvidia_smi_used_by_bus() -> dict[int, tuple[int, int]]:
+    """``{pci_bus_number: (total_bytes, used_bytes)}`` for every board nvidia-smi
+    lists, or ``{}`` when nvidia-smi is absent, fails or times out. Whole-board
+    figures, counting every process. Never raises."""
+    import subprocess
+    from localm import sysprog
+    from localm.debuglog import logger
+    from localm.discover import _ISOLATED_TORCH_DRAIN_TIMEOUT, _pci_bus_number
+    smi = sysprog.find("nvidia-smi")
+    if not smi:
+        return {}
+    try:
+        proc = subprocess.Popen(
+            [smi, "--query-gpu=pci.bus_id,memory.total,memory.free",
+             "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate(timeout=_ISOLATED_TORCH_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass
+            logger.debug("_vram: nvidia-smi did not answer within 5s")
+            return {}
+        if proc.returncode != 0:
+            logger.debug("_vram: nvidia-smi exited with %s", proc.returncode)
+            return {}
+        boards: dict[int, tuple[int, int]] = {}
+        for line in out.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            bus = _pci_bus_number(parts[0])
+            try:
+                total = int(parts[1]) * 1024 ** 2
+                free = int(parts[2]) * 1024 ** 2
+            except ValueError:
+                continue
+            if bus is not None:
+                boards[bus] = (total, max(0, total - free))
+        return boards
+    except Exception as e:
+        logger.debug("_vram: nvidia-smi query failed: %s", e)
+        return {}
+
+
+def _fresh_device_readings(devices: list) -> list | None:
+    """Copies of *devices* (a list_gpus() reading) with each device's ``free`` and
+    ``free_scope`` re-read from sources that never import torch, or None when any
+    device that reports ``free`` has no such source.
+
+    Sources, in order: the Windows ADL/PDH device-global reading
+    (:func:`localm.gpu_usage.device_global_used_bytes`), then nvidia-smi matched
+    on the device's ``pci_bus_id``. The re-read ``free`` is device-global and
+    tagged ``FREE_SCOPE_DEVICE``. A device without ``free`` is returned as it was."""
+    from localm import gpu_usage
+    from localm.debuglog import logger
+    from localm.discover import FREE_SCOPE_DEVICE
+    fresh = [dict(d) for d in devices]
+    wanted = [d for d in fresh if d.get("free") is not None]
+    if not wanted:
+        return None
+    try:
+        used = dict(gpu_usage.device_global_used_bytes(fresh))
+    except Exception as e:
+        logger.debug("_vram: device-global used reading unavailable: %s", e)
+        used = {}
+    if any(d["index"] not in used for d in wanted):
+        boards = _nvidia_smi_used_by_bus()
+        for d in wanted:
+            bus = d.get("pci_bus_id")
+            if (d["index"] not in used and isinstance(bus, int)
+                    and not isinstance(bus, bool) and bus in boards):
+                used[d["index"]] = boards[bus][1]
+    for d in wanted:
+        u = used.get(d["index"])
+        if u is None:
+            return None
+        total = int(d["total"])
+        d["free"] = max(0, min(total, total - int(u)))
+        d["free_scope"] = FREE_SCOPE_DEVICE
+    return fresh
+
+
+def _cheap_vram(fresh: list) -> dict:
+    """:func:`_compute_vram`'s reading for the device list *fresh*
+    (:func:`_fresh_device_readings`), with no list_gpus() probe: the split,
+    main-GPU and multi-GPU rules of ``vram_capacity`` apply to *fresh* as they
+    would to a probe's answer."""
+    from localm import discover
+    state = discover.new_shared_gpu_reading()
+    state["gpus"] = fresh
+    info, status = discover.using_shared_gpu_reading(
+        state, discover.vram_capacity, return_status=True, wait_for_inflight=True)
+    return _shape_vram(info, status, fresh)
+
+
+def _refresh_vram() -> tuple[dict | None, str | None]:
+    """``(reading, full_status)`` for one refresh of the meter.
+
+    A list_gpus() reading (:func:`_compute_vram`; ``full_status`` is its probe
+    status, None when :func:`_compute_vram` did not record one) is taken when
+    none has completed OK yet, when torch is already imported in this process, or
+    when the last one is older than the interval that applies:
+    :data:`_VRAM_TOPOLOGY_INTERVAL_S` while :func:`_fresh_device_readings`
+    re-reads every device (or there is no device),
+    :data:`_VRAM_UNCOVERED_INTERVAL_S` while it cannot. Otherwise ``full_status``
+    is None and the reading is :func:`_cheap_vram` of the re-read devices (for
+    no device: the rest of ``vram_capacity`` that needs no torch, i.e. the
+    Windows registry total with its ADL/PDH figure and the native runtime's
+    registry), or None (keep the reading already cached) when they cannot be
+    re-read.
+
+    The device list is ``last_known_gpus()``, so a probe any other caller took
+    is picked up at once. May raise; :func:`_vram_probe` is the boundary."""
+    from localm import discover
+
+    def _full() -> tuple[dict | None, str | None]:
+        _full_status.value = None
+        reading = _compute_vram()
+        return reading, _full_status.value
+
+    with _vram_lock:
+        full_at = _vram_full_at
+    if full_at is None or discover._torch_is_resident():
+        return _full()
+    age = time.monotonic() - full_at
+    devices = discover.last_known_gpus()
+    fresh = _fresh_device_readings(devices) if devices else []
+    limit = (_VRAM_UNCOVERED_INTERVAL_S if fresh is None
+             else _VRAM_TOPOLOGY_INTERVAL_S)
+    if age >= limit:
+        return _full()
+    if fresh is None:
+        return None, None
+    return _cheap_vram(fresh) or None, None
+
+
 def _vram_probe(my_epoch: int) -> None:
     """The actual (blocking) vram_capacity() call, which drives list_gpus()'s
-    out-of-process torch probe. Runs on its OWN single-flighted daemon thread,
+    out-of-process torch probe, or the torch-free re-read of a known device list
+    (:func:`_refresh_vram`). Runs on its OWN single-flighted daemon thread,
     started by :func:`_vram` - never call this directly.
 
     On a genuine exception the cache is left UNTOUCHED, never overwritten with
@@ -537,6 +712,7 @@ def _vram_probe(my_epoch: int) -> None:
     means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
     reading is discarded instead of racing whatever probe holds the slot now."""
     global _vram_inflight, _vram_last, _vram_last_at, _vram_last_is_seed
+    global _vram_full_at
     with _vram_lock:
         first_ever = _vram_last is None
     if first_ever:
@@ -552,8 +728,9 @@ def _vram_probe(my_epoch: int) -> None:
                     _vram_last = {"vram": quick}
                     _vram_last_is_seed = True
     computed = None
+    full_status = None
     try:
-        computed = _compute_vram()
+        computed, full_status = _refresh_vram()
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("_vram: probe raised unexpectedly: %s", e)
@@ -563,6 +740,9 @@ def _vram_probe(my_epoch: int) -> None:
             logger.debug("_vram: discarding probe result from retired epoch "
                          "%s (current %s)", my_epoch, _vram_probe_epoch)
             return
+        if full_status is not None:
+            from localm.discover import GPU_PROBE_OK
+            _vram_full_at = time.monotonic() if full_status == GPU_PROBE_OK else None
         if computed and computed.get("vram"):
             _vram_last = computed
             _vram_last_is_seed = False
@@ -587,8 +767,9 @@ def _vram(wait_first: bool = False) -> dict:
     NEVER blocks the calling (poll) thread on the underlying torch/nvidia-smi
     probe: the actual vram_capacity() call runs single-flighted on its own
     background thread (:func:`_vram_probe`), throttled to at most once per
-    :data:`_VRAM_REFRESH_INTERVAL_S`, and this function always returns
-    immediately with the last completed reading - omitting the section (never
+    :data:`_VRAM_REFRESH_INTERVAL_S` (most refreshes re-read used VRAM without
+    a list_gpus() probe, see :func:`_refresh_vram`), and this function always
+    returns immediately with the last completed reading - omitting the section (never
     fabricating one) until a reading has landed.
 
     *wait_first*: for a ONE-SHOT caller that will never poll again to pick up

@@ -691,6 +691,8 @@ def _worker_main(req_q, resp_q) -> None:
 
     from localm._mp_spawn import (ignore_interrupt_signals,
                                    install_parent_death_watchdog)
+    from localm.debuglog import attach_child_logging, logger
+    attach_child_logging()
     install_parent_death_watchdog()   # die with the parent even on a hard kill
                                        # (End Task / force-close); daemon=True is
                                        # atexit-gated and does not cover that, so
@@ -741,6 +743,7 @@ def _worker_main(req_q, resp_q) -> None:
                 # cannot download past the parent's network-policy decision.
                 model = _load_whisper(WhisperModel, name, download_root, local_files_only)
                 model_name = name
+                logger.info("whisper model ready: %s", name)
         except Exception as e:
             model = None
             resp_q.put(("error", "load", str(e)))

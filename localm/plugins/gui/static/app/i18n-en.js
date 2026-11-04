@@ -24,6 +24,7 @@ export const I18N_EN = {
   "sidebar.model": "Model",
   "sidebar.newConversation": "New conversation",
   "sidebar.noModelLoaded": "No model loaded",
+  "sidebar.modelNotLoaded": "{model} (not loaded)",
   "sidebar.peerRoute.keyPlaceholder": "peer instance API key",
   "sidebar.peerRoute.message": "Another localm instance at {host}:{port} already has \"{model}\" loaded. Route requests there instead of loading your own copy? Enter that instance's API key to route, or Cancel to load locally.",
   "sidebar.peerRoute.messageOpen": "Another localm instance at {host}:{port} already has \"{model}\" loaded. Use that copy instead of loading your own? Cancel loads it locally.",
@@ -1384,6 +1385,10 @@ export const I18N_EN = {
   "activity.interruptedPill.other": "{count} interrupted downloads",
   "activity.interruptedHead": "Interrupted downloads",
   "activity.nothingRunning": "Nothing running.",
+  "activity.stallPill": "Server was blocked",
+  "activity.stallsHead": "Recent server stalls",
+  "activity.stall.gil": "The server was blocked for {seconds} s: Python was busy in {where}",
+  "activity.stall.loop": "The server was blocked for {seconds} s: its event loop was busy in {where}",
   "models.pull.disconnectedStatus": "connection lost - it may still be running",
   "models.pull.disconnectedToast":
     "Lost connection to the pull - it may still be running in the background. Check the Models list in a moment.",
@@ -1424,7 +1429,7 @@ export const I18N_EN = {
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
   "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.",
+    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into ~/.localm/models.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
@@ -2544,7 +2549,7 @@ export const I18N_EN = {
   // ---- Settings > Updates > Roll back ----
   "settings.rollback.subHead": "Roll back",
   "settings.rollback.help":
-    "Restore the build you were running before the last update, then restart. This is for an update that applied cleanly but turned out worse. It restores that build's files; it does not undo package installs an update made along the way.",
+    "Restore the build you were running before the last update, then restart. This is for an update that applied cleanly but turned out worse. It restores that build's files, its dependencies, its native runtime and its components.",
   "settings.rollback.rollbackButton": "Roll back",
   "settings.rollback.confirmTitle": "Roll back to the previous build?",
   "settings.rollback.confirmBody":
@@ -2556,6 +2561,14 @@ export const I18N_EN = {
   "settings.rollback.rollingBack": "Rolling back...",
   "settings.rollback.rolledBackTo": "Rolled back to {version}. Restarting...",
   "settings.rollback.failed": "Roll back failed: {message}",
+  "settings.parts.subHead": "Installed parts",
+  "settings.parts.help": "Some parts of this install are not at the installed localm version. Repair brings each one to it, then restarts.",
+  "settings.parts.repairButton": "Repair",
+  "settings.parts.repairing": "Repairing...",
+  "settings.parts.repaired": "Repaired. Restarting...",
+  "settings.parts.repairedNoRestart": "Repaired.",
+  "settings.parts.failed": "Repair failed: {message}",
+  "settings.parts.lastSteps": "Last runtime and component updates:",
 
   // ---- Settings > Updates > App launcher ----
   "settings.launcher.subHead": "App launcher",
@@ -2815,6 +2828,7 @@ export const I18N_EN = {
   "enhance.enterPrompt": "Write a short prompt first.",
   "enhance.failed": "Could not enhance the prompt: {message}",
   "enhance.noModel": "No chat model is loaded. Load one in the sidebar, then try again.",
+  "enhance.loadingModel": "Loading {model}...",
   "enhance.title": "Ask the loaded chat model to expand this prompt for the selected model",
   "enhance.truncated": "{model} used all of its reply space on reasoning before it wrote the prompt. Try a model without reasoning.",
   "enhance.undo": "Undo",

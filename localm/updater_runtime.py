@@ -331,7 +331,7 @@ def holders(lib) -> list:
                 from localm.debuglog import logger
                 logger.warning("update: could not ask which process holds the runtime: %s", e)
                 found = []
-            return found or [{"pid": None, "name": f"an unidentified process ({held[0].name})"}]
+            return found or [{"pid": None, "name": f"an unidentified process ({held[0]})"}]
         if sys.platform.startswith("linux") and lib.is_dir():
             return _proc_holders(lib)
         return []
@@ -531,9 +531,11 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
     terminated, its registry entry removed and its crash marker cleared, then
     this waits up to *wait* seconds for the OS to release the files.
 
-    Stops nothing when any holder is not this install's. *say* receives each
-    step as one line of text. With *stop* False nothing is stopped and only the
-    holders that are not this install's are returned.
+    Stops nothing when any holder is not this install's. A holder Windows
+    cannot name (pid None, usually a process that is exiting) is waited out for
+    up to *wait* seconds before it counts as one. *say* receives each step as
+    one line of text. With *stop* False nothing is stopped and only the holders
+    that are not this install's are returned.
 
     Returns the holders left: empty when the runtime is free, else the holders
     that are not this install's or did not exit. Never raises."""
@@ -545,6 +547,14 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
         if not found:
             return []
         tops, foreign = classify_holders(found, root, home=home)
+        unnamed_until = time.monotonic() + max(0.5, wait)
+        while foreign and all(not h.get("pid") for h in foreign) and (
+                time.monotonic() < unnamed_until):
+            time.sleep(0.25)
+            found = holders(lib)
+            if not found:
+                return []
+            tops, foreign = classify_holders(found, root, home=home)
         if foreign or not stop:
             return foreign
         deadline = time.monotonic() + max(0.5, wait)
@@ -589,12 +599,14 @@ def _updates_dir() -> Path:
     return updater._updates_dir(create=True)
 
 
-def write_pending(p: dict, *, root, version: str) -> None:
+def write_pending(p: dict, *, root, version: str, repair: bool = False) -> None:
     """Record the re-provision :func:`plan` decided for the install at *root*,
-    for :func:`finish_pending`. Raises OSError when it cannot be written."""
+    for :func:`finish_pending`; *repair* marks one a repair of the installed
+    version recorded (not an update, so a failure rolls nothing back). Raises
+    OSError when it cannot be written."""
     data = {"root": str(Path(root).resolve()), "version": version,
             "backend": p["backend"], "from": p["current"], "target": p["target"],
-            "pins": p["pins"]}
+            "pins": p["pins"], "repair": bool(repair)}
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -619,11 +631,12 @@ def read_pending() -> Optional[dict]:
     return data
 
 
-def catch_up(root=None) -> Optional[dict]:
+def catch_up(root=None, *, repair: bool = False) -> Optional[dict]:
     """Record a pending re-provision when none is pending and the runtime
     installed at *root* (default the running install) is not the build that
     install's own release pins for its backend, the user having chosen neither
-    a pin nor "latest" (:func:`plan` of the install against itself). Covers an
+    a pin nor "latest" (:func:`plan` of the install against itself); *repair*
+    marks it as in :func:`write_pending`. Covers an
     install updated by an updater from before this check, setup re-run over an
     older runtime, and a copied install. Returns the plan when it recorded one,
     else None. Raises OSError when the marker cannot be written."""
@@ -634,7 +647,7 @@ def catch_up(root=None) -> Optional[dict]:
     p = plan(root, root)
     if not p["reprovision"]:
         return None
-    write_pending(p, root=root, version=_version.read_version())
+    write_pending(p, root=root, version=_version.read_version(), repair=repair)
     return p
 
 
@@ -647,8 +660,10 @@ def clear_pending() -> None:
 
 
 def _write_status(status: dict) -> None:
+    import time
     try:
-        (_updates_dir() / STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+        (_updates_dir() / STATUS_FILE).write_text(json.dumps(dict(status, at=time.time())),
+                                                  encoding="utf-8")
     except OSError as e:
         from localm.debuglog import logger
         logger.warning("update: could not record the runtime update result: %s", e)

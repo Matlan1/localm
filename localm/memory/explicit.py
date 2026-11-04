@@ -47,12 +47,31 @@ _RECOLLECTION_RE = re.compile(
     r"^(?:time|day|night|moment|one\s+time|summer|winter|trip|conversation|chat)\b",
     re.IGNORECASE)
 _ADDRESSES_ASSISTANT_RE = re.compile(r"^(?:you|du)\b", re.IGNORECASE)
+_TASK_VERBS = (
+    r"(?:fix|explain|add|summari[sz]e|rewrite|refactor|debug|review|translate|change|"
+    r"update|improve|edit|delete|remove|run|test|check|continue|repeat|show|send|use|"
+    r"finish|complete|help|look)"
+)
+_TASK_ON_IT = _TASK_VERBS + r"\s+(?:it|this|that|them|those)\b"
+_REQUEST_RE = re.compile(
+    r"\b(?:can|could|would|will)\s+you\b|\b(?:and|then)\s+(?:please\s+)?" + _TASK_ON_IT,
+    re.IGNORECASE)
+_BACK_REFERENCE_RE = re.compile(
+    r"\bfrom\s+(?:earlier|above)\b"
+    r"|\byou\s+(?:just\s+)?(?:wrote|sent|gave|made|said|showed|suggested|mentioned|"
+    r"posted|generated|created)\b"
+    r"|\bwe\s+(?:just\s+)?(?:discussed|talked\s+about)\b",
+    re.IGNORECASE)
+_IMPERATIVE_NEXT_RE = re.compile(
+    r"^\s*(?:(?:and|then|now|please|pls|ok|okay)[,!]?\s+)*" + _TASK_ON_IT,
+    re.IGNORECASE)
 _PARAGRAPH_RE = re.compile(r"\n\s*\n")
 _TERMINATOR_RE = re.compile(r"[.!?]+(?=\s|$)")
 _ABBREVIATIONS = frozenset((
     "e.g i.e z.b d.h u.a z.t v.a u.s.w etc vs bzw usw ca inc ltd co corp dr mr mrs ms "
     "prof st jr sr nr tel str evtl ggf bspw approx no").split())
 _MIN_FACT_CHARS = 6
+_MAX_SCAN_CHARS = 4000
 
 
 def _first_sentence(text: str) -> str:
@@ -61,11 +80,13 @@ def _first_sentence(text: str) -> str:
     a lower-case word does not end it."""
     para = " ".join(_PARAGRAPH_RE.split(text.strip())[0].split())
     for m in _TERMINATOR_RE.finditer(para):
-        words = para[:m.start()].split()
-        word = words[-1].lower().strip("\"'([") if words else ""
-        following = para[m.end():].lstrip()
+        end = m.start()
+        if end and para[end - 1] == " ":
+            end -= 1
+        word = para[para.rfind(" ", 0, end) + 1:end].lower().strip("\"'([")
+        nxt = m.end() + 1 if para[m.end():m.end() + 1] == " " else m.end()
         if m.group().startswith(".") and (word in _ABBREVIATIONS
-                                          or following[:1].islower()):
+                                          or para[nxt:nxt + 1].islower()):
             continue
         return para[:m.end()]
     return para
@@ -84,9 +105,13 @@ def explicit_fact(message: str) -> Optional[str]:
     assistant ("remember that you are a pirate") is an instruction for this chat,
     not a fact about the user, and is not stored. A first sentence ending in "?" is
     a request only when it asks ("can you remember that ...?") and carries "that"
-    or "dass". The fact is the first sentence after the request, trailing
-    punctuation removed, cut to MAX_TEXT_LEN."""
-    text = message.strip() if isinstance(message, str) else ""
+    or "dass". After a bare "that" (no colon), a fact that does not start with a
+    first-person word is not stored when it carries a request ("can you", "and
+    explain it"), refers back to earlier chat ("from earlier", "you wrote"), or is
+    followed by a task on it ("... . Fix it."). Only the first _MAX_SCAN_CHARS
+    characters of *message* are read. The fact is the first sentence after the
+    request, trailing punctuation removed, cut to MAX_TEXT_LEN."""
+    text = message[:_MAX_SCAN_CHARS].strip() if isinstance(message, str) else ""
     if not text:
         return None
     for rx, english in ((_EN_RE, True), (_DE_RE, False)):
@@ -115,5 +140,11 @@ def explicit_fact(message: str) -> Optional[str]:
             return None
         if _ADDRESSES_ASSISTANT_RE.match(fact):
             return None
+        if (english and keyword and connect.group("kw").lower() == "that"
+                and ":" not in connect.group(0) and not _FIRST_PERSON_RE.match(fact)):
+            following = " ".join(rest.split())[len(sentence):]
+            if (_REQUEST_RE.search(fact) or _BACK_REFERENCE_RE.search(fact)
+                    or _IMPERATIVE_NEXT_RE.match(following)):
+                return None
         return fact[:MAX_TEXT_LEN]
     return None

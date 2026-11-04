@@ -283,6 +283,11 @@ export function pickPath(opts = {}) {
         updateCount();
       }
 
+      // Moves focus to the listing when the focused control has just been removed.
+      function refocusList() {
+        if (document.activeElement === document.body) listEl.focus();
+      }
+
       // ---- path bar: clickable breadcrumbs, editable on demand ----
       function renderPath() {
         pathWrap.replaceChildren();
@@ -314,16 +319,28 @@ export function pickPath(opts = {}) {
         go.type = "button";
         pathWrap.append(inp, go);
         inp.focus(); inp.select();
-        const commit = () => { const v = inp.value.trim(); if (v) navigate(v); else renderPath(); };
-        go.onmousedown = (e) => { e.preventDefault(); commit(); };
+        const commit = () => {
+          const v = inp.value.trim();
+          if (v) { navigate(v).then(refocusList); return; }
+          renderPath();
+          refocusList();
+        };
+        // A mouse press leaves focus in the input; the click then commits.
+        go.onmousedown = (e) => { e.preventDefault(); };
+        go.onclick = commit;
+        go.onkeydown = (e) => {
+          if (e.key === "Escape") { e.preventDefault(); renderPath(); listEl.focus(); }
+        };
         inp.onkeydown = (e) => {
           if (e.key === "Enter") { e.preventDefault(); commit(); }
           else if (e.key === "Escape") { e.preventDefault(); renderPath(); listEl.focus(); }
         };
-        // Revert to breadcrumbs on blur unless the Go button took the click.
-        inp.onblur = () => setTimeout(() => {
-          if (pathWrap.contains(inp)) renderPath();
+        // Revert to breadcrumbs once focus has left both the input and Go.
+        const revertOnLeave = () => setTimeout(() => {
+          if (pathWrap.contains(inp) && !pathWrap.contains(document.activeElement)) renderPath();
         }, 100);
+        inp.onblur = revertOnLeave;
+        go.onblur = revertOnLeave;
       }
 
       // ---- listing ----
@@ -443,24 +460,31 @@ export function pickPath(opts = {}) {
           const name = inp.value.trim();
           if (!name) { cancel(); return; }
           done = true;
-          mkdirFs(current, name).then((created) => {
-            navigate(created.path);
-          }).catch((e) => {
+          mkdirFs(current, name).then((created) => navigate(created.path)).then(refocusList).catch((e) => {
             toast(t("picker.createFolderFailed", { message: e.message }), true);
             done = false;
             renderList();
+            refocusList();
           });
         };
-        okIc.onmousedown = (e) => { e.preventDefault(); commit(); };
-        cancelIc.onmousedown = (e) => { e.preventDefault(); cancel(); };
-        inp.onkeydown = (e) => {
-          if (e.key === "Enter") { e.preventDefault(); commit(); }
-          else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+        // A mouse press leaves focus in the input; the click then acts.
+        okIc.onmousedown = (e) => { e.preventDefault(); };
+        cancelIc.onmousedown = (e) => { e.preventDefault(); };
+        okIc.onclick = commit;
+        cancelIc.onclick = () => { cancel(); refocusList(); };
+        // The row's keys stop here: listEl has its own for arrows, Enter and Backspace.
+        row.onkeydown = (e) => {
+          e.stopPropagation();
+          if (e.key === "Escape") { e.preventDefault(); cancel(); refocusList(); }
+          else if (e.key === "Enter" && e.target === inp) { e.preventDefault(); commit(); }
         };
-        // Revert on blur unless a button's mousedown already set `done`.
-        inp.onblur = () => setTimeout(() => {
-          if (!done && listEl.contains(row)) cancel();
+        // Revert once focus has left the input and both buttons, unless committed.
+        const revertOnLeave = () => setTimeout(() => {
+          if (!done && listEl.contains(row) && !row.contains(document.activeElement)) cancel();
         }, 100);
+        inp.onblur = revertOnLeave;
+        okIc.onblur = revertOnLeave;
+        cancelIc.onblur = revertOnLeave;
       }
       newFolderBtn.onclick = startCreateFolder;
 
@@ -678,7 +702,9 @@ export function pickPath(opts = {}) {
       const escHandler = (e) => {
         if (e.key !== "Escape") return;
         const a = document.activeElement;
-        if (a && a.tagName === "INPUT" && root.contains(a)) return;   // let inputs handle Esc
+        // Inputs and the buttons of an open editor handle Esc themselves.
+        if (a && root.contains(a)
+            && (a.tagName === "INPUT" || a.matches(".picker-path-go, .picker-inline-btn"))) return;
         e.preventDefault();
         finish(null);
       };

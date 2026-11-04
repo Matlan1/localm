@@ -210,7 +210,8 @@ def _parse_plugin_selection(raw, available):
 @click.option("--plugins", "plugins_csv", default=None,
               help="Comma-list to install non-interactively (skips the prompt).")
 @click.option("--all", "install_all", is_flag=True,
-              help="Install every first-party plugin.")
+              help="Install every first-party plugin offered on this machine, "
+                   "except the opt-in ones (install those by name).")
 @click.option("--defaults", "install_defaults", is_flag=True,
               help="Install the recommended set non-interactively (coder, rag, web, tts).")
 @click.option("--with-deps/--no-deps", "with_deps", default=None,

@@ -272,6 +272,14 @@ class TestRegistrySlice:
             assert set(m) == {"name", "filename"}, (
                 "/api/models does not expose registry paths and neither may this")
 
+    def test_a_registered_folder_is_not_a_component(self, tmp_path):
+        folder = tmp_path / "ace_step_transformer"
+        folder.mkdir()
+        reg = {"ace": {"path": str(folder), "source": "hf", "model_type": "diffusion-unet"},
+               "file": {"path": str(tmp_path / "unet.safetensors"), "source": "local",
+                        "model_type": "diffusion-unet"}}
+        assert [m["name"] for m in media_roles.registry_models_of_type("diffusion-unet", reg)] == ["file"]
+
     def test_a_malformed_entry_is_skipped_not_fatal(self):
         out = media_roles.registry_models_of_type("vae", REGISTRY)
         assert "broken" not in {m["name"] for m in out}

@@ -218,6 +218,7 @@ class ExllamaBackend(BaseBackend):
         self.effective_ctx_max = capacity
         self.n_ctx_max = capacity
         self._loaded = True
+        logger.info("exllama model ready: %s", Path(self.model_path).name)
         from rich.markup import escape
         for note in meta.get("load_notes") or []:
             if isinstance(note, str) and note.strip():
