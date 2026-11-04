@@ -26,7 +26,9 @@ from tests._bare_llama import make_bare_llama
 
 
 class _MockBackend(BaseBackend):
-    def __init__(self, capacity: Optional[int] = 4096) -> None:
+    def __init__(self, capacity: Optional[int] = 4096, ctx_auto: Optional[bool] = False) -> None:
+        if ctx_auto is not None:
+            self.ctx_auto = ctx_auto
         self.effective_ctx_max = capacity
         self.n_ctx_max = capacity
         self.display_name = "test-cap-model"
@@ -112,9 +114,25 @@ class TestPreDispatchContextCapacityGuard:
         assert resp.status_code == 413
         assert f"{expected_tokens} tokens" in resp.json()["detail"]
         assert "100 tokens" in resp.json()["detail"]
-        assert "localm config n_ctx_max" in resp.json()["detail"]
+        assert "localm config n_ctx_max 32768" in resp.json()["detail"]
         assert backend.loaded is True
         assert backend.unloaded is False
+
+    @pytest.mark.parametrize("ctx_auto, says, never", [
+        (True, "sized from free memory", "n_ctx_max 32768"),
+        (False, "localm config n_ctx_max 32768", "sized from free memory"),
+        (None, "Start a new chat or shorten the message", "n_ctx_max"),
+    ])
+    def test_the_refusal_names_what_applies_to_the_model(self, ctx_auto, says, never):
+        client = TestClient(create_app(_EngineWithBackend(_MockBackend(capacity=100, ctx_auto=ctx_auto))))
+        resp = client.post("/v1/chat/completions", json={
+            "model": "test-cap-model", "stream": False,
+            "messages": [_SKIP_ROLE_NUDGE_SYSTEM, {"role": "user", "content": "x" * 150}],
+        })
+        assert resp.status_code == 413
+        detail = resp.json()["detail"]
+        assert says in detail
+        assert never not in detail
 
     def test_chat_completions_streaming_rejects_oversized_prompt_before_stream(self):
         backend = _MockBackend(capacity=100)
@@ -238,6 +256,14 @@ class TestWorkerNonCrashingOnContextOverflow:
         assert "4686 tokens" in err_msg
         assert "n_ctx_max=4096" in err_msg
         assert "localm config n_ctx_max 32768" in err_msg
+
+    def test_llama_outgrown_message_follows_ctx_auto(self):
+        llm = make_bare_llama(_n_ctx_max=4096, _ctx_auto=True)
+        with pytest.raises(ContextCapacityExceededError) as excinfo:
+            llm._fit_generation_budget(n_prompt=4686, max_new_tokens=1024)
+        err_msg = str(excinfo.value)
+        assert "sized from free memory" in err_msg
+        assert "n_ctx_max 32768" not in err_msg
 
     def test_gguf_backend_does_not_unload_on_context_capacity_exceeded(self):
         from localm.inference.backends.gguf import GgufBackend

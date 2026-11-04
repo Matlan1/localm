@@ -999,6 +999,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             n_ctx=self.n_ctx,
             n_gpu_layers=gpu_layers,
             n_ctx_max=ctx_max,
+            ctx_auto=bool(self.ctx_auto),
             n_ctx_grow=self.n_ctx_grow,
             # Give the worker's own _check_context_fit the same reserved overhead
             # this parent resolved, rather than the class-level default.

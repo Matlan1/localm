@@ -37,6 +37,7 @@ from fastapi.security import HTTPBearer
 from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
+from localm.inference.backends.base import context_ceiling_hint
 from localm.inference.backends.base import (
     AudioInputError,
     ChatTemplateMissingError,
@@ -6502,7 +6503,8 @@ async def _stream_sse_body(
             refusal = context_overflow_detail(
                 prompt_tokens, capacity,
                 encoder_decoder=_engine_is_encoder_decoder(engine),
-                reply_reserve=_engine_reply_reserve(engine))
+                reply_reserve=_engine_reply_reserve(engine),
+                ctx_auto=_engine_ctx_auto(engine))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -7124,13 +7126,23 @@ def _engine_reply_reserve(engine) -> Optional[int]:
     return None
 
 
+def _engine_ctx_auto(engine) -> Optional[bool]:
+    """The loaded backend's ctx_auto, or None when it has none (its context
+    limit is the model's own)."""
+    backend = getattr(engine, "_backend", None)
+    value = getattr(backend, "ctx_auto", None)
+    return value if isinstance(value, bool) else None
+
+
 def context_overflow_detail(prompt_tokens: int, capacity: int,
                             encoder_decoder: bool = False,
-                            reply_reserve: Optional[int] = None) -> str:
+                            reply_reserve: Optional[int] = None,
+                            ctx_auto: Optional[bool] = None) -> str:
     """The refusal text for a prompt larger than the context capacity. With
     *encoder_decoder* the text names the model's one-pass prompt limit, and with
     *reply_reserve* (a diffusion model) the fixed window that holds prompt and
-    reply together, instead of the context window settings."""
+    reply together, instead of the context window settings. *ctx_auto* selects
+    the advice (:func:`context_ceiling_hint`)."""
     if encoder_decoder:
         return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
                 f"this encoder-decoder model reads in one pass. Shorten the "
@@ -7140,9 +7152,8 @@ def context_overflow_detail(prompt_tokens: int, capacity: int,
                 f"tokens this diffusion model reads at once, prompt and reply "
                 f"together. Start a new chat or shorten the message.")
     return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
-            f"context capacity ({capacity} tokens). Start a new chat, "
-            f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
-            f"true to size it from free VRAM).")
+            f"context capacity ({capacity} tokens). "
+            + context_ceiling_hint(ctx_auto))
 
 
 def _resolve_disconnect_poll(request):

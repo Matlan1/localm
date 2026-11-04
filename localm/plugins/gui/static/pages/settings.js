@@ -1328,7 +1328,7 @@ export function applySettingsFilter() {
     for (const link of nav.querySelectorAll(".settings-nav-link")) link.classList.remove("active");
   }
   if (note) {
-    note.textContent = shown ? "" : `No settings match "${_settingsFilterQuery.trim()}".`;
+    note.textContent = shown ? "" : t("settings.filter.noMatch", { query: _settingsFilterQuery.trim() });
     note.hidden = shown > 0;
   }
 }
@@ -1483,22 +1483,20 @@ function confirmEmbeddingModelSwitch(model, report) {
       $("modal").style.display = "none";
       resolve(value);
     };
-    openModal(`Switch embedding model to '${model}'?`, (body) => {
+    openModal(t("settings.embeddingSwitch.title", { model }), (body) => {
       body.appendChild(el("p", "", report.note));
       const list = el("ul", "");
       for (const c of report.collections || []) {
         list.appendChild(el("li", "",
-          c.name + (c.built_with ? ` (built with ${c.built_with})` : "")
-          + (c.n_chunks != null ? ` - ${c.n_chunks} chunks` : "")));
+          c.name + (c.built_with ? " " + t("settings.embeddingSwitch.builtWith", { model: c.built_with }) : "")
+          + (c.n_chunks != null ? " " + t("settings.embeddingSwitch.chunks", { count: c.n_chunks }) : "")));
       }
       body.appendChild(list);
-      body.appendChild(el("p", "sub",
-        "Re-embed each one afterward on the Knowledge page to restore semantic "
-        + "search if it does turn out to need it."));
+      body.appendChild(el("p", "sub", t("settings.embeddingSwitch.reembed")));
       const row = el("div", "actions");
-      const cancel = el("button", "btn-secondary", "Cancel");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(false);
-      const ok = el("button", "btn-primary", "Switch anyway");
+      const ok = el("button", "btn-primary", t("settings.embeddingSwitch.confirm"));
       ok.onclick = () => finish(true);
       row.append(cancel, ok);
       body.appendChild(row);
@@ -1527,12 +1525,15 @@ function confirmEmbeddingModelSwitch(model, report) {
 export function savedToastKey(updates) {
   const blankAsNull = (v) => (v === undefined || v === null || v === "" ? null : v);
   const applies = new Set();
+  const restartKeys = new Set();
   for (const { field } of _settingsControls) {
     if (!(field.key in updates)) continue;
     const changed = field.widget === "secret"
       || JSON.stringify(blankAsNull(updates[field.key])) !== JSON.stringify(blankAsNull(field.default));
     if (changed) applies.add(field.applies);
+    if (changed && field.applies === "restart") restartKeys.add(field.key);
   }
+  if (restartKeys.size === 1 && restartKeys.has("port")) return "settings.toast.savedPort";
   if (applies.has("restart")) return "settings.toast.savedRestart";
   if (applies.has("next_load")) return "settings.toast.savedEngine";
   return "settings.toast.saved";
@@ -2797,10 +2798,9 @@ export async function buildPluginSettingsSections(form) {
     fail.id = "settings-sec-plugin-settings";
     fail.dataset.sec = "plugin-settings";
     fail.dataset.group = "plugins";
-    fail.dataset.secLabel = "Plugin settings";
+    fail.dataset.secLabel = t("settings.sectionHeading.pluginSettings");
     fail.appendChild(settingsSectionHead(t("settings.sectionHeading.pluginSettings"), "plugins"));
-    fail.appendChild(el("div", "sub",
-      "Could not load plugin-contributed settings (" + e.message + ")."));
+    fail.appendChild(el("div", "sub", t("settings.pluginSettings.loadFailed", { message: e.message })));
     form.appendChild(fail);
     return;
   }

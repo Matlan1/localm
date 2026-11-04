@@ -236,13 +236,10 @@ def register(app: FastAPI, ctx) -> None:
         # be undone from the GUI. Only ENABLING is blocked; turning it off or an
         # unrelated edit is fine.
         if validated.get("require_auth") is True:
-            from localm.auth import any_key_configured
-            if not any_key_configured():
-                raise HTTPException(
-                    400,
-                    "Cannot enable require_auth while no API key is configured: "
-                    "this would lock you out. Set an owner key (the launcher or "
-                    "LOCALM_API_KEY) or create a named key first, then enable it.")
+            from localm.auth import require_auth_refusal
+            refusal = require_auth_refusal()
+            if refusal:
+                raise HTTPException(400, refusal)
         # INVARIANT: the credential store is written last, synchronously, after
         # update_config has returned, and only checked (never written) before
         # it. A request that returns an error therefore leaves stored

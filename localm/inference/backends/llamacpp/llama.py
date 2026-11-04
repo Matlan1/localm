@@ -1560,6 +1560,7 @@ class LlamaCpp:
         seed: int = _DEFAULT_SEED,
         n_threads: Optional[int] = None,
         n_ctx_max: Optional[int] = None,
+        ctx_auto: bool = False,
         n_ctx_grow: int = 4096,
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
@@ -1625,6 +1626,7 @@ class LlamaCpp:
         # An explicitly requested base larger than the ceiling wins - the
         # user asked for it, the cap only governs automatic growth.
         self._n_ctx_max   = max(n_ctx_max, n_ctx) if n_ctx_max else None
+        self._ctx_auto    = bool(ctx_auto)
         self._n_ctx_grow  = max(256, n_ctx_grow)
         self._seed        = seed
         self._verbose     = verbose
@@ -3802,12 +3804,14 @@ class LlamaCpp:
             return max_new_tokens
         room = self._n_ctx_max - n_prompt - 64
         if room < 32:
-            from localm.inference.backends.base import ContextCapacityExceededError
+            from localm.inference.backends.base import (
+                ContextCapacityExceededError,
+                context_ceiling_hint,
+            )
             raise ContextCapacityExceededError(
                 f"Conversation ({n_prompt} tokens) has outgrown the maximum "
-                f"context window (n_ctx_max={self._n_ctx_max}). Start a new "
-                f"chat, or raise it:  localm config n_ctx_max 32768  "
-                f"(or set ctx_auto true to size it from free VRAM)."
+                f"context window (n_ctx_max={self._n_ctx_max}). "
+                + context_ceiling_hint(bool(getattr(self, "_ctx_auto", False)))
             )
         return min(max_new_tokens, room)
 

@@ -85,6 +85,18 @@ class TestRecording:
             projects.record_project(d, "log")
         assert [e["name"] for e in projects.list_projects()] == ["c", "b"]
 
+    def test_lowering_the_limit_shortens_the_list_at_once(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_config", lambda: {"coder_projects_remembered": 5})
+        for n in "abc":
+            d = tmp_path / n
+            d.mkdir()
+            projects.record_project(d, "log")
+        monkeypatch.setattr(cfg, "load_config", lambda: {"coder_projects_remembered": 1})
+        assert [e["name"] for e in projects.list_projects()] == ["c"]
+        monkeypatch.setattr(cfg, "load_config", lambda: {"coder_projects_remembered": 0})
+        assert projects.list_projects() == []
+
     def test_remembering_can_be_turned_off(self, tmp_path, monkeypatch):
         import localm.config as cfg
         monkeypatch.setattr(cfg, "load_config", lambda: {"coder_remember_projects": False})

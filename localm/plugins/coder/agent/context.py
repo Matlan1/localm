@@ -1808,7 +1808,8 @@ ws     ::= [ \t\n\r]*
                         on_token=lambda piece: self._emit("token", text=piece),
                         on_reasoning=lambda piece: self._emit("reasoning", text=piece),
                         on_status=lambda text, code: self._emit(
-                            "status", text=text, code=code),
+                            "status", text=str(text), code=code,
+                            args=getattr(text, "args", None)),
                     )
                     self._record_prompt_usage(messages)
                     return reply

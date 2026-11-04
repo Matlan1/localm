@@ -61,6 +61,7 @@ class GgufWorker(VramSizingMixin):
         n_ctx_max: Optional[int],
         n_ctx_grow: int,
         cancel_event=None,
+        ctx_auto: bool = False,
         vram_overhead_bytes: Optional[int] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
@@ -96,6 +97,7 @@ class GgufWorker(VramSizingMixin):
         self.effective_gpu_layers = n_gpu_layers
         self.n_cpu_moe = n_cpu_moe
         self.n_ctx_max = n_ctx_max
+        self.ctx_auto = bool(ctx_auto)
         self.n_ctx_grow = n_ctx_grow
         self.cancel_event = cancel_event
         # Mirrors the parent's already-resolved overhead (GgufBackend passes its
@@ -316,6 +318,7 @@ class GgufWorker(VramSizingMixin):
             n_ctx=self.n_ctx,
             n_gpu_layers=self.effective_gpu_layers,
             n_ctx_max=self.n_ctx_max,
+            ctx_auto=self.ctx_auto,
             n_ctx_grow=self.n_ctx_grow,
             mmproj_path=self.mmproj_path,        # C1: in-process vision via mtmd
             cancel_event=self.cancel_event,       # abort mid-load if superseded

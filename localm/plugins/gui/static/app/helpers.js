@@ -1790,7 +1790,7 @@ function _offerModelDownload(missingModel, log, plugin) {
           const end = await streamJob(data.job_id, (line) => {
             if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
           });
-          if (end.status !== "done") toast(`Download ${end.status}: ${filename}`, true);
+          if (end.status !== "done") toast(t("common.modelDownload.ended", { status: end.status, filename }), true);
           resolve(true);
         } catch (e) {
           toast(t("common.modelDownload.failed", { message: e.message }), true);

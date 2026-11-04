@@ -488,7 +488,8 @@ def register(app: FastAPI, ctx) -> None:
                     413, _hs.context_overflow_detail(
                         prompt_tokens, capacity,
                         encoder_decoder=_hs._engine_is_encoder_decoder(engine),
-                        reply_reserve=_hs._engine_reply_reserve(engine)))
+                        reply_reserve=_hs._engine_reply_reserve(engine),
+                        ctx_auto=_hs._engine_ctx_auto(engine)))
 
         except BaseException:
             _hs._unpin(engine)
@@ -1010,11 +1011,8 @@ def register(app: FastAPI, ctx) -> None:
             if (isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
                 raise HTTPException(
-                    413,
-                    f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
-                    f"context capacity ({capacity} tokens). Start a new chat, "
-                    f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
-                    f"true to size it from free VRAM).")
+                    413, _hs.context_overflow_detail(
+                        prompt_tokens, capacity, ctx_auto=_hs._engine_ctx_auto(engine)))
 
             if req.stream:
                 streaming_handoff = True

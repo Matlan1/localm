@@ -11,7 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -388,6 +388,85 @@ test("text painted by JS is redrawn when the language changes", async () => {
     `the chat empty state must be rebuilt in German, got ${JSON.stringify(blurb().slice(0, 120))}`);
 });
 
+async function toGerman(window) {
+  runScript(window, 'window.__p = applyLanguage("de");');
+  await window.__p;
+}
+
+test("the toast of a sidebar switch and the web permission modal read in the interface language", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  await toGerman(window);
+  const toasts = [];
+  window.toast = (msg) => toasts.push(String(msg));
+  runScript(window, 'toastLoadResult({}, "m1");');
+  assert.deepEqual(toasts, [DE["models.switch.doneToast"].replace("{model}", "m1")]);
+  runScript(window, 'confirmWebRequest({ name: "fetch_url", args: { url: "http://x" } });');
+  const modal = window.document.getElementById("modal");
+  assert.ok(modal.textContent.includes(DE["web.ask.title"]), modal.textContent);
+  assert.ok(modal.textContent.includes(DE["web.ask.fetch"]), modal.textContent);
+  assert.ok(modal.textContent.includes(DE["web.ask.allow"]), modal.textContent);
+  assert.ok(!/Allow web access|Deny/.test(modal.textContent), modal.textContent);
+});
+
+test("the Recent errors card follows a language change", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  window.toast("boom", true);
+  const doc = window.document;
+  assert.equal(doc.querySelector("#recent-errors-list .recent-error .btn-secondary").textContent, "Copy");
+  await toGerman(window);
+  assert.equal(doc.querySelector("#recent-errors-list .recent-error .btn-secondary").textContent,
+    DE["settings.recentErrors.copy"]);
+  assert.equal(doc.querySelector("#recent-errors-list .recent-error-dismiss").title,
+    DE["settings.recentErrors.dismiss"]);
+});
+
+test("the Companion app status line survives a language change", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  window.applyInstallUI({ standalone: true });
+  const hint = window.document.getElementById("install-hint");
+  assert.match(hint.textContent, /installed app/i);
+  await toGerman(window);
+  assert.equal(hint.textContent, DE["settings.companion.hintInstalled"]);
+  window.applyInstallUI({});
+  assert.ok(hint.textContent.includes("LocaLM"), hint.textContent);
+  assert.ok(hint.textContent !== DE["settings.companion.hintInstalled"], "the generic hint returns");
+});
+
+test("the Coder setup model dropdown's first option follows a language change", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  runScript(window, "populateSetupModels();");
+  const first = window.document.getElementById("setup-model").options[0];
+  assert.match(first.textContent, /active model/);
+  await toGerman(window);
+  assert.equal(window.document.getElementById("setup-model").options[0].textContent,
+    DE["coder.setup.activeModelOption"].replace("{name}", "?"));
+});
+
+test("every first-party plugin manifest has a catalog description with its exact text", async () => {
+  const { window } = await loadIn(null);
+  const en = evalIn(window, "I18N_EN");
+  const builtin = join(ROOT, "localm", "plugins", "builtin");
+  const names = readdirSync(builtin).filter((d) => existsSync(join(builtin, d, "plugin.toml")));
+  assert.ok(names.length >= 10, `expected the bundled plugins, found ${names.length}`);
+  for (const name of names) {
+    const toml = readFileSync(join(builtin, name, "plugin.toml"), "utf-8");
+    const description = /^description = "(.*)"$/m.exec(toml)[1];
+    assert.equal(en[`plugins.desc.${name}`], description, name);
+  }
+});
+
+test("the Plugins page shows a first-party description translated and a third-party one as written", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  await toGerman(window);
+  runScript(window, `window.__rows = [
+    _catalogRow({ name: "voice", builtin: true, description: "english" }),
+    _catalogRow({ name: "voice", builtin: false, description: "their own text" }),
+  ].map((tr) => tr.textContent);`);
+  const rows = window.__rows;
+  assert.ok(rows[0].includes(DE["plugins.desc.voice"]), rows[0]);
+  assert.ok(rows[1].includes("their own text"), rows[1]);
+});
+
 test("the privacy hint the app itself paints follows a later language change", async () => {
   // Driven through refreshCtxLimit, the real code path that creates the hint:
   // it is built once and never repainted, so it only follows the language if
@@ -663,7 +742,8 @@ const T_CALL_FILES = ["app/chat.js", "app/models-sidebar.js", "app/logo.js",
                       "app/slash.js", "app/cmdk.js", "app/picker.js",
                       "pages/models.js", "pages/knowledge.js", "app/coder.js",
                       "app/tabs.js", "pages/video.js", "pages/music.js",
-                      "pages/workflow.js", "app/native-workflows.js", "app/image-inputs.js"];
+                      "pages/workflow.js", "app/native-workflows.js", "app/image-inputs.js",
+                      "app/init.js"];
 
 /** Key-shaped string literals inside a balanced t(...) / tn(...) call. */
 function tCallKeys(src) {

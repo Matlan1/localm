@@ -348,6 +348,16 @@ def regenerate_key(nbytes: int = 32) -> str:
     return key
 
 
+def require_auth_refusal() -> Optional[str]:
+    """Why ``require_auth`` cannot be turned on now, or None when it can. With no
+    key configured every keyless request would answer 401."""
+    if any_key_configured():
+        return None
+    return ("Cannot enable require_auth while no API key is configured: "
+            "this would lock you out. Set an owner key (the launcher or "
+            "LOCALM_API_KEY) or create a named key first, then enable it.")
+
+
 def require_auth_enabled() -> bool:
     """True when the server must refuse requests if no key is configured.
 

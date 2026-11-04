@@ -9,7 +9,7 @@
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken } from "./helpers.js";
-import { syncLanguageFromConfig } from "./i18n.js";
+import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { capsReady, loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
@@ -115,7 +115,7 @@ export function lockUI(message) {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";          // nothing of localm behind the gate
-  showKeyGate(message || "This LocaLM server requires an API key.");
+  showKeyGate(message || t("keygate.required"));
 }
 export function unlockUI() {
   window.__localmLocked = false;
@@ -205,10 +205,8 @@ export function showShellStaleOverlay() {
     ov = el("div", "reconnect-overlay");
     ov.id = "shell-stale-overlay";
     const panel = el("div", "reconnect-panel");
-    panel.appendChild(el("div", "reconnect-msg",
-      "This page was served by an earlier run of the LocaLM server, so it can "
-      + "no longer make changes. Reloading will reconnect it."));
-    const again = el("button", "reconnect-reset", "Reload");
+    panel.appendChild(el("div", "reconnect-msg", t("reconnect.stalePage")));
+    const again = el("button", "reconnect-reset", t("reconnect.reload"));
     again.type = "button";
     again.onclick = () => location.reload();
     panel.appendChild(again);
@@ -251,12 +249,11 @@ export function showReconnectOverlay() {
     ov.id = "reconnect-overlay";
     const panel = el("div", "reconnect-panel");
     panel.appendChild(el("div", "reconnect-spinner"));
-    panel.appendChild(el("div", "reconnect-msg",
-      "Can't reach the LocaLM server. It may be starting or stopped. Reconnecting..."));
+    panel.appendChild(el("div", "reconnect-msg", t("reconnect.unreachable")));
     // Escape hatch: a client must always have a manual way out, so no local
     // artifact (a bad cookie, a wedged shell) can ever trap the user with no
     // recovery. Reset clears all client-side state and reloads to the key gate.
-    const reset = el("button", "reconnect-reset", "Reset and re-enter key");
+    const reset = el("button", "reconnect-reset", t("reconnect.reset"));
     reset.type = "button";
     reset.onclick = resetClientState;
     panel.appendChild(reset);
@@ -282,8 +279,7 @@ export function showStartupOverlay() {
     ov.id = "startup-overlay";
     const panel = el("div", "reconnect-panel");
     panel.appendChild(el("div", "reconnect-spinner"));
-    panel.appendChild(el("div", "reconnect-msg",
-      "Starting LocaLM... loading the model. The first run can take a moment."));
+    panel.appendChild(el("div", "reconnect-msg", t("reconnect.starting")));
     ov.appendChild(panel);
     document.body.appendChild(ov);
   }
@@ -611,11 +607,7 @@ window.bootAuthProbe = bootAuthProbe;
             authorized = r.ok;
           } catch { authorized = false; }
         }
-        if (authorized || confirm(
-          `Download model "${pullSpec}"?\n\n` +
-          "A link or page just asked localm to start this download. Only " +
-          "continue if you started this yourself (e.g. via " +
-          '"localm gui --pull").')) {
+        if (authorized || confirm(t("init.pullConfirm", { spec: pullSpec }))) {
           $("pull-start").click();   // kick off the pull with progress
         }
       }

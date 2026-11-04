@@ -153,13 +153,17 @@ def record_project(cwd, mode: Optional[str]) -> bool:
 
 
 def list_projects() -> list:
-    """Every remembered project, most recent first, each tagged ``available``.
+    """The remembered projects up to ``coder_projects_remembered``, most recent
+    first, each tagged ``available``. A limit of 0 returns none.
 
     A path that no longer exists is RETURNED, marked unavailable, rather than
     filtered out, so the caller can report it as moved or deleted.
     """
     out = []
+    limit = _limit()
     for e in _load():
+        if len(out) >= limit:
+            break
         if not isinstance(e, dict) or not e.get("path"):
             continue
         try:

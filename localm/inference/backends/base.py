@@ -157,6 +157,20 @@ class EmbedBatchTooLargeError(ValueError):
     """
 
 
+def context_ceiling_hint(ctx_auto: Optional[bool]) -> str:
+    """What the user can do about a full context window. *ctx_auto* is the loaded
+    model's ctx_auto: True when the ceiling is sized from free memory, False when
+    it is n_ctx_max, None when neither setting decides it (the model's own limit)."""
+    if ctx_auto is True:
+        return ("Start a new chat, or free memory and load the model again: the "
+                "ceiling is sized from free memory at load (localm config n_ctx_max 0 "
+                "lifts its 65536-token limit).")
+    if ctx_auto is False:
+        return ("Start a new chat, or raise it:  localm config n_ctx_max 32768  "
+                "(or set ctx_auto true to size it from free VRAM).")
+    return "Start a new chat or shorten the message."
+
+
 class ContextCapacityExceededError(ValueError):
     """Raised when a prompt or conversation exceeds the model's maximum context
     capacity or leaves insufficient room for generation under the configured ceiling.

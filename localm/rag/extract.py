@@ -283,8 +283,9 @@ def classify_format(text: str, filename: str = "", *,
     structural content sniff (:func:`sniff_text_format`). Only when BOTH are
     inconclusive is *classify_fn* (an LLM tie-break) consulted - and only when the
     user left ``rag_classify_unknown_files`` on. *classify_fn* must itself be a
-    no-op when no chat model is loaded (see the rag plugin's ``_make_self_classify``),
-    so an embedding-only index never stalls on a chat call. Always returns a label
+    no-op returning None when no chat model is loaded (see the rag plugin's
+    ``_make_self_classify``), so an embedding-only index never stalls on a chat
+    call; a failed attempt returns "". Always returns a label
     (falling back to "text") so every chunk can carry one for filtering / display.
     """
     if not text.strip():
@@ -297,13 +298,12 @@ def classify_format(text: str, filename: str = "", *,
     if sniffed:
         return sniffed
     # Unknown extension and inconclusive structure: the only place a model is
-    # consulted, and only when the toggle is on. The outcome (a real guess, or the
-    # "text" fallback) is cached per extension, so a same-extension corpus
-    # attempts the tie-break at most once per process.
+    # consulted, and only when the toggle is on. The outcome of an attempt (a real
+    # guess, or the "text" fallback) is cached per extension, so a same-extension
+    # corpus attempts the tie-break at most once per process. With the toggle off
+    # the cache is not read. A None from *classify_fn* means no attempt was made
+    # (no chat model) and is not cached.
     if classify_fn is not None:
-        cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
-        if cached is not None:
-            return cached
         try:
             from localm.config import load_config
             enabled = bool(load_config().get("rag_classify_unknown_files", True))
@@ -314,7 +314,13 @@ def classify_format(text: str, filename: str = "", *,
                        "rag_classify_unknown_files=on: %s", e)
             enabled = True
         if enabled:
-            label = _normalise_label(classify_fn(text[:1000]) or "") or "text"
+            cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
+            if cached is not None:
+                return cached
+            answer = classify_fn(text[:1000])
+            if answer is None:
+                return "text"
+            label = _normalise_label(answer) or "text"
             _EXT_CLASSIFICATION_CACHE[suffix] = label
             return label
     return "text"

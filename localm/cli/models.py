@@ -2078,6 +2078,11 @@ def config_cmd(key, value):
         validated = validate_update({key: value})
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+    if validated.get("require_auth") is True:
+        from localm.auth import require_auth_refusal
+        refusal = require_auth_refusal()
+        if refusal:
+            raise click.ClickException(refusal)
     # update_config() is the atomic read-modify-write helper; a bare
     # load_config()/save_config() pair has an unlocked window where a
     # concurrent config write can be silently lost.

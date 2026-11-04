@@ -140,7 +140,8 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
         budget = REPLY_TOKEN_CEILING
         if isinstance(capacity, int) and capacity > 0 and isinstance(prompt_tokens, int):
             if prompt_tokens >= capacity:
-                raise HTTPException(413, _hs.context_overflow_detail(prompt_tokens, capacity))
+                raise HTTPException(413, _hs.context_overflow_detail(
+                    prompt_tokens, capacity, ctx_auto=_hs._engine_ctx_auto(engine)))
             budget = min(REPLY_TOKEN_CEILING, capacity - prompt_tokens)
 
         sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())

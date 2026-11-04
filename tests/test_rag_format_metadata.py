@@ -212,6 +212,50 @@ def test_classify_format_tiebreak_gated_and_cached():
     assert _EXT_CLASSIFICATION_CACHE[".custom_code"] == "javascript"
 
 
+def test_classify_format_off_ignores_an_earlier_guess(monkeypatch):
+    import localm.config as cfg
+    from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
+    _EXT_CLASSIFICATION_CACHE.clear()
+    monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
+    calls = []
+
+    def fake(snippet):
+        calls.append(snippet)
+        return "javascript"
+    text = "plain words with no structure at all"
+    assert classify_format(text, "a.earlier", classify_fn=fake) == "javascript"
+    monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": False})
+    assert classify_format(text, "b.earlier", classify_fn=fake) == "text"
+    assert len(calls) == 1
+
+
+def test_classify_format_no_model_is_not_remembered_for_the_extension(monkeypatch):
+    import localm.config as cfg
+    from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
+    _EXT_CLASSIFICATION_CACHE.clear()
+    monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
+    text = "plain words with no structure at all"
+    assert classify_format(text, "a.nomodel", classify_fn=lambda s: None) == "text"
+    assert ".nomodel" not in _EXT_CLASSIFICATION_CACHE
+    assert classify_format(text, "b.nomodel", classify_fn=lambda s: "javascript") == "javascript"
+
+
+def test_classify_format_failed_attempt_is_remembered_for_the_extension(monkeypatch):
+    import localm.config as cfg
+    from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
+    _EXT_CLASSIFICATION_CACHE.clear()
+    monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
+    calls = []
+
+    def failing(snippet):
+        calls.append(snippet)
+        return ""
+    text = "plain words with no structure at all"
+    assert classify_format(text, "a.failing", classify_fn=failing) == "text"
+    assert classify_format(text, "b.failing", classify_fn=failing) == "text"
+    assert len(calls) == 1
+
+
 def test_classify_format_config_disables_tiebreak(monkeypatch):
     from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
     import localm.config as cfg
