@@ -86,9 +86,9 @@ def find_uv(root) -> Optional[str]:
     for candidate in before:
         if usable(candidate):
             return str(candidate)
-    for candidate in sysprog.path_candidates("uv"):
-        if usable(candidate):
-            return candidate
+    on_path = sysprog.find_on_path("uv")
+    if on_path:
+        return on_path
     for candidate in after:
         if usable(candidate):
             return str(candidate)
