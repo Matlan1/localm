@@ -280,6 +280,18 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 
 `--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `<data dir>/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
 
+### Packages a model's own code needs
+
+A Hugging Face model with `hf_trust_remote_code` on runs Python from its own folder, and that code can import a package localm does not include. localm refuses such a model when you add it and before a load starts, and names the package. When it is one localm can add on this machine (timm, open_clip, torchaudio, and flash-linear-attention on Linux), add it here or with **install packages** on the Models page:
+
+```bash
+localm install-packages mymodel          # lists what would be installed, then asks
+localm install-packages mymodel --yes    # installs without asking (the list is still printed)
+localm install-packages --list           # the packages added for models in this install
+```
+
+Only packages on a list localm has reviewed are installed, each from the project that list names, never a project guessed from what a model's code imports. Every installed package stays at its version and only ready-built packages are used; when that is impossible nothing is installed and the message says why. Packages that must be compiled from source are not installed. After installing, localm imports them in a new process and removes what it added if that fails. They live in localm's own environment, so uninstalling localm removes them; running setup again may too, and the model then offers the install again.
+
 ### Model type
 
 Every registered model has a type, detected deterministically from the file

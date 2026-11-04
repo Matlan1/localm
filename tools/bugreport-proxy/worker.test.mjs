@@ -152,6 +152,14 @@ test("report: a GitHub error becomes a 502", async () => {
   } finally { restore(); }
 });
 
+// A minimal body as scripts/report_issue.py and scripts/report_issue.ps1 write it.
+const STANDALONE = [
+  "# localm bug report: it failed", "", "## What happened", "setup failed", "",
+  "## How it was filed", "- Filed via the standalone PowerShell reporter (no Python on this machine).", "",
+  "## Environment", "- OS: x", "",
+].join("\n");
+const CURL_LINE = "Filed via the standalone curl reporter (no Python available). OS: x. Details: it failed";
+
 // Bodies localm never builds: the two observed probes, a body with only the two
 // headings the earlier check looked for, and skeletons with one marker missing,
 // moved or emptied.
@@ -168,9 +176,19 @@ const NOT_LOCALM = [
   { title: "t", body: SKELETON.replace("## App state\n- Model: tiny (loaded)\n\n", "")
       .replace("## Environment", "## Environment\n- localm: 0.3.3\n\n## App state\n- Model: tiny (loaded)") },
   { title: "t", body: SKELETON.replace("## Environment\n- localm: 0.3.3", "## Environment\n\n- localm: 0.3.3") },
+  { title: "t", body: STANDALONE.replace("# localm bug report: it failed", "# bug report: it failed") },
+  { title: "t", body: "intro\n" + STANDALONE },
+  { title: "t", body: STANDALONE.replace("## What happened\n", "") },
+  { title: "t", body: STANDALONE.replace("## How it was filed\n", "") },
+  { title: "t", body: STANDALONE.replace("- Filed via the standalone", "- Filed by") },
+  { title: "t", body: STANDALONE.replace("- OS: x", "OS: x") },
+  { title: "t", body: STANDALONE.replace("## Environment\n- OS: x\n", "") },
+  { title: "t", body: "Filed via the standalone curl reporter" },
+  { title: "t", body: "Filed via the standalone curl reporter (no Python available). OS: x" },
+  { title: "t", body: "intro\n" + CURL_LINE },
 ];
 
-test("a body localm did not build makes no GitHub call and gets a 202 that does not echo it", async () => {
+test("a body localm did not build makes no GitHub call and gets a 422 that does not echo it", async () => {
     const realLog = console.log;
   const logged = [];
   console.log = (...args) => logged.push(args.map(String).join(" "));
@@ -179,8 +197,8 @@ test("a body localm did not build makes no GitHub call and gets a 202 that does 
       logged.length = 0;
       const { res, body, upstream } = await postReport(payload);
       assert.equal(upstream.length, 0, `forwarded to GitHub: ${JSON.stringify(payload).slice(0, 120)}`);
-      assert.equal(res.status, 202);
-      assert.deepEqual(body, { ok: true, filed: false });
+      assert.equal(res.status, 422);
+      assert.deepEqual(body, { error: "report not filed", filed: false });
       assert.equal(logged.length, 1, "each held report is counted in one log line");
       assert.match(logged[0], /^report held: not built by localm /);
       assert.ok(!logged[0].includes(payload.body), "the log line does not carry the body");
@@ -190,8 +208,34 @@ test("a body localm did not build makes no GitHub call and gets a 202 that does 
   }
 });
 
+test("a held report is not 2xx: released clients read any 2xx as sent", async () => {
+  const realLog = console.log;
+  console.log = () => {};
+  try {
+    const { res } = await postReport({ title: "0", body: "/tmp/pp-fuzz/probe" });
+    assert.equal(res.ok, false, `status ${res.status}`);
+  } finally {
+    console.log = realLog;
+  }
+});
+
+test("a standalone reporter's body is filed with no detail, CRLF line ends or a log tail", async () => {
+  const variants = [
+    STANDALONE, CURL_LINE,
+    STANDALONE.replace("setup failed", ""),
+    STANDALONE.replace(/\n/g, "\r\n"),
+    STANDALONE + "\n## Recent log tail\n```\nline\n```",
+    "Filed via the standalone curl reporter (no Python available). OS: a. b. Details: it said \"no\" # x",
+  ];
+  for (const report of variants) {
+    const { res, upstream } = await postReport({ title: "t", body: report });
+    assert.equal(res.status, 201, JSON.stringify(report).slice(0, 160));
+    assert.equal(upstream.length, 1);
+  }
+});
+
 test("every report localm builds is filed once, prefixed with the reporter note", async () => {
-    assert.ok(REPORT_FIXTURES.length >= 5, REPORT_FIXTURES.join(", "));
+    assert.ok(REPORT_FIXTURES.length >= 8, REPORT_FIXTURES.join(", "));
   for (const name of REPORT_FIXTURES) {
     const report = readFileSync(join(FIXTURE_DIR, name), "utf8");
     const { res, body, upstream } = await postReport({ title: "localm bug report", body: report });

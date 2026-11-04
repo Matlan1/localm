@@ -390,3 +390,45 @@ class TestMountRemoteGuiClient:
         assert cli._mount_remote_gui({"scheme": "http", "token": "t"}) == (
             "its instance entry has no port")
         assert posts == []
+
+
+class TestSwitchModelForwardsActivate:
+    """Both GUI switch_model closures pass force and activate to switch_engine."""
+
+    @staticmethod
+    def _record(monkeypatch):
+        calls = []
+
+        async def fake_switch_engine(name, make_engine, **kw):
+            calls.append((name, kw))
+            return {"status": "loaded", "model": name}
+
+        monkeypatch.setattr(hs, "switch_engine", fake_switch_engine)
+        return calls
+
+    def test_the_mounted_surface_forwards_activate(self, tmp_path, monkeypatch):
+        import asyncio
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        app = _api_app(tmp_path)
+        assert mount_gui_surface(app) is True
+        calls = self._record(monkeypatch)
+
+        asyncio.run(app.state.switch_model("m", activate=False))
+        asyncio.run(app.state.switch_model("m"))
+
+        assert calls == [("m", {"force": False, "activate": False}),
+                         ("m", {"force": False, "activate": True})]
+
+    def test_the_gui_launcher_app_forwards_activate(self, tmp_path, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+
+        from localm.plugins.gui import cli as gui_cli
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        plan = SimpleNamespace(scheme="http", self_authority="127.0.0.1:8642")
+        app = gui_cli._build_app(None, None, plan, api_mode=False)
+        calls = self._record(monkeypatch)
+
+        asyncio.run(app.state.switch_model("m", activate=False, force=True))
+
+        assert calls == [("m", {"force": True, "activate": False})]

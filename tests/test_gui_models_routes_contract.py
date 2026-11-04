@@ -60,6 +60,9 @@ EXPECTED_ROUTES = {
     ("POST", "/api/models/relocate"): S.MODELS_WRITE,
     ("GET", "/api/discover/search"): S.MODELS_READ,
     ("GET", "/api/discover/files"): S.MODELS_READ,
+    ("POST", "/api/models/packages/plan"): S.PLUGINS_ADMIN,
+    ("POST", "/api/models/packages/install"): S.PLUGINS_ADMIN,
+    ("GET", "/api/models/packages/install/events"): S.PLUGINS_ADMIN,
 }
 
 # Routes that ALSO require host filesystem access (an inline require_fs_host
@@ -261,6 +264,9 @@ def _requests_for(app):
         ("POST", "/api/models/relocate", {"model": "nope", "new_path": "Z:/x.gguf"}),
         ("GET", "/api/discover/search?q=x", None),
         ("GET", "/api/discover/files?repo=a/b", None),
+        ("POST", "/api/models/packages/plan", {"model": "nope"}),
+        ("POST", "/api/models/packages/install", {"plan_id": "nope"}),
+        ("GET", "/api/models/packages/install/events", None),
     ]
 
 
@@ -576,6 +582,15 @@ class TestLoad:
             c.post("/api/models/load", json={"model": "m-b", "force": True})
             c.post("/api/models/load", json={"model": "m-b", "force": False})
         assert harness.state.switch_calls == [("m-b", {"force": True}), ("m-b", {})]
+
+    def test_activate_false_is_forwarded_only_when_asked(self, harness):
+        with TestClient(harness.app) as c:
+            c.post("/api/models/load", json={"model": "m-b", "activate": False})
+            c.post("/api/models/load", json={"model": "m-b", "activate": True})
+            c.post("/api/models/load", json={"model": "m-b", "activate": False, "force": True})
+        assert harness.state.switch_calls == [
+            ("m-b", {"activate": False}), ("m-b", {}),
+            ("m-b", {"force": True, "activate": False})]
 
     def test_a_status_less_switch_still_reports_loaded(self, harness):
         harness.state.switch_result = None

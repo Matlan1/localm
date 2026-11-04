@@ -1127,10 +1127,11 @@ def _snapshot_tree(root: Path, dest: Path) -> dict:
     if head is None or files is None:
         raise OSError(f"could not read the source tree of {root}")
     kept = []
+    long_root, long_dest = source_archive.long_path(root), source_archive.long_path(dest)
     for rel in files:
-        src = root / rel
+        src = long_root / rel
         if src.is_file():
-            out = dest / rel
+            out = long_dest / rel
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, out)
             kept.append(rel)
@@ -1159,12 +1160,14 @@ def _snapshot_comfy(root: Path, dest: Path) -> dict:
 
 def _restore_tree(kept: Path, root: Path) -> list:
     """Make the source files of the tree at *root* those kept in *kept* by
-    :func:`_snapshot_tree`. Returns the failures."""
+    :func:`_snapshot_tree`. Returns the failures; when a file could not be put
+    back, the failure says that *root* holds a mix of old and new files and where
+    the originals are kept."""
     from localm.media import source_archive
     if source_archive.read_record(kept) is None:
         return [f"{root}: the kept copy of its source at {kept} cannot be read"]
     backup = root.parent / f".{root.name}-restore-{os.getpid()}"
-    shutil.rmtree(backup, ignore_errors=True)
+    shutil.rmtree(source_archive.long_path(backup), ignore_errors=True)
     try:
         change = source_archive.apply_tree(kept, root, source_archive.tree_files(root), backup)
     except OSError as e:

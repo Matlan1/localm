@@ -345,3 +345,26 @@ test("the stack keeps at most TOAST_ERROR_KEEP_MAX undismissed errors", async ()
   assert.equal(window.errorToasts().length, 50);
   assert.equal(doc.querySelector("#toast-errors .toast-error-more-btn").textContent, "+47 more");
 });
+
+test("dismissing one recent error leaves the others in order and updates storage", async () => {
+  const { window, doc } = await boot({ mode: "full" });
+  for (const n of ["e1", "e2", "e3"]) window.toast(n, true);
+  const texts = () => [...doc.querySelectorAll("#recent-errors-list .recent-error-text")].map((n) => n.textContent);
+  assert.deepEqual(texts(), ["e3", "e2", "e1"]);
+  const btn = doc.querySelectorAll("#recent-errors-list .recent-error")[1].querySelector(".recent-error-dismiss");
+  assert.equal(btn.getAttribute("aria-label"), "Dismiss this error");
+  btn.click();
+  assert.deepEqual(texts(), ["e3", "e1"]);
+  assert.deepEqual(JSON.parse(window.localStorage.getItem("localm.recentErrors")).map((e) => e.text), ["e3", "e1"]);
+  doc.getElementById("recent-errors-clear").click();
+  assert.deepEqual(texts(), []);
+});
+
+test("dismissing one recent error in privacy mode touches no storage", async () => {
+  const { window, doc } = await boot({ mode: "privacy" });
+  for (const n of ["p1", "p2", "p3"]) window.toast(n, true);
+  doc.querySelectorAll("#recent-errors-list .recent-error")[0].querySelector(".recent-error-dismiss").click();
+  const texts = [...doc.querySelectorAll("#recent-errors-list .recent-error-text")].map((n) => n.textContent);
+  assert.deepEqual(texts, ["p2", "p1"]);
+  assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
+});

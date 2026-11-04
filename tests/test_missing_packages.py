@@ -105,6 +105,99 @@ def test_a_package_localm_ships_but_this_install_lacks_says_to_update(tmp_path, 
     assert "normally includes" in reason and "pip" not in reason.lower()
 
 
+def _on(monkeypatch, plat: str, machine: str) -> None:
+    monkeypatch.setattr(mp.sys, "platform", plat)
+    monkeypatch.setattr(mp.platform, "machine", lambda: machine)
+
+
+@pytest.mark.parametrize("plat, machine, label", [
+    ("linux", "aarch64", "Linux ARM64"),
+    ("win32", "ARM64", "Windows ARM64"),
+    ("darwin", "arm64", "macOS ARM64"),
+    ("darwin", "x86_64", "macOS x64"),
+])
+def test_a_package_localm_does_not_ship_for_this_platform_is_named_as_such(
+        tmp_path, trusted, monkeypatch, plat, machine, label):
+    _on(monkeypatch, plat, machine)
+    monkeypatch.setattr(mp, "is_importable", lambda module: module != "decord")
+    reason = mp.folder_refusal(_model(tmp_path, "import torch\nimport decord\n"))
+    assert reason == (
+        f"model cannot be loaded: its code needs the Python package decord, which is "
+        f"not available for this platform ({label}). localm cannot run this model here.")
+
+
+@pytest.mark.parametrize("plat, machine", [("linux", "x86_64"), ("win32", "AMD64")])
+def test_decord_missing_where_localm_ships_it_still_says_to_update(monkeypatch, plat, machine):
+    _on(monkeypatch, plat, machine)
+    reason = mp.refusal_for("m", ["decord"])
+    assert "normally includes" in reason and "not available for this platform" not in reason
+
+
+def test_the_platform_gap_wins_over_a_package_the_install_lost(monkeypatch):
+    _on(monkeypatch, "win32", "ARM64")
+    reason = mp.refusal_for("m", ["tiktoken", "cv2", "einops"])
+    assert "packages tiktoken, opencv, which are not available for this platform (Windows ARM64)" \
+        in reason
+    assert "normally includes" not in reason and "einops" not in reason
+
+
+def test_a_text_import_error_for_a_platform_gap_is_reworded_the_same_way(monkeypatch):
+    _on(monkeypatch, "darwin", "x86_64")
+    reason = mp.rewrite_import_error("m", "ModuleNotFoundError: No module named 'monai'")
+    assert reason is not None and "not available for this platform (macOS x64)" in reason
+    assert "pip" not in reason.lower()
+
+
+_ENVIRONMENTS = [("linux", "x86_64"), ("linux", "aarch64"), ("win32", "AMD64"),
+                 ("win32", "ARM64"), ("darwin", "arm64"), ("darwin", "x86_64")]
+_DIST_MODULES = {"opencv-python-headless": "cv2", "scikit-learn": "sklearn",
+                 "protobuf": "google"}
+
+
+def _extra_install_map(extra: str) -> dict[str, dict[tuple[str, str], bool]]:
+    """For each distribution of *extra*, whether its requirements install it on each
+    environment of _ENVIRONMENTS, as packaging evaluates their markers."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    out: dict[str, dict[tuple[str, str], bool]] = {}
+    for text in data["project"]["optional-dependencies"][extra]:
+        req = Requirement(text)
+        name = req.name.lower().replace("_", "-")
+        row = out.setdefault(name, {env: False for env in _ENVIRONMENTS})
+        for plat, machine in _ENVIRONMENTS:
+            env = {"sys_platform": plat, "platform_machine": machine, "extra": extra}
+            if req.marker is None or req.marker.evaluate(env):
+                row[(plat, machine)] = True
+    return out
+
+
+def test_platform_gaps_match_the_extras_markers():
+    hf = _extra_install_map("hf")
+    for dist, row in hf.items():
+        module = _DIST_MODULES.get(dist, dist.replace("-", "_"))
+        assert module in mp.SHIPPED_MODULES, f"[hf] installs {dist}, SHIPPED_MODULES lacks {module}"
+        for (plat, machine), installed in row.items():
+            assert mp.shipped_here(module, plat, machine) is installed, (dist, plat, machine)
+    gpu = _extra_install_map("gpu")
+    for dist in hf:
+        assert gpu[dist] == hf[dist], f"[gpu] and [hf] install {dist} on different platforms"
+
+
+def test_every_platform_gap_is_a_shipped_module_with_a_marker():
+    hf = _extra_install_map("hf")
+    gated = {_DIST_MODULES.get(d, d.replace("-", "_")) for d, row in hf.items()
+             if not all(row.values())}
+    assert set(mp.PLATFORM_GAPS) == gated
+
+
+def test_decord_is_left_out_everywhere_its_wheels_are_missing():
+    hf = _extra_install_map("hf")
+    assert {env for env, on in hf["decord"].items() if on} == {
+        ("linux", "x86_64"), ("win32", "AMD64")}
+
+
 def test_installed_packages_and_stdlib_are_not_missing(tmp_path, trusted):
     folder = _model(tmp_path, "import json\nimport pytest\n")
     assert mp.folder_refusal(folder) is None
@@ -156,7 +249,7 @@ def test_a_dynamic_module_import_failure_is_not_a_missing_package():
 
 def test_text_that_still_mentions_pip_is_replaced_by_a_neutral_sentence():
     out = mp.strip_pip_instructions("You can install it with pip: see the docs")
-    assert "pip" not in out.lower() and "localm cannot add packages" in out
+    assert "pip" not in out.lower() and "needs a Python package this install does not have" in out
 
 
 def test_unrelated_failures_are_not_reworded():

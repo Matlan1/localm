@@ -82,6 +82,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import has_recorded_model_type as _has_recorded_model_type
         from localm.model_manager import model_vision_capability as _mvc
         from localm.model_manager import capabilities as _caps
+        from localm.model_manager import model_packages as _mpk
         registry = load_registry()
         current = active_model()
         # Fetched once, off the event loop, before the row loop below: loaded_path()
@@ -137,6 +138,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # to this call, so a projector added to a folder shows up on the next
             # refresh.
             vision_dirs: dict = {}
+            # Packages a Hugging Face folder's own code needs that this install
+            # lacks, per NAME; only rows that need some are present.
+            packages: dict = {}
             # The per-row resolve() has exactly one consumer, the resident-model
             # identity comparison below, so it is skipped entirely when neither an
             # embedder nor a reranker is loaded.
@@ -158,6 +162,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                                    dir_cache=vision_dirs)
                 context_len[_n] = _caps.model_context_length(_n, reg=registry)
                 tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
+                if p.is_dir():
+                    try:
+                        state = _mpk.folder_state(p)
+                    except (OSError, ValueError, RecursionError):
+                        logger.debug("could not check the packages of %s", ep, exc_info=True)
+                    else:
+                        if state.missing:
+                            packages[_n] = state.as_dict()
                 # ONE stat() for both size and mtime. mtime is recorded for a
                 # directory too (an HF model dir); size stays None for a directory.
                 try:
@@ -176,10 +188,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 except (OSError, ValueError):
                     resolved[ep] = None
             return (sizes, mtimes, missing, resolved, resident_resolved, vision,
-                    context_len, tool_use, audio)
+                    context_len, tool_use, audio, packages)
 
         (sizes, mtimes, missing_flags, resolved_paths, resident_resolved, vision_caps,
-         context_lens, tool_caps, audio_caps) = await loop.run_in_executor(
+         context_lens, tool_caps, audio_caps, package_needs) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
         adapter_info, attached_to, resident = await loop.run_in_executor(
@@ -232,6 +244,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 row_out["audio_input"] = audio_caps[name]
             # Same true / false / KEY ABSENT shape for the other two routing
             # capabilities: the trained context window and tool-call support.
+            # Present only when the model's own code needs packages this install
+            # lacks: their names, the ones localm can add, and whether adding them
+            # is all the model needs.
+            if name in package_needs:
+                row_out["packages"] = package_needs[name]
             if context_lens.get(name) is not None:
                 row_out["context_length"] = context_lens[name]
             if tool_caps.get(name) is not None:
@@ -418,15 +435,15 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # authoritative status: loaded, already_active, superseded (a newer
         # selection took over), or cancelled (aborted for any other reason) -
         # none of these is an error.
+        # force and activate are passed only when they differ from their
+        # defaults, so a single-argument switch_model callable keeps working.
+        options = {}
+        if req.force:
+            options["force"] = True
+        if not req.activate:
+            options["activate"] = False
         try:
-            # Omit force entirely when False (the overwhelming common case):
-            # switch_model is a pluggable callback, and every test double
-            # across the suite still implements the older single-arg
-            # contract. Passing force=True is still forwarded when a caller
-            # actually asks for it.
-            result = await (
-                switch_model(req.model, force=True) if req.force
-                else switch_model(req.model))
+            result = await switch_model(req.model, **options)
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}") from e
         # A switch_model that does not report a status (a minimal/legacy callable)

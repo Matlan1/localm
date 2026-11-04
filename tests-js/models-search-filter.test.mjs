@@ -4,6 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { loadAppWithPages } from "./harness.mjs";
 
 function makeFetch(models) {
@@ -137,4 +138,11 @@ test("search: a blank (whitespace) query filters nothing", async () => {
   const window = await load();
   await type(window, "   ");
   assert.equal(rowNames(window).length, 5);
+});
+
+test("search: the box gets the themed card input style, not the browser's white default", () => {
+  const css = readFileSync(new URL("../localm/plugins/gui/static/style.css", import.meta.url), "utf8");
+  const rule = css.split("}").find((r) => /\.card input\[type="text"\]/.test(r) && /background:\s*var\(--bg-input\)/.test(r));
+  assert.ok(rule, "the shared .card input rule exists");
+  assert.match(rule, /\.card input\[type="search"\]/);
 });

@@ -45,7 +45,10 @@ function makeFetch(s, calls) {
     }
     if (u.endsWith("/v1/config") && method === "PATCH") return json({});
     if (u.endsWith("/v1/config")) return json({ n_ctx: 4096, n_gpu_layers: 99 });
-    if (u.startsWith("/api/models")) return json({ models: s.models, active: s.active || "" });
+    if (u.startsWith("/api/models") && s.hangModels) return new Promise(() => {});
+    if (u.startsWith("/api/models")) {
+      return json({ models: s.models, active: s.active || "", peer_routes: s.peerRoutes || {} });
+    }
     return json({ models: [], active: "", conversations: [], plugins: [] });
   };
 }
@@ -143,6 +146,88 @@ test("Models tab: a loaded model whose adapter change is pending offers reload",
   assert.ok(rowButtons(window, "base").includes("reload"), "pending adapter: reload offered");
   assert.ok(!rowButtons(window, "plain").includes("reload"),
     "a loaded, non-active, unchanged model gets no reload");
+});
+
+const activeModel = (window) => {
+  runScript(window, "window.__active = modelCache.active; window.__resumable = modelCache.resumable;");
+  return { active: window.__active, resumable: window.__resumable };
+};
+const loadBody = (calls) => JSON.parse(calls.find((c) => c.u.includes("/api/models/load")
+  && c.method === "POST").body);
+const PENDING = () => ({ active: "other", models: [
+  LLM("other", { active: true, loaded: true }),
+  LLM("base", { loaded: true, adapters: [{ name: "lora-a", file: "a.gguf", scale: 1 }],
+                applied_adapters: [] }),
+] });
+
+test("Models tab: reloading the active model asks for it to stay active", async () => {
+  const s = { active: "run", models: [LLM("run", { active: true, loaded: true })] };
+  const { window, calls } = await boot(s);
+  await showModels(window);
+  await reloadButton(window, "run").onclick();
+  assert.equal("activate" in loadBody(calls), false, JSON.stringify(loadBody(calls)));
+  assert.equal(activeModel(window).active, "run");
+});
+
+test("Models tab: reloading a loaded model that is not active keeps the active model", async () => {
+  const { window, calls, toasts } = await boot(PENDING());
+  await showModels(window);
+  await reloadButton(window, "base").onclick();
+  assert.deepEqual(sideEffects(calls), ["unload", "load"]);
+  assert.equal(loadBody(calls).model, "base");
+  assert.equal(loadBody(calls).activate, false);
+  assert.equal(activeModel(window).active, "other");
+  assert.equal(window.document.getElementById("model-select").value, "other");
+  assert.ok(toasts.some((x) => /Reloaded base/.test(x.msg)), JSON.stringify(toasts));
+  assert.ok(!toasts.some((x) => /switched to base/.test(x.msg)), JSON.stringify(toasts));
+});
+
+test("Models tab: a failed reload of a model that is not active keeps the active model", async () => {
+  const s = { ...PENDING(), loadFails: true };
+  const { window, toasts } = await boot(s);
+  await showModels(window);
+  s.hangModels = true;
+  await reloadButton(window, "base").onclick();
+  assert.ok(toasts.some((x) => x.isErr && /Reloading base failed: boom/.test(x.msg)),
+    JSON.stringify(toasts));
+  const after = activeModel(window);
+  assert.equal(after.active, "other");
+  assert.notEqual(after.resumable, "base");
+});
+
+test("Models tab: reloading the server's active model keeps this tab's peer-route selection", async () => {
+  const s = { active: "run", peerRoutes: { peer: { host: "10.0.0.2", port: 8642 } },
+              models: [LLM("run", { active: true, loaded: true })] };
+  const { window, calls } = await boot(s);
+  runScript(window, "_peerSelected = 'peer';");
+  await window.refreshModels();
+  assert.equal(activeModel(window).active, "peer", "precondition: the peer route is selected");
+  await showModels(window);
+  await reloadButton(window, "run").onclick();
+  assert.equal("activate" in loadBody(calls), false, JSON.stringify(loadBody(calls)));
+  runScript(window, "window.__peer = _peerSelected;");
+  assert.equal(window.__peer, "peer");
+  assert.equal(activeModel(window).active, "peer");
+});
+
+test("Models tab: a failed reload of the active model leaves it to reload on the next message", async () => {
+  const s = { active: "run", loadFails: true, models: [LLM("run", { active: true, loaded: true })] };
+  const { window } = await boot(s);
+  await showModels(window);
+  const before = window.fetch;
+  window.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/models?")) {
+      return { ok: true, status: 200, json: async () => ({ models: s.models, active: "", resumable: "run" }),
+               text: async () => "" };
+    }
+    return before(url, opts);
+  };
+  runScript(window, "fetch = window.fetch;");
+  await reloadButton(window, "run").onclick();
+  const after = activeModel(window);
+  assert.equal(after.active, "");
+  assert.equal(after.resumable, "run");
 });
 
 async function renderSettings(s) {

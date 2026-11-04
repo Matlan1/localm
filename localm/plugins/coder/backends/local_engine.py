@@ -26,11 +26,11 @@ from .base import BaseLLMBackend
 def engine_status_relay(on_status: Callable[[str, Optional[str]], None]
                         ) -> Callable[[str], None]:
     """An ``Engine.chat_stream`` ``on_status`` that passes each status to
-    *on_status* with its code from ``STATUS_CODE_BY_TEXT``."""
-    from localm.inference.protocol import STATUS_CODE_BY_TEXT
+    *on_status* with its code (``status_code_of``)."""
+    from localm.inference.protocol import status_code_of
 
     def _relay(text: str) -> None:
-        on_status(text, STATUS_CODE_BY_TEXT.get(text))
+        on_status(text, status_code_of(text))
     return _relay
 
 # Generation kwargs the inference Engine.chat_stream accepts; anything else the
