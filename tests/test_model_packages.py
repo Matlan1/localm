@@ -791,6 +791,22 @@ def test_the_model_list_says_which_packages_a_model_needs(routes):
     assert row["packages"] == {"missing": ["timm"], "addable": ["timm"], "installable": True}
 
 
+def test_the_model_list_marks_a_model_whose_own_code_does_not_run(routes, tmp_path, monkeypatch):
+    def row():
+        rows = routes.client.get("/api/models").json()
+        rows = rows["models"] if isinstance(rows, dict) else rows
+        return next(r for r in rows if r["name"] == "some-model")
+
+    assert "own_code_off" not in row()
+    config_file = tmp_path / "Some-Model" / "config.json"
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    config["model_type"] = "llama"
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    assert "own_code_off" not in row()
+    monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: False)
+    assert row()["own_code_off"] is True
+
+
 # ----------------------------------------------------------------- the command
 
 @pytest.fixture
