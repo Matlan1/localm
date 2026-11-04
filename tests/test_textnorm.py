@@ -79,6 +79,32 @@ class TestSplitThink:
         assert r == ""
 
 
+class TestThinkTagInCode:
+    REPLY = "A code span: `<think>` and a fence: ```<think>demo</think>``` end."
+
+    def test_quoted_tag_in_code_stays_content(self):
+        assert split_think(self.REPLY) == (self.REPLY, "")
+
+    def test_streaming_at_every_split_point(self):
+        for k in range(len(self.REPLY) + 1):
+            assert _stream_split([self.REPLY[:k], self.REPLY[k:]]) == (self.REPLY, ""), k
+        assert _stream_split(list(self.REPLY)) == (self.REPLY, "")
+
+    def test_real_block_still_splits_around_code(self):
+        text = "<think>plan with a ` tick</think>Use `<think>` here."
+        want = ("Use `<think>` here.", "plan with a ` tick")
+        assert split_think(text) == want
+        for k in range(len(text) + 1):
+            assert _stream_split([text[:k], text[k:]]) == want, k
+
+    def test_unclosed_span_ends_at_blank_line(self):
+        text = "It costs 5` today.\n\n<think>why</think>Done."
+        assert split_think(text) == ("It costs 5` today.\n\nDone.", "why")
+
+    def test_open_block_streams_as_reasoning(self):
+        assert _stream_split(["<think>half `of", " it"]) == ("", "half `of it")
+
+
 class TestNativeReasoningTags:
     """Native reasoning tags emitted WITHOUT a channel wrapper (<reasoning>,
     <thinking>, <thought>, <reflection>) must normalise to canonical <think>, so

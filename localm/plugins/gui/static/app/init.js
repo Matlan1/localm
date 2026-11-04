@@ -24,20 +24,13 @@ import { VIEWS, showView } from "./tabs.js";
 // deriving the token from the session (never a separate cookie), is what makes
 // "missing CSRF token" unreachable.
 
-// Same-origin paths whose 403 is the ROUTE's own answer rather than a rejected
-// credential. The stale-shell recovery below skips them.
-// See "a 403 from /api/image-proxy is the route saying the feature is OFF" in
-// tests-js/auth-recovery.test.mjs.
-// /api/discover/search and /api/discover/files answer 403 the same way
-// whenever net_mode=off refuses the lookup (discover.py's _discover_status) -
-// the same "route's own answer, not a rejected credential" shape as the
-// image proxy, on the same shell-token credential in open mode.
-const _ROUTE_OWNED_403 = ["/api/image-proxy", "/api/discover/search", "/api/discover/files"];
+// The auth layer marks a 403 that rejected the shell token with this header; a
+// route's own 403 (a network-policy refusal, a feature switched off) lacks it.
+const SHELL_REJECTED_HEADER = "X-Localm-Shell-Rejected";
 
-function _routeOwns403(url) {
-  let path = url;
-  try { path = new URL(url, location.origin).pathname; } catch { /* use the raw value */ }
-  return _ROUTE_OWNED_403.some((p) => path === p || path.startsWith(p + "/"));
+function _shellTokenRejectedBy(res) {
+  try { return !!(res.headers && res.headers.get(SHELL_REJECTED_HEADER)); }
+  catch { return false; }
 }
 
 const _rawFetch = window.fetch.bind(window);
@@ -68,7 +61,7 @@ window.fetch = async function (input, init) {
     // credential open mode actually uses with no recovery path of any kind.
     else if (res.status === 403 && sentShellToken(hdrs)) {
       const url = typeof input === "string" ? input : (input && input.url) || "";
-      if ((url.startsWith("/") || url.startsWith(location.origin)) && !_routeOwns403(url)) {
+      if ((url.startsWith("/") || url.startsWith(location.origin)) && _shellTokenRejectedBy(res)) {
         onShellTokenRejected();
       }
     }
