@@ -5,7 +5,8 @@ import json
 import unittest
 
 from localm.inference.protocol import (
-    UsageInfo, ChatChunk, ChatResponse, FullChoice, Message, STATUS_CODE_BY_TEXT,
+    UsageInfo, ChatChunk, ChatResponse, FullChoice, Message, STATUS_ARGS_BY_CODE,
+    STATUS_CODE_BY_TEXT, StatusText, status_code_of,
     make_chunk_id,
 )
 
@@ -82,10 +83,39 @@ class TestStatusChunk(unittest.TestCase):
         for path in sorted((static / "i18n").glob("*.json")):
             catalogs[path.stem] = {k for k in json.loads(path.read_text(encoding="utf-8"))
                                    if k.startswith("chat.status.")}
-        for code in STATUS_CODE_BY_TEXT.values():
+        for code in [*STATUS_CODE_BY_TEXT.values(), *STATUS_ARGS_BY_CODE]:
             key = "chat.status." + re.sub(r"_([a-z])", lambda m: m.group(1).upper(), code)
             for lang, keys in catalogs.items():
                 self.assertIn(key, keys, f"{lang} has no label for status code {code!r}")
+
+    def test_a_parameterised_status_label_names_every_arg_in_every_catalog(self):
+        import re
+        from pathlib import Path
+        static = (Path(__file__).resolve().parents[1]
+                  / "localm" / "plugins" / "gui" / "static")
+        en = (static / "app" / "i18n-en.js").read_text(encoding="utf-8")
+        catalogs = {"en": dict(re.findall(r'^\s*"(chat\.status\.[A-Za-z]+)": "(.*)",$', en, re.M))}
+        for path in sorted((static / "i18n").glob("*.json")):
+            catalogs[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+        for code, names in STATUS_ARGS_BY_CODE.items():
+            key = "chat.status." + re.sub(r"_([a-z])", lambda m: m.group(1).upper(), code)
+            for lang, catalog in catalogs.items():
+                self.assertEqual(set(re.findall(r"\{(\w+)\}", catalog[key])), set(names),
+                                 f"{lang} {key}")
+
+    def test_a_status_text_carries_its_code_and_args(self):
+        text = StatusText("Loading 'b' beside 'a'...", "loading_beside",
+                          {"model": "b", "resident": "'a'"})
+        chunk = ChatChunk.status_chunk(text, "localm", "id123", 0)
+        delta = json.loads(chunk.model_dump_json())["choices"][0]["delta"]
+        self.assertEqual(delta["status"], "Loading 'b' beside 'a'...")
+        self.assertEqual(delta["status_code"], "loading_beside")
+        self.assertEqual(delta["status_args"], {"model": "b", "resident": "'a'"})
+        self.assertEqual(status_code_of(text), "loading_beside")
+
+    def test_a_plain_status_carries_no_args(self):
+        chunk = ChatChunk.status_chunk("Processing prompt...", "localm", "id123", 0)
+        self.assertIsNone(chunk.choices[0].delta.status_args)
 
     def test_token_chunk_has_no_status_code(self):
         chunk = ChatChunk.token("hello", "localm", "id123", 0)

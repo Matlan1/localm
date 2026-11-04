@@ -824,6 +824,15 @@ export let modelCache = { models: [], active: "" };
 // distinguish them. See the truthiness note below.
 let _modelsEverRefreshed = false;
 
+/** Dispatches `localm:active-model-changed` (detail.model, possibly "") when
+ *  modelCache.active differs from *previous*. Fires for every change, an
+ *  unload to "" included, unlike `localm:model-switched`. */
+function _publishActiveChange(previous) {
+  if (modelCache.active === previous) return;
+  window.dispatchEvent(new CustomEvent("localm:active-model-changed",
+    { detail: { model: modelCache.active } }));
+}
+
 export async function refreshModels() {
   try {
     const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
@@ -977,6 +986,7 @@ export async function refreshModels() {
       }
     }
     _modelsEverRefreshed = true;
+    _publishActiveChange(previousActive);
   } catch {
     setStatus("err", t("sidebar.status.serverUnreachable"));
   }
@@ -1093,7 +1103,9 @@ async function _maybeRoutePeer(model) {
     model, host: offer.peer.host, port: offer.peer.port,
   }));
   _peerSelected = model;
+  const previousActive = modelCache.active;
   modelCache.active = model;
+  _publishActiveChange(previousActive);
   _showServedModel();
   toast(t("sidebar.peerRoute.routedToast", { model }));
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model } }));
@@ -1121,11 +1133,14 @@ function _showServedModel() {
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
 
-async function _postLoad(model, force, asChat = false) {
+async function _postLoad(model, force, asChat = false, activate = true) {
   const r = await fetch("/api/models/load", {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ model, ...(force ? { force: true } : {}), ...(asChat ? { as_chat: true } : {}) }),
+    body: JSON.stringify({
+      model, ...(force ? { force: true } : {}), ...(asChat ? { as_chat: true } : {}),
+      ...(activate ? {} : { activate: false }),
+    }),
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
   return await r.json().catch(() => ({ status: "loaded", model }));
@@ -1151,14 +1166,19 @@ async function _postLoad(model, force, asChat = false) {
 //
 // On a failed load or peer route it sets the pill to "load failed", starts a
 // refreshModels(), and rethrows; the caller only reports the error.
-export async function switchModel(model, { local = false } = {}) {
+//
+// *activate* false asks the server to load the model without making it the
+// active model. *select* false leaves this tab's selection as it is: the peer
+// route and modelCache.active are kept, no localm:model-switched is dispatched,
+// and the status line returns to the selected model once modelCache is re-read.
+export async function switchModel(model, { local = false, activate = true, select = true } = {}) {
   let data;
   try {
     const routed = local ? null : await _maybeRoutePeer(model);
     if (routed) return routed;
-    _peerSelected = null;
+    if (select) _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
-    data = await _postLoad(model, false);
+    data = await _postLoad(model, false, false, activate);
     if (data.status === "confirm_required") {
       const notChat = data.reason === "not_chat_model";
       const confirmed = await confirmDangerAsync(
@@ -1171,7 +1191,7 @@ export async function switchModel(model, { local = false } = {}) {
         return { status: "cancelled", reason: "declined by user", model };
       }
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = notChat ? await _postLoad(model, false, true) : await _postLoad(model, true);
+      data = notChat ? await _postLoad(model, false, true, activate) : await _postLoad(model, true, false, activate);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
@@ -1181,6 +1201,12 @@ export async function switchModel(model, { local = false } = {}) {
     throw e;
   }
   if (data.status === "superseded" || data.status === "cancelled") return data;
+  if (!select) {
+    await refreshModels();
+    setStatus("ok", modelCache.active || modelCache.resumable || t("sidebar.status.noModel"));
+    _showServedModel();
+    return data;
+  }
   setStatus("ok", data.model || model);
   // Publish the newly active model NOW. refreshModels() is the only other writer
   // and it polls every 30s, so without this the client believes no model is
@@ -1191,7 +1217,9 @@ export async function switchModel(model, { local = false } = {}) {
   // the rest of the cache. Deliberately after the superseded/cancelled return:
   // that load was abandoned, so claiming it would publish a model that is not
   // loaded.
+  const previousActive = modelCache.active;
   modelCache.active = data.model || model;
+  _publishActiveChange(previousActive);
   _showServedModel();
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model: data.model || model } }));
   return data;
@@ -1201,7 +1229,16 @@ export async function switchModel(model, { local = false } = {}) {
 // saved load settings. Asks before unloading a model that is in use. Returns the
 // switchModel() result, or {status: "cancelled"} when the user declined, or
 // {status: "in_use"} when the model is busy and was not unloaded.
+// Reloading a model that is not the active one leaves the active model, and
+// this tab's selection, as they are, also when the reload fails or is cancelled.
+// Whether *model* is the server's active model is read from its modelCache
+// entry; whether it is this tab's selection, from modelCache.active.
 export async function reloadModel(model) {
+  const wasActive = model === modelCache.active;
+  const entry = (modelCache.models || []).find((m) => m.name === model);
+  const serverActive = entry && typeof entry.active === "boolean" ? entry.active : wasActive;
+  const idleStatus = () => (wasActive ? model
+    : modelCache.active || modelCache.resumable || t("sidebar.status.noModel"));
   setStatus("busy", t("sidebar.status.unloading", { model }));
   let data;
   try {
@@ -1210,7 +1247,7 @@ export async function reloadModel(model) {
       const confirmed = await confirmDangerAsync(
         t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
       if (!confirmed) {
-        setStatus("ok", model);
+        setStatus("ok", idleStatus());
         return { status: "cancelled", reason: "declined by user", model };
       }
       setStatus("busy", t("sidebar.status.unloading", { model }));
@@ -1221,27 +1258,34 @@ export async function reloadModel(model) {
     throw e;
   }
   if (data.status === "in_use") {
-    setStatus("ok", model);
+    setStatus("ok", idleStatus());
     return { status: "in_use", model };
   }
   let res;
   try {
-    res = await switchModel(model, { local: true });
+    res = await switchModel(model, { local: true, activate: serverActive, select: wasActive });
   } catch (e) {
-    modelCache.active = "";
-    modelCache.resumable = model;
+    if (wasActive) _markUnloaded(model);
     throw e;
   }
   if (res && res.status === "cancelled") {
-    modelCache.active = "";
-    modelCache.resumable = model;
-    setStatus("ok", model);
+    if (wasActive) _markUnloaded(model);
+    setStatus("ok", idleStatus());
     refreshModels();
   }
   return res;
 }
 
-// Toast the outcome of a switchModel() call. A model too big to fully fit
+// Record that the active model *model* is no longer resident but still answers
+// the next message (the server keeps it for lazy reload).
+function _markUnloaded(model) {
+  modelCache.active = "";
+  modelCache.resumable = model;
+  _publishActiveChange(model);
+}
+
+// Toast the outcome of a switchModel() call, headed by *head* ("Model switched
+// to <model>" by default). A model too big to fully fit
 // VRAM still loads (the backend deliberately defers to a partial/zero GPU
 // offload rather than refusing), so a plain "switched" toast would read as
 // success even when the load quietly fell back to (slow) CPU layers -
@@ -1253,7 +1297,7 @@ export async function reloadModel(model) {
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
 // warning is res.mmap_note. A res.mmap_cpu_from_disk load with
 // res.mmap_cpu_read_bytes and res.mmap_ram_available_bytes names both sizes.
-export function toastLoadResult(res, model) {
+export function toastLoadResult(res, model, head = "Model switched to " + model) {
   const fromDisk = !!(res && res.mmap_from_disk);
   const cpuFromDisk = !!(res && res.mmap_cpu_from_disk);
   const gib = (n) => (n / 1024 ** 3).toFixed(1);
@@ -1275,13 +1319,13 @@ export function toastLoadResult(res, model) {
     }
     const slow = `${parts.join(", ") || "partly on CPU"} - slower`;
     const extra = fromDisk ? `; ${diskNote}` : (res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");
-    toast(`Model switched to ${model} (${slow}${extra})`, true);
+    toast(`${head} (${slow}${extra})`, true);
   } else if (res && res.mmap_ram_short && res.mmap_note) {
-    toast(`Model switched to ${model} (${res.mmap_note})`, true);
+    toast(`${head} (${res.mmap_note})`, true);
   } else if (fromDisk) {
-    toast(`Model switched to ${model} (${diskNote})`, true);
+    toast(`${head} (${diskNote})`, true);
   } else {
-    toast("Model switched to " + model);
+    toast(head);
   }
 }
 
@@ -1366,15 +1410,9 @@ if (sidebarUnloadBtn) {
       // resets _statusBusy, which refreshModels()'s own "ok" write is
       // gated on - skip it and the status line would stay stuck on
       // "unloading ...".
-      modelCache.active = "";
-      // The unload button's own tooltip promises "it reloads automatically on
-      // the next chat request", and the server does exactly that (the Engine
-      // stays in _engines for lazy reload). Publish that immediately alongside
-      // clearing `active`, for the same reason the line above exists: until the
-      // next poll lands, the chat gate would otherwise read no active and no
-      // resumable model and refuse to send - turning the button's promise into
-      // "load a model on the sidebar before chatting".
-      modelCache.resumable = model;
+      // The server keeps the Engine for lazy reload, so the next chat request
+      // still has a model to answer it.
+      _markUnloaded(model);
       setStatus("ok", model);
       refreshModels();
       refreshPerfEstimate();

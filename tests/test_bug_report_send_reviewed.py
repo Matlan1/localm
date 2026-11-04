@@ -187,7 +187,7 @@ def test_a_report_the_server_did_not_file_is_reported_not_claimed(client, monkey
 
     def _held(url, payload, headers, timeout):
         sent.append(payload)
-        return 202, '{"ok": true, "filed": false}'
+        return 422, '{"error": "report not filed", "filed": false}'
 
     def _upload(title, body, **kw):
         return transport.upload_report(title, body, url="https://proxy.example",

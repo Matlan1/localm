@@ -62,8 +62,9 @@ from localm.inference.stop_sequences import StopFilter, apply_stop_matched
 from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
-    FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage, STATUS_CODE_BY_TEXT,
-    StreamChoice, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
+    FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage,
+    StatusText, StreamChoice, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
+    status_code_of,
 )
 
 # Models whose last load failed; capability routing leaves them out of its
@@ -566,6 +567,16 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 LOADING_BESIDE_STATUS = ("Loading '{model}' beside {resident}, which could not be "
                          "unloaded: not enough GPU memory is free, so part of it "
                          "will run on the CPU (slower)...")
+
+
+def loading_beside_status(model: str, resident: list[str]) -> StatusText:
+    """LOADING_BESIDE_STATUS for *model* loading beside the *resident* models,
+    as a StatusText with code ``loading_beside`` and args ``model`` and
+    ``resident`` (the quoted names, comma separated)."""
+    args = {"model": model, "resident": ", ".join(f"'{n}'" for n in resident)}
+    return StatusText(LOADING_BESIDE_STATUS.format(**args), "loading_beside", args)
+
+
 # How often that wait checks whether a busy native media runtime's job ended.
 _BUSY_MEDIA_POLL_S = 0.25
 
@@ -1207,8 +1218,7 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     beside = [n for n, e in list(_engines.items())
               if n != budget.name and getattr(e, "loaded", False)]
     if beside and on_status is not None:
-        on_status(LOADING_BESIDE_STATUS.format(
-            model=budget.name, resident=", ".join(f"'{n}'" for n in beside)))
+        on_status(loading_beside_status(budget.name, beside))
     return step(switch_admission.PROCEED_TO_LOAD)
 
 
@@ -4587,10 +4597,10 @@ def mount_gui_surface(app) -> bool:
             mmproj_path=mmproj,
         )
 
-    async def switch_model(name: str, *, force: bool = False) -> dict:
+    async def switch_model(name: str, *, force: bool = False, activate: bool = True) -> dict:
         # Preemptive switch: a newer selection aborts an in-flight load rather
         # than waiting for the abandoned model to finish (see switch_engine).
-        return await switch_engine(name, _build_engine, force=force)
+        return await switch_engine(name, _build_engine, force=force, activate=activate)
 
     from localm.plugins.gui.web import attach_gui
     # Marks the GUI mounted before attaching; unless attach_gui returns, the routes
@@ -6937,7 +6947,7 @@ async def _stream_sse_completion_body(
                             "choices": [{
                                 "text": "", "index": 0, "finish_reason": None,
                                 "status": token.text,
-                                "status_code": STATUS_CODE_BY_TEXT.get(token.text),
+                                "status_code": status_code_of(token.text),
                             }],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"

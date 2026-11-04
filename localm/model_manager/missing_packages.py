@@ -22,6 +22,7 @@ import ast
 import functools
 import importlib.util
 import json
+import platform
 import re
 import sys
 import warnings
@@ -43,6 +44,47 @@ SHIPPED_MODULES = frozenset({
     "lmdb", "pretty_midi", "mir_eval", "sklearn", "monai", "onnxruntime", "x_transformers",
     "nltk", "g2p_en", "lightning", "ftfy", "icecream", "av", "soundfile",
 })
+
+# Modules of SHIPPED_MODULES that the [hf] and [gpu] extras leave out on some
+# platforms, mapped to whether a ``(sys.platform, platform.machine())`` pair gets
+# them. Must agree with the extras' markers: see
+# test_platform_gaps_match_the_extras_markers.
+_WINDOWS_X64_OR_LINUX_X64 = frozenset({("linux", "x86_64"), ("win32", "AMD64")})
+PLATFORM_GAPS: dict[str, Callable[[str, str], bool]] = {
+    "decord": lambda plat, machine: (plat, machine) in _WINDOWS_X64_OR_LINUX_X64,
+    "tiktoken": lambda plat, machine: (plat, machine) != ("win32", "ARM64"),
+    "cv2": lambda plat, machine: (plat, machine) != ("win32", "ARM64"),
+    "librosa": lambda plat, machine: (plat, machine) != ("win32", "ARM64"),
+    "datasets": lambda plat, machine: (plat, machine) != ("win32", "ARM64"),
+    "monai": lambda plat, machine: (plat, machine) != ("darwin", "x86_64"),
+    "x_transformers": lambda plat, machine: (plat, machine) != ("darwin", "x86_64"),
+}
+
+_OS_NAMES = {"linux": "Linux", "win32": "Windows", "darwin": "macOS"}
+_ARCH_NAMES = {"x86_64": "x64", "amd64": "x64", "aarch64": "ARM64", "arm64": "ARM64"}
+
+
+def shipped_here(module: str, plat: Optional[str] = None,
+                 machine: Optional[str] = None) -> bool:
+    """True when the [hf] and [gpu] extras install *module* on the platform
+    *plat* / *machine* (``sys.platform`` and ``platform.machine()`` when omitted).
+    False for a module outside SHIPPED_MODULES."""
+    if module not in SHIPPED_MODULES:
+        return False
+    gate = PLATFORM_GAPS.get(module)
+    if gate is None:
+        return True
+    return gate(sys.platform if plat is None else plat,
+                platform.machine() if machine is None else machine)
+
+
+def platform_label(plat: Optional[str] = None, machine: Optional[str] = None) -> str:
+    """This platform as a user names it, such as ``Linux ARM64`` or ``Windows x64``."""
+    plat = sys.platform if plat is None else plat
+    machine = platform.machine() if machine is None else machine
+    os_name = _OS_NAMES.get(plat, plat)
+    arch = _ARCH_NAMES.get(machine.lower(), machine)
+    return f"{os_name} {arch}".strip()
 
 _PIP_SENTENCE = re.compile(r"\s*(?:Run|Please run|Try running)?\s*`?pip install[^`.\n]*`?\.?",
                            re.IGNORECASE)
@@ -234,10 +276,19 @@ def refusal_for(model_name: str, modules: list[str]) -> str:
     *modules*, which this install lacks, and what the user can do about it:
     repair the install (a package localm ships), add them with
     ``localm install-packages`` or the Models page (every other package localm
-    can add here), or nothing (a package localm cannot add, with the reason)."""
+    can add here), or nothing (a package localm cannot add, with the reason, or
+    one it ships on other platforms but not on this one)."""
     from localm.model_manager import model_packages
     labels = ", ".join(package_label(m) for m in modules)
     noun = "package" if len(modules) == 1 else "packages"
+    elsewhere = [m for m in modules if m in SHIPPED_MODULES and not shipped_here(m)]
+    if elsewhere:
+        names = ", ".join(package_label(m) for m in elsewhere)
+        verb = "is" if len(elsewhere) == 1 else "are"
+        return (f"{model_name} cannot be loaded: its code needs the Python "
+                f"{'package' if len(elsewhere) == 1 else 'packages'} {names}, which "
+                f"{verb} not available for this platform ({platform_label()}). "
+                "localm cannot run this model here.")
     shipped = [m for m in modules if m in SHIPPED_MODULES]
     if len(shipped) == len(modules):
         return (f"{model_name} cannot be loaded: its code needs the Python {noun} "

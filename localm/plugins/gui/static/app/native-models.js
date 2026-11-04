@@ -604,8 +604,11 @@ export function mountEnhanceButton({ media, fieldId, familyOf }) {
   const button = el("button", "btn-secondary btn-sm", t("enhance.button"));
   button.type = "button";
   button.title = t("enhance.title");
+  button.dataset.i18n = "enhance.button";
+  button.dataset.i18nTitle = "enhance.title";
   const undo = el("button", "btn-secondary btn-sm", t("enhance.undo"));
   undo.type = "button";
+  undo.dataset.i18n = "enhance.undo";
   undo.hidden = true;
   row.append(button, undo);
   field.insertAdjacentElement("afterend", row);
