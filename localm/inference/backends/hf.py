@@ -115,6 +115,29 @@ def _has_transformers_support(model_path: str) -> bool:
     return (Path(spec.origin).parent / "models" / name / f"configuration_{name}.py").is_file()
 
 
+# Model types whose bundled code targets an older transformers and whose classes in
+# transformers load the same checkpoint: they use those whatever hf_trust_remote_code says.
+_TRANSFORMERS_FIRST = frozenset({"kimi_linear"})
+
+
+def _config_model_type(model_path: str):
+    import json
+    try:
+        return json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8")).get("model_type")
+    except (OSError, ValueError, AttributeError) as e:
+        logger.debug("hf: could not read the model_type of %s: %s", model_path, e)
+        return None
+
+
+def uses_transformers_classes(model_path: str) -> bool:
+    """True when a folder that ships its own code loads on the classes of the installed
+    transformers instead: :func:`runs_without_its_own_code`, or a model type listed in
+    :data:`_TRANSFORMERS_FIRST`."""
+    if not _declares_custom_code(model_path) or not _has_transformers_support(model_path):
+        return False
+    return not _trust_remote_code_enabled() or _config_model_type(model_path) in _TRANSFORMERS_FIRST
+
+
 def runs_without_its_own_code(model_path: str) -> bool:
     """True when the folder ships its own code (``auto_map``), ``hf_trust_remote_code`` is
     off, and the installed transformers has its own classes for the model, so the load

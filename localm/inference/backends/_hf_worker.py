@@ -744,6 +744,44 @@ def _refuse_missing_weights(info: dict) -> None:
                            f"weights are missing, such as {missing[0]}")
 
 
+@contextlib.contextmanager
+def _quiet_load_report(quiet: bool):
+    """With *quiet*, hold back transformers' load report for the block: it lists every
+    weight the on-demand experts leave to be read later as unexpected."""
+    if not quiet:
+        yield
+        return
+    from transformers.utils import logging as tr_logging
+    level = tr_logging.get_verbosity()
+    tr_logging.set_verbosity_error()
+    try:
+        yield
+    finally:
+        tr_logging.set_verbosity(level)
+
+
+def _on_demand_experts_device(torch, model_path: str, device: str, device_map_kwargs: dict):
+    """The device (a GPU index, or "cpu") for a load whose experts are read on demand, or None
+    for a load placed the usual way. Only a load on the CPU or on one GPU qualifies, for a
+    model :func:`_hf_on_demand_experts.worth_using` accepts."""
+    from localm.inference.backends import _hf_on_demand_experts
+    if device == "cpu":
+        import psutil
+        return "cpu" if _hf_on_demand_experts.worth_using(model_path, int(psutil.virtual_memory().available)) else None
+    if device != "cuda":
+        return None
+    budget = device_map_kwargs.get("max_memory")
+    gpus = sorted(i for i in budget if isinstance(i, int)) if isinstance(budget, dict) else [0]
+    if len(gpus) != 1:
+        return None
+    try:
+        free = int(torch.cuda.mem_get_info(gpus[0])[0])
+    except Exception as e:
+        logger.debug("hf load: could not read free video memory: %s", e)
+        return None
+    return gpus[0] if _hf_on_demand_experts.worth_using(model_path, free) else None
+
+
 def _safetensors_bytes(model_path: str) -> int:
     """Total size of the ``.safetensors`` files directly in *model_path*; 0 when there are
     none or the folder cannot be read."""
@@ -1655,6 +1693,7 @@ class HFWorker:
         self.fp8_plan = None
         # One-line notes about the last load for the load output.
         self.load_notes: list[str] = []
+        self._expert_store = None
         # Why the most recent chat_stream() call ended - "stop" (EOS) or
         # "length" (max_tokens exhausted first). Mirrors GgufWorker's
         # identical attribute; recomputed for real by chat_stream() below.
@@ -1676,9 +1715,10 @@ class HFWorker:
         # PARENT, BEFORE this class is ever constructed - see hf.py's load().
         # This method only needs the boolean for the trust_remote_code= kwarg
         # below.
-        trust_remote_code = _trust_remote_code_enabled()
-        from localm.inference.backends.hf import runs_without_its_own_code
+        from localm.inference.backends.hf import runs_without_its_own_code, uses_transformers_classes
         without_own_code = runs_without_its_own_code(self.model_path)
+        transformers_classes = uses_transformers_classes(self.model_path)
+        trust_remote_code = _trust_remote_code_enabled() and not transformers_classes
         _apply_gpu_order(self._gpu_order)
         torch = _require_torch()
         from localm.inference.backends import _st_plan
@@ -1695,6 +1735,14 @@ class HFWorker:
             device_map_kwargs, keep_checkpoint_dtype = _cpu_device_map(self.model_path)
         else:
             device_map_kwargs = {"device_map": "cpu"}
+        on_demand_device = _on_demand_experts_device(torch, self.model_path, device, device_map_kwargs)
+        if on_demand_device is not None:
+            device_map_kwargs = {"device_map": {"": on_demand_device}}
+            keep_checkpoint_dtype = True
+        kernel_note = None
+        if transformers_classes:
+            from localm.inference.backends._hf_linear_attention import choose_kernels
+            kernel_note = choose_kernels(torch, device)
 
         # Runs before transformers first checks for the kernels package (the
         # check is cached): a native FP8 plan, or a Hub-kernel quantization the
@@ -1714,6 +1762,8 @@ class HFWorker:
                                        device_map_kwargs)
         self.fp8_plan = fp8
         self.load_notes = []
+        if kernel_note:
+            self.load_notes.append(kernel_note)
         if without_own_code:
             self.load_notes.append("this model's own code did not run ('Allow model-bundled custom code' is off); "
                                    "using transformers' own support for it")
@@ -1806,6 +1856,9 @@ class HFWorker:
                    and not _is_compressed_tensors(self.model_path) else dtype),
             trust_remote_code=trust_remote_code,
         )
+        if on_demand_device is not None:
+            from localm.inference.backends import _hf_on_demand_experts
+            _hf_on_demand_experts.prepare()
         if fp8 is not None and not fp8.native:
             load_kwargs["quantization_config"] = tr.FineGrainedFP8Config(dequantize=True)
         elif fp8 is None and _is_compressed_tensors(self.model_path):
@@ -1832,8 +1885,9 @@ class HFWorker:
             if cls is None:
                 continue
             try:
-                with _filter_docstring_leak(), _suppress_offload_buffer_advisory():
-                    if without_own_code:
+                with _filter_docstring_leak(), _suppress_offload_buffer_advisory(), \
+                        _quiet_load_report(on_demand_device is not None):
+                    if transformers_classes:
                         model, info = cls.from_pretrained(self.model_path, output_loading_info=True, **load_kwargs)
                         _refuse_missing_weights(info)
                         self._model = model
@@ -1858,6 +1912,15 @@ class HFWorker:
         if self._model is None:
             detail = "; tried: " + "; ".join(errors) if errors else ""
             raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
+
+        if on_demand_device is not None:
+            from localm.inference.backends import _hf_on_demand_experts
+            target = "cpu" if device == "cpu" else f"cuda:{on_demand_device}"
+            budget = _hf_on_demand_experts.free_bytes(device)
+            self._expert_store = _hf_on_demand_experts.attach(self._model, self.model_path, target, budget)
+            self.load_notes.append(
+                f"the routed experts stay on disk and are read as needed; up to {budget / 1024 ** 3:.1f} GB of "
+                f"them stay in {'RAM' if device == 'cpu' else 'video memory'}")
 
         if fp8 is None:
             from localm.inference.backends._hf_fp8 import quant_method
@@ -1942,6 +2005,9 @@ class HFWorker:
             self._vision_cache.uninstall()
         self._vision_cache = None
         self._model = None
+        if self._expert_store is not None:
+            self._expert_store.close()
+            self._expert_store = None
         self._processor = None
         self._tokenizer = None
         self._loaded = False
