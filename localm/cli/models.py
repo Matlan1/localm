@@ -1452,7 +1452,7 @@ def install_packages_cmd(model, yes, list_added):
 
     \b
     Examples:
-      localm install-packages Kimi-Linear-48B-A3B-Instruct
+      localm install-packages my-vision-model
       localm install-packages D:\\models\\some-model --yes
       localm install-packages --list
     """

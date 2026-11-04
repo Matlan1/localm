@@ -121,15 +121,25 @@ def _check_custom_code_allowed(model_path: str) -> None:
 
 def _without_pip_advice(model_path: str, err: RuntimeError) -> RuntimeError:
     """*err* itself, or the load failure it reports re-worded for a localm user
-    when it is a missing-package ImportError or tells the reader to run pip."""
-    from localm.model_manager.missing_packages import rewrite_import_error, strip_pip_instructions
+    when it is a missing-package ImportError or tells the reader to run pip.
+    An ImportError is always returned as a :class:`ModelRefusedError`, never a
+    bare ``RuntimeError`` that the CLI reports as an unexpected error."""
+    from localm.model_manager.missing_packages import (
+        IMPORT_ERROR,
+        rewrite_import_error,
+        strip_pip_instructions,
+    )
+    name = Path(model_path).name
     text = str(err)
-    sentence = rewrite_import_error(Path(model_path).name, text, model_path)
+    sentence = rewrite_import_error(name, text, model_path)
     if sentence is not None:
         return ModelRefusedError(sentence)
     stripped = strip_pip_instructions(text)
     if stripped == " ".join(text.split()):
         return err
+    if IMPORT_ERROR.search(text):
+        return ModelRefusedError(f"{name} cannot be loaded: its own code stopped on an import "
+                                 f"it needs. {stripped}")
     return type(err)(stripped)
 
 

@@ -5,6 +5,7 @@ message is re-worded."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 
 from localm.inference.backends import hf as hf_backend
 from localm.inference.backends.base import ModelRefusedError
+from localm.inference.backends.llamacpp._runner import load_error_text
 from localm.model_manager import missing_packages as mp
 from localm.model_manager.unsupported import hf_folder_refusal
 
@@ -299,7 +301,98 @@ def test_load_reports_a_remote_code_import_error_without_pip(tmp_path, monkeypat
     assert "tiktoken" in str(raised.value) and "pip" not in str(raised.value).lower()
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+PIP_NAME = ABSENT.replace("_", "-")
+MODEL_STOPS = (
+    f"try:\n    import {ABSENT}\nexcept ImportError:\n"
+    f"    raise ImportError(\"Plese run `pip install -U {PIP_NAME}`\")\n")
+MODEL_FLAGS = (
+    f"try:\n    import {ABSENT}\n    HAS_IT = True\nexcept ImportError:\n    HAS_IT = False\n"
+    f"if not HAS_IT:\n    raise ImportError(\"Plese run `pip install -U {PIP_NAME}`\")\n")
+
+
+def _real_import_error(folder: Path) -> ImportError:
+    spec = importlib.util.spec_from_file_location("modeling_x_probe", folder / "modeling_x.py")
+    module = importlib.util.module_from_spec(spec)
+    with pytest.raises(ImportError) as raised:
+        spec.loader.exec_module(module)
+    return raised.value
+
+
+def _refusing_runner(monkeypatch, text: str) -> None:
+    class _Runner:
+        def spawn_and_load(self, params, timeout):
+            raise RuntimeError(text)
+
+    monkeypatch.setattr(hf_backend, "HFRunner", _Runner)
+
+
+def test_a_try_whose_import_handler_raises_marks_its_imports_required():
+    source = (
+        "try:\n    import needed_a\nexcept ImportError:\n    raise ImportError('install it')\n"
+        "try:\n    from needed_b import x\nexcept (ValueError, ModuleNotFoundError):\n    raise\n"
+        "try:\n    import optional_a\nexcept ImportError:\n    optional_a = None\n"
+        "try:\n    import optional_b\nexcept ValueError:\n    raise\n"
+        "try:\n    import optional_c\nexcept ImportError:\n    def later():\n        raise X\n"
+        "try:\n    import optional_d\nexcept ImportError:\n    import fallback_d\n")
+    absolute, _ = mp.imports_of(source)
+    assert absolute == {"needed_a", "needed_b"}
+    assert mp.imports_of(source, guarded=True)[0] == {
+        "needed_a", "needed_b", "optional_a", "optional_b", "optional_c", "optional_d"}
+
+
+def test_a_model_that_stops_when_a_guarded_import_fails_is_refused_before_the_load(
+        tmp_path, trusted, monkeypatch):
+    class _Runner:
+        def __init__(self):
+            raise AssertionError("a child was started")
+
+    monkeypatch.setattr(hf_backend, "HFRunner", _Runner)
+    folder = _model(tmp_path, MODEL_STOPS)
+    assert mp.missing_modules(folder) == [ABSENT]
+    added = hf_folder_refusal(folder)
+    assert added is not None and PIP_NAME in added and "pip install" not in added
+    with pytest.raises(ModelRefusedError) as raised:
+        hf_backend.HFBackend(str(folder)).load()
+    assert str(raised.value) == added
+
+
+def test_a_real_import_error_from_the_models_own_code_is_a_refusal_at_load(
+        tmp_path, trusted, monkeypatch):
+    folder = _model(tmp_path, MODEL_FLAGS)
+    assert mp.missing_modules(folder) == []
+    failure = _real_import_error(folder)
+    text = load_error_text(failure)
+    assert text.startswith("ImportError: ") and "pip install" in text
+    _refusing_runner(monkeypatch, text)
+    with pytest.raises(ModelRefusedError) as raised:
+        hf_backend.HFBackend(str(folder)).load()
+    message = str(raised.value)
+    assert PIP_NAME in message and "pip" not in message.lower()
+
+
+def test_a_guarded_import_the_error_does_not_name_is_not_blamed(tmp_path, trusted, monkeypatch):
+    folder = _model(tmp_path, MODEL_FLAGS)
+    _refusing_runner(monkeypatch, "ImportError: cannot import name 'thing' from 'somewhere'")
+    with pytest.raises(RuntimeError) as raised:
+        hf_backend.HFBackend(str(folder)).load()
+    assert not isinstance(raised.value, ModelRefusedError)
+    assert ABSENT not in str(raised.value) and PIP_NAME not in str(raised.value)
+
+
+def test_an_import_error_telling_to_run_pip_names_the_package_without_a_folder_scan():
+    text = f"ImportError: Plese run `pip install -U {PIP_NAME}`"
+    sentence = mp.rewrite_import_error("m", text)
+    assert sentence is not None and PIP_NAME in sentence and "pip" not in sentence.lower()
+    assert mp.rewrite_import_error("m", "ImportError: Plese run `pip install -U numpy`") is None
+
+
+def test_an_import_error_that_names_no_package_is_still_a_refusal_without_pip():
+    out = hf_backend._without_pip_advice(
+        "/m/x", RuntimeError("ImportError: this needs more. Please run pip install"))
+    assert isinstance(out, ModelRefusedError) and "pip" not in str(out).lower()
+
+
+REPO_ROOT =Path(__file__).resolve().parents[1]
 CENSUS_PACKAGES = {"tiktoken": "tiktoken", "sentencepiece": "sentencepiece",
                    "protobuf": "google", "einops": "einops", "peft": "peft",
                    "librosa": "librosa", "scipy": "scipy",

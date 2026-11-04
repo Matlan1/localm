@@ -1715,6 +1715,12 @@ class HFWorker:
                 pass
         logger.debug("hf load: dtype=%s", dtype)
 
+        if trust_remote_code:
+            from localm.inference.backends import _remote_code_compat
+            from localm.inference.backends._fla_torch import provide_for
+            provide_for(self.model_path)
+            _remote_code_compat.apply_for(self.model_path)
+
         # --- Processor / tokenizer ---
         logger.debug("hf load: loading processor")
         try:
@@ -1781,6 +1787,9 @@ class HFWorker:
                 with _filter_docstring_leak(), _suppress_offload_buffer_advisory():
                     self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 logger.debug("hf load: class=%s", cls_name)
+                if trust_remote_code:
+                    from localm.inference.backends import _remote_code_compat
+                    _remote_code_compat.apply_to_model(self._model)
                 break
             except (ValueError, OSError, RuntimeError, KeyError) as e:
                 # Record why each class was rejected so the final error names

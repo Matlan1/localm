@@ -77,17 +77,25 @@ def test_a_refused_module_gives_its_reason():
     assert "source code" in mpk.unavailable_reason("flash_attn")
 
 
+def _linux_only_needing_triton(monkeypatch):
+    monkeypatch.setitem(mpk.ON_DEMAND, "zz_linux_only",
+                        mpk.OnDemand("zz-linux-only", "1.0", platforms=("linux",), needs=("triton",)))
+
+
 def test_a_listed_module_for_another_platform_is_not_installable(monkeypatch, available):
+    _linux_only_needing_triton(monkeypatch)
+    monkeypatch.setattr(mpk, "_importable", lambda m: True)
     monkeypatch.setattr(sys, "platform", "win32")
-    assert "operating system" in mpk.unavailable_reason("fla")
+    assert "operating system" in mpk.unavailable_reason("zz_linux_only")
     monkeypatch.setattr(sys, "platform", "linux")
-    assert mpk.unavailable_reason("fla") is None
+    assert mpk.unavailable_reason("zz_linux_only") is None
 
 
 def test_a_listed_module_whose_prerequisite_is_missing_is_not_installable(monkeypatch):
+    _linux_only_needing_triton(monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(mpk, "_importable", lambda m: m != "triton")
-    assert mpk.unavailable_reason("fla") == "it needs triton, which this install does not have"
+    assert mpk.unavailable_reason("zz_linux_only") == "it needs triton, which this install does not have"
 
 
 def test_the_lists_do_not_overlap_each_other_or_what_localm_ships():

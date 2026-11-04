@@ -66,7 +66,6 @@ ON_DEMAND: dict[str, OnDemand] = {
     "timm": OnDemand("timm", "1.0.30"),
     "open_clip": OnDemand("open-clip-torch", "3.3.0"),
     "torchaudio": OnDemand("torchaudio", "2.0"),
-    "fla": OnDemand("flash-linear-attention", "0.6.0", platforms=("linux",), needs=("triton",)),
 }
 
 _KERNELS = "a CUDA kernel package that PyPI publishes only as source code to compile"
@@ -563,12 +562,12 @@ def folder_state(folder: Path) -> FolderState:
     ones it cannot add here (including a shipped module this platform does not
     get), and ones it can add. Never touches the network."""
     from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
-    from localm.model_manager.missing_packages import is_importable, shipped_here
+    from localm.model_manager.missing_packages import is_available, shipped_here
     if not folder.is_dir() or not _declares_custom_code(str(folder)):
         return FolderState(True, [], [], [], [])
     if not _trust_remote_code_enabled():
         return FolderState(False, [], [], [], [])
-    missing = sorted(m for m in _folder_imports(folder) if not is_importable(m))
+    missing = sorted(m for m in _folder_imports(folder) if not is_available(m))
     shipped = [m for m in missing if shipped_here(m)]
     others = [m for m in missing if not shipped_here(m)]
     blocked = [m for m in others if not installable(m)]

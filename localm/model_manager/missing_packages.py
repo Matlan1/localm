@@ -10,10 +10,13 @@ install lacks is refused at add time and before a load starts, with a sentence a
 localm user can act on, and rewrites transformers' own message when it still
 reaches us.
 
-The scan mirrors transformers' ``check_imports``: every ``import`` and ``from``
+The scan follows transformers' ``check_imports``: every ``import`` and ``from``
 statement of the entry modules named by ``auto_map`` and of the sibling modules
-they import relatively, except those inside a ``try`` or behind an availability
-check (see :func:`imports_of`).
+they import relatively, except those behind an availability check or inside a
+``try`` whose handler does not raise. It differs from transformers in one rule:
+a ``try`` whose ``ImportError`` handler raises marks its imports as required, so
+the model's own "please install X" stop is found before the load (see
+:func:`imports_of`).
 """
 
 from __future__ import annotations
@@ -129,13 +132,49 @@ def _is_availability_guard(node: ast.If, known: frozenset) -> bool:
     return False
 
 
-def imports_of(source: str, known: Optional[frozenset] = None) -> tuple[set[str], set[str]]:
+_TRY_NODES = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t is not None)
+_IMPORT_FAILURES = frozenset({"ImportError", "ModuleNotFoundError", "Exception", "BaseException"})
+
+
+def _catches_import_failure(handler: ast.ExceptHandler) -> bool:
+    kind = handler.type
+    if kind is None:
+        return True
+    names = kind.elts if isinstance(kind, ast.Tuple) else [kind]
+    return any(getattr(n, "id", getattr(n, "attr", "")) in _IMPORT_FAILURES for n in names)
+
+
+def _raises(body: list) -> bool:
+    stack: list = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Raise):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _requires_its_imports(node: ast.AST) -> bool:
+    """True for a ``try`` with a handler for a failed import that raises: the
+    code stops when the import fails, so the package is required."""
+    handlers = getattr(node, "handlers", [])
+    return any(_catches_import_failure(h) and _raises(h.body) for h in handlers)
+
+
+def imports_of(source: str, known: Optional[frozenset] = None,
+               guarded: bool = False) -> tuple[set[str], set[str]]:
     """``(absolute, relative)`` imports of the Python *source*: the top-level names
     of absolute imports and the module names of same-folder relative imports.
-    Mirrors transformers' import check: nothing inside a ``try`` is read, nor inside
-    an ``if`` whose test calls an ``is_flash_attn*_available`` helper or a name
-    defined in transformers' ``import_utils`` (*known*, read from the installed
-    transformers when omitted). A source that does not parse yields two empty sets."""
+    Follows transformers' import check, which reads no import inside a ``try``,
+    except that the body of a ``try`` whose ``ImportError`` handler raises is read:
+    the module stops at that import, so the package is required. Not read: the
+    body of any other ``try`` (an optional import) unless *guarded* is true, the
+    handlers of any ``try``, and an ``if`` whose test calls an
+    ``is_flash_attn*_available`` helper or a name defined in transformers'
+    ``import_utils`` (*known*, read from the installed transformers when omitted).
+    A source that does not parse yields two empty sets."""
     if known is None:
         known = _availability_names()
     try:
@@ -148,7 +187,10 @@ def imports_of(source: str, known: Optional[frozenset] = None) -> tuple[set[str]
     relative: set[str] = set()
 
     def visit(node: ast.AST) -> None:
-        if isinstance(node, ast.Try):
+        if isinstance(node, _TRY_NODES):
+            if guarded or _requires_its_imports(node):
+                for child in [*getattr(node, "body", []), *getattr(node, "orelse", [])]:
+                    visit(child)
             return
         if isinstance(node, ast.If) and _is_availability_guard(node, known):
             return
@@ -193,10 +235,11 @@ def entry_modules(configs: Iterable[dict]) -> list[str]:
 
 
 def third_party_imports(read: Callable[[str], Optional[str]],
-                        entries: Iterable[str]) -> set[str]:
+                        entries: Iterable[str], guarded: bool = False) -> set[str]:
     """Top-level non-standard-library module names the code of *entries* imports,
     following relative imports. *read* returns the source text of a module name
-    (``"modeling_x"``) or None when the folder has no such file."""
+    (``"modeling_x"``) or None when the folder has no such file. *guarded* also
+    reads the optional imports inside a ``try`` (see :func:`imports_of`)."""
     seen: set[str] = set()
     pending = list(entries)
     needed: set[str] = set()
@@ -208,11 +251,21 @@ def third_party_imports(read: Callable[[str], Optional[str]],
         source = read(module)
         if source is None:
             continue
-        absolute, relative = imports_of(source)
+        absolute, relative = imports_of(source, guarded=guarded)
         needed.update(absolute)
         pending.extend(relative)
     return {m for m in needed if m not in sys.stdlib_module_names and m not in seen
             and read(m) is None}
+
+
+PROVIDED_MODULES = frozenset({"fla"})
+
+
+def is_available(module: str) -> bool:
+    """True when the bundled code of a model can import *module*: it is importable
+    in this interpreter, or localm supplies it itself (:data:`PROVIDED_MODULES`,
+    registered by ``_fla_torch.provide_for`` when the model loads)."""
+    return module in PROVIDED_MODULES or is_importable(module)
 
 
 def is_importable(module: str) -> bool:
@@ -242,24 +295,26 @@ def _folder_reader(folder: Path) -> Callable[[str], Optional[str]]:
     return read
 
 
-def folder_third_party_imports(folder: Path) -> set[str]:
+def folder_third_party_imports(folder: Path, guarded: bool = False) -> set[str]:
     """Third-party modules the bundled code of the model *folder* imports; empty
-    for a folder with no ``auto_map``."""
+    for a folder with no ``auto_map``. *guarded* also reads the optional imports
+    inside a ``try`` (see :func:`imports_of`)."""
     configs = [c for c in (_read_json(folder / f) for f in CONFIG_FILES) if c is not None]
     entries = entry_modules(configs)
     if not entries:
         return set()
-    return third_party_imports(_folder_reader(folder), entries)
+    return third_party_imports(_folder_reader(folder), entries, guarded)
 
 
-def missing_modules(folder: Path) -> list[str]:
+def missing_modules(folder: Path, guarded: bool = False) -> list[str]:
     """Sorted top-level modules the bundled code of *folder* imports that this
-    interpreter cannot import."""
+    interpreter cannot import. *guarded* also counts the optional imports inside
+    a ``try``."""
     try:
-        needed = folder_third_party_imports(folder)
+        needed = folder_third_party_imports(folder, guarded)
     except (OSError, ValueError, RecursionError):
         return []
-    return sorted(m for m in needed if not is_importable(m))
+    return sorted(m for m in needed if not is_available(m))
 
 
 _NAMES = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn", "cv2": "opencv",
@@ -373,8 +428,36 @@ def rewrite_import_error(model_name: str, text: str, folder: Optional[str] = Non
         if not modules and library:
             modules = [_module_for_library(library.group(1))]
     if not modules:
+        modules = _modules_from_import_error(text, folder)
+    if not modules:
         return None
     return refusal_for(model_name, modules, _addable_for(folder))
+
+
+IMPORT_ERROR = re.compile(r"\b(?:ImportError|ModuleNotFoundError)\b")
+_PIP_TARGET = re.compile(r"\bpip3?\s+install\s+(?:-{1,2}\S+\s+)*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _named_in(lowered: str, word: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(word.lower())}(?![a-z0-9])", lowered) is not None
+
+
+def _modules_from_import_error(text: str, folder: Optional[str]) -> list[str]:
+    """The missing modules an ``ImportError`` *text* that names none (the model's
+    own message, such as "please run pip install X") is about: the modules the
+    model *folder* imports behind a ``try`` that this interpreter lacks and the
+    text names, else the packages of its ``pip install`` instruction that this
+    interpreter lacks. Empty when *text* is not an ImportError."""
+    if not IMPORT_ERROR.search(text):
+        return []
+    lowered = text.lower()
+    if folder:
+        found = [m for m in missing_modules(Path(folder), guarded=True)
+                 if _named_in(lowered, m) or _named_in(lowered, package_label(m))]
+        if found:
+            return found
+    named = (n.replace("-", "_").replace(".", "_").lower() for n in _PIP_TARGET.findall(text))
+    return [m for m in dict.fromkeys(named) if not is_importable(m)]
 
 
 def _addable_for(folder: Optional[str]) -> set[str]:
