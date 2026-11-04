@@ -227,7 +227,14 @@ class HTTPBackend(BaseLLMBackend):
         Capabilities the answering model must have, e.g. ``("tool_use",)``,
         sent to a localm server with every request. Ignored by any other
         server.
+
+    Every request to a localm server carries ``context_reserve``
+    (``AGENT_CONTEXT_RESERVE``), the context window an agent session needs;
+    the server reloads a model with a smaller window when its settings allow.
     """
+
+    # Tokens of context window an agent session asks a localm server for.
+    AGENT_CONTEXT_RESERVE = 32768
 
     # Anthropic requires max_tokens on every request; OpenAI-compat does not.
     _ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
@@ -707,6 +714,7 @@ class HTTPBackend(BaseLLMBackend):
                 body["pin_model"] = False
             if self.required_capabilities:
                 body["required_capabilities"] = list(self.required_capabilities)
+            body.setdefault("context_reserve", self.AGENT_CONTEXT_RESERVE)
         return {k: v for k, v in body.items() if v is not None}
 
     def _anthropic_body(self, messages: list[dict], stream: bool,

@@ -20,10 +20,12 @@ def test_the_figure_reaches_the_placement_dict_and_its_sentence():
     gib = 1024 ** 3
     placement = _engine(int(1.5 * gib)).gpu_placement
     assert placement["moe_ram_read_bytes"] == int(1.5 * gib)
-    assert "about 1.50 GB read from RAM per token" in describe_gpu_placement(placement)
+    assert describe_gpu_placement(placement) == (
+        "48/48 layers on the GPU, the routed experts of 15 of 48 layers in system RAM; "
+        "each token reads only its active experts there (about 1.50 GB)")
 
 
 def test_a_load_without_the_figure_keeps_the_placement_unchanged():
     placement = _engine(None).gpu_placement
     assert "moe_ram_read_bytes" not in placement
-    assert "per token" not in describe_gpu_placement(placement)
+    assert "each token reads" not in describe_gpu_placement(placement)

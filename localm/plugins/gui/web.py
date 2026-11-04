@@ -372,6 +372,10 @@ class LoadModelRequest(BaseModel):
     # "not_chat_model"}: marks an embedding, reranker or text-encoder model as a
     # chat model (type 'llm') and loads it.
     as_chat: bool = False
+    # Set on the retry after {"status": "confirm_required", "reason":
+    # "unload_choice"} when the user chose to load beside the other models:
+    # nothing is unloaded and the model gets the VRAM that is left.
+    keep_others: bool = False
     # False: make the model resident without making it the active model (the
     # active model stays as it is; see switch_engine's *activate*).
     activate: bool = True

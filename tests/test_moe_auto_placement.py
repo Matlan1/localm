@@ -144,8 +144,8 @@ class TestAutoChoice:
         assert b.last_gpu_sizing["mode"] == "auto"
         assert b.last_gpu_sizing["layers"] == 99
         out = _flat(capsys)
-        assert "every layer on the GPU, with the routed experts of 2/4 layers in system RAM" in out
-        assert "Set n_cpu_moe or n_gpu_layers to override" in out
+        assert ("moe placement: every layer on the GPU; the routed experts of 2 of 4 "
+                "layers stay in system RAM") in out
 
     def test_the_choice_reaches_every_later_charge_of_the_load(self, tmp_path, capsys):
         b = _backend(_moe_model(tmp_path))
@@ -286,7 +286,8 @@ class TestLoadCarriesTheChoice:
         out = _flat(capsys)
         assert "moe placement: 0.50 MiB system RAM / 1.00 MiB VRAM" in out
         # 210,000 expert bytes in RAM, 2 of 8 experts read per token.
-        assert "each generated token reads about 0.00 GB of expert weights" in out
+        assert ("moe speed: 2 of 4 layers keep their experts in system RAM; each token "
+                "reads only its active experts there (about 0.00 GB)") in out
         engine = object.__new__(Engine)
         engine._backend = b
         assert engine.gpu_placement == {"gpu_layers_offloaded": 4, "gpu_layers_total": 4,
@@ -449,7 +450,7 @@ class TestLeadingDenseBlocks:
             b.load()
         assert b.effective_n_cpu_moe == 2
         assert b.moe_cpu_layers == 1
-        assert "with the routed experts of 1/3 layers in system RAM" in _flat(capsys)
+        assert "the routed experts of 1 of 3 layers stay in system RAM" in _flat(capsys)
         engine = object.__new__(Engine)
         engine._backend = b
         assert engine.gpu_placement["moe_cpu_layers"] == 1

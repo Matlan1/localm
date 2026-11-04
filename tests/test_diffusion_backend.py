@@ -672,7 +672,7 @@ class TestCompactionGate:
         text = context_overflow_detail(2100, 2048, reply_reserve=256)
         assert "diffusion model" in text and "2048" in text
         assert "n_ctx_max" not in text
-        assert "n_ctx_max" in context_overflow_detail(5000, 4096)
+        assert "n_ctx_max" in context_overflow_detail(5000, 4096, limit="n_ctx_max")
 
 
 class TestMaskTokenRefusal:

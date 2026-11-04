@@ -231,6 +231,18 @@ CORE_FIELDS: list = [
                  "VRAM. 0 is automatic: with auto-sized GPU layers, only as many as "
                  "needed, before a whole layer moves to the CPU.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    SettingField("ctx_reserve", Widget.NUMBER, "Context window (minimum)",
+                 "Every load keeps a window of at least this many tokens usable. "
+                 "MoE models keep more experts in system RAM to hold it on the GPU; "
+                 "the coding agent asks for 32768.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
+                 step=1024),
+    SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
+                 "always unloads this instance's idle models when a new model needs "
+                 "their VRAM; ask asks first; never keeps them and uses the VRAM that "
+                 "is left (slower). Another instance's model is always asked about.",
+                 group="Engine", applies=Applies.LIVE,
+                 options=["always", "ask", "never"]),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
                  "MoE models only. VRAM that keeps the most used experts of the layers whose "
                  "experts stay in system RAM. Used when those experts are not memory-mapped; set "

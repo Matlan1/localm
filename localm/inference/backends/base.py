@@ -391,6 +391,10 @@ AUDIO_CPU_FALLBACK_STATUS = (
 # before it can answer.
 LOADING_MODEL_STATUS = "Loading model..."
 
+# Emitted while a model is reloaded with a larger context window so a request
+# fits it.
+GROWING_CONTEXT_STATUS = "Reloading the model with a larger context window..."
+
 # Emitted while a request waits for the model to finish other requests before
 # it starts on this one.
 WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."

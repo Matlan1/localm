@@ -196,12 +196,15 @@ def _inconclusive_refusal(name, attempts):
         r"report if this keeps happening\.")
 
 
-def _estimate_confirm_detail(name, free_bytes):
-    return (f"'{name}' does not fit the estimated free VRAM "
-            f"(needs ~{(NEED + HEADROOM) // MB} MB free including a safety margin, "
-            f"{free_bytes // MB} MB free) even after "
-            "eviction; loading it anyway will let the backend fall back to "
-            "partial CPU offload, which is slower")
+def _estimate_confirm(name, free_bytes, unloaded=(), *, shared=False, peers=False,
+                      needed=NEED + HEADROOM):
+    """The degraded-load confirmation for *name* sized at the whole-model
+    estimate (*needed*), the fake engines having no backend sizing."""
+    from localm.inference import switch_admission as sa
+    budget = sa.LoadBudget(name=name, vram_required=needed - HEADROOM, headroom=HEADROOM,
+                           resident_cap=None, pinned=frozenset(), check_split_fit=True)
+    return sa.degraded_load_confirm(name, budget, free_bytes, list(unloaded),
+                                    shared=shared, peers=peers)
 
 
 # --------------------------------------------------------------------------- #
@@ -665,8 +668,7 @@ class TestPinnedVictim:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", 10 * GB - NEED)}
+        assert res == _estimate_confirm("model-b", 10 * GB - NEED)
         assert env.built == ["model-b"] and env.cancelled == []
         assert hs._engines == {"model-a": a} and a.unload_calls == 0
         assert hs._active_model_name == "model-a"
@@ -991,8 +993,7 @@ class TestSplitShortfall:
         res = asyncio.run(hs.switch_engine("model-a", env.factory))
         forced = asyncio.run(hs.switch_engine("model-a", env.factory, force=True))
 
-        assert res == {"status": "confirm_required", "model": "model-a",
-                       "detail": _estimate_confirm_detail("model-a", 20 * GB)}
+        assert res == _estimate_confirm("model-a", 20 * GB)
         assert forced == {"status": "loaded", "model": "model-a"}
 
     def test_a_device_shortfall_drives_eviction_until_it_clears(self, monkeypatch):
@@ -1090,7 +1091,7 @@ class TestLoadPlacementLog:
         ({"gpu_layers_offloaded": 30, "gpu_layers_total": 30, "degraded": True,
           "moe_cpu_layers": 6},
          {"mode": "configured", "layers": 99, "n_ctx": 4096, "n_cpu_moe": 6,
-          "n_cpu_moe_auto": True}, "WARNING"),
+          "n_cpu_moe_auto": True}, "INFO"),
         ({"gpu_layers_offloaded": 0, "gpu_layers_total": 30, "degraded": True},
          {"mode": "unmeasurable", "layers": 0, "n_ctx": 4096, "n_cpu_moe": 0,
           "n_cpu_moe_auto": False}, "WARNING"),
@@ -1112,7 +1113,7 @@ class TestLoadPlacementLog:
         assert line.startswith(
             f"switch_engine: loaded 'model-b': {placement['gpu_layers_offloaded']}/30 "
             "layers on the GPU, the rest on the CPU" if placement["gpu_layers_offloaded"] < 30
-            else "switch_engine: loaded 'model-b': 30/30 layers on the GPU, routed experts")
+            else "switch_engine: loaded 'model-b': 30/30 layers on the GPU, the routed experts")
 
     def test_an_already_resident_model_logs_no_load_line(self, monkeypatch, caplog):
         a = PlacementEngine("model-a")
@@ -1588,6 +1589,20 @@ class _BackendSizedEngine(_SizedEngine):
         return self._need
 
 
+class _MoeSizedEngine(_BackendSizedEngine):
+    """_BackendSizedEngine for a Mixture-of-Experts model whose backend also
+    reports *low* bytes for every layer on the GPU with its experts in system
+    RAM (``Engine.gpu_offload_needs``)."""
+
+    def __init__(self, name, need, low):
+        super().__init__(name, need)
+        self._low = low
+
+    def gpu_offload_needs(self):
+        self.need_calls += 1
+        return self._need, self._low
+
+
 class TestBackendSizedAdmission:
     """At 12 GB total with model-a resident, 7.2 GB is free: enough for the
     whole-model estimate (NEED + HEADROOM), so the backend's own full-offload
@@ -1680,30 +1695,50 @@ class TestBackendSizedAdmission:
         a, env, result = self._beside_a(monkeypatch, b, preempt=True)
 
         assert not a.loaded and "model-b" not in hs._engines and b.load_calls == 0
-        assert result == {
-            "status": "confirm_required", "model": "model-b",
-            "detail": ("'model-b' does not fit the estimated free VRAM "
-                       f"(needs ~{13 * 1024} MB free including a safety margin, "
-                       f"{12 * 1024} MB free) even after "
-                       "eviction; loading it anyway will let the backend "
-                       "fall back to partial CPU offload, which is slower")}
+        assert result == _estimate_confirm("model-b", 12 * GB, needed=13 * GB)
+        assert result["detail"] == (
+            "'model-b' does not fit: every layer on the GPU needs about 13312 MB of "
+            "free VRAM, and about 12288 MB is free. "
+            "Loading it anyway runs some of its layers on the CPU, which is slower.")
 
-    def test_the_ask_for_a_moe_model_says_its_experts_go_to_system_ram(self, monkeypatch):
-        b = _BackendSizedEngine("model-b", 13 * GB)
+    def test_a_moe_model_whose_expert_plan_fits_loads_without_asking(self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 4 * GB)
+
+        a, env, result = self._beside_a(monkeypatch, b, preempt=True)
+
+        assert result["status"] == "loaded"
+        assert b.load_calls == 1 and hs._engines == {"model-b": b}
+        assert not a.loaded, "the idle model still makes room for more experts"
+
+    def test_a_moe_model_whose_expert_plan_fits_beside_a_busy_model_does_not_stop_it(
+            self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 4 * GB)
         a = GatedEngine("model-a")
         env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
-        _seat("model-a", a, active=True)
-        import localm.config as cfg
-        registry = cfg.load_registry()
-        registry["model-b"] = dict(registry["model-b"], expert_count=128)
-        monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+        _seat("model-a", a, active=True, busy=1)
 
         result = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=True,
                                               activate=False))
 
-        assert result["status"] == "confirm_required"
-        assert "keep the experts in system RAM" in result["detail"]
-        assert "partial CPU offload" not in result["detail"]
+        assert result["status"] == "loaded"
+        assert a.loaded and env.cancelled == []
+        assert hs._engines == {"model-a": a, "model-b": b}
+
+    def test_a_moe_model_whose_expert_plan_does_not_fit_asks_with_both_figures(
+            self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 13 * GB)
+        a = _SizedResident("model-a")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
+        _seat("model-a", a, active=True)
+
+        result = asyncio.run(hs.switch_engine("model-b", env.factory, activate=False))
+
+        assert a.loaded and b.load_calls == 0
+        assert result["status"] == "confirm_required" and result["moe"] is True
+        assert (result["plan_mb"], result["full_mb"], result["free_mb"]) == (
+            13 * 1024, 25 * 1024, 12 * 1024)
+        assert result["unloaded"] == ["model-a"]
+        assert "even with its experts in system RAM" in result["detail"]
 
     def test_a_registered_engine_evicted_while_it_is_sized_is_not_committed(
             self, monkeypatch):
@@ -2067,8 +2102,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert a.unload_calls == 0 and a.loaded and a.unloading is False
         assert env.release_waits == [], "no eviction ran before asking"
         assert env.cancelled == [] and not b.loaded
@@ -2120,8 +2154,7 @@ class TestTooBigEvenAfterEviction:
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
         assert waited == [1], "the switch waited for the reply"
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert env.cancelled == [], "the reply was not cut"
         assert a.unload_calls == 0 and a.loaded
         assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
@@ -2177,8 +2210,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert a.unload_calls == 0 and hs._active_model_name == "model-a"
 
     def test_a_measured_hold_wins_over_the_sized_one(self, monkeypatch):
@@ -2283,8 +2315,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL + 100 * MB)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL + 100 * MB, ["model-a"], peers=True)
         assert a.unload_calls == 0
 
 
@@ -2394,8 +2425,7 @@ class TestSharedModelsCountedBeforeEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"], shared=True)
         assert a.unload_calls == 0 and a.loaded and env.release_waits == []
         assert box.events == [], "nothing was freed before asking"
         assert box.loaded == {kind}
@@ -2533,8 +2563,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"], shared=True)
         assert box.events == ["reply-finished"], "no free or peer ask before asking"
         assert env.cancelled == [] and a.unload_calls == 0 and a.loaded
         assert box.loaded == {"embedder"}
@@ -2548,8 +2577,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, shared=True)
         assert box.events == [] and box.loaded == {"embedder"} and not b.loaded
 
     def test_an_idle_model_beside_a_busy_one_waits_for_the_reply_before_asking(
@@ -2577,8 +2605,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a", "model-c"])
         assert events == ["reply-finished"], "the reply was waited for first"
         assert a.unload_calls == 0 and c.unload_calls == 0 and env.cancelled == []
 
@@ -2632,3 +2659,188 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         assert res == {"status": "loaded", "model": "model-b"}
         assert box.events[0] == "free-embedder"
+
+
+# --------------------------------------------------------------------------- #
+#  The unload_for_room setting                                                #
+# --------------------------------------------------------------------------- #
+
+class TestUnloadPolicy:
+    """At the default 10 GB with model-a resident, model-b does not fit beside
+    it, so the setting decides whether model-a is unloaded."""
+
+    def _setup(self, monkeypatch, policy):
+        import localm.config as cfg
+        real = cfg.load_config
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda *a, **k: {**real(*a, **k), "unload_for_room": policy})
+        a = GatedEngine("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+        return a, b, env
+
+    def _switch(self, env, **kw):
+        return asyncio.run(hs.switch_engine("model-b", env.factory, **kw))
+
+    def test_always_unloads_the_idle_model_without_asking(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "always")
+
+        res = self._switch(env)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and a.unload_calls == 1 and b.loaded
+
+    def test_ask_asks_an_explicit_switch_and_unloads_nothing(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env)
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_ask"
+        assert res["unloaded"] == ["model-a"]
+        assert res["detail"] == "Loading 'model-b' unloads 'model-a'."
+        assert a.loaded and a.unload_calls == 0 and not b.loaded
+
+    def test_ask_confirmed_unloads_and_loads(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env, force=True)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and b.loaded
+
+    def test_ask_never_unloads_for_a_load_nobody_can_be_asked_about(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env, preempt=False, activate=False)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and a.unload_calls == 0 and b.loaded
+
+    def test_never_offers_the_choice_on_an_explicit_switch(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env)
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_choice"
+        assert res["unloaded"] == ["model-a"]
+        assert res["free_mb"] == (10 * GB - NEED) // MB
+        assert a.loaded and not b.loaded
+
+    def test_never_with_keep_others_loads_beside(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, keep_others=True)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and a.unload_calls == 0 and b.loaded
+        assert hs._active_model_name == "model-b"
+
+    def test_never_with_force_unloads_for_this_load_only(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, force=True)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and b.loaded
+
+    def test_keep_others_loads_beside_whatever_the_setting(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "always")
+
+        res = self._switch(env, keep_others=True)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.loaded
+
+    def test_never_loads_beside_for_a_load_that_is_not_a_switch(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, preempt=False, activate=False)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.loaded
+
+
+class TestPeerModelsAreNeverUnloadedSilently:
+    def _setup(self, monkeypatch):
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-b": b}, total=4 * GB)
+        asked = []
+
+        def _ask(**kw):
+            asked.append(kw)
+            return len(asked) == 1
+
+        monkeypatch.setattr(hs, "_peer_model_names", lambda: ["'big' (port 9000)"])
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: [3 * GB])
+        monkeypatch.setattr(hs, "_attempt_cooperative_unload", _ask)
+        return b, env, asked
+
+    def test_an_explicit_switch_asks_naming_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_ask"
+        assert res["peers"] == ["'big' (port 9000)"]
+        assert "'big' (port 9000) of another localm instance" in res["detail"]
+        assert asked == [] and not b.loaded
+
+    def test_a_confirmed_switch_asks_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        asyncio.run(hs.switch_engine("model-b", env.factory, force=True))
+
+        assert len(asked) >= 1
+
+    def test_a_load_that_is_not_a_switch_never_asks_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                           activate=False))
+
+        assert res["status"] == "loaded" and asked == []
+
+
+class TestUnloadPolicyWithExpertsInRam:
+    """model-b is a Mixture-of-Experts model that fits beside model-a with its
+    experts in system RAM but would keep every expert on the GPU alone."""
+
+    def _setup(self, monkeypatch, policy):
+        import localm.config as cfg
+        real = cfg.load_config
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda *a, **k: {**real(*a, **k), "unload_for_room": policy})
+        a = GatedEngine("model-a")
+        b = _MoeSizedEngine("model-b", 9 * GB, 2 * GB)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+        return a, b, env
+
+    def test_ask_offers_the_choice_naming_the_full_figure(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["reason"] == "unload_choice" and res["fits_with_experts_in_ram"] is True
+        assert res["unloaded"] == ["model-a"]
+        assert res["full_mb"] == 9 * 1024
+        assert "to keep every expert on the GPU" in res["detail"]
+        assert a.loaded and b.load_calls == 0
+
+    def test_never_loads_beside_without_asking(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.load_calls == 1
+
+    def test_ask_for_a_load_nobody_can_be_asked_about_loads_beside(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                           activate=False))
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.load_calls == 1

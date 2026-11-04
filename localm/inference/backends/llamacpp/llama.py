@@ -3804,10 +3804,9 @@ class LlamaCpp:
         if room < 32:
             from localm.inference.backends.base import ContextCapacityExceededError
             raise ContextCapacityExceededError(
-                f"Conversation ({n_prompt} tokens) has outgrown the maximum "
-                f"context window (n_ctx_max={self._n_ctx_max}). Start a new "
-                f"chat, or raise it:  localm config n_ctx_max 32768  "
-                f"(or set ctx_auto true to size it from free VRAM)."
+                f"Conversation ({n_prompt} tokens) has outgrown the model's "
+                f"{self._n_ctx_max}-token context window. Start a new chat or "
+                f"shorten the conversation."
             )
         return min(max_new_tokens, room)
 
