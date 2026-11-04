@@ -342,6 +342,61 @@ class TestEdges:
         assert "orig" not in mm.load_registry()
 
 
+class TestNameBasedDetection:
+    def test_a_rename_does_not_change_how_a_model_is_treated(self, home, tmp_path):
+        from localm.inference.model_family import is_thinking_model
+        from localm.plugins.coder.prompts import detect_model_family
+        _add(tmp_path, "gemma-4-small")
+        before = (is_thinking_model("gemma-4-small"), detect_model_family("gemma-4-small"))
+        assert before == (True, "gemma")
+        assert mm.rename_model("gemma-4-small", "daily")
+        assert (is_thinking_model("daily"), detect_model_family("daily")) == before
+        assert detect_model_family("daily local") == "gemma"
+        assert mm.rename_model("daily", "other")
+        assert detect_model_family("other") == "gemma"
+        assert detect_model_family("not-registered") == "default"
+
+
+class TestProjectConfigName:
+    def _project(self, tmp_path, name):
+        proj = tmp_path / "proj"
+        (proj / ".localcoder").mkdir(parents=True)
+        (proj / ".localcoder" / "config.toml").write_text(f'model = "{name}"\n', encoding="utf-8")
+        return proj
+
+    def test_a_name_that_resolves_to_nothing_says_so_before_any_server_starts(
+            self, home, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        import localm.plugins.coder.cli as coder_cli
+        from localm.plugins.coder.cli import _main
+        from localm.plugins.engine import PluginManager
+        PluginManager(None).set_installed_state("coder", True)
+        _add(tmp_path, "orig")
+        assert mm.rename_model("orig", "renamed")
+        started = []
+        monkeypatch.setattr(coder_cli, "make_localm_backend",
+                            lambda *a, **k: started.append(a) or pytest.fail("a server was started"))
+        result = CliRunner().invoke(
+            _main.main, ["--cwd", str(self._project(tmp_path, "orig")), "-y", "say ok"])
+        assert result.exit_code == 1, result.output
+        text = " ".join(result.output.split())
+        assert "'orig' is not registered" in text
+        assert ".localcoder/config.toml" in text
+        assert started == []
+
+    def test_the_current_name_passes_and_a_flag_name_does_not_blame_the_project(
+            self, home, tmp_path):
+        from localm.plugins.coder.cli._main import _unregistered_model_message
+        _add(tmp_path, "orig")
+        assert mm.rename_model("orig", "renamed")
+        proj = self._project(tmp_path, "renamed")
+        assert _unregistered_model_message("renamed", proj) is None
+        message = _unregistered_model_message("gone", proj)
+        assert "'gone' is not registered" in message
+        assert "config.toml" not in message
+
+
 class TestLiveCoderSession:
     def _session(self, backend):
         from localm.plugins.coder.sessions import CoderSession

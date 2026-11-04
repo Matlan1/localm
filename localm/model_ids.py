@@ -37,10 +37,12 @@ NATIVE_NAME_KEYS = ("model", "vae", "clip_l", "clip_g", "t5xxl", "llm", "llm_vis
 @dataclass(frozen=True)
 class ModelIndex:
     """One registry state as lookups: ``by_id`` id to name, ``by_name`` name to
-    id, ``former`` former name to current name."""
+    id, ``former`` former name to current name, ``first_name`` current name of a
+    renamed entry to the first name it had."""
     by_id: dict = field(default_factory=dict)
     by_name: dict = field(default_factory=dict)
     former: dict = field(default_factory=dict)
+    first_name: dict = field(default_factory=dict)
 
 
 EMPTY_INDEX = ModelIndex()
@@ -80,6 +82,7 @@ def build_index(reg: Any) -> ModelIndex:
     by_id: dict = {}
     by_name: dict = {}
     former: dict = {}
+    first_name: dict = {}
     for name, entry in reg.items():
         rid = entry.get("id") if isinstance(entry, dict) else None
         rid = rid if isinstance(rid, str) else ""
@@ -91,7 +94,8 @@ def build_index(reg: Any) -> ModelIndex:
             for old in olds:
                 if isinstance(old, str):
                     former[old] = name
-    return ModelIndex(by_id, by_name, former)
+                    first_name.setdefault(name, old)
+    return ModelIndex(by_id, by_name, former, first_name)
 
 
 def needs_ids(reg: Any) -> bool:
