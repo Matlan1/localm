@@ -95,9 +95,61 @@ def _declares_custom_code(model_path: str) -> bool:
     return False
 
 
+def _has_transformers_support(model_path: str) -> bool:
+    """True when the installed transformers ships its own classes for the ``model_type``
+    in the folder's ``config.json``. Reads files only; nothing is imported."""
+    import importlib.util
+    import json
+    try:
+        config = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
+        model_type = config.get("model_type")
+        spec = importlib.util.find_spec("transformers")
+    except (OSError, ValueError, ImportError, AttributeError) as e:
+        logger.debug("hf: could not check for transformers' own support of %s: %s", model_path, e)
+        return False
+    if not isinstance(model_type, str) or not model_type or spec is None or not spec.origin:
+        return False
+    name = model_type.replace("-", "_")
+    if not name.isidentifier():
+        return False
+    return (Path(spec.origin).parent / "models" / name / f"configuration_{name}.py").is_file()
+
+
+def runs_without_its_own_code(model_path: str) -> bool:
+    """True when the folder ships its own code (``auto_map``), ``hf_trust_remote_code`` is
+    off, and the installed transformers has its own classes for the model, so the load
+    uses those and the folder's code does not run."""
+    return (_declares_custom_code(model_path) and not _trust_remote_code_enabled()
+            and _has_transformers_support(model_path))
+
+
+BUNDLED_CODE_NOTE = ("This model ships its own code, which did not run because 'Allow model-bundled custom "
+                     "code' is off; localm used transformers' own support for it instead. That may be why this "
+                     "failed. If you trust the model's source, try turning that setting on "
+                     "(localm config hf_trust_remote_code true).")
+
+
+def with_bundled_code_note(model_path: str, err: Exception) -> Exception:
+    """*err*, with :data:`BUNDLED_CODE_NOTE` added to its message when the failed model ran
+    without its own code (:func:`runs_without_its_own_code`); otherwise *err* itself. A
+    failure for lack of memory has nothing to do with the code and is returned as it is."""
+    text = str(err)
+    if BUNDLED_CODE_NOTE in text or "out of memory" in text.lower():
+        return err
+    if not runs_without_its_own_code(model_path):
+        return err
+    try:
+        noted = type(err)(f"{text} {BUNDLED_CODE_NOTE}")
+    except TypeError:
+        noted = RuntimeError(f"{text} {BUNDLED_CODE_NOTE}")
+    noted.__cause__ = err
+    return noted
+
+
 def _check_custom_code_allowed(model_path: str) -> None:
     """Refuse, with an actionable message, a model that needs custom code when
-    ``hf_trust_remote_code`` is off. No-op for an ordinary model.
+    ``hf_trust_remote_code`` is off. No-op for an ordinary model, and for a model the
+    installed transformers has its own classes for (:func:`runs_without_its_own_code`).
 
     Called at the TOP of load(), BEFORE spawning a child, so a refused model
     never pays the cost of spawning one. It needs no torch/transformers and
@@ -107,7 +159,7 @@ def _check_custom_code_allowed(model_path: str) -> None:
     """
     if not _declares_custom_code(model_path):
         return
-    if _trust_remote_code_enabled():
+    if _trust_remote_code_enabled() or _has_transformers_support(model_path):
         return
     raise RuntimeError(
         f"'{Path(model_path).name}' requires custom code: it asks to import and "
@@ -368,7 +420,7 @@ class HFBackend(BaseBackend):
         try:
             meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         except RuntimeError as e:
-            plain = _without_pip_advice(self.model_path, e)
+            plain = with_bundled_code_note(self.model_path, _without_pip_advice(self.model_path, e))
             if plain is e:
                 raise
             raise plain from e
@@ -621,21 +673,27 @@ class HFBackend(BaseBackend):
                            ("frequency_penalty", frequency_penalty)):
             if value is not None:
                 extra[key] = value
-        yield from self._runner.chat_stream(
-            first_chunk_timeout=self._first_token_timeout_seconds(),
-            on_status=on_status,
-            **extra,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            repeat_penalty=repeat_penalty,
-            grammar=grammar,
-            grammar_lazy=grammar_lazy,
-            grammar_triggers=grammar_triggers,
-            seed=seed,
-        )
+        try:
+            yield from self._runner.chat_stream(
+                first_chunk_timeout=self._first_token_timeout_seconds(),
+                on_status=on_status,
+                **extra,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repeat_penalty=repeat_penalty,
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
+                seed=seed,
+            )
+        except RuntimeError as e:
+            noted = with_bundled_code_note(self.model_path, e)
+            if noted is e:
+                raise
+            raise noted from e
         done = getattr(self._runner, "last_done", None) or {}
         self.last_finish_reason = done.get("finish_reason", "stop")
         if done.get("grammar_unsupported") and not getattr(self, "_grammar_unsupported", False):

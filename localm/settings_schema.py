@@ -604,8 +604,9 @@ CORE_FIELDS: list = [
                  "Allow model-bundled custom code",
                  "Arbitrary code execution on this machine: lets a HuggingFace "
                  "model directory run its own Python when loading. Off by "
-                 "default; a model needing it is refused. Turn on only for a "
-                 "source you trust.",
+                 "default; such a model then runs on transformers' own support "
+                 "when there is one, and is refused otherwise. Turn on only for "
+                 "a source you trust.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     # admin_only: matches rag_allowed_roots/rag_denied_roots (same "which host
     # locations may localm touch" trust boundary). ON by default, so a mapped

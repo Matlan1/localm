@@ -1442,6 +1442,9 @@ export const I18N_EN = {
   "models.relocate.title": "Point this entry at the file's new location",
   "models.relocate.working": "Checking…",
   "models.relocate.toast": "Relocated '{name}'",
+  "models.bundledCodeNote": "This model ships its own code, which did not run because 'Allow model-bundled custom code' is off; localm used transformers' own support for it instead. That may be why this failed. If you trust the model's source, try turning that setting on (localm config hf_trust_remote_code true).",
+  "models.ownCodeOff": "own code off",
+  "models.ownCodeOffHint": "This model ships its own code. It runs on transformers' own support because 'Allow model-bundled custom code' is off. If it fails, turning that setting on for a source you trust is the thing to try.",
   "models.packages.confirmLabel": "Install",
   "models.packages.failed": "Installing packages failed: {message}",
   "models.packages.from": "from {source}",
@@ -1883,7 +1886,7 @@ export const I18N_EN = {
   "settings.field.idleUnloadSeconds.label": "Idle model unload (s)",
   "settings.field.idleUnloadSeconds.help": "Free the model's VRAM after this many seconds with no request (0 = never; the model stays resident). The next message reloads it automatically.",
   "settings.field.hfTrustRemoteCode.label": "Allow model-bundled custom code",
-  "settings.field.hfTrustRemoteCode.help": "Arbitrary code execution on this machine: lets a HuggingFace model directory run its own Python when loading. Off by default; a model needing it is refused. Turn on only for a source you trust.",
+  "settings.field.hfTrustRemoteCode.help": "Arbitrary code execution on this machine: lets a HuggingFace model directory run its own Python when loading. Off by default; such a model then runs on transformers' own support when there is one, and is refused otherwise. Turn on only for a source you trust.",
 
   // Settings > schema fields: Timeouts
   "settings.field.ggufLoadTimeoutS.label": "GGUF load timeout (s)",

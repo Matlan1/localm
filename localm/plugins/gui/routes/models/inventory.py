@@ -82,6 +82,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import has_recorded_model_type as _has_recorded_model_type
         from localm.model_manager import model_vision_capability as _mvc
         from localm.model_manager import capabilities as _caps
+        from localm.inference.backends.hf import runs_without_its_own_code as _runs_without_its_own_code
         from localm.model_manager import model_packages as _mpk
         registry = load_registry()
         current = active_model()
@@ -118,6 +119,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # off the event loop, then build the response on the loop from its results.
         # The embedder's and the reranker's own paths are resolved in the same hop
         # for the identity comparison below.
+        own_code_off: set = set()
+
         def _probe_rows() -> tuple:
             sizes: dict = {}
             mtimes: dict = {}
@@ -163,6 +166,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 context_len[_n] = _caps.model_context_length(_n, reg=registry)
                 tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
                 if p.is_dir():
+                    if _runs_without_its_own_code(str(p)):
+                        own_code_off.add(_n)
                     try:
                         state = _mpk.folder_state(p)
                     except (OSError, ValueError, RecursionError):
@@ -249,6 +254,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # is all the model needs.
             if name in package_needs:
                 row_out["packages"] = package_needs[name]
+            # Present only when the folder ships code that does not run because
+            # hf_trust_remote_code is off.
+            if name in own_code_off:
+                row_out["own_code_off"] = True
             if context_lens.get(name) is not None:
                 row_out["context_length"] = context_lens[name]
             if tool_caps.get(name) is not None:

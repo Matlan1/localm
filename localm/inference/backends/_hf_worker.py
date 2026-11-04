@@ -735,6 +735,15 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     return {"device_map": "auto"}
 
 
+def _refuse_missing_weights(info: dict) -> None:
+    """Raise RuntimeError when transformers' own class found weights absent from the
+    checkpoint, which it would otherwise run on random values."""
+    missing = sorted(info.get("missing_keys") or [])
+    if missing:
+        raise RuntimeError(f"transformers' own class for this model does not match its weights: {len(missing)} "
+                           f"weights are missing, such as {missing[0]}")
+
+
 def _safetensors_bytes(model_path: str) -> int:
     """Total size of the ``.safetensors`` files directly in *model_path*; 0 when there are
     none or the folder cannot be read."""
@@ -1668,6 +1677,8 @@ class HFWorker:
         # This method only needs the boolean for the trust_remote_code= kwarg
         # below.
         trust_remote_code = _trust_remote_code_enabled()
+        from localm.inference.backends.hf import runs_without_its_own_code
+        without_own_code = runs_without_its_own_code(self.model_path)
         _apply_gpu_order(self._gpu_order)
         torch = _require_torch()
         from localm.inference.backends import _st_plan
@@ -1703,6 +1714,9 @@ class HFWorker:
                                        device_map_kwargs)
         self.fp8_plan = fp8
         self.load_notes = []
+        if without_own_code:
+            self.load_notes.append("this model's own code did not run ('Allow model-bundled custom code' is off); "
+                                   "using transformers' own support for it")
         if fp8 is not None:
             from localm.inference.backends._hf_fp8 import describe
             self.load_notes.append(describe(fp8))
@@ -1819,7 +1833,12 @@ class HFWorker:
                 continue
             try:
                 with _filter_docstring_leak(), _suppress_offload_buffer_advisory():
-                    self._model = cls.from_pretrained(self.model_path, **load_kwargs)
+                    if without_own_code:
+                        model, info = cls.from_pretrained(self.model_path, output_loading_info=True, **load_kwargs)
+                        _refuse_missing_weights(info)
+                        self._model = model
+                    else:
+                        self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 logger.debug("hf load: class=%s", cls_name)
                 if trust_remote_code:
                     from localm.inference.backends import _remote_code_compat

@@ -585,6 +585,11 @@ export async function refreshModelsPage() {
     if (m.part_of) {
       nameLine.appendChild(el("span", "arch-badge", t("models.partOf", { model: m.part_of })));
     }
+    if (m.own_code_off) {
+      const ownCode = el("span", "moe-badge moe-likely", t("models.ownCodeOff"));
+      ownCode.title = t("models.ownCodeOffHint");
+      nameLine.appendChild(ownCode);
+    }
     if (m.expert_count > 0) {
       nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
