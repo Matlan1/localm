@@ -240,6 +240,115 @@ def test_uninstall_removes_only_recorded_items(tmp_path):
     assert im.load(tmp_path) is None
 
 
+def _keep_venv_copies(root: Path, venv: Path) -> list:
+    """The folders an update's snapshots keep beside the venv, made by the real code."""
+    from localm import updater_components as uc
+    site = venv / "Lib" / "site-packages" / "pkg"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "mod.py").write_text("live", encoding="utf-8")
+    copies = []
+    for kind in ("", "deps"):
+        snap = root / "data" / "updates" / "backup-components"
+        copy = uc._venv_copy_path(venv, snap, kind)
+        uc._clone_venv(venv, copy, snap)
+        copies.append(copy)
+    aside = uc._move_aside_dir(venv)
+    (aside / "abc").mkdir(parents=True)
+    (aside / "abc" / "0-old.pyd").write_bytes(b"replaced")
+    copies.append(aside)
+    return copies
+
+
+def _files_of(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_uninstall_removes_the_venv_copies_an_update_kept(tmp_path):
+    p = _fake_install(tmp_path)
+    copies = _keep_venv_copies(tmp_path, p["venv"])
+    assert [c.name for c in copies] == ["..venv-backup-components",
+                                        "..venv-backup-components-deps",
+                                        ".venv.localm-replaced"]
+    planned = im.uninstall(tmp_path, dry_run=True)
+    assert all(str(c) in planned["removed"] for c in copies), planned["removed"]
+    assert all(c.is_dir() for c in copies), "a dry run removes nothing"
+    rep = im.uninstall(tmp_path)
+    assert not any(c.exists() for c in copies), rep
+    assert rep["ok"] and rep["exit"] == im.EXIT_OK
+    assert all(str(c) in rep["removed"] for c in copies)
+    assert p["data"].exists(), "the saved data stays"
+
+
+def test_removing_a_kept_venv_copy_leaves_the_live_venv_whole(tmp_path):
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    copies = _keep_venv_copies(tmp_path, venv)
+    live = venv / "Lib" / "site-packages" / "pkg" / "mod.py"
+    link = copies[1] / "Lib" / "site-packages" / "pkg" / "mod.py"
+    assert os.path.samefile(live, link), "the copy holds hard links, so the test can fail"
+    assert os.stat(live).st_nlink == 3
+    link_inside = copies[1] / "into-the-live-venv"
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(venv), str(link_inside))
+    else:
+        link_inside.symlink_to(venv, target_is_directory=True)
+    before = _files_of(venv)
+    rep = im.uninstall(tmp_path)
+    assert not any(c.exists() for c in copies), rep
+    assert _files_of(venv) == before, "every file of the live venv is still there, unchanged"
+    assert os.stat(live).st_nlink == 1
+
+
+def test_a_folder_named_like_a_kept_copy_without_its_marker_is_not_removed(tmp_path):
+    from localm import updater_components as uc
+    p = _fake_install(tmp_path)
+    theirs = tmp_path / "..venv-theirs"
+    theirs.mkdir()
+    (theirs / "f").write_text("x", encoding="utf-8")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / uc.COPY_MARKER).write_text("x", encoding="utf-8")
+    links = [tmp_path / "..venv-link", tmp_path / ".venv.localm-replaced"]
+    for link in links:
+        if sys.platform == "win32":
+            import _winapi
+            _winapi.CreateJunction(str(other), str(link))
+        else:
+            link.symlink_to(other, target_is_directory=True)
+    rep = im.uninstall(tmp_path)
+    assert rep["exit"] == im.EXIT_OK and not p["venv"].exists()
+    assert (theirs / "f").exists()
+    assert (other / uc.COPY_MARKER).exists(), "a link is never followed"
+    assert all(str(link) not in rep["removed"] for link in links)
+    assert all(os.path.lexists(link) for link in links)
+
+
+def test_a_process_running_from_a_folder_of_replaced_files_is_stopped_first(tmp_path, monkeypatch):
+    p = _fake_install(tmp_path)
+    copies = _keep_venv_copies(tmp_path, p["venv"])
+    exe = copies[2] / "abc" / "localm.exe"
+    exe.write_bytes(b"x")
+    monkeypatch.setattr(im, "list_processes", lambda: [(4242, 1, str(exe), "")])
+    rep = im.uninstall(tmp_path)
+    assert rep["exit"] == im.EXIT_RUNNING
+    assert all(c.exists() for c in copies), "nothing is touched while it runs"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the long path form exists on Windows only")
+def test_a_kept_copy_is_removed_by_its_long_path_form(tmp_path, monkeypatch):
+    p = _fake_install(tmp_path)
+    copies = _keep_venv_copies(tmp_path, p["venv"])
+    seen = []
+    real = im.shutil.rmtree
+    monkeypatch.setattr(im.shutil, "rmtree",
+                        lambda path, **kw: seen.append(str(path)) or real(path, **kw))
+    rep = im.uninstall(tmp_path)
+    assert not any(c.exists() for c in copies), rep
+    assert "\\\\?\\" + str(copies[1]) in seen, seen
+
+
 def test_uninstall_purge_removes_a_folder_setup_created(tmp_path):
     target = tmp_path / "made" / "LocaLM-data"
     im.prepare_data(tmp_path, data_dir=str(target))

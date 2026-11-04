@@ -1298,6 +1298,12 @@ you had. `localm doctor` and Settings > Updates list any part that differs from 
 installed version (for example after an older version's own rollback), and
 `localm update --repair` or Settings > Updates > Repair brings each one to it.
 
+`rollback.bat` / `rollback.sh` and the automatic rollback after a failed health check
+have to work when localm itself cannot start, so they put back the code, the packages
+and the native runtime only. They say when an update also replaced ComfyUI or the uv
+inside localm; those return to that version's pins the next time localm starts with an
+internet connection.
+
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter
 instead: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh`

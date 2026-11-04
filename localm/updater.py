@@ -930,31 +930,81 @@ def _new_run_dir() -> Path:
     return d
 
 
-def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
+# How often, and how many seconds apart, a folder rename of the update backup is
+# tried before it counts as refused.
+_BACKUP_MOVE_TRIES = 3
+_BACKUP_MOVE_WAIT_S = 0.5
+
+
+def _rename_folder(src: Path, dst: Path) -> None:
+    """Rename the folder *src* to *dst*, trying again while a file in it is held.
+    Raises OSError."""
+    import os
+    for attempt in range(_BACKUP_MOVE_TRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if attempt == _BACKUP_MOVE_TRIES - 1:
+                raise
+            time.sleep(_BACKUP_MOVE_WAIT_S)
+
+
+def _drop_run_dir(run_dir: Path) -> None:
+    """Remove a run's scratch folder. What cannot be removed is logged."""
+    shutil.rmtree(run_dir, ignore_errors=True)
+    if run_dir.exists():
+        _apply_warn("update: could not remove the scratch folder %s; it can be deleted by "
+                    "hand", run_dir)
+
+
+def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
     """Move *run_backup_dir* (this run's own, just-written backup) to the stable
     *backup_dir* location :func:`rollback_last` reads, replacing whatever was
-    there.
+    there. Returns None when it is in place, else the reason it is not.
 
     Must be called ONLY after ``swap_with_backup`` has already succeeded, so
     *run_backup_dir* is a complete, self-contained COPY of the pre-update install
     (``_apply_update.backup`` copies, never moves, the live tree).
 
-    The native runtime snapshot and the components snapshot of the update whose
-    backup this replaces (``_apply_update.runtime_snapshot_dir``,
-    ``updater_components.snapshot_dir``) are removed with it, and so is the copy
-    of the running code a rollback kept (``running-code``).
+    All or nothing: the backup already at *backup_dir* is renamed aside first, so a
+    held file in it refuses the move with both backups whole, and a failed move
+    renames it back. A held file in *run_backup_dir* stops only the rename, and the
+    folder is copied into place instead.
 
-    Best-effort: a failure does not undo the update but IS surfaced as a warning,
-    since it degrades a later ``update --rollback``."""
+    Once the backup is in place, the backup it replaced goes, and with it the native
+    runtime snapshot and the components snapshot of that update
+    (``_apply_update.runtime_snapshot_dir``, ``updater_components.snapshot_dir``) and
+    the copy of the running code a rollback kept (``running-code``). What cannot be
+    removed is logged. On a refusal all of these stay."""
     from localm import _apply_update as au
+    for left in backup_dir.parent.glob(f"{backup_dir.name}-replaced-*"):
+        shutil.rmtree(left, ignore_errors=True)
+    aside = backup_dir.with_name(f"{backup_dir.name}-replaced-{uuid.uuid4().hex[:8]}")
+    had_backup = backup_dir.exists()
+    if had_backup:
+        try:
+            _rename_folder(backup_dir, aside)
+        except OSError as e:
+            return f"the backup of the previous update is in use: {e}"
     try:
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-        shutil.move(str(run_backup_dir), str(backup_dir))
+        try:
+            _rename_folder(run_backup_dir, backup_dir)
+        except OSError:
+            shutil.copytree(run_backup_dir, backup_dir)
     except OSError as e:
-        _apply_warn("update applied, but could not move this run's backup from %s "
-                    "to %s: %s; a later `update --rollback` may not find it",
-                    run_backup_dir, backup_dir, e)
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        why = f"could not move this update's backup from {run_backup_dir} to {backup_dir}: {e}"
+        if had_backup:
+            try:
+                _rename_folder(aside, backup_dir)
+            except OSError as back:
+                return f"{why}; the backup of the previous update stays at {aside}: {back}"
+        return why
+    shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():
+        _apply_warn("update applied, but could not remove the backup it replaced at %s; it "
+                    "can be deleted by hand", aside)
     snapshot = au.runtime_snapshot_dir(backup_dir)
     try:
         if snapshot.exists():
@@ -966,6 +1016,7 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
     from localm import updater_components
     updater_components.discard(updater_components.snapshot_dir(backup_dir))
     shutil.rmtree(backup_dir.with_name("running-code"), ignore_errors=True)
+    return None
 
 
 # Data dir entries an older build may read without the fields a newer one added,
@@ -1238,7 +1289,15 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     immediately rather than racing the first. Each call also downloads, extracts,
     and takes its swap-time backup in its OWN unique scratch directory
     (:func:`_new_run_dir`) and, once its swap has succeeded, moves that backup to
-    the stable location :func:`rollback_last` reads (:func:`_promote_backup`).
+    the stable location :func:`rollback_last` reads (:func:`_promote_backup`). When
+    that move is refused the swap is undone and LocalmError raised: the backup and the
+    update manifest of the update before stay as they were, and only a recovery that
+    fails keeps this run's backup (its path is in the error).
+
+    A backup that cannot be completed raises LocalmError with nothing swapped. This
+    run's scratch folder is removed on every failure except one that needs its backup
+    for a manual recovery, and the previous update's manifest is replaced only after
+    the swap and the move of the backup have succeeded.
 
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
@@ -1348,11 +1407,44 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             shutil.rmtree(run_dir, ignore_errors=True)
             raise
 
-        # Remove any stale applied_names.json from a previous update before the
-        # swap, so a failed write below degrades to the backup-dir listing rather
-        # than leaving the prior update's names. Placed after
-        # download/verify/extract so an early abort leaves the previous manifest
-        # intact.
+        # swap_with_backup backs up to run_backup_dir first, then swaps, rolling
+        # back from it and re-raising on failure. run_backup_dir still exists after
+        # a failure only when the rollback failed too and a manual recovery needs it.
+        previous_version = _version.read_version()
+        try:
+            names = au.swap_with_backup(root, target, run_backup_dir)
+        except au.BackupFailed as e:
+            _drop_run_dir(run_dir)
+            raise LocalmError("could not keep a copy of the current version, so nothing was "
+                              "updated", reason=str(e)) from None
+        except Exception:
+            if not run_backup_dir.exists():
+                _drop_run_dir(run_dir)
+            raise
+        # Promote this run's backup to the stable path before the manifest write or
+        # the post-swap command's own rollback touches `backup_dir`, so both use the
+        # fixed path rollback_last() expects.
+        refused = _promote_backup(run_backup_dir, backup_dir)
+        if refused:
+            try:
+                au.rollback(run_backup_dir, target, names)
+            except Exception as rb:
+                raise LocalmError(
+                    "the update's backup could not be kept AND putting the previous version "
+                    "back failed - manual recovery needed",
+                    reason=f"{refused}; rollback: {rb}; restore from {run_backup_dir}") from None
+            _drop_run_dir(run_dir)
+            raise LocalmError(
+                "the backup of this update could not be kept, so it was rolled back",
+                reason=f"{refused}. Close the program using {backup_dir} and update again")
+        _drop_run_dir(run_dir)   # zip/staging no longer needed
+        # Lazy imports in this process from here on load this version's code
+        # from the backup, never the swapped-in build's. See
+        # test_apply_pins_imports_to_the_running_code.
+        unpin = au.pin_imports(backup_dir / "localm", target / "localm")
+
+        # Replace the previous update's manifest, so a failed write below degrades to
+        # the backup-dir listing rather than leaving that update's names.
         manifest_path = updir / "applied_names.json"
         try:
             manifest_path.unlink()
@@ -1362,21 +1454,6 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             _apply_warn("could not remove the previous update manifest %s: %s; if recording "
                         "the new one below also fails, a later rollback may use stale names",
                         manifest_path, e)
-
-        # swap_with_backup backs up to run_backup_dir first, then swaps, rolling
-        # back from it and re-raising on failure. run_dir is left in place on
-        # failure, so run_backup_dir survives for a manual recovery.
-        previous_version = _version.read_version()
-        names = au.swap_with_backup(root, target, run_backup_dir)
-        # Promote this run's backup to the stable path before the manifest write or
-        # the post-swap command's own rollback touches `backup_dir`, so both use the
-        # fixed path rollback_last() expects.
-        _promote_backup(run_backup_dir, backup_dir)
-        shutil.rmtree(run_dir, ignore_errors=True)   # zip/staging no longer needed
-        # Lazy imports in this process from here on load this version's code
-        # from the backup, never the swapped-in build's. See
-        # test_apply_pins_imports_to_the_running_code.
-        unpin = au.pin_imports(backup_dir / "localm", target / "localm")
 
         # Record the full swap set, including brand-new top-level entries the backup
         # dir does not contain, so a later `update --rollback` removes them too.
@@ -1873,7 +1950,8 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
         build = None
     if write_runtime:
         updater_runtime._write_status({"state": "rolled_back", "backend": None, "from": None,
-                                       "to": build, "holders": [], "error": None, "note": note})
+                                       "to": build, "holders": [], "error": None, "note": note,
+                                       "version": version})
     if not write_comp:
         return
     try:
