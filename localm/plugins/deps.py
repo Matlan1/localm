@@ -192,7 +192,7 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=env)
+                encoding="utf-8", errors="replace", bufsize=1, env=env)
         except FileNotFoundError:
             _emit(on_progress, f"{cmd[0]} not found, trying next installer...")
             continue

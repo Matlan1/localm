@@ -338,7 +338,7 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
         commands.insert(0, [uv, "pip", "install", "-e", str(pkg_dir)])
     for cmd in commands:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", env=env)
             if r.returncode == 0:
                 return True
             # Keep the real pip/uv failure instead of discarding it, so the user
