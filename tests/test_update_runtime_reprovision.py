@@ -525,8 +525,9 @@ def test_the_restart_boot_does_not_start_a_download(install, monkeypatch):
     from localm.cli import _core
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.setenv("LOCALM_UPDATE_STEPS_DONE", "1")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("no provision"))
-    _core._finish_pending_runtime_update("gui")
+    _core._update_steps_at_start("gui")
     assert updater_runtime.read_pending() is not None
 
 
@@ -612,6 +613,7 @@ def _start(install, monkeypatch, command="gui", rc=0, calls=None, build="b1355-c
     fake = _fake_setup_llama(install, build, rc=rc, calls=calls)
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.delenv("LOCALM_UPDATE_STEPS_DONE", raising=False)
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
     _core._finish_pending_runtime_update(command)

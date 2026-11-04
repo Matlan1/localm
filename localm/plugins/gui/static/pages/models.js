@@ -2533,6 +2533,61 @@ export async function updateRollback() {
 }
 if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 
+// Installed parts: the GUI form of `localm update --repair`. The block shows
+// only when a part of the install differs from the installed version.
+export async function updatePartsCheck() {
+  const block = $("app-parts-block"), list = $("update-parts-list");
+  if (!block) return;
+  try {
+    const r = await fetch("/api/update/parts", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    const steps = (r.ok && d.last_steps) || [];
+    const differs = r.ok && d.consistent === false;
+    if (!differs && !steps.length) { block.hidden = true; return; }
+    block.hidden = false;
+    const item = (text) => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      return li;
+    };
+    for (const id of ["update-parts-help", "update-repair-actions"]) {
+      if ($(id)) $(id).hidden = !differs;
+    }
+    if (list) list.replaceChildren(...(differs ? d.problems || [] : []).map(item));
+    if ($("update-parts-steps-head")) $("update-parts-steps-head").hidden = !steps.length;
+    if ($("update-parts-steps")) $("update-parts-steps").replaceChildren(...steps.map((s) => item(s.note)));
+  } catch (e) {
+    block.hidden = true;
+    console.warn("could not read the installed parts:", e);
+  }
+}
+window.__localmPartsCheck = updatePartsCheck;
+
+export async function updateRepair() {
+  const out = $("update-repair-status"), btn = $("update-repair");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.parts.repairing"); }
+  try {
+    const r = await fetch("/api/update/repair", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!d.repaired) throw new Error(d.error || r.statusText);
+    if (d.restarting) {
+      if (out) out.textContent = t("settings.parts.repaired");
+      if (btn) btn.hidden = true;
+      if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+    } else {
+      if (out) out.textContent = t("settings.parts.repairedNoRestart");
+      if (btn) btn.disabled = false;
+      await updatePartsCheck();
+    }
+  } catch (e) {
+    showInlineError(out, t("settings.parts.failed", { message: e.message }));
+    if (btn) btn.disabled = false;
+  }
+}
+if ($("update-repair")) $("update-repair").onclick = updateRepair;
+
 // The GUI form of `localm make-launcher --force`. Always passes force=true, so a
 // launcher already on disk is rebuilt rather than returning an idempotent no-op.
 // A single blocking POST: make_launcher() runs in seconds and reports a

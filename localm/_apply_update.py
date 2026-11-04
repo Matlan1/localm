@@ -410,6 +410,80 @@ def post_swap_command(klass: str, backend: Optional[str] = None,
     return None
 
 
+# ------------------------- the running process's code ------------------------
+
+def _norm(path) -> str:
+    import os
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def pin_imports(code_dir, live_dir):
+    """Make every later import of a not-yet-imported ``localm`` submodule in
+    this process load it from *code_dir* (a copy of the code this process
+    runs) instead of *live_dir* (the install's ``localm`` package, about to
+    hold another version's files): each imported package whose ``__path__``
+    entry lies under *live_dir* gets the same entry under *code_dir*. Returns
+    a callable that puts every changed ``__path__`` back. Changes nothing for
+    packages imported from elsewhere."""
+    import importlib
+    import os
+    live, code = _norm(live_dir), Path(code_dir)
+    changed = []
+    for name, mod in list(sys.modules.items()):
+        if not (name == "localm" or name.startswith("localm.")):
+            continue
+        paths = getattr(mod, "__path__", None)
+        if not isinstance(paths, list):
+            continue
+        new = []
+        for entry in paths:
+            norm = _norm(entry)
+            if norm == live or norm.startswith(live + os.sep):
+                new.append(str(code / os.path.relpath(norm, live)) if norm != live
+                           else str(code))
+            else:
+                new.append(entry)
+        if new != paths:
+            changed.append((mod, list(paths)))
+            paths[:] = new
+    importlib.invalidate_caches()
+
+    def unpin() -> None:
+        for mod, old in changed:
+            mod.__path__[:] = old
+        importlib.invalidate_caches()
+
+    return unpin
+
+
+def running_code_dir() -> Path:
+    """The folder this process imports ``localm`` submodules from (the first
+    entry of ``localm.__path__``)."""
+    import localm
+    return Path(list(localm.__path__)[0])
+
+
+def keep_running_code(installed, dest):
+    """Before the ``localm`` package of the install at *installed* is replaced
+    while this process keeps running, keep a copy of it in ``<dest>/localm``
+    (hard links for large files) and pin this process's imports to it
+    (:func:`pin_imports`) when this process imports from that package. Returns
+    the undo callable (a no-op when nothing was pinned). Raises OSError when
+    the copy cannot be made."""
+    live = Path(installed) / "localm"
+    if _norm(running_code_dir()) != _norm(live):
+        return lambda: None
+    dest = Path(dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    try:
+        _clone_tree(live, dest / "localm")
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    return pin_imports(dest / "localm", live)
+
+
 # ------------------------- native runtime snapshot ---------------------------
 
 def runtime_snapshot_dir(backup_dir) -> Path:

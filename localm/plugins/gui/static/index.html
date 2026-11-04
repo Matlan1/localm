@@ -1253,12 +1253,28 @@
                 <h4 class="update-sub-head" data-i18n="settings.rollback.subHead">Roll back</h4>
                 <div class="sub" data-i18n="settings.rollback.help">Restore the build you were running before the last update,
                 then restart. This is for an update that applied cleanly but turned out worse.
-                It restores that build's files; it does not undo package installs an update
-                made along the way.</div>
+                It restores that build's files, its dependencies, its native runtime and its
+                components.</div>
                 <div class="actions">
                   <button class="btn-secondary" id="update-rollback" data-i18n="settings.rollback.rollbackButton">Roll back</button>
                 </div>
                 <div id="update-rollback-status" class="sub" role="status" aria-live="polite" hidden></div>
+              </div>
+
+              <!-- The GUI half of `localm update --repair`, and the results of the
+                   runtime and component updates of the last day. Revealed only
+                   when a part of the install differs from the installed version
+                   or such a result exists (GET /api/update/parts). -->
+              <div class="update-subsection" id="app-parts-block" hidden>
+                <h4 class="update-sub-head" data-i18n="settings.parts.subHead">Installed parts</h4>
+                <div class="sub" id="update-parts-help" data-i18n="settings.parts.help">Some parts of this install are not at the installed localm version. Repair brings each one to it, then restarts.</div>
+                <ul id="update-parts-list" class="sub"></ul>
+                <div class="sub" id="update-parts-steps-head" data-i18n="settings.parts.lastSteps" hidden>Last runtime and component updates:</div>
+                <ul id="update-parts-steps" class="sub"></ul>
+                <div class="actions" id="update-repair-actions">
+                  <button class="btn-secondary" id="update-repair" data-i18n="settings.parts.repairButton">Repair</button>
+                </div>
+                <div id="update-repair-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The GUI form of `localm make-launcher`. Its OWN sub-block, not part
