@@ -92,8 +92,11 @@ def write_pth(path: Path, tensors: dict, *, monkeypatch, wrapper: str | None = "
     monkeypatch.setitem(sys.modules, "torch", torch_mod)
     monkeypatch.setitem(sys.modules, "torch._utils", utils_mod)
     state = {name: _TensorStandIn(shape) for name, shape in tensors.items()}
-    obj = {wrapper: state} if wrapper else state
-    obj.update(extra or {})
+    obj = dict(extra or {})
+    if wrapper:
+        obj[wrapper] = state
+    else:
+        obj.update(state)
     buf = io.BytesIO()
     _TorchPickler(buf, protocol=2).dump(obj)
     path.parent.mkdir(parents=True, exist_ok=True)
