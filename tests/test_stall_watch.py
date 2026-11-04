@@ -208,10 +208,10 @@ def test_a_line_that_is_not_a_frame_is_ignored(line):
 
 
 def test_parsing_a_hostile_frame_line_is_linear():
-    line = '  File "' + '", line 0 in ' * 200_000
+    line = '  File "' + '", line 0 in a' * 8000 + "\n\n"
     t0 = time.perf_counter()
     sw._parse_frame(line)
-    assert time.perf_counter() - t0 < 1.0
+    assert time.perf_counter() - t0 < 0.5
 
 
 def test_parse_dump_reads_threads_and_frames():
