@@ -73,21 +73,10 @@ def _requirements_changed(root: Path, new_tree: Path) -> bool:
 
 
 def _staging(root: Path, what: str) -> Path:
-    """A fresh, absent folder beside *root* for *what* (a download or a backup)."""
+    """A fresh, absent folder beside *root* for *what* (a download)."""
     path = root.parent / f".{root.name}-{what}-{os.getpid()}"
     if path.exists():
         mc.rmtree_robust(path)
-    return path
-
-
-def _new_backup(root: Path) -> Path:
-    """An absent folder beside *root* for a backup of its files. A backup an
-    earlier failed update kept is left alone: the next free numbered name is
-    used instead."""
-    base = root.parent / f".{root.name}-backup-{os.getpid()}"
-    path, n = base, 1
-    while os.path.lexists(source_archive.long_path(path)):
-        path, n = base.with_name(f"{base.name}-{n}"), n + 1
     return path
 
 
@@ -113,12 +102,14 @@ def _replace_source(root: Path, repo: str, commit: str, changes: list,
         deps_changed = _requirements_changed(root, new)
         try:
             changes.append(source_archive.apply_tree(new, root, old_files,
-                                                     _new_backup(root)))
+                                                     source_archive.new_backup_path(root)))
         except source_archive.TreeRollbackError as e:
             changes.append(e.change)
-            return False, f"could not write the new source into {root}: {e.cause}", False
+            return (False, f"could not write the new source into {root}: "
+                    f"{source_archive.plain_text(e.cause)}", False)
         except OSError as e:
-            return False, f"could not write the new source into {root}: {e}", False
+            return (False, f"could not write the new source into {root}: "
+                    f"{source_archive.plain_text(e)}", False)
         return True, "", deps_changed
     finally:
         if new.exists():
@@ -244,15 +235,20 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         """Put back every source file the update overwrote or removed (ComfyUI and
         its custom nodes) and re-apply the patch set, then report *reason*. If a
         file cannot be put back - OR the localm patch set cannot be re-applied on
-        the restored source - say so rather than report a clean tree."""
+        the restored source - say so rather than report a clean tree. The backup of
+        a tree put back in full is removed; one with a file still missing is kept
+        and named."""
         note = ""
         failed_files = []
         kept = []
+        restored = []
         for change in reversed(changes):
             failed = change.rollback()
             if failed:
                 failed_files += failed
-                kept.append(source_archive.plain_path(change.backup))
+                kept.append(source_archive.plain_text(change.backup))
+            else:
+                restored.append(change)
         if not failed_files:
             failed = [o for o in apply_patches(root) if not o.ok]
             if failed:
@@ -265,14 +261,14 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             elif changes:
                 _emit(on_progress,
                       f"Rolled back to the previous ComfyUI ({prev_commit[:12]}).")
-            for change in changes:
-                change.discard()
         else:
             note = (f" The rollback to {prev_commit[:12]} ALSO failed ({len(failed_files)} "
                     f"file(s) could not be put back, e.g. {failed_files[0]}); the managed "
                     "ComfyUI may be in a mixed state - reinstall it with 'localm comfy "
                     "remove' then 'localm comfy setup'. The original files are kept in "
                     f"{', '.join(kept)}.")
+        for change in restored:
+            change.discard()
         return _result(False, "error", reason + note)
 
     try:

@@ -32,6 +32,15 @@ def test_path_is_the_last_place_looked(tmp_path, monkeypatch):
     assert found is not None and os.path.isabs(found) and Path(found).samefile(on_path)
 
 
+def test_a_system_folder_program_wins_over_one_on_path(tmp_path, monkeypatch):
+    exe = "tool.exe" if sysprog.IS_WINDOWS else "tool"
+    system = _exe(tmp_path / "system" / exe)
+    on_path = _exe(tmp_path / "bin" / exe)
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [str(system)])
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    assert sysprog.find("tool") == str(system)
+
+
 def test_a_program_in_the_current_folder_is_never_run_instead(tmp_path, monkeypatch):
     exe = "tool.exe" if sysprog.IS_WINDOWS else "tool"
     here = _exe(tmp_path / "cwd" / exe)

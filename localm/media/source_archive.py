@@ -69,9 +69,9 @@ class TreeRollbackError(OSError):
         self.change = change
         self.backup = change.backup
         super().__init__(
-            f"{cause}; {len(self.failed)} file(s) could not be put back (e.g. "
-            f"{self.failed[0]}), so {plain_path(change.root)} holds a mix of old and new "
-            f"files; the originals are kept in {plain_path(change.backup)}")
+            f"{plain_text(cause)}; {len(self.failed)} file(s) could not be put back (e.g. "
+            f"{self.failed[0]}), so {plain_text(change.root)} holds a mix of old and new "
+            f"files; the originals are kept in {plain_text(change.backup)}")
 
 
 def archive_url(repo: str, commit: str) -> str:
@@ -113,26 +113,43 @@ def long_path(path: Path) -> Path:
     return path
 
 
-def plain_path(path: Path) -> str:
-    """*path* as text without the Windows extended-length prefix that
-    :func:`long_path` adds."""
-    text = str(path)
-    if text.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + text[8:]
-    if text.startswith("\\\\?\\"):
-        return text[4:]
+def plain_text(value: object) -> str:
+    """*value* (a path or an error) as text without the Windows extended-length
+    prefix :func:`long_path` adds, also in the doubled-backslash spelling an
+    OSError uses for its file name."""
+    text = str(value)
+    for prefix, short in (("\\\\\\\\?\\\\UNC\\\\", "\\\\\\\\"), ("\\\\\\\\?\\\\", ""),
+                          ("\\\\?\\UNC\\", "\\\\"), ("\\\\?\\", "")):
+        text = text.replace(prefix, short)
     return text
+
+
+def new_backup_path(root: Path, what: str = "backup") -> Path:
+    """An absent folder for a backup of the tree at *root*: beside it, or, for a
+    tree inside a ``custom_nodes`` folder, beside that folder, where ComfyUI does
+    not load it as a custom node. A folder an earlier failed run kept is left
+    alone: the next free numbered name is returned instead."""
+    root = Path(root)
+    if root.parent.name == "custom_nodes":
+        base = root.parent.parent / f".custom_nodes-{root.name}-{what}-{os.getpid()}"
+    else:
+        base = root.parent / f".{root.name}-{what}-{os.getpid()}"
+    path, n = base, 1
+    while os.path.lexists(long_path(path)):
+        path, n = base.with_name(f"{base.name}-{n}"), n + 1
+    return path
 
 
 def _safe_name(name: str) -> Optional[str]:
     """*name* (a path inside the archive, below its top folder) as a relative
     POSIX path, or None when it is empty, absolute, climbs out, lies inside a
-    ``.git`` folder, or has a part holding a drive colon, a backslash or a NUL
+    ``.git`` folder (also spelled ``git~1``, or with the trailing dots and spaces
+    Windows drops), or has a part holding a drive colon, a backslash or a NUL
     (each of which Windows reads as a path of its own)."""
     p = PurePosixPath(name)
     if not name or p.is_absolute() or ".." in p.parts or not p.parts:
         return None
-    if any(part.casefold() == ".git" for part in p.parts):
+    if any(part.rstrip(". ").casefold() in (".git", "git~1") for part in p.parts):
         return None
     if any(c in part for part in p.parts for c in (":", "\\", "\0")):
         return None
