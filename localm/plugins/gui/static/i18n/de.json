@@ -2854,6 +2854,7 @@
   "slash.movedToFolder": "In Ordner '{name}' verschoben",
   "slash.musicFailed": "Musikerzeugung fehlgeschlagen: {message}",
   "slash.musicStatus": "Musikerzeugung {status} - Details auf der Seite Music.",
+  "slash.modelsNotDownloaded": "Nicht generiert: Die benötigten Modelldateien sind nicht heruntergeladen.",
   "slash.noPersonas": "Noch keine Personas gespeichert - nutzen Sie 'speichern…' im Bedienfeld.",
   "slash.personaList": "Personas: {names}",
   "slash.pinned": "Angeheftet",

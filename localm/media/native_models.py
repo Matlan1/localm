@@ -489,7 +489,7 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             if preview:
                 from localm.media import native_offer
-                preview["offer"] = native_offer.from_pairing(preview["missing"])
+                preview["offer"] = native_offer.from_pairing(preview.get("missing") or [])
             out["preview"] = preview
             return out
         from localm.inference.http_server import path_formatter

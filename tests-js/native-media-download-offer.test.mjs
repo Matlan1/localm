@@ -211,3 +211,55 @@ test("a job that named nothing missing offers nothing", async () => {
   assert.equal(await offer.offer(), null);
   assert.equal(modalOpen(win), false);
 });
+
+function slashFetch({ kind, missing, posts, jobEvents }) {
+  const base = makeFetch({ missing: [], pulls: [] });
+  const api = { video: "/api/video", image: "/api/imagine", music: "/api/music" }[kind];
+  return async (url, opts = {}) => {
+    const u = String(url);
+    if (u === `/api/media/${kind}/preflight`) {
+      return { ok: true, status: 200,
+               json: async () => ({ status: "verified", missing, warning: null }) };
+    }
+    if (u === api && (opts.method || "GET") === "POST") {
+      posts.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({ job_id: "job-9" }) };
+    }
+    if (u === "/api/jobs/job-9/events") return sse(jobEvents);
+    return base(url, opts);
+  };
+}
+
+for (const [kind, run] of [["video", "runVideoInChat"], ["image", "runImagineInChat"],
+                           ["music", "runMusicInChat"]]) {
+  test(`/${kind} in chat offers the download box and stops when it is declined`, async () => {
+    const posts = [];
+    const { window: win } = loadApp({
+      fetchImpl: slashFetch({ kind, missing: PARTS, posts, jobEvents: [] }) });
+    const done = win[run]("a fox");
+    await until(() => modalOpen(win), "the download box");
+    assert.match(win.document.getElementById("modal-title").textContent, /3 files/);
+    click(win, "Not now");
+    await done;
+    assert.equal(posts.length, 0, "no job is started");
+    assert.match(win.document.getElementById("chat-messages").textContent,
+      /Not generated: the model files it needs are not downloaded/);
+  });
+
+  test(`/${kind} in chat keeps a command line out of the reply and offers the box`, async () => {
+    const posts = [];
+    const command = "No native model is set up: localm pull owner/repo:x --sha256 abc";
+    const { window: win } = loadApp({
+      fetchImpl: slashFetch({ kind, missing: [], posts, jobEvents: [
+        { type: "missing_model", missing: PARTS, text: command },
+        { type: "line", text: command },
+        { type: "end", status: "failed" }] }) });
+    const done = win[run]("a fox");
+    await until(() => modalOpen(win), "the download box");
+    assert.equal(posts.length, 1);
+    assert.doesNotMatch(win.document.getElementById("chat-messages").textContent, /localm pull/);
+    click(win, "Not now");
+    await done;
+    assert.doesNotMatch(win.document.getElementById("chat-messages").textContent, /localm pull/);
+  });
+}

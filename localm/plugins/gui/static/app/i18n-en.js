@@ -843,6 +843,7 @@ export const I18N_EN = {
   "slash.movedToFolder": "Moved to folder '{name}'",
   "slash.musicFailed": "Music generation failed: {message}",
   "slash.musicStatus": "Music generation {status} - see the Music page for details.",
+  "slash.modelsNotDownloaded": "Not generated: the model files it needs are not downloaded.",
   "slash.noPersonas": "No personas saved yet - use the drawer's save…",
   "slash.personaList": "Personas: {names}",
   "slash.pinned": "Pinned",

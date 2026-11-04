@@ -2948,6 +2948,7 @@
   "slash.movedToFolder": "Déplacée dans le dossier « {name} »",
   "slash.musicFailed": "Échec de la génération de musique : {message}",
   "slash.musicStatus": "Génération de musique : {status} - voir la page Music pour les détails.",
+  "slash.modelsNotDownloaded": "Non généré : les fichiers de modèle nécessaires ne sont pas téléchargés.",
   "slash.noPersonas": "Aucune persona enregistrée pour l'instant - utilisez « Enregistrer… » du panneau",
   "slash.personaList": "Personas : {names}",
   "slash.pinned": "Épinglée",

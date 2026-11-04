@@ -2948,6 +2948,7 @@
   "slash.movedToFolder": "Movida a la carpeta '{name}'",
   "slash.musicFailed": "La generación de música falló: {message}",
   "slash.musicStatus": "Generación de música: {status} - consulta la página Music para más detalles.",
+  "slash.modelsNotDownloaded": "No se generó: los archivos de modelo que necesita no están descargados.",
   "slash.noPersonas": "Aún no hay personas guardadas - usa \"guardar…\" en el panel",
   "slash.personaList": "Personas: {names}",
   "slash.pinned": "Fijada",
