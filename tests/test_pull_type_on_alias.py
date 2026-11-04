@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -134,18 +133,15 @@ class TestRegisterWithDedup:
 
 class TestAddLocal:
     def test_a_type_equal_to_the_detected_one_still_beats_a_hand_typed_entry(
-            self, have, monkeypatch):
+            self, home, tmp_path, monkeypatch):
+        from tests.test_model_folder_discovery import _write_gguf
+        gguf = tmp_path / "chat.gguf"
+        _write_gguf(gguf, "llama")
+        digest = hashlib.sha256(gguf.read_bytes()).hexdigest()
+        mm._register("have", gguf, "local", sha256=digest, model_type="lora")
         _no_terminal(monkeypatch)
-        header = {"decoder.conv_in.weight": {"dtype": "F16", "shape": [8, 4, 3, 3],
-                                             "data_offsets": [0, 0]},
-                  "encoder.conv_in.weight": {"dtype": "F16", "shape": [8, 3, 3, 3],
-                                             "data_offsets": [0, 0]}}
-        raw = json.dumps(header).encode("utf-8")
-        have.write_bytes(struct.pack("<Q", len(raw)) + raw)
-        digest = hashlib.sha256(have.read_bytes()).hexdigest()
-        mm._register("have", have, "local", sha256=digest, model_type="lora")
-        assert mm.add_local(str(have), "new", model_type="vae") is True
-        _assert_typed_alias()
+        assert mm.add_local(str(gguf), "new", model_type="llm") is True
+        _assert_typed_alias(model_type="llm")
 
 
 class TestPullBeforeDownload:
