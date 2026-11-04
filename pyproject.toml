@@ -188,10 +188,12 @@ gpu = [
     "num2words>=0.5.14",
     "compressed-tensors>=0.15.0",
     # Packages the tokenizers and bundled modeling code of the most downloaded
-    # transformers repos import (scripts/hf_remote_code_census.py), each installable on
-    # every platform uv.lock covers (decord has no macOS wheel). See
-    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import.
-    "tiktoken>=0.14.0",
+    # transformers repos import (scripts/hf_remote_code_census.py). A marker leaves a
+    # package out on each platform PyPI has no wheel of it for, the platforms
+    # missing_packages.PLATFORM_GAPS lists. See
+    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import and
+    # test_platform_gaps_match_the_extras_markers.
+    "tiktoken>=0.14.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "sentencepiece>=0.2.2",
     "protobuf>=7.36.2",
     "einops>=0.8.2",
@@ -200,23 +202,24 @@ gpu = [
     # only pinned here on Windows (the AMD build); on other platforms the user's torch is
     # chosen by setup, so these are left out of [hf]. See test_torch_coupled_packages_stay_out_of_hf.
     "timm>=1.0.30; sys_platform == 'win32'",
-    "librosa>=0.11.0",
+    "librosa>=0.11.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "addict>=2.4.0",
     "easydict>=1.13",
     "matplotlib>=3.11.2",
     "open_clip_torch>=3.3.0; sys_platform == 'win32'",
     "scipy>=1.18.1",
-    "decord>=0.6.0; sys_platform != 'darwin'",
-    "datasets>=5.1.0",
+    "decord>=0.6.0; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    "datasets>=5.1.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "backoff>=2.2.1",
-    "opencv-python-headless>=5.0.0.93",
+    "opencv-python-headless>=5.0.0.93; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "lmdb>=3.0.0",
     "pretty_midi>=0.2.11.post0",
     "mir_eval>=0.8.2",
     "scikit-learn>=1.9.1",
-    "monai>=1.6.1",
-    "onnxruntime>=1.31.0",
-    "x-transformers>=2.31.11",
+    "monai>=1.6.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.31.0; sys_platform != 'darwin'",
+    "onnxruntime>=1.23.2; sys_platform == 'darwin'",
+    "x-transformers>=2.31.11; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "nltk>=3.10.4",
     "g2p-en>=2.1.0",
     "lightning>=2.6.6",
@@ -242,30 +245,33 @@ hf = [
     "num2words>=0.5.14",
     "compressed-tensors>=0.15.0",
     # Packages the tokenizers and bundled modeling code of the most downloaded
-    # transformers repos import (scripts/hf_remote_code_census.py), each installable on
-    # every platform uv.lock covers (decord has no macOS wheel). See
-    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import.
-    "tiktoken>=0.14.0",
+    # transformers repos import (scripts/hf_remote_code_census.py). A marker leaves a
+    # package out on each platform PyPI has no wheel of it for, the platforms
+    # missing_packages.PLATFORM_GAPS lists. See
+    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import and
+    # test_platform_gaps_match_the_extras_markers.
+    "tiktoken>=0.14.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "sentencepiece>=0.2.2",
     "protobuf>=7.36.2",
     "einops>=0.8.2",
     "peft>=0.21.2",
-    "librosa>=0.11.0",
+    "librosa>=0.11.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "addict>=2.4.0",
     "easydict>=1.13",
     "matplotlib>=3.11.2",
     "scipy>=1.18.1",
-    "decord>=0.6.0; sys_platform != 'darwin'",
-    "datasets>=5.1.0",
+    "decord>=0.6.0; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    "datasets>=5.1.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "backoff>=2.2.1",
-    "opencv-python-headless>=5.0.0.93",
+    "opencv-python-headless>=5.0.0.93; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "lmdb>=3.0.0",
     "pretty_midi>=0.2.11.post0",
     "mir_eval>=0.8.2",
     "scikit-learn>=1.9.1",
-    "monai>=1.6.1",
-    "onnxruntime>=1.31.0",
-    "x-transformers>=2.31.11",
+    "monai>=1.6.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.31.0; sys_platform != 'darwin'",
+    "onnxruntime>=1.23.2; sys_platform == 'darwin'",
+    "x-transformers>=2.31.11; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "nltk>=3.10.4",
     "g2p-en>=2.1.0",
     "lightning>=2.6.6",

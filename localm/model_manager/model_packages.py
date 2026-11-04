@@ -140,8 +140,15 @@ def package_label(module: str) -> str:
 def unavailable_reason(module: str) -> Optional[str]:
     """Why localm cannot add *module* on this machine, or None when it can.
     Never touches the network."""
+    from localm.model_manager.missing_packages import (
+        SHIPPED_MODULES,
+        platform_label,
+        shipped_here,
+    )
     entry = ON_DEMAND.get(module)
     if entry is None:
+        if module in SHIPPED_MODULES and not shipped_here(module):
+            return f"it is not available for this platform ({platform_label()})"
         reason = REFUSED.get(module)
         return reason or "it is not on the list of packages localm has reviewed for installing"
     if entry.platforms and not any(sys.platform.startswith(p) for p in entry.platforms):
@@ -537,17 +544,18 @@ class FolderState:
 
 def folder_state(folder: Path) -> FolderState:
     """The packages the bundled code of the model *folder* needs and this
-    install lacks, sorted into ones localm ships (the install is incomplete),
-    ones it cannot add here, and ones it can add. Never touches the network."""
+    install lacks, sorted into ones localm ships here (the install is incomplete),
+    ones it cannot add here (including a shipped module this platform does not
+    get), and ones it can add. Never touches the network."""
     from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
-    from localm.model_manager.missing_packages import SHIPPED_MODULES, is_importable
+    from localm.model_manager.missing_packages import is_importable, shipped_here
     if not folder.is_dir() or not _declares_custom_code(str(folder)):
         return FolderState(True, [], [], [], [])
     if not _trust_remote_code_enabled():
         return FolderState(False, [], [], [], [])
     missing = sorted(m for m in _folder_imports(folder) if not is_importable(m))
-    shipped = [m for m in missing if m in SHIPPED_MODULES]
-    others = [m for m in missing if m not in SHIPPED_MODULES]
+    shipped = [m for m in missing if shipped_here(m)]
+    others = [m for m in missing if not shipped_here(m)]
     blocked = [m for m in others if not installable(m)]
     addable = [m for m in others if installable(m)]
     return FolderState(True, missing, shipped, blocked, addable)

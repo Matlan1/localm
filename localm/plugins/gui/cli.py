@@ -908,12 +908,13 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
     from .web import attach_gui
     app = hs.create_app(engine)
 
-    async def switch_model(name: str, *, force: bool = False) -> dict:
+    async def switch_model(name: str, *, force: bool = False, activate: bool = True) -> dict:
         """Swap engines, PREEMPTING any in-flight load so the latest selection
         wins immediately instead of waiting for an abandoned model to finish
         loading (see http_server.switch_engine). Serialised on the inference
-        semaphore so no generation is mid-flight."""
-        return await hs.switch_engine(name, make_engine, force=force)
+        semaphore so no generation is mid-flight. With *activate* False the
+        model is made resident without becoming the active model."""
+        return await hs.switch_engine(name, make_engine, force=force, activate=activate)
 
     if not api_mode:
         attach_gui(
