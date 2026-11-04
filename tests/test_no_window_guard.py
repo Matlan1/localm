@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,18 @@ class _Stop(Exception):
 
 
 _Refused = pytest.fail.Exception
+
+
+@pytest.fixture(autouse=True)
+def _guard_is_armed_before_the_test_body():
+    """On Windows, fail before the test body runs when the guard is not in place,
+    so a test here cannot reach a real window through an unarmed guard."""
+    if sys.platform == "win32":
+        import _winapi
+        assert nw.armed()
+        assert _winapi.CreateProcess is nw.create_process
+        assert os.startfile is nw.startfile and webbrowser.open is nw.browser_open
+    yield
 
 
 @pytest.fixture
@@ -180,6 +193,44 @@ def test_allow_window_nests_and_ends_with_its_block():
     assert not nw.window_allowed()
 
 
+def test_allow_window_ends_when_its_block_raises():
+    with pytest.raises(_Stop):
+        with nw.allow_window():
+            raise _Stop
+    assert not nw.window_allowed()
+
+
+def test_importing_the_tests_package_without_pytest_arms_nothing_and_imports_nothing():
+    code = ("import sys; from tests import _no_console_window, _no_window; "
+            "print(_no_window.armed(), 'pytest' in sys.modules, 'tkinter' in sys.modules)")
+    root = str(Path(__file__).resolve().parents[1])
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": root}, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["False", "False", "False"]
+
+
+@_needs_windows
+def test_allow_window_stops_the_console_guard_adding_a_flag(monkeypatch):
+    from tests import _no_console_window as guard
+    calls = []
+
+    def record(*args):
+        calls.append(args)
+        raise _Stop
+
+    monkeypatch.setattr(guard, "has_console", lambda: False)
+    monkeypatch.setattr(guard, "_real_create", record)
+    with pytest.raises(_Stop):
+        subprocess.run(["cmd", "/c", "exit 0"])
+    assert _flags(_ours(calls, "exit 0")) & nw.CREATE_NO_WINDOW
+    calls.clear()
+    with nw.allow_window():
+        with pytest.raises(_Stop):
+            subprocess.run(["cmd", "/c", "exit 0"])
+    assert not _flags(_ours(calls, "exit 0")) & nw.CREATE_NO_WINDOW
+
+
 @_needs_windows
 @pytest.mark.parametrize("flags", [nw.CREATE_NEW_CONSOLE, nw.DETACHED_PROCESS],
                          ids=["new-console", "detached"])
@@ -234,16 +285,36 @@ def test_allow_window_lets_tk_windows_show(monkeypatch):
     monkeypatch.setattr(nw, "_real_tk_init", lambda self, *a, **k: calls.append("tk"))
     monkeypatch.setattr(nw, "_real_toplevel_init", lambda self, *a, **k: calls.append("top"))
     monkeypatch.setattr(nw, "_real_deiconify", lambda self: calls.append("deiconify"))
+    monkeypatch.setattr(nw, "_real_iconify", lambda self: calls.append("iconify"))
+    monkeypatch.setattr(nw, "_real_state", lambda self, new=None: calls.append(("state", new)))
+    monkeypatch.setattr(nw, "_real_dialog_show", lambda self, **k: calls.append("dialog"))
+    monkeypatch.setattr(nw, "_real_wait_visibility", lambda self, w=None: calls.append("wait"))
     with nw.allow_window():
         nw.tk_init(_Fake())
         nw.toplevel_init(_Fake())
         nw.deiconify(_Fake())
-    assert calls == ["tk", "top", "deiconify"]
+        nw.iconify(_Fake())
+        nw.state(_Fake(), "normal")
+        nw.dialog_show(_Fake())
+        nw.wait_visibility(_Fake())
+    assert calls == ["tk", "top", "deiconify", "iconify", ("state", "normal"), "dialog", "wait"]
     calls.clear()
     nw.tk_init(_Fake())
     nw.toplevel_init(_Fake())
     nw.deiconify(_Fake())
+    nw.iconify(_Fake())
+    nw.state(_Fake(), "normal")
     assert calls == ["tk", "withdraw", "top", "withdraw"]
+    calls.clear()
+    nw.state(_Fake())
+    nw.state(_Fake(), "withdrawn")
+    assert calls == [("state", None), ("state", "withdrawn")]
+    calls.clear()
+    with pytest.raises(_Refused, match="native Tk dialog"):
+        nw.dialog_show(_Fake())
+    with pytest.raises(_Refused, match="wait_visibility"):
+        nw.wait_visibility(_Fake())
+    assert calls == []
 
 
 @_needs_windows
@@ -268,22 +339,37 @@ def test_a_refusal_imports_nothing_when_pytest_is_gone_from_sys_modules(monkeypa
 
 
 @_needs_windows
-def test_startfile_and_webbrowser_are_refused(tmp_path):
-    assert os.startfile is nw.startfile and webbrowser.open is nw.browser_open
+def test_startfile_and_webbrowser_are_refused(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(nw, "_real_startfile", lambda *a, **k: opened.append(a))
+    monkeypatch.setattr(nw, "_real_browser_open", lambda *a, **k: opened.append(a))
     with pytest.raises(_Refused, match="os.startfile"):
         nw.startfile(str(tmp_path / "missing.txt"))
     with pytest.raises(_Refused, match="webbrowser.open"):
         webbrowser.open("http://127.0.0.1:9/")
     with pytest.raises(_Refused, match="webbrowser.open"):
         webbrowser.open_new_tab("http://127.0.0.1:9/")
+    assert opened == []
 
 
 @_needs_windows
-def test_tk_windows_start_withdrawn_and_stay_withdrawn():
+def test_tcl_without_tk_still_works():
+    tkinter = pytest.importorskip("tkinter")
+    interp = tkinter.Tcl()
+    assert interp.tk.eval("expr {2 + 3}") == "5"
+
+
+@_needs_windows
+def test_tk_windows_start_withdrawn_and_stay_withdrawn(monkeypatch):
     tkinter = pytest.importorskip("tkinter")
     assert tkinter.Tk.__init__ is nw.tk_init
     assert tkinter.Toplevel.__init__ is nw.toplevel_init
     assert tkinter.Wm.deiconify is nw.deiconify and tkinter.Wm.wm_deiconify is nw.deiconify
+    assert tkinter.Wm.iconify is nw.iconify and tkinter.Wm.wm_iconify is nw.iconify
+    assert tkinter.Wm.state is nw.state and tkinter.Wm.wm_state is nw.state
+    reached = []
+    monkeypatch.setattr(nw, "_real_deiconify", lambda self: reached.append("deiconify"))
+    monkeypatch.setattr(nw, "_real_iconify", lambda self: reached.append("iconify"))
     root = build_tk_root(tkinter.Tk)
     try:
         assert root.state() == "withdrawn"
@@ -291,6 +377,9 @@ def test_tk_windows_start_withdrawn_and_stay_withdrawn():
         assert top.state() == "withdrawn"
         root.deiconify()
         top.deiconify()
+        root.iconify()
+        root.state("normal")
+        assert reached == []
         assert root.state() == "withdrawn" and top.state() == "withdrawn"
         root.update()
         assert root.state() == "withdrawn" and top.state() == "withdrawn"

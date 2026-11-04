@@ -3,7 +3,7 @@
 would put a window on the desktop, unless the test asked for windows with
 ``allow_window()``.
 
-``arm()`` patches:
+``arm()`` does nothing unless pytest is already imported. It patches:
 
 * ``_winapi.CreateProcess``, which ``subprocess``, ``asyncio`` and
   ``multiprocessing`` all start a Windows process through. ``DETACHED_PROCESS``
@@ -11,17 +11,22 @@ would put a window on the desktop, unless the test asked for windows with
   the window, and then becomes ``CREATE_NO_WINDOW``. Every call that goes ahead
   carries a STARTUPINFO with ``STARTF_USESHOWWINDOW`` and ``SW_HIDE``.
 * ``os.startfile`` and ``webbrowser.open``, which are refused.
-* ``tkinter.Tk`` and ``tkinter.Toplevel``, which start withdrawn, and
-  ``deiconify``, which leaves a window withdrawn.
+* ``tkinter.Tk`` (with Tk loaded) and ``tkinter.Toplevel``, which start
+  withdrawn. ``deiconify``, ``iconify`` and ``state("normal")`` leave a window
+  withdrawn. Native dialogs (``tkinter.commondialog.Dialog.show``) and
+  ``wait_visibility`` are refused.
 
 Inside ``allow_window()`` every patch passes the call through unchanged, on
-every thread of the process.
+every thread of the process, and ``tests._no_console_window`` adds no flag.
 
 A refusal fails the test at the call with ``pytest.fail``, whose exception
 derives from ``BaseException``, so an ``except Exception`` in the code under
 test does not swallow it. ``pytest.fail`` is looked up once, by ``arm()``, so a
-refusal imports nothing. In a process without pytest a refusal raises
-``RuntimeError``.
+refusal imports nothing. On a background thread the refusal ends that thread
+and pytest reports it as a warning; the window is refused all the same.
+
+Not covered: ``os.spawn*``, ``os.exec*``, ctypes calls, ``tk.call("wm", ...)``,
+and programs a child process starts on its own.
 """
 
 from __future__ import annotations
@@ -139,13 +144,9 @@ def _origin() -> str:
 
 def refuse(reason: str, what: str) -> None:
     """Fail the current test with ``pytest.fail``, naming *reason*, *what* and
-    the call site; raise ``RuntimeError`` with the same text where pytest was
-    not importable when ``arm()`` ran."""
-    message = ("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
-               + "\n    from " + _origin() + "\n" + ADVICE)
-    if _fail is None:
-        raise RuntimeError(message)
-    _fail(message, pytrace=False)
+    the call site."""
+    _fail("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
+          + "\n    from " + _origin() + "\n" + ADVICE, pytrace=False)
 
 
 _real_create = None
@@ -186,13 +187,23 @@ def browser_open(url, *args, **kwargs):
 _real_tk_init = None
 _real_toplevel_init = None
 _real_deiconify = None
+_real_iconify = None
+_real_state = None
+_real_dialog_show = None
+_real_wait_visibility = None
+
+
+def _loads_tk(args, kwargs) -> bool:
+    """Whether ``tkinter.Tk.__init__`` called with *args* loads Tk; ``tkinter.Tcl``
+    passes ``useTk=False`` as the fourth positional argument."""
+    return bool(args[3] if len(args) > 3 else kwargs.get("useTk", True))
 
 
 def tk_init(self, *args, **kwargs):
     """``tkinter.Tk.__init__``, then ``withdraw()`` before any idle task runs,
-    except inside ``allow_window()``."""
+    unless Tk is not loaded or inside ``allow_window()``."""
     _real_tk_init(self, *args, **kwargs)
-    if not window_allowed():
+    if _loads_tk(args, kwargs) and not window_allowed():
         self.withdraw()
 
 
@@ -212,19 +223,63 @@ def deiconify(self):
     return None
 
 
+def iconify(self):
+    """Stand-in for ``Wm.iconify``: the window stays withdrawn, except inside
+    ``allow_window()``."""
+    if window_allowed():
+        return _real_iconify(self)
+    return None
+
+
+def state(self, newstate=None):
+    """Stand-in for ``Wm.state``: reads the state, or sets it to ``withdrawn``;
+    any other state is ignored, except inside ``allow_window()``."""
+    if newstate is None or newstate == "withdrawn" or window_allowed():
+        return _real_state(self, newstate)
+    return None
+
+
+def dialog_show(self, **options):
+    """Stand-in for ``tkinter.commondialog.Dialog.show``: refuses, or calls it
+    inside ``allow_window()``."""
+    if window_allowed():
+        return _real_dialog_show(self, **options)
+    refuse("a native Tk dialog opens a window", type(self).__name__)
+
+
+def wait_visibility(self, window=None):
+    """Stand-in for ``Misc.wait_visibility``: refuses, since a withdrawn window
+    never becomes visible, or calls it inside ``allow_window()``."""
+    if window_allowed():
+        return _real_wait_visibility(self, window)
+    refuse("wait_visibility waits for a window on the desktop", str(window or self))
+
+
 def _arm_tk() -> None:
-    global _real_tk_init, _real_toplevel_init, _real_deiconify
+    global _real_tk_init, _real_toplevel_init, _real_deiconify, _real_iconify
+    global _real_state, _real_dialog_show, _real_wait_visibility
     try:
         import tkinter
+        import tkinter.commondialog
     except ImportError:
         return
     _real_tk_init = tkinter.Tk.__init__
     _real_toplevel_init = tkinter.Toplevel.__init__
     _real_deiconify = tkinter.Wm.wm_deiconify
+    _real_iconify = tkinter.Wm.wm_iconify
+    _real_state = tkinter.Wm.wm_state
+    _real_dialog_show = tkinter.commondialog.Dialog.show
+    _real_wait_visibility = tkinter.Misc.wait_visibility
     tkinter.Tk.__init__ = tk_init
     tkinter.Toplevel.__init__ = toplevel_init
     tkinter.Wm.deiconify = deiconify
     tkinter.Wm.wm_deiconify = deiconify
+    tkinter.Wm.iconify = iconify
+    tkinter.Wm.wm_iconify = iconify
+    tkinter.Wm.state = state
+    tkinter.Wm.wm_state = state
+    tkinter.commondialog.Dialog.show = dialog_show
+    tkinter.Misc.wait_visibility = wait_visibility
 
 
 def armed() -> bool:
@@ -232,16 +287,14 @@ def armed() -> bool:
 
 
 def arm() -> bool:
-    """Install the patches once, on Windows only. Returns True when it did."""
+    """Install the patches once, on Windows, in a process that has imported
+    pytest. Returns True when it did."""
     global _ARMED, _real_create, _real_startfile, _real_browser_open, _fail
-    if _ARMED or sys.platform != "win32":
+    if _ARMED or sys.platform != "win32" or "pytest" not in sys.modules:
         return False
     import _winapi
-    try:
-        import pytest
-        _fail = pytest.fail
-    except ImportError:
-        _fail = None
+
+    _fail = sys.modules["pytest"].fail
 
     _real_create = _winapi.CreateProcess
     _winapi.CreateProcess = create_process
