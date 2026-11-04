@@ -1023,9 +1023,10 @@ def test_a_debug_server_whose_probe_is_killed_passes_the_log_audit(tmp_path):
                     pass
     manifest = tmp_path / "run.manifest.json"
     manifest.write_text(json.dumps({"run": "probe killed from outside"}), encoding="utf-8")
+    # No --home: it reports the crash marker every tree kill leaves.
     audit = subprocess.run(
         [sys.executable, str(repo / "scripts" / "log_audit.py"), "--manifest",
-         str(manifest), "--strict", "--home", str(home), str(logs[0])],
+         str(manifest), "--strict", str(logs[0])],
         capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
         creationflags=no_window)
     assert audit.returncode == 0, audit.stdout + audit.stderr
