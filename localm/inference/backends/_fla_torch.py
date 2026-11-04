@@ -145,7 +145,7 @@ class ShortConvolution(nn.Conv1d):
             final = F.pad(final, (width - final.shape[-1], 0))
         return y.transpose(1, 2), final
 
-    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None,
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None,  # pyright: ignore[reportIncompatibleMethodOverride]
                 mask: Optional[torch.Tensor] = None, cache: Optional[torch.Tensor] = None,
                 output_final_state: bool = False,
                 cu_seqlens: Optional[torch.Tensor] = None, **kwargs):

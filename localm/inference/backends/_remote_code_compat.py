@@ -103,7 +103,7 @@ def _adapt_cache_class(cache_cls) -> bool:
 
 def _sdpa_without_flash_attn(model) -> bool:
     config = getattr(model, "config", None)
-    if getattr(config, "_attn_implementation", None) != "flash_attention_2":
+    if config is None or getattr(config, "_attn_implementation", None) != "flash_attention_2":
         return False
     if importlib.util.find_spec("flash_attn") is not None:
         return False
