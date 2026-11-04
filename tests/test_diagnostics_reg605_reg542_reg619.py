@@ -306,16 +306,18 @@ def test_restarted_process_binds_exactly_the_probed_port(restart_harness, monkey
     """The same defect proven through the REAL pick_port(), which is what
     actually decides the new process's port - not just the presence of a token.
 
-    Reproduces the drift: the default 8642 is free (the other instance closed),
-    so pick_port(None) - what an argv carrying no port token produces - returns
-    8642 while the watchdog probes 8643. They must agree."""
+    Reproduces the drift: pick_port(None) - what an argv carrying no port token
+    produces - stays in localm's own range, while the watchdog probes a free port
+    outside it. They must agree."""
     import sys
 
     from localm.config import PORT_RANGE, pick_port
     import localm.inference.http_server as hs
+    from tests.conftest import free_loopback_port
 
     monkeypatch.setattr(sys, "argv", ["localm", "gui"])
-    bound = PORT_RANGE[0] + 1                      # auto-bumped off the default
+    bound = free_loopback_port()
+    assert not PORT_RANGE[0] <= bound <= PORT_RANGE[1]
     with pytest.raises(SystemExit):
         hs._do_restart(port=bound, update_watchdog={
             "host": "127.0.0.1", "port": bound, "scheme": "http",

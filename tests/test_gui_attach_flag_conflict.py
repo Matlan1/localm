@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from localm.plugins.gui import cli as guicli
+from tests.conftest import free_loopback_port
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +102,7 @@ def test_gui_new_flag_bypasses_the_conflict_and_starts_fresh(running, monkeypatc
     monkeypatch.setattr("localm.portmux.run_server",
                         lambda *a, **k: ran.setdefault("ok", True))
     result = CliRunner().invoke(
-        guicli.main, ["--new", "--no-model", "--port", "8794", "--no-browser"])
+        guicli.main, ["--new", "--no-model", "--port", str(free_loopback_port()), "--no-browser"])
     flat = _flat(result.output)
     assert result.exit_code == 0, result.output
     assert "cannot apply" not in flat     # not refused

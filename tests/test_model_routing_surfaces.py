@@ -21,6 +21,7 @@ import uvicorn
 
 import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
+from tests.conftest import free_loopback_port
 
 
 @pytest.fixture(autouse=True)
@@ -361,8 +362,9 @@ class TestScheduledChatJobs:
 
         monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
         base, engines, _ = live
+        dead_port = free_loopback_port()
         route = peer_routing.PeerRoute(
-            model="tooly", instance_id="peer-1", host="127.0.0.1", port=9999,
+            model="tooly", instance_id="peer-1", host="127.0.0.1", port=dead_port,
             scheme="http", api_key="peer-secret", peer_model="tooly-on-peer")
         peer_routing.set_route(route)
         try:
@@ -370,10 +372,10 @@ class TestScheduledChatJobs:
         finally:
             peer_routing.clear_route("tooly")
 
-        # No peer is actually listening on :9999, so the request fails to
-        # reach it - proving the peer's own URL was dialled, not a local load.
+        # No peer is listening on dead_port, so the request fails to reach it -
+        # proving the peer's own URL was dialled, not a local load.
         assert res["status"] == "error", res
-        assert "127.0.0.1:9999" in res["error"], res
+        assert f"127.0.0.1:{dead_port}" in res["error"], res
         # The local "tooly" engine is never even constructed: no local load
         # was attempted for it.
         assert "tooly" not in engines
