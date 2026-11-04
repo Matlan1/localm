@@ -25,8 +25,9 @@ loading such a model.
 Two of the bounds prevent a CRASH and two prevent unbounded COST; they are not
 the same claim and the refusal messages say which:
 
-* ``max_run`` over ``char_class``, and ``newline_run`` over ``[\r\n]``, sit below
-  a length measured to THROW. A run past either kills the worker.
+* ``max_run`` over ``char_class``, ``newline_run`` over ``[\r\n]`` and ``digit_run``
+  over digits sit below a length measured to THROW. A run past any of them
+  kills the worker.
 * ``cost_budget``, and ``jais-2``'s whitespace ``max_run``, bound how long
   ``unicode_regex_split`` RUNS. Neither pre-tokenizer has been observed to throw
   on those inputs; they go quadratic, not fatal.
@@ -114,6 +115,8 @@ class Policy(NamedTuple):
     ``label``        the pre-tokenizer name used in the refusal message.
     ``newline_run``  longest permitted unbroken run of ``\r``/``\n``, or ``None``
                      when a newline run does not throw for this pre-tokenizer.
+    ``digit_run``    longest permitted unbroken run of digits when they are
+                     bounded beside another ``char_class``, or ``None``.
     ``cost_budget``  cap on ``len(text)`` multiplied by the longest run carrying
                      no ASCII whitespace, or ``None`` when unbounded.
     ``cuts``         where a text longer than ``max_chars`` may be cut so the two
@@ -137,6 +140,7 @@ class Policy(NamedTuple):
     cost_budget: Optional[int] = None
     unusable: bool = False
     cuts: str = "words"
+    digit_run: Optional[int] = None
 
 
 _LETTER_RUN_LIMIT = 64
@@ -179,6 +183,9 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     "minimax-m2": _letters("minimax-m2"),
     # LLAMA_VOCAB_PRE_TYPE_TEKKEN.
     "tekken": _letters("tekken"),
+    # LLAMA_VOCAB_PRE_TYPE_TEKKEN_NUM3. As tekken for letters, and its digit-group
+    # lookahead also throws on a digit run.
+    "tekken-num3": _letters("tekken-num3")._replace(digit_run=_DIGIT_RUN_LIMIT),
     # LLAMA_VOCAB_PRE_TYPE_GRANITE_EMB_MULTI.
     "granite-embed-multi-97m": _letters("granite-embed-multi-97m"),
     # LLAMA_VOCAB_PRE_TYPE_SUPERBPE. Digits, not letters.
@@ -298,6 +305,8 @@ def _run_scanner_keys():
                 yield (p.char_class, p.max_run)
             if p.newline_run is not None:
                 yield (_CLASS_NEWLINE, p.newline_run)
+            if p.digit_run is not None:
+                yield (_CLASS_DIGIT, p.digit_run)
 
 
 # One compiled scanner per distinct (class, limit) pair, built once at import.
@@ -347,6 +356,8 @@ def hazard_note(pre_type: Optional[str]) -> Optional[str]:
                      + _RUN_KIND[policy.char_class])
     if policy.newline_run is not None:
         crashes.append(f"an unbroken run of more than {policy.newline_run} line breaks")
+    if policy.digit_run is not None:
+        crashes.append(f"an unbroken run of more than {policy.digit_run} digits")
     if policy.cost_budget is not None:
         slows.append("a long block of text carrying no spaces or line breaks")
     parts = []
@@ -642,6 +653,8 @@ def check_text(pre_type: Optional[str], text: str, *, part: bool = False,
         )
     if policy.newline_run is not None:
         _refuse_long_run(policy, text, _CLASS_NEWLINE, policy.newline_run)
+    if policy.digit_run is not None:
+        _refuse_long_run(policy, text, _CLASS_DIGIT, policy.digit_run)
     # Runs at or below `cost_budget // max_chars` can never breach the budget,
     # and _COST_SCANNERS only matches longer ones. That holds because the
     # max_chars refusal above has already bounded len(text); this check must

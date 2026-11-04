@@ -171,6 +171,13 @@ class TestRealSocketTable:
 #  Candidate ports                                                   #
 # ------------------------------------------------------------------ #
 
+def _idle_port() -> int:
+    """A loopback port nothing is listening on right now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 class TestCandidateEndpoints:
     def test_detection_off_finds_nothing(self, monkeypatch):
         with peer_server(localm_whoami("a1")) as srv:
@@ -210,8 +217,9 @@ class TestCandidateEndpoints:
     def test_the_ollama_port_outside_the_range_is_a_candidate(self, monkeypatch):
         with peer_server(localm_whoami("a1")) as srv:
             monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
-            monkeypatch.setattr("localm.config.PORT_RANGE", (8642, 8642))
-            assert srv.port != 8642
+            idle = _idle_port()
+            monkeypatch.setattr("localm.config.PORT_RANGE", (idle, idle))
+            assert srv.port != idle
             monkeypatch.setattr(gpu_registry, "EXTRA_PEER_PORTS", (srv.port,))
             assert gpu_registry.candidate_endpoints() == [("127.0.0.1", srv.port)]
             peers = gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)
@@ -222,7 +230,8 @@ class TestCandidateEndpoints:
             self, monkeypatch):
         with peer_server(localm_whoami("a1")) as srv:
             monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
-            monkeypatch.setattr("localm.config.PORT_RANGE", (8642, 8642))
+            idle = _idle_port()
+            monkeypatch.setattr("localm.config.PORT_RANGE", (idle, idle))
             monkeypatch.setattr(gpu_registry, "EXTRA_PEER_PORTS", (srv.port,))
             monkeypatch.setattr(listeners, "listening_endpoints", lambda: None)
             assert gpu_registry.candidate_endpoints() == [("127.0.0.1", srv.port)]
@@ -376,6 +385,23 @@ class TestRequestCooperativeUnload:
         assert seen["body"]["requester"] == {"instance_id": "me-1", "port": 18642,
                                               "scheme": "http"}
         assert len(seen["body"]["request_id"]) >= 24
+
+    def test_the_request_outlasts_the_unload_it_waits_for(self, monkeypatch):
+        from localm.vram import wait_for_vram_release
+        _me(monkeypatch)
+        seen = {}
+
+        def post(url, body, timeout):
+            seen["timeout"] = timeout
+
+        monkeypatch.setattr(gpu_registry, "_post_json", post)
+        with peer_server(localm_whoami("peer-1")) as srv:
+            assert gpu_registry.request_cooperative_unload(_peer_dict(srv)) is False
+
+        pin_wait = inspect.signature(hs._wait_for_pin_clear).parameters["timeout"].default
+        vram_wait = inspect.signature(wait_for_vram_release).parameters["timeout_s"].default
+        large_model_unload = 7.0
+        assert seen["timeout"] > pin_wait + vram_wait + large_model_unload
 
     def test_the_request_id_is_forgotten_once_the_call_returns(self, monkeypatch):
         _me(monkeypatch)

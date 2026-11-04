@@ -254,6 +254,24 @@ class TestGrowthSafety:
         assert hs._engines["test-cap-model"].loaded
 
 
+    def test_a_switch_that_takes_the_model_during_the_reload_asks_for_a_retry(self, monkeypatch):
+        backend = _GrowableBackend(capacity=100)
+        engine = _EngineWithBackend(backend)
+        client = TestClient(create_app(engine))
+
+        async def _superseded(name, *args, **kwargs):
+            hs._engines.pop(name, None)
+            return {"status": "superseded", "model": name}
+
+        monkeypatch.setattr(hs, "switch_engine", _superseded)
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 503, resp.text
+        assert "retry the request" in resp.json()["detail"]
+        assert engine.active_requests == 0, "the request gave up its pin"
+
+
 class TestRequestedWindowSizesTheLoad:
     def test_the_next_load_reserves_the_requested_window_once(self):
         engine = _EngineWithBackend(_GrowableBackend(capacity=100))

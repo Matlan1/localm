@@ -31,6 +31,12 @@ def _no_leftover_comfy_handles():
     comfy_client._device_errors.clear()
 
 
+@pytest.fixture(autouse=True)
+def _comfy_port_reads_free(monkeypatch):
+    """comfy_port_holder reports a free port, whatever listens on this machine."""
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
+
+
 def test_derive_workdir_from_full_bat_path(tmp_path):
     bat = tmp_path / "launch-comfyui.bat"
     bat.write_text("echo hi\n", encoding="utf-8")
@@ -370,8 +376,11 @@ def _spawn_with_cfg(tmp_path, cfg):
     hardcoded 127.0.0.1:8188 URL to test independent launch attempts, which
     would otherwise short-circuit on the SECOND call via the cache the first
     call just populated (see conftest.py's _reset_comfy_readiness_cache for
-    the cross-TEST half of this same isolation concern)."""
+    the cross-TEST half of this same isolation concern). Clears the remembered
+    handle too, so the stub from the previous scenario is not health-checked
+    against the real port."""
     comfy_client._confirmed_alive.clear()
+    comfy_client._spawned_procs.clear()
     launcher = tmp_path / f"comfyui.{_ext()}"
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),

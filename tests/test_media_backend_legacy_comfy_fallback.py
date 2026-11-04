@@ -41,6 +41,12 @@ def _isolated_comfy_handles(monkeypatch):
     monkeypatch.setattr(comfy_client, "_device_errors", {})
 
 
+@pytest.fixture(autouse=True)
+def _comfy_port_reads_free(monkeypatch):
+    """comfy_port_holder reports a free port, whatever listens on this machine."""
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
+
+
 def _mock_managed_active(monkeypatch, active: bool):
     """Patch managed_comfy_active everywhere it is actually called from.
 

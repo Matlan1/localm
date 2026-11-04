@@ -45,6 +45,11 @@ REQUEST_TTL_S = 30.0
 #: Floor on the wait for a verified status answer, which includes the peer
 #: calling this instance back before it answers.
 VERIFIED_STATUS_TIMEOUT_S = 3.0
+#: How long a cooperative-unload request waits for its answer. The peer answers
+#: after its wait for requests in flight, its unload and its wait for the VRAM
+#: release, so this stays above the sum of the three.
+#: See test_the_request_outlasts_the_unload_it_waits_for.
+COOPERATIVE_UNLOAD_TIMEOUT_S = 30.0
 DETECTION_ENV = "LOCALM_PEER_DETECTION"
 STATUS_PATH = "/v1/instances/status"
 UNLOAD_PATH = "/v1/instances/cooperate-unload"
@@ -502,7 +507,8 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
     return port_owned_by_current_user(port, dial, fresh=True)
 
 
-def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
+def request_cooperative_unload(peer: dict, *,
+                               timeout: float = COOPERATIVE_UNLOAD_TIMEOUT_S) -> bool:
     """Ask a live *peer* (as returned by :func:`list_gpu_peers`) to release its own
     VRAM via ``POST /v1/instances/cooperate-unload``. The request names this
     instance and carries a fresh request id this instance will confirm when the
