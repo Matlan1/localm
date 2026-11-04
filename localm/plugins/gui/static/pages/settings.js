@@ -330,11 +330,15 @@ export function buildSettingControl(field) {
       // Still the factory default: leave the box BLANK with the value shown as
       // a native placeholder (exactly the chat-drawer / image-gen pattern),
       // rather than a solid value indistinguishable from something the user
-      // typed. read() below already omits a blank box from the save payload -
-      // that contract predates this fix and is unchanged.
+      // typed.
       if (value != null && isShippedDefault) input.placeholder = t("settings.field.defaultPlaceholder", { value });
       else if (value != null) input.value = value;
-      read = () => (input.value.trim() === "" ? undefined : Number(input.value));
+      // A blanked box that held a saved override resets that field to its
+      // shipped default (null for a nullable field); a blank box that showed
+      // the default sends nothing.
+      const blankValue = value != null && field.shipped_default !== undefined
+        && value !== field.shipped_default ? field.shipped_default : undefined;
+      read = () => (input.value.trim() === "" ? blankValue : Number(input.value));
       break;
     }
     case "secret": {

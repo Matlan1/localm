@@ -103,10 +103,11 @@ def debug_content_enabled() -> bool:
 def honor_env_debug() -> None:
     """Open the debug log file when debug was requested via the LOCALM_DEBUG env
     var (e.g. ``LOCALM_DEBUG=1 localm run ...``), not only via the ``--debug``
-    flag. A truthy-but-non-path value ("1"/"true"/"yes") is the user's request;
-    a real path means we inherited an already-open log from a parent process, so
-    leave enable_debug() to no-op."""
-    if debug_enabled() and log_file_path() is None:
+    flag. A truthy-but-non-path value ("1"/"true"/"yes") is the user's request
+    and gets a new log file; a real path was inherited from a parent process
+    (a re-executed server) and is opened in append mode, so this process writes
+    to the same file."""
+    if debug_enabled():
         enable_debug()
 
 
@@ -515,14 +516,18 @@ def enable_debug() -> Optional[Path]:
     """
     Turn on debug mode for this process and its children.
 
-    Idempotent: a second call returns the existing log file. Returns None when
-    the log file cannot be created (its folder is not writable): debug output
-    then goes to the console only, with one WARNING naming the path and the
-    error. Never raises OSError for that.
+    Idempotent: a second call returns the existing log file. When LOCALM_DEBUG
+    already names a log file that this process has no handler for (inherited
+    from a parent, e.g. across a server restart), that file is opened in append
+    mode. Returns None when the log file cannot be created (its folder is not
+    writable): debug output then goes to the console only, with one WARNING
+    naming the path and the error. Never raises OSError for that.
     """
     global _debug_console_only
     existing = log_file_path()
     if existing is not None:
+        attach_child_logging()
+        _flush_deferred()
         return existing
     if _debug_console_only:
         return None

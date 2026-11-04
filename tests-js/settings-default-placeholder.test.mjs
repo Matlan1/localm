@@ -233,3 +233,38 @@ test("legacy schema rows with no shipped_default key behave exactly as before (s
   const el = win.document.querySelector('input[data-key="n_ctx"]');
   assert.equal(el.value, "4096", "no shipped_default -> always renders solid, old behavior");
 });
+
+test("blanking a NUMBER field that held a real override resets it to the shipped default", async () => {
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_OVERRIDDEN, patches) });
+  await render(win);
+  const el = win.document.querySelector('input[data-key="n_ctx"]');
+  assert.equal(el.value, "8192", "starts as the real override, solid");
+  el.value = "";
+  el.dispatchEvent(new win.Event("input"));
+  const secId = el.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].n_ctx, 4096,
+    "a blanked override must reach the server as the default, never be dropped from the PATCH");
+});
+
+test("blanking a nullable NUMBER field that held a real override sends null", async () => {
+  const patches = [];
+  const schema = { fields: [
+    { key: "embedding_gpu_layers", widget: "number", label: "Embedding GPU layers", help: "",
+      group: "Engine", owner: "core", min: 0, default: 12, shipped_default: null },
+  ] };
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(schema, patches) });
+  await render(win);
+  const el = win.document.querySelector('input[data-key="embedding_gpu_layers"]');
+  assert.equal(el.value, "12");
+  el.value = "";
+  el.dispatchEvent(new win.Event("input"));
+  const secId = el.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].embedding_gpu_layers, null);
+});
