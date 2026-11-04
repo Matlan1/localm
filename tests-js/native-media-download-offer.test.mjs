@@ -254,12 +254,17 @@ for (const [kind, run] of [["video", "runVideoInChat"], ["image", "runImagineInC
         { type: "missing_model", missing: PARTS, text: command },
         { type: "line", text: command },
         { type: "end", status: "failed" }] }) });
+    const box = win.document.getElementById("chat-messages");
+    const seen = [];
+    new win.MutationObserver(() => seen.push(box.textContent))
+      .observe(box, { subtree: true, childList: true, characterData: true });
     const done = win[run]("a fox");
     await until(() => modalOpen(win), "the download box");
     assert.equal(posts.length, 1);
-    assert.doesNotMatch(win.document.getElementById("chat-messages").textContent, /localm pull/);
     click(win, "Not now");
     await done;
-    assert.doesNotMatch(win.document.getElementById("chat-messages").textContent, /localm pull/);
+    await wait(20);
+    assert.ok(seen.length > 0, "the observer saw the reply change");
+    assert.ok(seen.every((text) => !/localm pull/.test(text)), "no reply text ever named the command");
   });
 }
