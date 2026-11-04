@@ -30,6 +30,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
 
 ### Fixed
+- **Unloading another localm instance's large model for a switch is no longer reported as failed.** The switch waits for that instance to finish freeing its video memory before it loads the new model.
 - **Reloading right after a sidebar switch keeps the model you chose.** Clicking Reload model or Save and reload model within 30 seconds of switching in the sidebar could leave the server with no active model, and reloading the old model's row could make it active again. The reload now reads the current state first.
 - **Save and reload with a peer route no longer loads a local copy.** While a model answers through another localm instance the reload buttons are hidden, a save says it applies on the next load, and the tab keeps its selection.
 - **Live tuning Apply writes only what you changed.** It used to cut a saved context window above 32768 to 32768 and could turn GPU auto-fit off. The slider now shows a larger saved window, and Apply with nothing changed reloads the model without saving.
