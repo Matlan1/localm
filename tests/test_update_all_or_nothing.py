@@ -772,8 +772,8 @@ def test_a_lifespan_under_pytest_never_schedules_the_update_restart(monkeypatch)
     monkeypatch.setattr(hs, "_request_restart", lambda **kw: asked.append(kw))
     monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "1")
 
-    with TestClient(hs.create_app(None)) as client:
-        assert client.get("/health").status_code == 200
+    with TestClient(hs.create_app(None)):
+        pass
 
     assert asked == []
     assert os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] == "1"

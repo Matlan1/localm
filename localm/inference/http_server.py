@@ -5995,8 +5995,7 @@ def _make_lifespan():
                           "cross-instance GPU coordination): %s", e)
                 _gpu_coord = None
 
-        # The restart for pending update steps re-executes this process, so it
-        # is skipped under pytest like its siblings above. See
+        # Skipped under pytest like its siblings above. See
         # test_a_lifespan_under_pytest_never_schedules_the_update_restart.
         if "pytest" not in sys.modules:
             _restart_for_pending_update_steps(app)
