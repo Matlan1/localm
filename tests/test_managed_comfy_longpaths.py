@@ -47,9 +47,9 @@ def _write(path, text) -> None:
         f.write(text)
 
 
-def _deep_tree(tmp_path, name="Node"):
+def _deep_tree(tmp_path, parent="custom_nodes"):
     """A source tree with a record whose file ``_DEEP_REL`` lies past 260 characters."""
-    root = tmp_path / ("n" * 40) / "custom_nodes" / name
+    root = tmp_path / ("n" * 40) / parent / "Node"
     assert len(str(root / _DEEP_REL)) > 260
     _write(root / _DEEP_REL, "deep\n")
     _write(root / "__init__.py", "x\n")
@@ -96,10 +96,10 @@ def test_a_deep_tree_is_kept_restored_and_its_copy_removed_by_the_app_updater(tm
 
 
 def test_a_restore_leaves_a_deep_backup_an_earlier_restore_kept(tmp_path):
-    root = _deep_tree(tmp_path)
+    root = _deep_tree(tmp_path, parent="trees")
     dest = tmp_path / ("k" * 40) / "comfy-src"
     uc._snapshot_tree(root, dest)
-    earlier = source_archive.new_backup_path(root, "restore")
+    earlier = root.parent / f".{root.name}-restore-{os.getpid()}"
     _write(earlier / _DEEP_REL, "the originals\n")
 
     assert uc._restore_tree(dest, root) == []
