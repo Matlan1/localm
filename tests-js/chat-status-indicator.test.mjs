@@ -21,7 +21,7 @@ async function loadGerman() {
     const u = String(url);
     if (u.includes("/i18n/de.json")) return { ok: true, status: 200, json: async () => DE };
     if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
-    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl });
   runScript(window, 'window.__p = applyLanguage("de");');
@@ -244,4 +244,59 @@ test("updateStatusIndicator falls back to the raw English text for an unrecogniz
     window.removeStatusIndicator(body);
     body.remove();
   });
+
+const BESIDE_EN = "Loading 'b' beside 'a', which could not be unloaded: not enough GPU memory " +
+  "is free, so part of it will run on the CPU (slower)...";
+
+test("updateStatusIndicator localizes the load-beside status from its args, with the warning style",
+  async () => {
+    const window = await loadGerman();
+    const doc = window.document;
+    const body = doc.createElement("div");
+    body.className = "msg-body";
+    doc.body.appendChild(body);
+
+    window.updateStatusIndicator(body, BESIDE_EN, "loading_beside", { model: "b", resident: "'a'" });
+    const ind = body.querySelector(".msg-status-indicator");
+    const label = ind.querySelector(".status-text").textContent;
+    assert.equal(label, "'b' wird neben 'a' geladen (nicht entladbar): Es ist nicht genug " +
+      "GPU-Speicher frei, daher läuft ein Teil auf der CPU (langsamer)…");
+    assert.ok(ind.classList.contains("st-warn"), "loading_beside uses the warning style");
+
+    window.removeStatusIndicator(body);
+    body.remove();
+  });
+
+test("a status delta's args reach the localized label during a reply", async () => {
+  const window = await loadGerman();
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = false;
+  let label = null;
+  window.__onSSE = (onData) => {
+    onData(JSON.stringify({ choices: [{ delta: {
+      status: BESIDE_EN, status_code: "loading_beside", status_args: { model: "b", resident: "'a'" },
+    } }] }));
+    label = doc.querySelector("#chat-messages .msg-row.assistant .status-text").textContent;
+    onData(JSON.stringify({ choices: [{ delta: { content: "Hi" } }] }));
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  };
+  runScript(window, `
+    modelCache.active = 'test-model';
+    maybeCompactConversation = async () => {};
+    readSSE = async (r, onData) => { window.__onSSE(onData); };
+  `);
+
+  await window.runCompletion({ id: "c_test", title: "t", messages: [{ role: "user", content: "hello" }] });
+
+  assert.match(label, /^'b' wird neben 'a' geladen/);
+});
+
+test("statusLabel keeps the server text when a status code's args are missing", async () => {
+  const window = await loadGerman();
+  assert.equal(window.statusLabel(BESIDE_EN, "loading_beside"), BESIDE_EN);
+  assert.equal(window.statusLabel(BESIDE_EN, "loading_beside", { model: "b" }), BESIDE_EN);
+  assert.equal(window.statusLabel("Loading model...", "loading_model"), "Modell wird geladen…");
+});
 

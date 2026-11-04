@@ -69,3 +69,50 @@ test("chat render: a still-open real think block streams as open", () => {
   const t = renderVia(win, "<think>partial `code` so far");
   assert.equal(t.querySelector("details.think-block").open, true);
 });
+
+const UNBALANCED = [
+  ["inline backtick", "<think>\nThe user typed a ` character.\n</think>\nUse `ls` here.", "Use `ls` here."],
+  ["fence opener", "<think>\nI will use ```python once.\n</think>\nRun:\n\n```python\nprint(1)\n```", "Run:\n\n```python\nprint(1)\n```"],
+  ["double backtick", "<think>\nMaybe `` is meant.\n</think>\nThe ``a`` answer.", "The ``a`` answer."],
+];
+
+test("an unbalanced backtick in the reasoning does not swallow the answer", () => {
+  const { window: win } = loadApp();
+  for (const [name, text, answer] of UNBALANCED) {
+    const s = win.splitThink(text);
+    assert.equal(s.open, false, name);
+    assert.equal(s.rest.trim(), answer, name);
+    assert.ok(!s.think.includes("</think>"), name);
+    assert.equal(win.stripThink(text), answer, name);
+    assert.equal(win.assistantHistoryText(text, false), answer, name);
+  }
+});
+
+test("chat render: an unbalanced backtick in the reasoning keeps the answer in the bubble", () => {
+  const win = realPipeline();
+  const t = renderVia(win, UNBALANCED[0][1], { final: true });
+  const d = t.querySelector("details.think-block");
+  assert.ok(d, "think block present");
+  assert.equal(d.open, false);
+  assert.ok(!/ls/.test(d.textContent), "answer not inside the think block");
+  assert.match(t.querySelector(".md-main").textContent, /Use ls here\./);
+});
+
+test("stripThink and splitThink: <think> quoted in an answer's code is kept", () => {
+  const { window: win } = loadApp();
+  for (const reply of [NOTE, "Use the `<think>` tag.\n\nMore.", "Example:\n\n```\n<think>x</think>\n```\n\nDone."]) {
+    assert.equal(win.splitThink(reply).think, null, reply);
+    assert.equal(win.stripThink(reply), reply.trim(), reply);
+  }
+  const both = "<think>a ` b</think>Use the `<think>` tag.";
+  assert.equal(win.stripThink(both), "Use the `<think>` tag.");
+  assert.equal(win.splitThink(both).rest, "Use the `<think>` tag.");
+});
+
+test("stripThink removes every reasoning block and an unclosed trailing one", () => {
+  const { window: win } = loadApp();
+  assert.equal(win.stripThink("<think>x ` y</think>A `c`<think>z</think> B"), "A `c` B");
+  assert.equal(win.stripThink("A<think>still going `"), "A");
+  assert.equal(win.stripThink(""), "");
+  assert.equal(win.stripThink(null), "");
+});

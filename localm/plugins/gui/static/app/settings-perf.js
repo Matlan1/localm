@@ -10,7 +10,7 @@ import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
-import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
+import { modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -98,6 +98,7 @@ export async function reloadWithToasts(model, keys) {
     const res = await reloadModel(model);
     if (res.status === "in_use") toast(t(keys.busy, { model }), true);
     else if (res.status === "cancelled" || res.status === "superseded") toast(t(keys.cancelled, { model }));
+    else if (model !== modelCache.active) toastLoadResult(res, model, t("models.reload.doneToast", { model }));
     else toastLoadResult(res, model);
     return res;
   } catch (e) {
@@ -2880,7 +2881,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const d = chunk.choices?.[0]?.delta || {};
       if (d.status) {
-        updateStatusIndicator(liveBody, d.status, d.status_code);
+        updateStatusIndicator(liveBody, d.status, d.status_code, d.status_args);
         if (chat.stick) box.scrollTop = box.scrollHeight;
       }
       const cDelta = d.content || "";
@@ -3064,6 +3065,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // marker is added at render time only, in chat.js, so the model never sees
   // that literal marker in its own prior turn on the next request).
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
+  // The server loaded another model to answer: re-read which model is active.
+  if (answeredBy && answeredBy !== modelCache.active) refreshModels();
   const routedNote = routing && routing.routed
     ? { from: routing.requested || modelName, gaps: routing.gaps,
         ...(routing.placement ? { placement: routing.placement } : {}) }
@@ -3887,6 +3890,7 @@ $("p-pin-model").addEventListener("change", () => {
   setConversationPin($("p-pin-model").checked);
 });
 window.addEventListener("localm:model-switched", () => syncPinModelToggle(currentConv()));
+window.addEventListener("localm:active-model-changed", () => syncPinModelToggle(currentConv()));
 $("model-select").addEventListener("change", () => syncPinModelToggle(currentConv()));
 
 $("p-web").addEventListener("change", () => {
