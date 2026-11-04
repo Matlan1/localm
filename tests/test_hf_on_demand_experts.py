@@ -79,6 +79,23 @@ def test_the_results_are_those_of_the_whole_model(tmp_path, restored_class, capa
     assert torch.equal(out, want_out)
 
 
+def test_prefill_then_decode_matches_a_full_forward(tmp_path, restored_class):
+    folder = _checkpoint(tmp_path / "m")
+    model, _ = _on_demand(folder, 10 ** 9)
+    ids = torch.randint(3, 64, (1, 90))
+    with torch.no_grad():
+        full = model(input_ids=ids, use_cache=False).logits
+        out = model(input_ids=ids[:, :84], use_cache=True)
+        past = out.past_key_values
+        steps = [out.logits[0, -1]]
+        for t in range(84, 90):
+            out = model(input_ids=ids[:, t:t + 1], past_key_values=past, use_cache=True)
+            past = out.past_key_values
+            steps.append(out.logits[0, -1])
+    for offset, step in enumerate(steps):
+        assert torch.allclose(step, full[0, 83 + offset], atol=1e-3)
+
+
 def test_only_the_experts_routed_to_are_read_and_a_second_use_reads_nothing(tmp_path, restored_class):
     folder = _checkpoint(tmp_path / "m")
     model, store = _on_demand(folder, 10 ** 9)
@@ -132,6 +149,29 @@ def test_a_checkpoint_of_stacked_experts_is_not_read_this_way(tmp_path):
     state = load_file(str(folder / "model.safetensors"))
     save_file({k: v for k, v in state.items() if "experts" not in k}, str(folder / "model.safetensors"))
     assert od.worth_using(str(folder), 0) is False
+
+
+def _budget(**kwargs):
+    from localm.inference import switch_admission
+    return switch_admission.LoadBudget(name="m", vram_required=10 ** 11, headroom=0, resident_cap=None,
+                                       pinned=frozenset(), check_split_fit=False, **kwargs)
+
+
+def test_the_load_question_says_the_experts_are_read_from_disk_when_they_are():
+    from localm.inference import switch_admission
+    asked = switch_admission.degraded_load_confirm("m", _budget(experts_on_disk=True), 10 ** 9)
+    assert asked["experts_on_disk"] is True and "reads them as they are needed" in asked["detail"]
+    usual = switch_admission.degraded_load_confirm("m", _budget(), 10 ** 9)
+    assert usual["experts_on_disk"] is False and "on the CPU" in usual["detail"]
+
+
+def test_the_file_check_imports_neither_torch_nor_transformers():
+    import ast
+    source = Path(od.__file__).with_name("_hf_expert_files.py").read_text(encoding="utf-8")
+    names = {n.name.split(".")[0] for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Import) for n in node.names}
+    names |= {node.module.split(".")[0] for node in ast.walk(ast.parse(source))
+              if isinstance(node, ast.ImportFrom) and node.module}
+    assert not names & {"torch", "transformers", "safetensors"}
 
 
 class _Cuda:

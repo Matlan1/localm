@@ -12,49 +12,23 @@ recently used ones on the device up to a byte budget.
 from __future__ import annotations
 
 import collections
-import json
 import logging
-import re
 from pathlib import Path
 from typing import Optional
 
 import torch
 from torch import nn
 
+from localm.inference.backends._hf_expert_files import _EXPERT_KEY, _safetensors_header, _weight_map, worth_using
+
+__all__ = ["ExpertStore", "OnDemandExperts", "_EXPERT_KEY", "_weight_map", "attach", "free_bytes", "prepare", "worth_using"]
+
 logger = logging.getLogger("localm")
 
-MODEL_TYPE = "kimi_linear"
-_EXPERT_KEY = re.compile(r"^model\.layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w([123])\.weight$")
-# Weights of a routed expert as a share of the checkpoint below which placing the whole model is left
-# to transformers.
-_MIN_EXPERT_SHARE = 0.5
 _HEADROOM_BYTES = int(1.5e9)
 
 
 _DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "F64": torch.float64}
-
-
-def _safetensors_header(path: Path) -> tuple[dict, int]:
-    """``(header, offset of the data)`` of a ``.safetensors`` file."""
-    with open(path, "rb") as f:
-        size = int.from_bytes(f.read(8), "little")
-        return json.loads(f.read(size)), 8 + size
-
-
-def _weight_map(folder: Path) -> dict:
-    """``{weight name: file name}`` of the checkpoint in *folder*; empty when it has no
-    readable ``.safetensors`` weights."""
-    index = folder / "model.safetensors.index.json"
-    try:
-        if index.is_file():
-            return dict(json.loads(index.read_text(encoding="utf-8"))["weight_map"])
-        single = folder / "model.safetensors"
-        if single.is_file():
-            names = (n for n in _safetensors_header(single)[0] if n != "__metadata__")
-            return dict.fromkeys(names, single.name)
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        logger.debug("hf load: could not read the weight map of %s: %s", folder, e)
-    return {}
 
 
 class ExpertStore:
@@ -150,23 +124,6 @@ class OnDemandExperts(nn.Module):
             out = nn.functional.linear(self.act_fn(gate) * up, down) * top_k_weights[token, position, None]
             final.index_add_(0, token, out.to(final.dtype))
         return final
-
-
-def worth_using(model_path: str, available_bytes: int) -> bool:
-    """True for a ``kimi_linear`` checkpoint in per-expert ``.safetensors`` form whose weights
-    do not fit in *available_bytes* and are mostly routed experts."""
-    folder = Path(model_path)
-    try:
-        if json.loads((folder / "config.json").read_text(encoding="utf-8")).get("model_type") != MODEL_TYPE:
-            return False
-        total = sum(f.stat().st_size for f in folder.glob("*.safetensors"))
-    except (OSError, ValueError, AttributeError):
-        return False
-    if total <= available_bytes:
-        return False
-    weights = _weight_map(folder)
-    experts = sum(1 for name in weights if _EXPERT_KEY.match(name))
-    return experts > 0 and experts / max(1, len(weights)) >= _MIN_EXPERT_SHARE
 
 
 def prepare() -> None:

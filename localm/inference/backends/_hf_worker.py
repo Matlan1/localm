@@ -1767,6 +1767,8 @@ class HFWorker:
         if without_own_code:
             self.load_notes.append("this model's own code did not run ('Allow model-bundled custom code' is off); "
                                    "using transformers' own support for it")
+        elif transformers_classes:
+            self.load_notes.append("this model's own code does not run; using transformers' own support for it")
         if fp8 is not None:
             from localm.inference.backends._hf_fp8 import describe
             self.load_notes.append(describe(fp8))

@@ -261,9 +261,11 @@ let _toastErrorAnnounce = null;
  *  raises that one's count instead, and the error is recorded in the recent
  *  errors list and the server log. #toast always holds the latest message and
  *  carries the "error" class for an error; it is shown only for an info toast. */
-/** *text* from the server with its English bundled-code note in the GUI's language. */
+/** *text* from the server with its English bundled-code notes in the GUI's language. */
 export function localizeServerNotes(text) {
-  return String(text ?? "").replace(I18N_EN["models.bundledCodeNote"], t("models.bundledCodeNote"));
+  return String(text ?? "")
+    .replace(I18N_EN["models.bundledCodeNote"], t("models.bundledCodeNote"))
+    .replace(I18N_EN["models.bundledCodeAlwaysNote"], t("models.bundledCodeAlwaysNote"));
 }
 
 export function toast(msg, isError = false) {

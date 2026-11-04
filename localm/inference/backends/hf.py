@@ -139,11 +139,10 @@ def uses_transformers_classes(model_path: str) -> bool:
 
 
 def runs_without_its_own_code(model_path: str) -> bool:
-    """True when the folder ships its own code (``auto_map``), ``hf_trust_remote_code`` is
-    off, and the installed transformers has its own classes for the model, so the load
-    uses those and the folder's code does not run."""
-    return (_declares_custom_code(model_path) and not _trust_remote_code_enabled()
-            and _has_transformers_support(model_path))
+    """True when :func:`uses_transformers_classes` holds only because ``hf_trust_remote_code``
+    is off, so turning the setting on would run the folder's code."""
+    return (uses_transformers_classes(model_path) and not _trust_remote_code_enabled()
+            and _config_model_type(model_path) not in _TRANSFORMERS_FIRST)
 
 
 BUNDLED_CODE_NOTE = ("This model ships its own code, which did not run because 'Allow model-bundled custom "
@@ -152,19 +151,26 @@ BUNDLED_CODE_NOTE = ("This model ships its own code, which did not run because '
                      "(localm config hf_trust_remote_code true).")
 
 
+BUNDLED_CODE_ALWAYS_NOTE = ("This model ships its own code, which localm does not run for this kind of model; it uses "
+                            "transformers' own support for it instead. That may be why this failed.")
+
+
 def with_bundled_code_note(model_path: str, err: Exception) -> Exception:
-    """*err*, with :data:`BUNDLED_CODE_NOTE` added to its message when the failed model ran
-    without its own code (:func:`runs_without_its_own_code`); otherwise *err* itself. A
-    failure for lack of memory has nothing to do with the code and is returned as it is."""
+    """*err*, with a note added to its message when the failed model ran on transformers'
+    classes instead of its own code: :data:`BUNDLED_CODE_NOTE` when the setting would change
+    that (:func:`runs_without_its_own_code`), else :data:`BUNDLED_CODE_ALWAYS_NOTE`. Otherwise
+    *err* itself. A failure for lack of memory has nothing to do with the code and is
+    returned as it is."""
     text = str(err)
-    if BUNDLED_CODE_NOTE in text or "out of memory" in text.lower():
+    if BUNDLED_CODE_NOTE in text or BUNDLED_CODE_ALWAYS_NOTE in text or "out of memory" in text.lower():
         return err
-    if not runs_without_its_own_code(model_path):
+    if not uses_transformers_classes(model_path):
         return err
+    note = BUNDLED_CODE_NOTE if runs_without_its_own_code(model_path) else BUNDLED_CODE_ALWAYS_NOTE
     try:
-        noted = type(err)(f"{text} {BUNDLED_CODE_NOTE}")
+        noted = type(err)(f"{text} {note}")
     except TypeError:
-        noted = RuntimeError(f"{text} {BUNDLED_CODE_NOTE}")
+        noted = RuntimeError(f"{text} {note}")
     noted.__cause__ = err
     return noted
 

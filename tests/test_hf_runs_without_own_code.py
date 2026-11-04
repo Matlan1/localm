@@ -179,7 +179,14 @@ def test_kimi_linear_uses_transformers_classes_with_the_setting_on_too_and_needs
     assert mp.folder_refusal(folder) is None
     state = mpk.folder_state(folder)
     assert state.trusted is True and state.missing == []
-    assert with_bundled_code_note(str(folder), RuntimeError("x")).args == ("x",)
+    assert hf_backend.BUNDLED_CODE_ALWAYS_NOTE in str(with_bundled_code_note(str(folder), RuntimeError("x")))
+
+
+def test_kimi_linear_with_the_setting_off_does_not_tell_to_turn_it_on(tmp_path, setting):
+    folder = _kimi_folder(tmp_path)
+    assert hf_backend.runs_without_its_own_code(str(folder)) is False
+    text = str(with_bundled_code_note(str(folder), RuntimeError("x")))
+    assert hf_backend.BUNDLED_CODE_ALWAYS_NOTE in text and "hf_trust_remote_code" not in text
 
 
 def test_another_model_type_keeps_its_own_code_with_the_setting_on(tmp_path, setting):
@@ -191,3 +198,4 @@ def test_another_model_type_keeps_its_own_code_with_the_setting_on(tmp_path, set
 def test_the_note_the_gui_translates_is_the_one_the_server_sends():
     catalog = (Path(__file__).resolve().parents[1] / "localm/plugins/gui/static/app/i18n-en.js").read_text(encoding="utf-8")
     assert f'"models.bundledCodeNote": {json.dumps(BUNDLED_CODE_NOTE)}' in catalog
+    assert f'"models.bundledCodeAlwaysNote": {json.dumps(hf_backend.BUNDLED_CODE_ALWAYS_NOTE)}' in catalog
