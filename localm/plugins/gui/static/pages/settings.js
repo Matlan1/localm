@@ -1534,6 +1534,7 @@ export function savedToastKey(updates) {
     if (changed && field.applies === "restart") restartKeys.add(field.key);
   }
   if (restartKeys.size === 1 && restartKeys.has("port")) return "settings.toast.savedPort";
+  if (restartKeys.size === 1 && restartKeys.has("keep_diagnostics")) return "settings.toast.savedDiagnostics";
   if (applies.has("restart")) return "settings.toast.savedRestart";
   if (applies.has("next_load")) return "settings.toast.savedEngine";
   return "settings.toast.saved";

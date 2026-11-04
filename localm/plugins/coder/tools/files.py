@@ -1389,6 +1389,9 @@ def tool_search_replace(
         ``RESTRICTED_UNWRITABLE_DIRS`` directory, in a folder such an entry
         redirects to, or with another hard link is left unchanged and listed
         in the output; when every match is such a file, the call is an error.
+
+    A file over the ``coder_grep_max_file_bytes`` cap is not searched and is
+    named in the output, whatever else the call returns.
     """
     try:
         rx = _compile_model_pattern(pattern, _model_regex_flags())
@@ -1486,6 +1489,19 @@ def tool_search_replace(
             f"skipped; any matches there were NOT replaced: {shown}]"
         )
 
+    # Warn about files over the size cap: they were never searched, so a replacement
+    # may be partial and a "No matches" answer does not cover them.
+    oversized_note = ""
+    if oversized:
+        shown = ", ".join(oversized[:20])
+        if len(oversized) > 20:
+            shown += f", ... (+{len(oversized) - 20} more)"
+        oversized_note = (
+            f"\n[WARNING: {len(oversized)} file(s) over the {size_cap}-byte size cap "
+            f"(coder_grep_max_file_bytes) were skipped; any matches there were NOT "
+            f"replaced: {shown}]"
+        )
+
     if guarded:
         shown = ", ".join(guarded[:20])
         if len(guarded) > 20:
@@ -1506,9 +1522,9 @@ def tool_search_replace(
     if not changes:
         if locked:
             return ToolResult.error(
-                f"search_replace changed nothing.{locked_note}{unreadable_note}")
+                f"search_replace changed nothing.{locked_note}{oversized_note}{unreadable_note}")
         return ToolResult.success(
-            f"No matches for pattern '{pattern}'.{unreadable_note}",
+            f"No matches for pattern '{pattern}'.{oversized_note}{unreadable_note}",
             summary="search_replace - 0 matches",
         )
 
@@ -1524,7 +1540,7 @@ def tool_search_replace(
         # from the same matching pass, so a dry run reports the same file set an apply
         # would write.
         return ToolResult.success(
-            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{unreadable_note}",
+            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{oversized_note}{unreadable_note}",
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
             changes=[(str(rel), old_bytes, new_text)
                     for _, rel, new_text, _, old_bytes in changes],
@@ -1553,7 +1569,7 @@ def tool_search_replace(
         applied.append((str(rel), old_bytes, new_text))
 
     return ToolResult.success(
-        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{unreadable_note}",
+        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{oversized_note}{unreadable_note}",
         summary=f"search_replace: {total} replacement(s) in {len(changes)} file(s)",
         changes=applied,
     )

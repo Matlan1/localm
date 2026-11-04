@@ -741,9 +741,9 @@ CORE_FIELDS: list = [
     # This toggle is the opt-in that writes them anyway.
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
-                 "From the next server start, writes crash and hang diagnostics (stack "
-                 "traces, restart breadcrumbs, a debug log) even in privacy mode. Code "
-                 "and operational logs only, never chat content.",
+                 "Writes crash and hang diagnostics (stack traces, a debug log) even in "
+                 "privacy mode, never chat content. Debug log, crash guard and stall "
+                 "watchdog change from the next server start, the rest at once.",
                  group="Diagnostics", admin_only=True, applies=Applies.RESTART),
     # ---- Models ----
     # A small on-device model, loaded separately from the chat model. The known
@@ -809,9 +809,9 @@ CORE_FIELDS: list = [
     # for the same "where does an outbound credential go" boundary as
     # net_search_url/bugreport_upload_url above.
     SettingField("hf_token", Widget.SECRET, "Hugging Face API token",
-                 "Optional: raises rate limits and unlocks gated/login-required Hugging "
-                 "Face models. Blank uses the HF_TOKEN environment variable, then a "
-                 "saved huggingface-cli login, else anonymous access.",
+                 "Optional: raises rate limits and unlocks gated models. Blank uses HF_TOKEN, "
+                 "else anonymous access; a saved huggingface-cli login then covers downloads "
+                 "only, not model search and its file lists.",
                  group="Models", admin_only=True, secret=True,
                  link=("https://huggingface.co/settings/tokens", "Get a token")),
     SettingField("civitai_api_key", Widget.SECRET, "CivitAI API key",
@@ -1988,7 +1988,7 @@ MEDIA_PLUGIN_FIELDS: list = [
                plugins=_NATIVE, admin_only=True),
     MediaField("native_llm", ("native", "llm"), "", Widget.TEXT,
                "Native LLM text encoder", "Optional (Z-Image, Qwen Image, FLUX.2, Ovis, Anima, ERNIE, Hunyuan "
-                                          "Video, LTX-2).",
+                                          "Video).",
                plugins=_NATIVE, admin_only=True),
     MediaField("native_clip_vision", ("native", "clip_vision"), "", Widget.TEXT,
                "Native CLIP vision encoder", "Optional (Wan image-to-video).",

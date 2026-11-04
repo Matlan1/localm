@@ -51,7 +51,7 @@ Frame counts are snapped to 4k+1 like the ComfyUI path; the native backend makes
 241 frames per clip and refuses a longer request with a reason. Width and height must
 be multiples of 16, from 64 to 1920. The clip is written as H.264 MP4 with PyAV (installed
 with the `voice` extra, which the installers include); a model that also returns audio
-(LTX-2) gets an AAC track. Progress shows each sampling step, Stop cancels a running
+gets an AAC track. Progress shows each sampling step, Stop cancels a running
 load or generation, and the chat model is unloaded and reloaded around the job as for
 native images. Model paths are owner-only settings; network and device paths are
 refused. Workflow model picks and per-component GPU placement are ComfyUI-only and are

@@ -92,6 +92,92 @@ class TestSearchReplacePartialWriteHonesty:
                   for _, old, new in r.changes)
 
 
+class TestSearchReplaceReportsOversizedFiles:
+    """A file over the size cap is never searched, so every answer has to name it:
+    "No matches" and "Replaced N" are otherwise wrong about a file that holds the
+    pattern."""
+
+    @staticmethod
+    def _lower_cap(monkeypatch, cap=1024):
+        import localm.plugins.coder.tools.files as files_mod
+        monkeypatch.setattr(files_mod, "_grep_config",
+                            lambda: {"coder_grep_max_file_bytes": cap})
+
+    @staticmethod
+    def _big(tmp_path, name="big.log"):
+        path = tmp_path / name
+        path.write_text("NEEDLE\n" + "x" * 4000, encoding="utf-8")
+        return path, path.read_bytes()
+
+    def test_no_match_names_the_skipped_file(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch)
+        big, before = self._big(tmp_path)
+        (tmp_path / "small.txt").write_text("nothing here\n", encoding="utf-8")
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND")
+        assert big.read_bytes() == before
+        assert r.ok is True
+        assert "No matches" in r.output
+        assert "big.log" in r.output
+        assert "1024-byte size cap" in r.output
+        assert "small.txt" not in r.output
+
+    def test_dry_run_names_the_skipped_file(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch)
+        big, before = self._big(tmp_path)
+        small = tmp_path / "small.txt"
+        small.write_text("NEEDLE\n", encoding="utf-8")
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND",
+                                dry_run=True)
+        assert big.read_bytes() == before
+        assert small.read_text(encoding="utf-8") == "NEEDLE\n"
+        assert r.ok is True
+        assert r.output.startswith("[dry-run] Would replace 1 match(es) in 1 file(s)")
+        assert "big.log" in r.output
+        assert [c[0] for c in r.changes] == ["small.txt"]
+
+    def test_success_names_the_skipped_file(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch)
+        big, before = self._big(tmp_path)
+        small = tmp_path / "small.txt"
+        small.write_text("NEEDLE\n", encoding="utf-8")
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND")
+        assert big.read_bytes() == before
+        assert small.read_text(encoding="utf-8") == "FOUND\n"
+        assert r.ok is True
+        assert r.output.startswith("Replaced 1 match(es) in 1 file(s)")
+        assert "big.log" in r.output
+        assert [c[0] for c in r.changes] == ["small.txt"]
+
+    def test_a_restricted_refusal_names_the_skipped_file(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch)
+        big, before = self._big(tmp_path)
+        locked = tmp_path / ".git" / "note.txt"
+        locked.parent.mkdir()
+        locked.write_text("NEEDLE\n", encoding="utf-8")
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND",
+                                glob="**/*", _restricted=True)
+        assert big.read_bytes() == before
+        assert locked.read_text(encoding="utf-8") == "NEEDLE\n"
+        assert r.ok is False
+        assert "big.log" in r.output
+
+    def test_the_list_is_bounded_and_counts_the_rest(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch)
+        for i in range(25):
+            self._big(tmp_path, f"big{i:02}.log")
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND")
+        assert "25 file(s)" in r.output
+        assert "big19.log" in r.output and "big20.log" not in r.output
+        assert "(+5 more)" in r.output
+
+    def test_no_note_without_a_skipped_file(self, tmp_path, monkeypatch):
+        self._lower_cap(monkeypatch, cap=0)
+        big, _ = self._big(tmp_path)
+        r = tool_search_replace(tmp_path, pattern="NEEDLE", replacement="FOUND")
+        assert big.read_text(encoding="utf-8").startswith("FOUND")
+        assert "size cap" not in r.output
+
+
 class TestEditFileEmptyOld:
     def test_empty_old_rejected(self, tmp_path):
         f = tmp_path / "a.txt"
