@@ -5271,8 +5271,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     ``{host, port, scheme, expect_version}`` dict describing this instance. A
     DETACHED health-check watchdog is spawned right before the re-exec; it
     polls the restarted instance's own /whoami and auto-rolls back if the
-    expected version never comes up healthy within its timeout. The plain
-    "restart the server" button (/v1/server/restart) calls this with no
+    expected version never comes up healthy within its timeout. It is not spawned
+    when this restart's update steps rolled the update back: the previous version
+    starts instead, and it would be rolled back again under the running server. The
+    plain "restart the server" button (/v1/server/restart) calls this with no
     update_watchdog, so it is entirely unaffected.
 
     Free VRAM is captured BEFORE the teardown below so the wait after it (once
@@ -5448,7 +5450,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
-    _finish_pending_runtime_update()
+    rolled_back = _finish_pending_runtime_update()
 
     try:
         from localm import bugreport
@@ -5493,7 +5495,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
     _mark_fds_noninheritable()
 
-    if update_watchdog:
+    if update_watchdog and rolled_back:
+        from localm.debuglog import logger as _dbg
+        _dbg.info("update health check not started: the update to %s was rolled back during "
+                  "this restart", update_watchdog.get("expect_version"))
+    elif update_watchdog:
         # Spawned as the LAST step before execv: the watchdog's own timeout
         # clock starts when its process begins executing, so spawning as late as
         # possible keeps that clock closest to the actual restart moment.
@@ -5517,7 +5523,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     _execv_restart(port, instance_id, update_steps_done=True)
 
 
-def _finish_pending_runtime_update() -> None:
+def _finish_pending_runtime_update() -> bool:
     """Carry out the native runtime re-provision an applied update left pending
     (``updater_runtime.finish_pending``), once this server's models, workers and
     jobs are stopped: stops the runtime probe daemon, then this install's other
@@ -5525,7 +5531,8 @@ def _finish_pending_runtime_update() -> None:
     the runtime cannot be updated, the update's code is rolled back
     (``updater.rollback_last``) so the restart loads the previous version with
     its own runtime. Logs each step and the outcome; never raises, so the
-    restart always proceeds.
+    restart always proceeds. Returns True when the update was rolled back, False
+    otherwise, a rollback that did not complete included.
 
     Then the component update the applied update left pending
     (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
@@ -5537,13 +5544,14 @@ def _finish_pending_runtime_update() -> None:
     try:
         from localm import discover
         with discover.torch_probes_held():
-            _finish_pending_update_steps()
+            return _finish_pending_update_steps()
     except Exception:
         _dbg_swallow("the pending runtime update or its rollback could not be carried out "
                      "during the restart", level="warning")
+        return False
 
 
-def _finish_pending_update_steps() -> None:
+def _finish_pending_update_steps() -> bool:
     """The body of :func:`_finish_pending_runtime_update`: the pending runtime
     re-provision, then the pending component update; when either fails, the
     whole update is rolled back (:func:`_roll_back_during_restart`), unless a
@@ -5551,7 +5559,8 @@ def _finish_pending_update_steps() -> None:
     none is pending but this version pins another runtime build or other
     component versions than the installed ones (``catch_up``, after an update
     by an older localm), they are recorded as a repair and carried out the same
-    way. Raises on an unexpected failure."""
+    way. Returns True when the update was rolled back. Raises on an unexpected
+    failure."""
     from localm import updater_components, updater_runtime
     from localm.debuglog import logger as _dbg
     pending = updater_runtime.read_pending()
@@ -5575,8 +5584,7 @@ def _finish_pending_update_steps() -> None:
                 _dbg.warning("runtime update during restart: %s; rolling the update back",
                              status["note"])
                 updater_components.clear_pending()
-                _roll_back_during_restart()
-                return
+                return _roll_back_during_restart()
         if status is not None:
             _dbg.info("runtime update during restart: %s", status["note"])
     comp_pending = updater_components.read_pending()
@@ -5585,26 +5593,27 @@ def _finish_pending_update_steps() -> None:
         _dbg.info("component update during restart: this version pins other component "
                   "versions than the installed ones; installing them")
     if comp_pending is None:
-        return
+        return False
     status = updater_components.finish_pending(
         say=lambda m: _dbg.info("component update during restart: %s", m))
     if status is None:
-        return
+        return False
     if status["state"] in ("updated", "current"):
         _dbg.info("component update during restart: %s", status["note"])
-        return
+        return False
     if comp_pending.get("repair"):
         _dbg.warning("component repair during restart: %s", status["note"])
-        return
+        return False
     _dbg.warning("component update during restart: %s; rolling the update back",
                  status["note"])
-    _roll_back_during_restart()
+    return _roll_back_during_restart()
 
 
-def _roll_back_during_restart() -> None:
+def _roll_back_during_restart() -> bool:
     """Roll the applied update back (``updater.rollback_last``: components and
-    venv, runtime, code). A rollback that cannot be done is logged at ERROR
-    with what it left; the restart still proceeds."""
+    venv, runtime, code) and return True. A rollback that cannot be done is logged
+    at ERROR with what it left and returns False; the restart still proceeds. An
+    unexpected failure raises."""
     from localm import _version, updater
     from localm.bugreport import LocalmError
     from localm.debuglog import logger as _dbg
@@ -5612,10 +5621,12 @@ def _roll_back_during_restart() -> None:
         updater.rollback_last(say=lambda m: _dbg.info("rollback during restart: %s", m))
         _dbg.info("rollback during restart: localm %s and its parts were put back",
                   _version.read_version())
+        return True
     except LocalmError as e:
         _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
                    "localm %s is installed and Settings > Updates shows which parts "
                    "disagree", e.summary, e.reason, _version.read_version())
+        return False
 
 
 # Seconds a server started by a restart of an older localm answers before it

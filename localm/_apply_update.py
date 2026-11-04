@@ -315,10 +315,12 @@ def rollback(backup_dir, installed, names) -> None:
     When the update re-provisioned the native runtime, its snapshot
     (:func:`runtime_snapshot_dir`) is restored too (:func:`restore_runtime`).
 
-    Raises RuntimeError listing any restore operation that FAILED, so a failed
-    rollback is NEVER reported as a success. The backup dir is left intact for manual
-    recovery. Best-effort: it attempts every name even if one fails, then reports the
-    collected failures."""
+    Raises RuntimeError listing any remove or restore operation that FAILED, so a
+    failed rollback is NEVER reported as a success. The backup dir is left intact for
+    manual recovery. Best-effort: it attempts every name even if one fails, and a
+    folder with a file that cannot be removed still gets every backed-up file that can
+    be written, then it reports the collected failures. Running it again once the file
+    is free finishes the job."""
     backup_dir, installed = Path(backup_dir), Path(installed)
     errors = []
     for name in names:
@@ -351,7 +353,8 @@ def rollback(backup_dir, installed, names) -> None:
                     if _name_has_preserved(entry.name):
                         _copy_into(entry, dst, entry.name)   # dst still holds the preserved sub-tree
                     else:
-                        shutil.copytree(entry, dst)
+                        # dst can still exist when a held file stopped its removal.
+                        shutil.copytree(entry, dst, dirs_exist_ok=True)
                 else:
                     shutil.copy2(entry, dst)
             except OSError as e:
@@ -364,12 +367,26 @@ def rollback(backup_dir, installed, names) -> None:
             f"rollback incomplete (backup kept at {backup_dir}): " + "; ".join(errors[:6]))
 
 
+class BackupFailed(Exception):
+    """:func:`backup` could not complete: nothing was swapped and what it wrote is
+    gone."""
+
+
 def swap_with_backup(staged_root, installed, backup_dir) -> list:
     """Back up, then swap the staged source into the install. Returns the list of
-    swapped names (for a later rollback). Raises (after restoring) if the swap fails
-    partway - we never leave a half-applied tree."""
+    swapped names (for a later rollback).
+
+    Raises :class:`BackupFailed` when the backup cannot be completed, with nothing
+    swapped and *backup_dir* removed. Raises the swap's own error, after restoring the
+    install, when the swap fails partway, with *backup_dir* removed. Raises
+    RuntimeError when the restore fails too, with *backup_dir* kept: it is then the
+    only copy of what the swap replaced."""
     names = swap_entries(staged_root)
-    backup(installed, names, backup_dir)
+    try:
+        backup(installed, names, backup_dir)
+    except OSError as e:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise BackupFailed(str(e)) from e
     try:
         apply_files(staged_root, installed, names)
     except Exception as swap_err:
@@ -380,6 +397,7 @@ def swap_with_backup(staged_root, installed, backup_dir) -> list:
             raise RuntimeError(
                 f"update swap failed ({swap_err}) AND rollback also failed ({rb}); "
                 f"the install may be inconsistent - restore from {backup_dir}") from swap_err
+        shutil.rmtree(backup_dir, ignore_errors=True)
         raise
     return names
 

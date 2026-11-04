@@ -136,6 +136,9 @@ def _tokenizer(pre_type):
 class TestCalibration:
     """The table's numbers, pinned against the lengths measured to abort."""
 
+    # Shortest digit run measured to throw, for a pre-tokenizer bounding digits
+    # beside its letter run. Plain tekken does not throw on a digit run.
+    MEASURED_DIGIT_CRASH = {"tekken-num3": 298}
     # Shortest input at which each pre-tokenizer was measured to throw, on the
     # character class its own regex runs over. jais-2 and deepseek-llm are
     # absent on purpose: neither has ever been observed to throw on its own
@@ -144,7 +147,7 @@ class TestCalibration:
         "exaone-moe": 149,
         "gpt-4o": 198, "llama4": 198, "kanana2": 198, "talkie": 198,
         "minimax-m2": 198,
-        "tekken": 198,
+        "tekken": 198, "tekken-num3": 198,
         "granite-embed-multi-97m": 198,
         "superbpe": 297,
         "tiny_aya": 1348, "cohere2moe": 1348, "youtu": 1348,
@@ -191,6 +194,16 @@ class TestCalibration:
         # against a different input shape reaching the same blowup sooner.
         limit = guard.UNSAFE_PRE_TYPES[pre_type].max_run
         assert limit <= self.MEASURED_FIRST_CRASH[pre_type] / 2
+
+    @pytest.mark.parametrize("pre_type", sorted(MEASURED_DIGIT_CRASH))
+    def test_digit_limit_keeps_a_margin_of_at_least_half(self, pre_type):
+        limit = guard.UNSAFE_PRE_TYPES[pre_type].digit_run
+        assert limit <= self.MEASURED_DIGIT_CRASH[pre_type] / 2
+
+    def test_every_digit_bound_has_a_measured_number(self):
+        bounded = {p for p, policy in guard.UNSAFE_PRE_TYPES.items()
+                   if policy.digit_run is not None}
+        assert bounded == set(self.MEASURED_DIGIT_CRASH)
 
     @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
     def test_newline_limit_keeps_a_margin_of_at_least_half(self, pre_type):
@@ -678,6 +691,8 @@ class TestScannerCacheKeysAreDistinct:
                     pairs.add((p.char_class, p.max_run))
                 if p.newline_run is not None:
                     pairs.add((guard._CLASS_NEWLINE, p.newline_run))
+                if p.digit_run is not None:
+                    pairs.add((guard._CLASS_DIGIT, p.digit_run))
         assert len(guard._SCANNERS) == len(pairs)
         for cls, limit in pairs:
             scanner = guard._SCANNERS[(cls, limit)]
@@ -1860,6 +1875,8 @@ class TestTheTableCannotShipAnUncompilableLimit:
                 assert (p.char_class, p.max_run) in guard._SCANNERS, pre_type
             if p.newline_run is not None:
                 assert (guard._CLASS_NEWLINE, p.newline_run) in guard._SCANNERS, pre_type
+            if p.digit_run is not None:
+                assert (guard._CLASS_DIGIT, p.digit_run) in guard._SCANNERS, pre_type
             if p.cost_budget is not None:
                 assert (p.cost_budget, p.max_chars) in guard._COST_SCANNERS, pre_type
 
@@ -1923,6 +1940,41 @@ class TestTheLoadTimeWarningDoesNotOverstateTheHazard:
             src = inspect.getsource(mod)
             assert "hazard_note(" in src, mod.__name__
             assert "aborts the process" not in src, mod.__name__
+
+
+class TestTekkenNum3BoundsDigitsToo:
+    """tekken-num3 is tekken plus a digit-group lookahead, so it throws on a run
+    of letters AND on a run of digits; tekken throws on letters only."""
+
+    def test_a_digit_run_at_the_limit_passes(self):
+        limit = guard.UNSAFE_PRE_TYPES["tekken-num3"].digit_run
+        assert guard.check_text("tekken-num3", "x " + _digits(limit) + " x") is None
+
+    def test_a_digit_run_over_the_limit_is_refused_as_a_crash(self):
+        limit = guard.UNSAFE_PRE_TYPES["tekken-num3"].digit_run
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.check_text("tekken-num3", "x " + _digits(limit + 1) + " x")
+        assert f"more than {limit} digits" in str(exc.value)
+        assert "crashes on" in str(exc.value)
+
+    def test_a_letter_run_over_the_limit_is_still_refused(self):
+        limit = guard.UNSAFE_PRE_TYPES["tekken-num3"].max_run
+        with pytest.raises(PretokenizerUnsafeInputError, match="letters"):
+            guard.check_text("tekken-num3", _letters(limit + 1))
+
+    def test_plain_tekken_does_not_bound_digits(self):
+        assert guard.check_text("tekken", _digits(1000)) is None
+
+    def test_the_load_warning_names_the_digit_run(self):
+        limit = guard.UNSAFE_PRE_TYPES["tekken-num3"].digit_run
+        note = guard.hazard_note("tekken-num3")
+        assert f"more than {limit} digits" in note and "letters" in note
+
+    def test_the_digit_limit_is_the_same_on_linux(self, monkeypatch):
+        monkeypatch.setattr(guard, "_LINUX", True)
+        policy = guard.policy_for("tekken-num3")
+        assert policy.digit_run == guard.UNSAFE_PRE_TYPES["tekken-num3"].digit_run
+        assert (guard._CLASS_DIGIT, policy.digit_run) in guard._SCANNERS
 
 
 class TestTheCrashAndCostVerbsArePinnedInBothDirections:
