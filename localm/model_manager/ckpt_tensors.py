@@ -259,14 +259,16 @@ def open_capped_zip(path: Path) -> Iterator[zipfile.ZipFile]:
 
 
 def read_member_capped(zf: zipfile.ZipFile, member: zipfile.ZipInfo,
-                       limit: int) -> Optional[bytes]:
-    """The bytes of *member* of *zf*. None, reading nothing, when it declares more
-    than *limit* bytes or is packed with anything but stored or deflate. Reads and
-    inflates about *limit* bytes at most, whatever its size fields claim. Raises
-    what :mod:`zipfile` and :mod:`zlib` raise for a damaged member, including one
-    whose bytes do not match its CRC."""
-    if member.file_size > limit or member.compress_type not in CAPPABLE_ZIP_METHODS:
-        return None
+                       limit: int) -> bytes:
+    """The bytes of *member* of *zf*. Raises ValueError, reading nothing, when it
+    declares more than *limit* bytes or is packed with anything but stored or
+    deflate. Reads and inflates about *limit* bytes at most, whatever its size fields
+    claim. Raises what :mod:`zipfile` and :mod:`zlib` raise for a damaged member,
+    including one whose bytes do not match its CRC."""
+    if member.file_size > limit:
+        raise ValueError(f"the member declares {member.file_size} bytes, over {limit}")
+    if member.compress_type not in CAPPABLE_ZIP_METHODS:
+        raise ValueError(f"the member uses zip method {member.compress_type}")
     with zf.open(member) as fh:
         return fh.read(member.file_size)
 
@@ -286,8 +288,10 @@ def read_checkpoint_tensors(path: Path) -> Optional[dict]:
         with open_capped_zip(path) as zf:
             member = next((i for i in zf.infolist()
                            if i.filename == "data.pkl" or i.filename.endswith("/data.pkl")), None)
-            blob = None if member is None else read_member_capped(zf, member, PICKLE_MAX_BYTES)
-        return None if blob is None else _state_dict(_replay(blob))
+            if member is None:
+                return None
+            blob = read_member_capped(zf, member, PICKLE_MAX_BYTES)
+        return _state_dict(_replay(blob))
     except Exception as e:
         logger.debug("checkpoint tensor probe could not read %s: %s: %s",
                      path, type(e).__name__, e)

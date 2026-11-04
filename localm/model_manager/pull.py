@@ -1145,9 +1145,9 @@ def pull_model(
 
 def _kept_user_type(registered: bool, type_user_set: bool) -> bool:
     """The result of a pull that found its file already on disk and asked to register
-    it (*registered*): False only when the type the user chose was lost with no
-    one to ask, so a job reports it; a person at a terminal answered the question."""
-    return registered or not type_user_set or _mm.can_prompt()
+    it (*registered*): False only when it was not registered, the user chose its type
+    and there is no terminal."""
+    return bool(registered or not type_user_set or _mm.can_prompt())
 
 
 def _pull_remote(model_spec: str, spec: str, name: Optional[str],

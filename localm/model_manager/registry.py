@@ -2012,8 +2012,19 @@ def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
 def _must_alias_for_type(user_type: Optional[str]) -> bool:
     """True when a pull or add of a file that is already registered cannot ask the
     user and was given *user_type*, the type the user chose (None when they chose
-    none): it takes an alias of that type, because skipping would lose the choice."""
+    none): it takes an alias of that type instead of being skipped."""
     return user_type is not None and not can_prompt()
+
+
+def _registered_with_another_type(path: Path, digest: Optional[str], model_type: str) -> bool:
+    """True when an entry for the file at *path*, found by its path or by *digest*
+    when given, has a type other than *model_type*."""
+    reg = _mm.load_registry()
+    names = set(find_aliases_by_path(path, reg))
+    if digest:
+        names.update(_mm.find_by_sha256(digest, reg))
+    return any(reg[n].get("model_type") != model_type for n in names
+               if isinstance(reg.get(n), dict))
 
 
 def _alias_duplicate(dup_names: list[str], new_name: str, user_type: Optional[str]) -> bool:
@@ -5896,7 +5907,8 @@ def add_local(
     # its own header is worth reading.
     detected_type, gguf_metadata = _detect_local_model_type(
         p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
-    type_user_set = model_type is not None
+    type_user_set = model_type is not None and (
+        model_type != detected_type or _registered_with_another_type(p, digest, model_type))
     if model_type is None:
         model_type = detected_type
 

@@ -24,11 +24,11 @@ def is_sam_checkpoint(path: Path) -> bool:
     try:
         with open_capped_zip(path) as zf:
             member = next((i for i in zf.infolist() if i.filename.endswith("data.pkl")), None)
-            blob = None if member is None else read_member_capped(zf, member, _PICKLE_MAX_BYTES)
+            if member is None:
+                return False
+            blob = read_member_capped(zf, member, _PICKLE_MAX_BYTES)
     except Exception as e:
         logger.debug("SAM checkpoint probe could not read %s: %s: %s",
                      path, type(e).__name__, e)
-        return False
-    if blob is None:
         return False
     return all(k in blob for k in _SAM1_KEYS) or all(k in blob for k in _SAM2_KEYS)
