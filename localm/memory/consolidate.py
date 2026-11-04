@@ -36,7 +36,7 @@ from localm.textnorm import strip_think
 from .corrections import PendingCorrection
 from .gating import writes_allowed
 from .record import MemoryRecord
-from .store import MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, MemoryStore
+from .store import MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, DeferredEmbed, MemoryStore
 
 Complete = Callable[[str], str]
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -485,6 +485,9 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     except ConsolidationModelError as e:
         return _model_failed({**counts, "added": 0, "updated": 0, "deleted": 0,
                               "noop": 0}, e)
+    if isinstance(embed_fn, DeferredEmbed) and (
+            updated_ids or store.lacks_vector(working)):
+        embed_fn.ensure()
     # APPLY UNDER LOCK (brief, no LLM): reload fresh and MERGE the decided deltas by
     # id onto the CURRENT on-disk state, so a write another thread committed during
     # the lock-free decide window survives instead of being clobbered by a

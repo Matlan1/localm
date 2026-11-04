@@ -29,8 +29,8 @@ from .corrections import PendingCorrection
 from .explicit import explicit_fact
 from .gating import writes_allowed
 from .record import MemoryRecord
-from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, MemoryStore,
-                    namespace_file, namespace_hash)
+from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, DeferredEmbed,
+                    EmbedderUnavailable, MemoryStore, namespace_file, namespace_hash)
 
 __all__ = [
     "MemoryRecord", "MemoryStore", "PendingCorrection", "open_store",
@@ -38,7 +38,7 @@ __all__ = [
     "ConsolidationModelError", "ConsolidationReplyError", "explicit_fact",
     "writes_allowed", "principal_of",
     "namespace_hash", "namespace_file", "MAX_TEXT_LEN", "N_MAX", "K_CAP",
-    "TRUSTED_SOURCES", "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",
+    "TRUSTED_SOURCES", "DeferredEmbed", "EmbedderUnavailable", "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",
 ]
 
 # How many memories to inject per turn, and the size caps on the injected block.
