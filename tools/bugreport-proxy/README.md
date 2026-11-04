@@ -85,11 +85,18 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
 ## Spam / abuse control
 
 - Set `SHARED_SECRET` so random scanners that find the URL cannot file issues.
-- Only a body with the structure localm's reporter writes is filed: the
-  `# localm bug report:` title line, then `## What I was doing`, `## What happened`,
-  `## App state` followed by its `- Model:` line, and `## Environment` followed by
-  its `- localm:` line. Anything else gets a 202 and is not filed; each one is
-  counted by a `report held: not built by localm` line in the Workers logs.
+- Only a body with the structure a localm reporter writes is filed:
+  - the in-app reporter: the `# localm bug report:` title line, then `## What I was
+    doing`, `## What happened`, `## App state` followed by its `- Model:` line, and
+    `## Environment` followed by its `- localm:` line;
+  - `scripts/report_issue.py` and `scripts/report_issue.ps1`: the title line, then
+    `## What happened`, `## How it was filed` followed by its `- Filed via the
+    standalone` line, and `## Environment` followed by a `- ` line;
+  - `report-issue.sh`: the one line starting `Filed via the standalone curl reporter`.
+
+  Installed clones keep sending these, so a change to a reporter's structure must keep
+  the Worker accepting the old one. Anything else gets a 422 and is not filed; each one
+  is counted by a `report held: not built by localm` line in the Workers logs.
 - Add a Cloudflare **Rate limiting rule** (dashboard -> your Worker -> Security ->
   Rate limiting) capping requests per IP if you want a hard ceiling.
 - Issues are created by the token's identity (with the GitHub App below, the app's
@@ -126,7 +133,7 @@ the app surfaces honestly (a failed action is never reported as success).
 
 ```
 POST /                      { "title", "body" }   -> 201 { ok, url, number }
-                               202 { ok, filed: false } when the body is not a
+                               422 { error, filed: false } when the body is not a
                                report built by localm (not filed, not echoed)
 GET  /issues[?state=all|open|closed][&per_page=N] -> 200 { ok, issues: [...] }
 GET  /issues?number=N                             -> 200 { ok, issue }
@@ -180,7 +187,7 @@ applying is always their explicit action.
 wrangler dev          # serves the Worker locally
 curl -X POST http://localhost:8787 -H 'content-type: application/json' \
   -H 'x-localm-token: <SHARED_SECRET>' \
-  -d '{"title":"proxy smoke test","body":"hello from curl"}'
+  -d '{"title":"proxy smoke test","body":"# localm bug report: smoke\n## What happened\nx\n## How it was filed\n- Filed via the standalone smoke test\n## Environment\n- OS: test"}'
 ```
 
 ## Unit test (no Cloudflare account needed)

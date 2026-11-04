@@ -171,9 +171,10 @@ def test_upload_report_non_2xx_raises():
     assert "502" in (ei.value.reason or "")
 
 
-def test_upload_report_not_filed_reply_raises():
+@pytest.mark.parametrize("status", [422, 202])
+def test_upload_report_not_filed_reply_raises(status):
     def opener(url, data, headers, timeout):
-        return 202, '{"ok": true, "filed": false}'
+        return status, '{"error": "report not filed", "filed": false}'
 
     try:
         bugreport.upload_report("t", "b", url="https://proxy.example", opener=opener)
@@ -183,8 +184,31 @@ def test_upload_report_not_filed_reply_raises():
         caught = None
     assert caught is not None, "a report the server did not file was returned as sent"
     assert caught.stage == "not_filed"
-    assert "202" in (caught.reason or "")
+    assert str(status) in (caught.reason or "")
     assert bugreport.MAINTAINER_EMAIL in caught.hint
+
+
+@pytest.mark.parametrize("reply, stage", [
+    (b'{"error": "report not filed", "filed": false}', "not_filed"),
+    (b'{"error": "GitHub rejected the issue"}', "server_rejected"),
+    (b"not json", "server_rejected"),
+], ids=["filed-false", "other-json", "not-json"])
+def test_upload_report_http_error_reply_keeps_its_stage(monkeypatch, reply, stage):
+    import io
+    import urllib.error
+
+    def _reject(req, timeout=None):
+        raise urllib.error.HTTPError("https://proxy.example", 422, "x", {}, io.BytesIO(reply))
+
+    monkeypatch.setattr("localm.http_ssl.verified_urlopen", _reject)
+    try:
+        bugreport.upload_report("t", "b", url="https://proxy.example", token="x")
+    except bugreport.LocalmError as e:
+        caught = e
+    else:
+        caught = None
+    assert caught is not None
+    assert caught.stage == stage
 
 
 @pytest.mark.parametrize("raw", ['{"ok": true, "url": "u", "number": 3}', '{"filed": true}', "{}", ""])
