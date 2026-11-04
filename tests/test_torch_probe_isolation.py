@@ -258,7 +258,7 @@ class TestIsolatedProbeDegradesHonestly:
 
 
 
-class TestWedgedTorchIsNotRetriedForever:
+class TestWedgedTorchIsNotAskedEveryProbe:
     """`list_gpus` re-probes on every call (no TTL), so a box whose torch cannot
     answer must not pay the full timeout every single probe, or it never reaches
     the nvidia-smi fallback inside the caller's 15s deadline."""
@@ -281,8 +281,8 @@ class TestWedgedTorchIsNotRetriedForever:
         assert discover._torch_gpus_isolated_once() == []
         assert discover._torch_gpus_isolated_once() == []
         assert len(spawns) == 1, (
-            f"respawned a known-unanswerable child {len(spawns)} times - that is "
-            "the full timeout on every probe, forever")
+            f"respawned a timed-out child {len(spawns)} times inside the retry "
+            "wait - that is the full timeout on every probe")
 
     def test_wedged_torch_is_never_retried_in_process(self, monkeypatch):
         """The in-process import IS the multi-minute hang. A wedged torch must
@@ -632,7 +632,8 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
 
         monkeypatch.setattr(discover, "_torch_gpus_isolated", wedged)
         waits = []
-        for _ in range(8):
+        rounds = discover._ISOLATED_TORCH_TIMEOUTS_MAX - 1
+        for _ in range(rounds):
             assert discover._torch_gpus_isolated_once() == []
             with discover._gpu_probe_lock:
                 assert discover._isolated_torch_unavailable is True
@@ -645,7 +646,67 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
                       discover._ISOLATED_TORCH_RETRY_MAX)
         assert waits[:3] == [first, 2 * first, 4 * first]
         assert waits[-1] == cap
-        assert len(spawns) == 8, "a round inside the wait spawned the child"
+        assert len(spawns) == rounds, "a round inside the wait spawned the child"
+
+    def test_timeouts_in_a_row_stop_the_asking_for_this_process(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = []
+
+        def wedged():
+            spawns.append(1)
+            raise discover._IsolatedTorchWedged()
+
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", wedged)
+        limit = discover._ISOLATED_TORCH_TIMEOUTS_MAX
+        for _ in range(limit):
+            discover._torch_gpus_isolated_once()
+            with discover._gpu_probe_lock:
+                if discover._isolated_torch_retry_at != float("inf"):
+                    now[0] = discover._isolated_torch_retry_at
+        assert len(spawns) == limit
+        now[0] += 1e9
+        assert discover._torch_gpus_isolated_once() == []
+        assert len(spawns) == limit, "asked again past the limit"
+        assert discover.isolated_torch_unavailable() is True
+
+    def test_an_answer_resets_the_count_of_timeouts(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        for _ in range(discover._ISOLATED_TORCH_TIMEOUTS_MAX - 1):
+            discover._torch_gpus_isolated_once()
+            with discover._gpu_probe_lock:
+                now[0] = discover._isolated_torch_retry_at
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
+        discover._torch_gpus_isolated_once()
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_at != float("inf")
+            assert discover._isolated_torch_timeouts == 1
+
+    def test_a_failed_child_with_an_empty_reply_keeps_the_latch(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        real_isolated = discover._torch_gpus_isolated
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            now[0] = discover._isolated_torch_retry_at
+            wait_before = discover._isolated_torch_retry_wait
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = ("[]", "torch failed")
+        fake_popen.return_value.returncode = 1
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", real_isolated)
+        assert discover._torch_gpus_isolated_once() == []
+        assert fake_popen.call_count == 1
+        assert discover.isolated_torch_unavailable() is True
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_wait == 2 * wait_before
+            assert discover._isolated_torch_retry_at > now[0]
 
     def test_an_answer_after_a_wedge_clears_the_latch(self, monkeypatch):
         now = self._clock(monkeypatch)
@@ -827,6 +888,23 @@ class TestProbeChildThatDiedIsAskedAgain:
         assert (discover._ISOLATED_TORCH_REASK_PAUSE
                 + discover._ISOLATED_TORCH_REASK_MIN_LEFT
                 < discover._ISOLATED_TORCH_PROBE_TIMEOUT)
+
+    def test_a_second_child_out_of_time_is_could_not_answer_not_a_timeout(
+            self, monkeypatch, caplog):
+        caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: True)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.side_effect = [
+            ("", ""), subprocess.TimeoutExpired("py", 5.0), ("", "")]
+        fake_popen.return_value.returncode = 1
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        assert discover._torch_gpus_isolated_once() == []
+        assert fake_popen.call_count == 2
+        assert discover.isolated_torch_unavailable() is False
+        assert self._WARNING in caplog.text
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
 
     def test_a_spawn_failure_is_not_asked_again(self, monkeypatch):
         fake_popen = MagicMock(side_effect=OSError("no interpreter"))

@@ -801,9 +801,11 @@ def _reset_gpu_probe_cache() -> None:
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
     global _isolated_torch_unanswered, _torch_round_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
+    global _isolated_torch_timeouts
     _LLAMA_SLOTS_CACHE.clear()
     with _gpu_probe_lock:
         _TORCH_INDEX_OF_BUS.clear()
+        _isolated_torch_timeouts = 0
         _torch_round_unanswered = False
         _gpu_last_good = None
         _gpu_probe_inflight = False
@@ -1071,7 +1073,7 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             # CONCLUSIVENESS (GPU_PROBE_INCONCLUSIVE): an EMPTY value is
             # conclusive unless torch could not be TRUSTED this round -
             # either _isolated_torch_unavailable (the isolated probe itself
-            # proved it cannot answer; never set for an honest "torch
+            # did not answer in time; never set for an honest "torch
             # answered, zero devices" - see
             # test_a_real_empty_answer_does_NOT_latch) or
             # _torch_gpu_probe_known_doomed() (torch was never even asked,
@@ -1510,8 +1512,8 @@ _ISOLATED_TORCH_DRAIN_TIMEOUT = 3.0
 # True from the moment the out-of-process torch enumeration times out until a later
 # child answers. The child is asked again after the retry wait below. Read/written
 # under _gpu_probe_lock, cleared by _reset_gpu_probe_cache. This is not a reading
-# cache (see the no-TTL note above): what is remembered is "torch cannot be asked
-# here", never a VRAM number, so nothing stale can reach switch_engine's eviction
+# cache (see the no-TTL note above): what is remembered is "torch did not answer in
+# time", never a VRAM number, so nothing stale can reach switch_engine's eviction
 # loop.
 _isolated_torch_unavailable = False
 
@@ -1523,8 +1525,8 @@ _isolated_torch_broken_warned = False
 
 # True for the probe round in which the isolated probe could not answer AND the
 # in-process fallback was refused (:func:`_in_process_torch_import_can_freeze`).
-# Cleared at the start of every probe round and by _reset_gpu_probe_cache. Unlike
-# _isolated_torch_unavailable it never skips the next round's isolated attempt.
+# Cleared at the start of every probe round and by _reset_gpu_probe_cache. It never
+# skips the next round's isolated attempt by itself; the retry wait below does.
 # Read/written under _gpu_probe_lock.
 _isolated_torch_unanswered = False
 
@@ -1537,6 +1539,12 @@ _ISOLATED_TORCH_RETRY_FIRST = 30.0
 _ISOLATED_TORCH_RETRY_MAX = 600.0
 _isolated_torch_retry_wait = 0.0
 _isolated_torch_retry_at = 0.0
+
+# Timeouts in a row after which the child is not asked again in this process, so
+# at most this many children can stay stuck in a driver call. Cleared by an answer
+# and by _reset_gpu_probe_cache. Read/written under _gpu_probe_lock.
+_ISOLATED_TORCH_TIMEOUTS_MAX = 8
+_isolated_torch_timeouts = 0
 
 # A child that exited printing nothing is asked once more in the same round: the
 # pause before it, and the least time left of _ISOLATED_TORCH_PROBE_TIMEOUT it needs.
@@ -1568,9 +1576,9 @@ def isolated_torch_unavailable() -> bool:
 
     Specifically it binds ``_sizing.VramSizingMixin._free_total_vram_bytes``,
     which sits on the model-LOAD path: an unbounded ``import torch`` there, on a
-    box that has just proven torch wedges, wedges the whole load.
+    box where torch just did not answer in time, can wedge the whole load.
 
-    False means "not proven unavailable", NOT "torch works" - the probe may
+    False means "no timeout standing", NOT "torch works" - the probe may
     simply never have run. It is a reason to SKIP an attempt, never evidence
     that an attempt will succeed, so a caller still needs its own bound.
     """
@@ -1646,11 +1654,11 @@ def _child_stderr_once(err: str) -> str | None:
 
 
 class _IsolatedTorchWedged(Exception):
-    """The out-of-process torch probe ran but did not finish in time, i.e. TORCH
-    ITSELF is wedging on this box (the sm_120 case). Distinct from the child
-    mechanism being broken, and the distinction decides the fallback: retrying
-    this import IN-PROCESS would reproduce the multi-minute startup hang the
-    isolation exists to prevent, so this one must never fall back that way."""
+    """The out-of-process torch probe ran but did not finish in time: torch is
+    wedging on this box (the sm_120 case) or is slow right now. Distinct from the
+    child mechanism being broken, and the distinction decides the fallback:
+    retrying this import IN-PROCESS can reproduce the multi-minute startup hang
+    the isolation exists to prevent, so this one must never fall back that way."""
 
 
 class _TorchProbeChildDied(Exception):
@@ -1705,11 +1713,13 @@ def _torch_gpus_isolated() -> Optional[list]:
     lock and block thread creation process-wide, stalling the event loop (full
     mechanism in :mod:`localm._torch_gpu_probe`).
 
-    Returns the device list (possibly ``[]``, a real answer meaning torch sees no
-    CUDA/HIP device), or ``None`` when the child COULD NOT ANSWER at all - spawn
-    failure, an unusable reply, or a child that exited printing nothing twice.
-    Raises :class:`_IsolatedTorchWedged` on a timeout. The caller falls through to
-    nvidia-smi on all of these, but ``[]`` is never reported for them, so a box
+    Returns the device list (possibly ``[]``: with exit 0 torch sees no CUDA/HIP
+    device, and with exit 1 torch failed, noted through
+    :func:`_note_torch_round_unanswered`), or ``None`` when the child COULD NOT
+    ANSWER at all - spawn failure, an unusable reply, or a child that exited
+    printing nothing and then did not answer when asked again. Raises
+    :class:`_IsolatedTorchWedged` when the first child runs out the whole timeout.
+    The caller falls through to nvidia-smi on all of these, so a box
     where torch simply has no device is not mistaken for one where torch
     cannot be asked - "nothing there" and "could not look" never collapse into
     one silent path. The child inherits this process's
@@ -1735,7 +1745,7 @@ def _torch_gpus_isolated() -> Optional[list]:
         return None
     try:
         return _ask_torch_probe_child(left)
-    except _TorchProbeChildDied:
+    except (_TorchProbeChildDied, _IsolatedTorchWedged):
         return None
 
 
@@ -1857,8 +1867,8 @@ def _torch_gpus_isolated_once() -> list:
       to the IN-PROCESS import and say plainly at WARNING that the isolation was
       lost. On Windows
       (:func:`_in_process_torch_import_can_freeze`) that import can freeze the
-      server and a child that died printing nothing usually means torch's import
-      itself faulted, so return ``[]`` without importing, say so at WARNING, and
+      server and a child that keeps dying printing nothing may mean torch's import
+      itself faults, so return ``[]`` without importing, say so at WARNING, and
       set ``_isolated_torch_unanswered`` for the round: the empty reading is then
       reported inconclusive and the AMD registry fallback in
       :func:`_list_gpus_probe` runs. A safety net for a genuine runtime failure,
@@ -1892,8 +1902,10 @@ def _torch_gpus_isolated_once() -> list:
     ``_ISOLATED_TORCH_RETRY_FIRST`` seconds and doubles per further failure up to
     ``_ISOLATED_TORCH_RETRY_MAX``. A round inside the wait is handled exactly as
     a round whose child could not answer. Any answer from the child clears the
-    wait and the latch."""
-    global _isolated_torch_unavailable
+    wait; while latched, a ``[]`` from a child that exited non-zero is not an
+    answer. After ``_ISOLATED_TORCH_TIMEOUTS_MAX`` timeouts in a row the child is
+    not spawned again in this process."""
+    global _isolated_torch_unavailable, _isolated_torch_timeouts
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     with _gpu_probe_lock:
         waiting = time.monotonic() < _isolated_torch_retry_at
@@ -1907,7 +1919,8 @@ def _torch_gpus_isolated_once() -> list:
         else:
             devices = _torch_gpus_isolated()
             with _gpu_probe_lock:
-                if devices is None:
+                if devices is None or (_isolated_torch_unavailable
+                                       and _torch_round_unanswered):
                     _isolated_torch_retry_wait = min(
                         _ISOLATED_TORCH_RETRY_MAX,
                         _isolated_torch_retry_wait * 2
@@ -1916,20 +1929,31 @@ def _torch_gpus_isolated_once() -> list:
                                                 + _isolated_torch_retry_wait)
                 else:
                     _isolated_torch_unavailable = False
+                    _isolated_torch_timeouts = 0
                     _isolated_torch_retry_wait = 0.0
                     _isolated_torch_retry_at = 0.0
     except _IsolatedTorchWedged:
         with _gpu_probe_lock:
             _isolated_torch_unavailable = True
+            _isolated_torch_timeouts += 1
+            stop_asking = _isolated_torch_timeouts >= _ISOLATED_TORCH_TIMEOUTS_MAX
             _isolated_torch_retry_wait = min(
                 _ISOLATED_TORCH_RETRY_MAX,
                 _isolated_torch_retry_wait * 2 or _ISOLATED_TORCH_RETRY_FIRST)
-            _isolated_torch_retry_at = time.monotonic() + _isolated_torch_retry_wait
+            _isolated_torch_retry_at = (
+                float("inf") if stop_asking
+                else time.monotonic() + _isolated_torch_retry_wait)
             wait = _isolated_torch_retry_wait
-        logger.debug(
-            "list_gpus: torch did not finish enumerating within %.1fs in an "
-            "isolated probe; using the non-torch sources and asking it again in "
-            "%.0fs", _ISOLATED_TORCH_PROBE_TIMEOUT, wait)
+        if stop_asking:
+            logger.debug(
+                "list_gpus: torch did not finish enumerating in %d isolated probes "
+                "in a row; using the non-torch sources for the rest of this process",
+                _ISOLATED_TORCH_TIMEOUTS_MAX)
+        else:
+            logger.debug(
+                "list_gpus: torch did not finish enumerating within %.1fs in an "
+                "isolated probe; using the non-torch sources and asking it again "
+                "in %.0fs", _ISOLATED_TORCH_PROBE_TIMEOUT, wait)
         return []
     if devices is None:
         global _isolated_torch_broken_warned, _isolated_torch_unanswered

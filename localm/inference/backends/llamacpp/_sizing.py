@@ -246,8 +246,8 @@ class VramSizingMixin:
         read:
 
         - **The discover latch.** When ``discover.isolated_torch_unavailable()``
-          reports that the out-of-process probe has already proven torch cannot
-          finish enumerating on this box, no attempt is made at all. The latch
+          reports that the out-of-process probe did not finish enumerating in
+          time and no later child has answered, no attempt is made at all. The latch
           is only consulted when torch is NOT already resident: once it is in
           ``sys.modules`` the reads below are ordinary calls on an imported
           module.
@@ -303,8 +303,8 @@ class VramSizingMixin:
             if discover.isolated_torch_unavailable():
                 _dbg.debug(
                     "free-vram: skipping the in-process torch read - the "
-                    "isolated probe already proved torch cannot answer on this "
-                    "box; using the isolated native probe instead")
+                    "isolated torch probe did not answer in time; using the "
+                    "isolated native probe instead")
                 return None, None
         # Bounded: neither the import nor a torch.cuda call has a timeout of its
         # own. The thread is abandoned on overrun.
