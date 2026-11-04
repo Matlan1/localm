@@ -1047,6 +1047,29 @@ def test_a_failure_while_restoring_the_packages_puts_them_back_and_says_so(insta
     assert "restore helper broke" in out.stderr and "Traceback" not in out.stderr
 
 
+def test_a_failed_undo_of_the_packages_is_reported_without_a_traceback(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    helper = inst / "localm" / "updater_components.py"
+    helper.write_text(helper.read_text(encoding="utf-8") + (
+        "\n_real_restore = _restore_venv\n"
+        "def _restore_venv(copy, venv, *, own=False, only=None):\n"
+        "    if 'before-rollback' in str(copy):\n"
+        "        raise ValueError('the undo broke')\n"
+        "    return _real_restore(copy, venv, own=own, only=only)\n"), encoding="utf-8")
+    manifest = updater._updates_dir() / "applied_names.json"
+    manifest.write_text(json.dumps(json.loads(manifest.read_text(encoding="utf-8"))
+                                   + ["../outside"]), encoding="utf-8")
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "ALSO failed" in out.stderr and "the undo broke" in out.stderr
+    assert "Traceback" not in out.stderr
+    assert (updater._backup_dir() / "VERSION").exists()
+
+
 # ------------------- the standalone rollback and what it reports ----------------
 
 def _add_kept_parts(names=("comfyui", "uv")) -> None:

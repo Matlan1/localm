@@ -206,7 +206,7 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
 
     def undo():
         return uc._restore_venv(keep, venv, own=True)
-    undo.keep = keep
+    undo.keep = uc._long(keep)
     errors, restored = [], False
     try:
         for copy, own, only in steps:
@@ -229,7 +229,7 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
         except Exception as e:
             back = [f"putting the current packages back stopped with an error: {e}"]
         import shutil
-        shutil.rmtree(keep, ignore_errors=True)
+        shutil.rmtree(undo.keep, ignore_errors=True)
         return errors + back, None
     return [], undo
 
@@ -299,7 +299,10 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
     try:
         au.rollback(backup_dir, install_root, names)
     except Exception as e:
-        back = undo() if undo else []
+        try:
+            back = undo() if undo else []
+        except Exception as undo_error:
+            back = [f"the package restore helper stopped with an error: {undo_error}"]
         packages = ("the packages were put back as they were" if not back else
                     "putting the packages back ALSO failed: " + "; ".join(back))
         print(f"Rollback FAILED: {e}\n{packages.capitalize()}. The backup is kept at "
