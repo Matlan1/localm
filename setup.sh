@@ -324,6 +324,34 @@ if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]
   esac
 fi
 
+# ---- LocaLM programs running from this folder hold files setup must replace ----
+# Needs the installed Python; a folder with no .venv has nothing running from it.
+if [ -x .venv/bin/python ]; then
+  run_rc=0
+  run_list="$(.venv/bin/python -m localm.install_manifest running --root . 2>/dev/null)" || run_rc=$?
+  if [ "$run_rc" = 3 ]; then
+    say ""
+    say "  These programs are running from this folder and would block the update:"
+    say ""
+    printf '%s\n' "$run_list" | sed 's/^PID \([0-9]*\) \(.*\)$/    - \2 (PID \1)/'
+    say ""
+    # SETUP-Q: running-localm
+    stoprun="$(ask "  Stop them and go on? [Y/n]: " Y)"
+    case "$stoprun" in
+      [Nn]*) say "  Nothing changed. Close them, then run setup again."; exit 0 ;;
+    esac
+    run_rc=0
+    .venv/bin/python -m localm.install_manifest running --root . --stop || run_rc=$?
+    if [ "$run_rc" != 0 ]; then
+      say ""
+      say "  [!] Those programs could not be stopped. Nothing changed. Close them by hand, then run setup again."
+      exit 1
+    fi
+  elif [ "$run_rc" != 0 ] && [ "$run_rc" != 4 ]; then
+    say "  [i] Could not check for running LocaLM programs."
+  fi
+fi
+
 # ---- setup journal: remember how far this run gets ---------------------------
 # One tab-separated line per event, appended to .localm-setup-journal in this
 # folder (the format localm.install_manifest reads): "begin<TAB>step",
@@ -826,6 +854,9 @@ say "  Installing localm into .venv ..."
 # the create_venv retry loop above. Do not copy it back here.
 uv pip install -p .venv -e ".[${EXTRAS}]" || {
   say "  [!] Installing localm failed - see the error above."
+  say "      If a LocaLM program is still running from this folder, close it, run setup.sh again"
+  say "      and pick [1] Install again / repair. Until then this folder is partly updated."
+  say "      Your chats, settings and models are untouched."
   offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
   exit 1
 }

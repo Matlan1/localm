@@ -1866,6 +1866,35 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
     return _finish(report, root, m, items, dry_run=False)
 
 
+EXIT_CANNOT_LIST = 4     # `running`: processes cannot be listed on this system
+
+
+def running_in_folder(root, *, stop: bool = False, log=print) -> int:
+    """List the programs running from inside *root*, one "PID <pid> <exe>" line
+    each; with *stop*, stop them as well and rescan.
+
+    Returns 0 when nothing (is left) running, EXIT_RUNNING when programs run and
+    *stop* is False, EXIT_FAILED when one could not be stopped, EXIT_CANNOT_LIST
+    when processes cannot be listed here. Nothing outside *root* is touched."""
+    root = Path(root).resolve()
+    found = running_from([root])
+    if found is None:
+        log("  [i] Could not list the running programs on this system.")
+        return EXIT_CANNOT_LIST
+    for pid, exe in found:
+        log(f"PID {pid} {exe}")
+    if not found:
+        return 0
+    if not stop:
+        return EXIT_RUNNING
+    report = {"running": found, "stopped": [], "failed": []}
+    if not _stop_all(report, [root]):
+        for label, why in report["failed"]:
+            log(f"  [!] {label}: {why}")
+        return EXIT_FAILED
+    return 0
+
+
 def _stop_all(report: dict, dirs: list, rounds: int = 3) -> bool:
     """Stop every process running from *dirs*, parents first, rescanning for
     anything a stopped process started meanwhile. False when one survives."""
@@ -2284,6 +2313,11 @@ def main(argv=None) -> int:
                    help="leave the in-clone Python runtime for the calling "
                         f"script to delete, named in {PENDING_NAME}")
 
+    rn = sub.add_parser("running", help="list LocaLM programs running from this folder "
+                                        "(exit 3 when some do); --stop stops them")
+    rn.add_argument("--root", default=".")
+    rn.add_argument("--stop", action="store_true")
+
     f = sub.add_parser("finish", help="remove what a previous uninstall deferred")
     f.add_argument("--root", default=".")
 
@@ -2354,6 +2388,8 @@ def main(argv=None) -> int:
             print(f"[install] could not write the setup journal: {e}", file=sys.stderr)
             return 1
         return 0
+    if args.cmd == "running":
+        return running_in_folder(args.root, stop=args.stop)
     if args.cmd == "finish":
         removed, left = finish_pending(args.root)
         for p in removed:
