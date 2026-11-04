@@ -31,6 +31,9 @@ _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
 _AFFECTED = sorted(guard.UNSAFE_PRE_TYPES)
 _CHUNKABLE = [p for p in _AFFECTED if not guard.UNSAFE_PRE_TYPES[p].unusable]
 _CAP = guard.UNSAFE_PRE_TYPES["gpt-4o"].max_chars
+# Pre-types only a recent runtime can load. An older one skips them instead of
+# failing, so a runtime that has not been re-provisioned yet stays testable.
+_RECENT_PRE_TYPES = {"tekken-num3"}
 
 
 @pytest.fixture(autouse=True)
@@ -564,11 +567,17 @@ def compare(tok, text, cuts):
     return joined == tok(text)
 
 
-def run(directory, pre_types, n_fuzz):
+def run(directory, pre_types, n_fuzz, optional):
     result = {}
     rnd = random.Random(11)
     for pre in pre_types:
-        tok = tokenizer(f"{directory}/{pre}.gguf")
+        try:
+            tok = tokenizer(f"{directory}/{pre}.gguf")
+        except AssertionError:
+            if pre not in optional:
+                raise
+            result[pre] = None
+            continue
         compared = mismatched = bad_compared = bad_mismatched = cuts_made = 0
         texts = [PROSE * 5, PROSE.replace("\n", "\r\n") * 5]
         texts += ["".join(rnd.choice(ALPHA) for _ in range(rnd.randint(1, 14)))
@@ -590,7 +599,7 @@ def run(directory, pre_types, n_fuzz):
     return result
 
 
-print(json.dumps(run(sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3]))))
+print(json.dumps(run(sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3]), json.loads(sys.argv[4]))))
 '''
 
 
@@ -610,7 +619,8 @@ class TestChunkedTokensEqualWholeTokens:
         env = {**os.environ, "PYTHONPATH": str(repo), "PYTHONIOENCODING": "utf-8"}
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         proc = subprocess.run(
-            [sys.executable, "-c", _ORACLE, str(directory), json.dumps(_CHUNKABLE), "400"],
+            [sys.executable, "-c", _ORACLE, str(directory), json.dumps(_CHUNKABLE), "400",
+             json.dumps(sorted(_RECENT_PRE_TYPES))],
             capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
             timeout=600, creationflags=flags)
         assert proc.returncode == 0, proc.stderr[-2000:]
@@ -618,6 +628,8 @@ class TestChunkedTokensEqualWholeTokens:
 
     @pytest.mark.parametrize("pre_type", _CHUNKABLE)
     def test_chunked_tokens_equal_whole_tokens(self, result, pre_type):
+        if result[pre_type] is None:
+            pytest.skip(f"this runtime cannot load the {pre_type} pre-tokenizer")
         compared, mismatched, cuts_made = result[pre_type][:3]
         assert compared > 100 and cuts_made > 200
         assert mismatched == 0
@@ -626,6 +638,8 @@ class TestChunkedTokensEqualWholeTokens:
     def test_the_comparison_fails_for_a_cut_that_is_not_safe(self, result, pre_type):
         # The same comparison with a cut at every offset must find differences,
         # or "no mismatches" above says nothing.
+        if result[pre_type] is None:
+            pytest.skip(f"this runtime cannot load the {pre_type} pre-tokenizer")
         bad_compared, bad_mismatched = result[pre_type][3:]
         assert bad_compared > 20
         assert bad_mismatched > 0
