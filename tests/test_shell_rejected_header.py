@@ -59,10 +59,11 @@ def test_rejected_shell_token_carries_the_marker(web_app, token):
     assert r.headers[SHELL_REJECTED_HEADER] == "1"
 
 
-def test_cross_origin_refusal_with_a_valid_token_carries_no_marker(web_app):
+def test_cross_origin_read_with_a_valid_token_carries_no_marker(web_app):
     client, app = web_app
-    r = client.post("/api/web/retrieve", json={"query": "test"},
-                    headers={"Authorization": f"Bearer {app.state.shell_token}",
-                             "Origin": "http://evil.example"})
+    r = client.get("/v1/config",
+                   headers={"Authorization": f"Bearer {app.state.shell_token}",
+                            "Origin": "http://evil.example"})
     assert r.status_code == 403
+    assert "Open-mode management" in r.json()["detail"]
     assert SHELL_REJECTED_HEADER not in r.headers
