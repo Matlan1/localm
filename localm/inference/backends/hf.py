@@ -372,6 +372,7 @@ class HFBackend(BaseBackend):
         self.effective_ctx_max = meta.get("context_capacity")
         self.n_ctx_max = self.effective_ctx_max
         self._loaded = True
+        logger.info("hf model ready: %s", Path(self.model_path).name)
         # Printed in the parent, not the child: the child's stdout inherits the
         # codepage the spawn gave it rather than the parent's console
         # configuration, and a rich/Unicode console.print from the child raises
