@@ -5995,13 +5995,17 @@ def _make_lifespan():
                           "cross-instance GPU coordination): %s", e)
                 _gpu_coord = None
 
+        # The restart for pending update steps re-executes this process, so it
+        # is skipped under pytest like its siblings above. See
+        # test_a_lifespan_under_pytest_never_schedules_the_update_restart.
+        if "pytest" not in sys.modules:
+            _restart_for_pending_update_steps(app)
+
         # Vision-projector backfill (model_manager.sync_models_dir's
         # backfill_mmproj part): one-shot, off the loop, started here rather
         # than during the synchronous CLI startup sequence so a per-candidate
         # HF lookup never delays accepting connections. Best-effort, logged
         # only; skipped under pytest like its siblings above.
-        _restart_for_pending_update_steps(app)
-
         mmproj_task = None
         if "pytest" not in sys.modules:
             try:

@@ -764,6 +764,21 @@ def test_the_server_restarts_once_for_the_deferred_steps(monkeypatch):
     assert len(asked) == 1
 
 
+def test_a_lifespan_under_pytest_never_schedules_the_update_restart(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import localm.inference.http_server as hs
+    asked = []
+    monkeypatch.setattr(hs, "_request_restart", lambda **kw: asked.append(kw))
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "1")
+
+    with TestClient(hs.create_app(None)) as client:
+        assert client.get("/health").status_code == 200
+
+    assert asked == []
+    assert os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] == "1"
+
+
 def test_the_restart_catches_up_a_runtime_nothing_left_pending(install, monkeypatch):
     import localm.inference.http_server as hs
     import localm.inference.backends.llamacpp._loader as loader
