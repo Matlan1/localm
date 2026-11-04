@@ -1903,7 +1903,7 @@ class HFWorker:
         if on_demand_device is not None:
             from localm.inference.backends import _hf_on_demand_experts
             target = "cpu" if device == "cpu" else f"cuda:{on_demand_device}"
-            budget = _hf_on_demand_experts.free_bytes(device)
+            budget = _hf_on_demand_experts.free_bytes(device, gpu=0 if device == "cpu" else on_demand_device)
             self._expert_store = _hf_on_demand_experts.attach(self._model, self.model_path, target, budget)
             self.load_notes.append(
                 f"larger than this machine's memory: the routed experts stay on disk and are read as needed, so "

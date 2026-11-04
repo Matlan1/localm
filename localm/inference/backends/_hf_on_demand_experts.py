@@ -49,9 +49,13 @@ class ExpertStore:
 
     def _read(self, layer: int, expert: int, part: int) -> torch.Tensor:
         """One weight, read with plain file reads: mapping every shard of a large checkpoint
-        needs more commit charge than Windows may have (os error 1455)."""
+        needs more commit charge than Windows may have (os error 1455). Raises ValueError for a
+        weight map that names a file outside the folder and OSError for a file shorter than its
+        header says."""
         name = f"model.layers.{layer}.block_sparse_moe.experts.{expert}.w{part}.weight"
         file_name = self._weight_map[name]
+        if Path(file_name).name != file_name or "\\" in file_name:
+            raise ValueError(f"the weight map names a file outside the model folder: {file_name!r}")
         opened = self._files.get(file_name)
         if opened is None:
             path = self._folder / file_name
@@ -62,7 +66,8 @@ class ExpertStore:
         start, end = entry["data_offsets"]
         handle.seek(data_start + start)
         data = bytearray(end - start)
-        handle.readinto(data)
+        if handle.readinto(data) != len(data):
+            raise OSError(f"{file_name} is shorter than its header says; the download may be incomplete")
         return torch.frombuffer(data, dtype=_DTYPES[entry["dtype"]]).reshape(entry["shape"])
 
     def expert(self, layer: int, expert: int) -> tuple:
@@ -149,10 +154,10 @@ def attach(model, model_path: str, device, available_bytes: int) -> ExpertStore:
     return store
 
 
-def free_bytes(device: str, torch_module=torch) -> int:
-    """Bytes the store may keep on *device*: free video memory less a margin for the generation's
-    own tensors, or half the available RAM on the CPU."""
+def free_bytes(device: str, torch_module=torch, gpu: int = 0) -> int:
+    """Bytes the store may keep on *device*: free video memory of GPU *gpu* less a margin for the
+    generation's own tensors, or half the available RAM on the CPU."""
     if device == "cuda":
-        return max(0, int(torch_module.cuda.mem_get_info(0)[0]) - _HEADROOM_BYTES)
+        return max(0, int(torch_module.cuda.mem_get_info(gpu)[0]) - _HEADROOM_BYTES)
     import psutil
     return int(psutil.virtual_memory().available) // 2

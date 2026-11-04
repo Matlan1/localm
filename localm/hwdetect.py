@@ -456,9 +456,9 @@ _TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
+_FLA_CORE_LINUX_CUDA = "fla-core==0.6.0"
 # uv's `--torch-backend` values for the same variants. See
 # test_torch_backend_avoids_the_setuptools_conflict_index_url_hits.
-_FLA_CORE_LINUX_CUDA = "fla-core==0.6.0"
 _TORCH_BACKEND = {
     "cuda": "cu126",
     "cuda-blackwell": "cu130",
@@ -563,7 +563,7 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
                            any OS with NVIDIA. On Linux also fla-core, the Triton
                            kernels of linear-attention models; the Linux CUDA wheels
                            bring Triton
-      * xpu            -> Intel wheels (self-provision the oneAPI runtime)
+      * xpu             -> Intel wheels (self-provision the oneAPI runtime)
       * rocm, Linux     -> upstream ROCm wheels (broad gfx support)
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
                            build, the ``[gpu]`` extra (no upstream Windows wheel for it)

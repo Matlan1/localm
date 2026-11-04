@@ -132,6 +132,45 @@ def test_an_expert_is_gate_and_up_on_the_first_axis_and_down(tmp_path):
     assert torch.equal(down, state[f"{prefix}.w2.weight"])
 
 
+@pytest.mark.parametrize("named", ["../outside.safetensors", "\\\\host\\share\\x.safetensors"])
+def test_a_weight_map_naming_a_file_outside_the_folder_is_refused(tmp_path, named):
+    folder = _checkpoint(tmp_path / "m")
+    weights = {name: named for name in od._weight_map(folder)}
+    store = od.ExpertStore(folder, weights, "cpu", torch.float32, 0)
+    with pytest.raises(ValueError, match="outside the model folder"):
+        store.expert(2, 3)
+    assert store._files == {}
+
+
+def test_a_weight_file_shorter_than_its_header_is_refused(tmp_path):
+    folder = _checkpoint(tmp_path / "m")
+    path = folder / "model.safetensors"
+    header, data_start = od._safetensors_header(path)
+    last = max((n for n in header if od._EXPERT_KEY.match(n)), key=lambda n: header[n]["data_offsets"][1])
+    path.write_bytes(path.read_bytes()[:data_start + header[last]["data_offsets"][1] - 1])
+    store = od.ExpertStore(folder, od._weight_map(folder), "cpu", torch.float32, 0)
+    layer, expert, _ = od._EXPERT_KEY.match(last).groups()
+    with pytest.raises(OSError, match="shorter than its header"):
+        store.expert(int(layer), int(expert))
+    store.close()
+
+
+def test_the_budget_reads_the_gpu_the_load_uses():
+    asked = []
+
+    class Cuda:
+        @staticmethod
+        def mem_get_info(index):
+            asked.append(index)
+            return (od._HEADROOM_BYTES + 5, 0)
+
+    class Stub:
+        cuda = Cuda
+
+    assert od.free_bytes("cuda", Stub, gpu=1) == 5
+    assert asked == [1]
+
+
 def test_it_is_used_only_for_a_kimi_linear_checkpoint_that_does_not_fit(tmp_path):
     folder = _checkpoint(tmp_path / "m")
     size = (folder / "model.safetensors").stat().st_size
