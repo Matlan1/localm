@@ -7,7 +7,9 @@ runs on a worker thread too."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -72,8 +74,6 @@ def load_spy(monkeypatch):
 
 
 @pytest.mark.parametrize("path,body", [
-    ("add", {"paths": []}),
-    ("upload", {"files": []}),
     ("reembed", None),
     ("repair", {"embed": False, "confirm": True}),
     ("remove-doc", {"path": "nowhere.txt"}),
@@ -89,6 +89,54 @@ def test_opening_a_cold_collection_runs_off_the_event_loop(client, load_spy, pat
     assert r.status_code in (200, 400, 404), r.text
     assert load_spy, f"{path}: the cold collection was never opened"
     assert not any(load_spy), f"{path}: Collection._load ran on the event loop thread"
+
+
+@pytest.mark.parametrize("path,body", [
+    ("add", {"paths": []}),
+    ("upload", {"files": []}),
+])
+def test_add_and_upload_do_not_open_the_collection_in_the_request(client, load_spy, path, body):
+    c, home = client
+    _cold_collection(home)
+    load_spy.clear()
+    r = c.post(f"/api/rag/collections/cold/{path}", headers=_owner(), json=body)
+    assert r.status_code == 400, r.text
+    assert load_spy == []
+
+
+@pytest.mark.parametrize("path,body", [
+    ("add", {"paths": ["x"]}),
+    ("upload", {"files": []}),
+])
+@pytest.mark.parametrize("name,status", [("missing", 404), ("bad..name", 400)])
+def test_add_and_upload_still_refuse_a_missing_or_invalid_collection(client, path, body, name, status):
+    c, _home = client
+    r = c.post(f"/api/rag/collections/{name}/{path}", headers=_owner(), json=body)
+    assert r.status_code == status, r.text
+
+
+def test_an_upload_opens_the_collection_off_the_event_loop_in_its_job(client, load_spy):
+    c, home = client
+    _cold_collection(home)
+    load_spy.clear()
+    r = c.post("/api/rag/collections/cold/upload", headers=_owner(), json={
+        "embed": False,
+        "files": [{"filename": "new.txt",
+                   "content_b64": base64.b64encode(b"new text").decode()}]})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    deadline = time.monotonic() + 30
+    status = None
+    while time.monotonic() < deadline:
+        ops = c.get("/api/activity", headers=_owner()).json()["operations"]
+        status = next((o["status"] for o in ops if o["id"] == job_id), None)
+        if status not in (None, "running", "queued"):
+            break
+        time.sleep(0.05)
+    assert status == "done"
+    assert load_spy and not any(load_spy), load_spy
+    docs = Collection("cold", base=home / "rag").docs()
+    assert "upload:new.txt" in [d["path"] for d in docs]
 
 
 def test_the_credential_write_of_a_config_save_runs_off_the_event_loop(client, monkeypatch):

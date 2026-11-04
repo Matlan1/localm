@@ -1552,6 +1552,43 @@ _isolated_torch_timeouts = 0
 _ISOLATED_TORCH_REASK_PAUSE = 0.5
 _ISOLATED_TORCH_REASK_MIN_LEFT = 2.0
 
+# Out-of-process torch probes running now, and how many holders of
+# torch_probes_held() are active (no new probe is spawned while it is above 0).
+_torch_probe_procs: set = set()
+_torch_probe_holds = 0
+
+
+def torch_probes_running() -> int:
+    """How many out-of-process torch probe children are running now."""
+    with _gpu_probe_lock:
+        return sum(1 for p in _torch_probe_procs if p.poll() is None)
+
+
+class torch_probes_held:
+    """Context manager: while active, :func:`list_gpus` spawns no
+    out-of-process torch probe (it answers as in a round whose probe could not
+    answer), so no process of this install loads PyTorch's native libraries
+    for it. On entry it waits up to *wait* seconds for the probes already
+    running to exit. Nests."""
+
+    def __init__(self, wait: float = 10.0):
+        self.wait = wait
+
+    def __enter__(self):
+        global _torch_probe_holds
+        with _gpu_probe_lock:
+            _torch_probe_holds += 1
+        deadline = time.monotonic() + max(0.0, self.wait)
+        while torch_probes_running() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self
+
+    def __exit__(self, *exc):
+        global _torch_probe_holds
+        with _gpu_probe_lock:
+            _torch_probe_holds = max(0, _torch_probe_holds - 1)
+        return False
+
 
 def _in_process_torch_import_can_freeze() -> bool:
     """True where a cold ``import torch`` in this process can hold the OS loader
@@ -1760,20 +1797,38 @@ def _ask_torch_probe_child(timeout: float) -> Optional[list]:
     ``sys.executable``: inside a Windows multiprocessing-spawn worker the latter
     is the BASE interpreter, whose children get no venv context and so cannot
     import torch or localm at all (the same trap documented on
-    ``_loader._spawn_probe_daemon``). Started with no console window on Windows."""
-    import json
+    ``_loader._spawn_probe_daemon``). Started with no console window on Windows.
+
+    Spawns nothing and returns ``None`` while :class:`torch_probes_held` is
+    active."""
     import subprocess
     from localm._mp_spawn import interpreter_for_localm_children
     try:
-        proc = subprocess.Popen(
-            [interpreter_for_localm_children(), "-u", "-m",
-             "localm._torch_gpu_probe"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        with _gpu_probe_lock:
+            if _torch_probe_holds > 0:
+                return None
+            proc = subprocess.Popen(
+                [interpreter_for_localm_children(), "-u", "-m",
+                 "localm._torch_gpu_probe"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _torch_probe_procs.add(proc)
     except Exception as e:
         logger.debug("list_gpus: could not spawn the out-of-process torch probe "
                      "(%s); falling through to nvidia-smi", type(e).__name__)
         return None
+    try:
+        return _read_torch_probe(proc, timeout)
+    finally:
+        with _gpu_probe_lock:
+            _torch_probe_procs.discard(proc)
+
+
+def _read_torch_probe(proc, timeout: float) -> list | None:
+    """The reply of the torch probe child *proc*, waited on for *timeout* seconds,
+    as :func:`_ask_torch_probe_child` returns it."""
+    import json
+    import subprocess
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1906,11 +1961,19 @@ def _torch_gpus_isolated_once() -> list:
     answer. After ``_ISOLATED_TORCH_TIMEOUTS_MAX`` timeouts in a row the child is
     not spawned again in this process."""
     global _isolated_torch_unavailable, _isolated_torch_timeouts
+    global _isolated_torch_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     with _gpu_probe_lock:
         waiting = time.monotonic() < _isolated_torch_retry_at
         if _isolated_torch_unavailable and waiting:
             return []
+        held = _torch_probe_holds > 0
+    if held:
+        logger.debug("list_gpus: torch probes are held (an update step needs "
+                     "PyTorch's libraries free); not spawning one")
+        with _gpu_probe_lock:
+            _isolated_torch_unanswered = True
+        return []
     try:
         if waiting:
             logger.debug("list_gpus: isolated probe failed recently; not "
@@ -1956,7 +2019,7 @@ def _torch_gpus_isolated_once() -> list:
                 "in %.0fs", _ISOLATED_TORCH_PROBE_TIMEOUT, wait)
         return []
     if devices is None:
-        global _isolated_torch_broken_warned, _isolated_torch_unanswered
+        global _isolated_torch_broken_warned
         with _gpu_probe_lock:
             still_latched = _isolated_torch_unavailable
         if still_latched:

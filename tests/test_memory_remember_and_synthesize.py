@@ -422,3 +422,80 @@ def test_explicit_fact_rejects(message):
 def test_explicit_fact_is_cut_to_the_record_cap():
     from localm.memory import MAX_TEXT_LEN
     assert len(explicit_fact("remember that " + "word " * 500)) <= MAX_TEXT_LEN
+
+
+@pytest.mark.parametrize("message", [
+    "Remember that script you wrote yesterday, can you add logging to it",
+    "Remember that bug from earlier. Fix it now please.",
+    "Remember that error message from before and explain it",
+    "remember that function we discussed, could you rewrite it",
+    "Remember that paragraph above and then summarize it",
+    "remember that long config file. Now check it for typos.",
+])
+def test_a_demonstrative_that_with_a_request_is_not_a_fact(message):
+    assert explicit_fact(message) is None
+
+
+@pytest.mark.parametrize("message, fact", [
+    ("remember that Dr. Smith is my doctor. What do you think of him?",
+     "Dr. Smith is my doctor"),
+    ("remember that: the Berlin office from earlier closes at six",
+     "the Berlin office from earlier closes at six"),
+    ("remember that I asked you to explain it simply", "I asked you to explain it simply"),
+    ("merk dir, dass ich Tee mag. Erkläre mir dann Python.", "ich Tee mag"),
+    ("remember that the leftovers from yesterday are in the fridge",
+     "the leftovers from yesterday are in the fridge"),
+    ("remember that the photos from before the move are on the NAS",
+     "the photos from before the move are on the NAS"),
+    ("remember that the deadline is Friday and review meetings are on Mondays",
+     "the deadline is Friday and review meetings are on Mondays"),
+    ("remember that the gym closes at 10 and check-in needs an ID",
+     "the gym closes at 10 and check-in needs an ID"),
+    ("remember that Anna's birthday is on May 3rd. Help me pick a gift.",
+     "Anna's birthday is on May 3rd"),
+])
+def test_the_request_filter_leaves_real_facts_alone(message, fact):
+    assert explicit_fact(message) == fact
+
+
+def test_explicit_fact_reads_a_bounded_prefix_of_a_huge_message(monkeypatch):
+    from localm.memory import explicit as ex
+    seen = []
+    real = ex._first_sentence
+
+    def _recording(text):
+        seen.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(ex, "_first_sentence", _recording)
+    message = "remember that " + "a. b " * 400_000
+    assert len(message) > 1_000_000
+    explicit_fact(message)
+    assert seen and max(seen) <= ex._MAX_SCAN_CHARS
+
+
+def _first_sentence_reference(text):
+    from localm.memory import explicit as ex
+    para = " ".join(ex._PARAGRAPH_RE.split(text.strip())[0].split())
+    for m in ex._TERMINATOR_RE.finditer(para):
+        words = para[:m.start()].split()
+        word = words[-1].lower().strip("\"'([") if words else ""
+        following = para[m.end():].lstrip()
+        if m.group().startswith(".") and (word in ex._ABBREVIATIONS
+                                          or following[:1].islower()):
+            continue
+        return para[:m.end()]
+    return para
+
+
+def test_first_sentence_matches_the_word_by_word_definition():
+    import random
+    from localm.memory import explicit as ex
+    rng = random.Random(2743)
+    pieces = ["a", "B", " ", "  ", ".", "!", "?", "...", "e.g", "Inc", "z.B", "\n",
+              "\n\n", "\"", "(", "x", "Dr", "ok"]
+    cases = ["a . b", ". a", "a .B", "e.g. x", "Inc. Berlin", "", ".", " . . ."]
+    cases += ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 40)))
+              for _ in range(3000)]
+    for text in cases:
+        assert ex._first_sentence(text) == _first_sentence_reference(text), repr(text)

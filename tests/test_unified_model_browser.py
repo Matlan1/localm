@@ -263,8 +263,8 @@ def test_pull_type_forwarding(temp_registry, monkeypatch):
     _, models_dir, _ = temp_registry
     
     # Mock HF snapshots / GGUF download to just call register
-    monkeypatch.setattr(mm.pull, "_pull_url", lambda url, name, expected_sha256=None, redownload=False, model_type="llm": 
-        mm._register(name, models_dir / "url_model.gguf", url, model_type=model_type)
+    monkeypatch.setattr(mm.pull, "_pull_url", lambda url, name, expected_sha256=None, redownload=False, model_type="llm", type_user_set=False: 
+        mm._register(name, models_dir / "url_model.gguf", url, model_type=model_type, type_user_set=type_user_set)
     )
 
     mm.pull.pull_model("https://example.com/test_model.gguf", name="pulled", model_type="diffusion-unet")
@@ -273,6 +273,7 @@ def test_pull_type_forwarding(temp_registry, monkeypatch):
     assert len(reg) == 1
     assert "pulled" in reg
     assert reg["pulled"]["model_type"] == "diffusion-unet"
+    assert reg["pulled"]["type_user_set"] is True
 
 
 def test_scan_folder_walk(tmp_path, temp_registry):

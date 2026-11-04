@@ -2645,11 +2645,17 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
 
     cpu_only_names = {n for n, e in list(_engines.items())
                       if e.loaded and _holds_no_vram(e)}
-    if await _only_cpu_only_chat_loaded(loop, cpu_only_names, media):
-        before, before_fresh, before_scope = None, True, None
-    else:
-        before, before_fresh, before_scope = await loop.run_in_executor(
-            None, _vram_free_reading)
+    reading: list = []
+    if not await _only_cpu_only_chat_loaded(loop, cpu_only_names, media):
+        reading.append(await loop.run_in_executor(None, _vram_free_reading))
+
+    async def _before_vram_release() -> None:
+        # Takes the free-VRAM reading before the first release that can free
+        # VRAM, when the CPU-only check skipped it. See
+        # test_a_model_holding_vram_loaded_during_the_check_still_waits.
+        if not reading:
+            reading.append(await loop.run_in_executor(None, _vram_free_reading))
+
     unloaded_models = []
     skipped_in_use = []
     unloaded_other: list[str] = []
@@ -2671,7 +2677,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
         embedder_was_loaded = await _unload_engines_and_embedder(
             loop, _embedder_mod, unloaded_models, skipped_in_use,
             confirm_required=confirm_required, unloaded_other=unloaded_other,
-            force=force)
+            force=force, cpu_only_names=cpu_only_names,
+            before_vram_release=_before_vram_release)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -2688,7 +2695,10 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     media_left_running: dict[str, str] = {}
     media_stopped = False
     if media:
-        from localm.vram import MEDIA_STOPPED, stop_idle_native_media
+        from localm.vram import (MEDIA_STOPPED, loaded_native_media_runtimes,
+                                 stop_idle_native_media)
+        if not reading and await loop.run_in_executor(None, loaded_native_media_runtimes):
+            await _before_vram_release()
         outcomes = await loop.run_in_executor(None, stop_idle_native_media)
         for kind, outcome in outcomes.items():
             if outcome == MEDIA_STOPPED:
@@ -2701,6 +2711,7 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     freed_vram = (embedder_was_loaded or media_stopped
                   or any(n not in cpu_only_names for n in unloaded_models))
+    before, before_fresh, before_scope = reading[0] if reading else (None, True, None)
     if before is not None and freed_vram:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -2737,7 +2748,9 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                                        skipped_in_use, *,
                                        confirm_required: dict,
                                        unloaded_other: list,
-                                       force: bool = False) -> bool:
+                                       force: bool = False,
+                                       cpu_only_names: frozenset | set = frozenset(),
+                                       before_vram_release=None) -> bool:
     """The releasing half of ``unload_all_models``: unload every loaded chat
     engine that is idle, or every one with *force* (appending to
     *unloaded_models* / *skipped_in_use* / *confirm_required*), then the
@@ -2751,7 +2764,11 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     engine's generations (``residency.cancel_all``) before unloading it, and
     stops a busy embedding, reranker or speech model (``reset_*(force=True)``:
     its worker is stopped and its requests in flight fail). Returns whether
-    anything other than a chat engine was released."""
+    anything other than a chat engine was released.
+
+    *before_vram_release*, when given, is awaited before each release that can
+    free VRAM: a chat engine not named in *cpu_only_names*, and the embedding,
+    reranker and speech models."""
     if not force:
         busy = [e for e in list(_engines.values())
                 if e.loaded and _has_requests_in_flight(e)]
@@ -2761,6 +2778,10 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
         engine = _engines[name]
         if not engine.loaded:
             continue
+        if before_vram_release is not None and name not in cpu_only_names:
+            await before_vram_release()
+            if not engine.loaded:
+                continue
         if _has_requests_in_flight(engine):
             if not force:
                 skipped_in_use.append(name)
@@ -2798,6 +2819,8 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     # coroutine. Executor-offloading them, like every other blocking call in
     # this function, keeps the wait local to this one coroutine instead.
     async def _release(kind: str, active_fn, reset_fn) -> None:
+        if before_vram_release is not None:
+            await before_vram_release()
         if await loop.run_in_executor(
                 None, functools.partial(reset_fn, force=force)):
             unloaded_other.append(kind)
@@ -3458,6 +3481,23 @@ async def _hang_heartbeat_loop() -> None:
         _hb_monotonic = now
         expected = now + _HEARTBEAT_INTERVAL_S
         await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+
+
+def _stall_trace_writer(path_fn):
+    """A ``StallWatch`` trace sink appending each native dump to one hang trace
+    file, ``path_fn()`` called once, on the first dump."""
+    state: dict = {}
+
+    def _write(text: str) -> None:
+        path = state.get("path")
+        if path is None:
+            path = state["path"] = path_fn()
+        with open(path, "a", encoding="utf-8", errors="backslashreplace") as fh:
+            fh.write(f"\n===== LOCALM STALL WATCH: native dump while Python was "
+                     f"blocked (pid {os.getpid()}, "
+                     f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+            fh.write(text)
+    return _write
 
 
 def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
@@ -4860,7 +4900,7 @@ def set_restart_ui(ui: Optional[str]) -> None:
 def _set_restart_env() -> None:
     """Set the environment a restart's re-exec'd process inherits:
     LOCALM_RESTART_IN_PROGRESS to the surface recorded by set_restart_ui, or to
-    "1" when none is recorded, and LOCALM_RESTART_GUI_MOUNTED to "1" when the
+    "1" when none is recorded, LOCALM_RESTART_GUI_MOUNTED to "1" when the
     GUI was mounted live onto this process's API-only app (removed otherwise)."""
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
     if _gui_mounted_live:
@@ -5212,7 +5252,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 pass
 
     _set_restart_env()
-    _execv_restart(port, instance_id)
+    _execv_restart(port, instance_id, update_steps_done=True)
 
 
 def _finish_pending_runtime_update() -> None:
@@ -5227,54 +5267,135 @@ def _finish_pending_runtime_update() -> None:
 
     Then the component update the applied update left pending
     (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
-    ComfyUI, uv), with the same rollback when a component cannot be updated."""
+    ComfyUI, uv), with the same rollback when a component cannot be updated.
+
+    While it runs, the GPU meter spawns no torch probe child
+    (``discover.torch_probes_held``, which also waits for running ones), so no
+    process of this install holds PyTorch's libraries for it."""
     try:
-        from localm import updater_components, updater_runtime
-        from localm.debuglog import logger as _dbg
-        if updater_runtime.read_pending() is not None:
-            try:
-                from localm.inference.backends.llamacpp._loader import stop_probe_daemon
-                stop_probe_daemon()
-            except Exception:
-                _dbg_swallow("stopping the runtime probe daemon before the runtime update "
-                             "failed", level="warning")
-            status = updater_runtime.finish_pending(
-                say=lambda m: _dbg.info("runtime update during restart: %s", m))
-            if status is not None and status["state"] not in ("updated", "current"):
-                _dbg.warning("runtime update during restart: %s; rolling the update back",
-                             status["note"])
-                updater_components.clear_pending()
-                from localm import updater
-                updater.rollback_last()
-                return
-            if status is not None:
-                _dbg.info("runtime update during restart: %s", status["note"])
-        if updater_components.read_pending() is None:
-            return
-        status = updater_components.finish_pending(
-            say=lambda m: _dbg.info("component update during restart: %s", m))
-        if status is None:
-            return
-        if status["state"] in ("updated", "current"):
-            _dbg.info("component update during restart: %s", status["note"])
-            return
-        _dbg.warning("component update during restart: %s; rolling the update back",
-                     status["note"])
-        from localm import updater
-        updater.rollback_last()
+        from localm import discover
+        with discover.torch_probes_held():
+            _finish_pending_update_steps()
     except Exception:
         _dbg_swallow("the pending runtime update or its rollback could not be carried out "
                      "during the restart", level="warning")
 
 
-def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
+def _finish_pending_update_steps() -> None:
+    """The body of :func:`_finish_pending_runtime_update`: the pending runtime
+    re-provision, then the pending component update; when either fails, the
+    whole update is rolled back (:func:`_roll_back_during_restart`), unless a
+    repair recorded it (``updater_parts.repair``), which is only logged. When
+    none is pending but this version pins another runtime build or other
+    component versions than the installed ones (``catch_up``, after an update
+    by an older localm), they are recorded as a repair and carried out the same
+    way. Raises on an unexpected failure."""
+    from localm import updater_components, updater_runtime
+    from localm.debuglog import logger as _dbg
+    pending = updater_runtime.read_pending()
+    if pending is None and updater_runtime.catch_up(repair=True) is not None:
+        pending = updater_runtime.read_pending()
+        _dbg.info("runtime update during restart: this version pins another runtime build "
+                  "than the installed one; installing it")
+    if pending is not None:
+        try:
+            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+            stop_probe_daemon()
+        except Exception:
+            _dbg_swallow("stopping the runtime probe daemon before the runtime update "
+                         "failed", level="warning")
+        status = updater_runtime.finish_pending(
+            say=lambda m: _dbg.info("runtime update during restart: %s", m))
+        if status is not None and status["state"] not in ("updated", "current"):
+            if pending.get("repair"):
+                _dbg.warning("runtime repair during restart: %s", status["note"])
+            else:
+                _dbg.warning("runtime update during restart: %s; rolling the update back",
+                             status["note"])
+                updater_components.clear_pending()
+                _roll_back_during_restart()
+                return
+        if status is not None:
+            _dbg.info("runtime update during restart: %s", status["note"])
+    comp_pending = updater_components.read_pending()
+    if comp_pending is None and updater_components.catch_up(repair=True) is not None:
+        comp_pending = updater_components.read_pending()
+        _dbg.info("component update during restart: this version pins other component "
+                  "versions than the installed ones; installing them")
+    if comp_pending is None:
+        return
+    status = updater_components.finish_pending(
+        say=lambda m: _dbg.info("component update during restart: %s", m))
+    if status is None:
+        return
+    if status["state"] in ("updated", "current"):
+        _dbg.info("component update during restart: %s", status["note"])
+        return
+    if comp_pending.get("repair"):
+        _dbg.warning("component repair during restart: %s", status["note"])
+        return
+    _dbg.warning("component update during restart: %s; rolling the update back",
+                 status["note"])
+    _roll_back_during_restart()
+
+
+def _roll_back_during_restart() -> None:
+    """Roll the applied update back (``updater.rollback_last``: components and
+    venv, runtime, code). A rollback that cannot be done is logged at ERROR
+    with what it left; the restart still proceeds."""
+    from localm import _version, updater
+    from localm.bugreport import LocalmError
+    from localm.debuglog import logger as _dbg
+    try:
+        updater.rollback_last(say=lambda m: _dbg.info("rollback during restart: %s", m))
+        _dbg.info("rollback during restart: localm %s and its parts were put back",
+                  _version.read_version())
+    except LocalmError as e:
+        _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
+                   "localm %s is installed and Settings > Updates shows which parts "
+                   "disagree", e.summary, e.reason, _version.read_version())
+
+
+# Seconds a server started by a restart of an older localm answers before it
+# restarts itself to carry out this version's update steps (see
+# _restart_for_pending_update_steps): long enough for that build's update
+# watchdog, which polls every 2 s, to see it come up.
+UPDATE_STEPS_RESTART_DELAY_S = 10.0
+
+
+def _restart_for_pending_update_steps(app) -> None:
+    """When ``LOCALM_FINISH_UPDATE_AFTER_START`` is set (``cli/_core.py``: a
+    restart by an older localm re-executed this server and this version's
+    runtime or components are not installed yet), remove it and request a
+    restart :data:`UPDATE_STEPS_RESTART_DELAY_S` seconds from now, which
+    carries the steps out (:func:`_finish_pending_runtime_update`)."""
+    import os
+    if not os.environ.pop("LOCALM_FINISH_UPDATE_AFTER_START", None):
+        return
+    from localm.debuglog import logger as _dbg
+    _dbg.info("restarting in %.0f s to install this version's native runtime and "
+              "components", UPDATE_STEPS_RESTART_DELAY_S)
+    _request_restart(delay=UPDATE_STEPS_RESTART_DELAY_S,
+                     port=getattr(app.state, "instance_port", None),
+                     instance_id=getattr(app.state, "instance_id", None))
+
+
+def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
+                   update_steps_done: bool = False) -> None:
     """Remove this instance's own registry entry, then re-exec this server with
     os.execv. The re-exec'd process registers under a new instance id. When
-    os.execv raises, the entry is written back and the error re-raised."""
+    os.execv raises, the entry is written back and the error re-raised.
+
+    With *update_steps_done* (this restart carried out the pending update
+    steps, :func:`_finish_pending_runtime_update`), ``LOCALM_UPDATE_STEPS_DONE``
+    is set to the installed version for the re-exec'd process, whose start-up
+    then does not repeat them; it is removed again when os.execv raises."""
     import os
     import sys
 
-    from localm import instances
+    from localm import _version, instances
+    if update_steps_done:
+        os.environ["LOCALM_UPDATE_STEPS_DONE"] = _version.read_version()
     removed = None
     try:
         removed = instances.unregister_own(instance_id)
@@ -5285,6 +5406,7 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
     try:
         os.execv(sys.executable, _execv_argv(_restart_argv(port)))
     except BaseException:
+        os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
         try:
             instances.restore_own(removed)
         except Exception:
@@ -5446,7 +5568,7 @@ def _make_lifespan():
         # diagnostics (_diagnostics_allowed) or explicitly forced it on
         # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely.
         # Skipped under pytest so no thread lingers.
-        hang_stop = hang_thread = None
+        hang_stop = hang_thread = hang_path = None
         from localm.debuglog import (
             hang_watchdog_active as _hw_active,
             hang_watchdog_verbose as _hw_verbose,
@@ -5456,7 +5578,8 @@ def _make_lifespan():
         if (_hw_active() and (_hw_verbose() or _diagnostics_allowed())
                 and "pytest" not in sys.modules):
             try:
-                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())
+                hang_path = _hw_path()
+                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), hang_path)
                 if _hw_verbose():
                     # Explicit opt-in extras: asyncio debug logs any single callback
                     # that hogs the loop past the threshold (names the culprit at a
@@ -5468,6 +5591,30 @@ def _make_lifespan():
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang watchdog startup failed (continuing): %s", e)
+
+        # Stall watch: a native dump on a GIL-held stall plus an in-memory record
+        # of every stall (kind, length, code location) for GET /api/activity.
+        # The raw dump goes to the hang trace file only under the stack-dump
+        # thread's gate above; otherwise it stays in memory. Skipped under pytest
+        # and with LOCALM_HANG_WATCHDOG=0.
+        stall_watch = None
+        if _hw_active() and "pytest" not in sys.modules:
+            try:
+                from localm.inference import _stall_watch as _sw
+                trace_sink = (_stall_trace_writer(
+                    (lambda: hang_path) if hang_path is not None else _hw_path)
+                    if (_hw_verbose() or _diagnostics_allowed()) else None)
+                stall_watch = _sw.StallWatch(
+                    threshold=_hw_secs(),
+                    heartbeat_gap=lambda: (
+                        None if _hb_monotonic is None
+                        else time.monotonic() - _hb_monotonic),
+                    loop_thread=threading.get_ident(),
+                    trace_sink=trace_sink).start()
+                _sw.set_active(stall_watch)
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("stall watch startup failed (continuing without it): %s", e)
 
         # Executor thread-pool saturation watch: a separate off-loop daemon
         # thread, always on (unlike the hang watchdog it sits beside, it logs
@@ -5591,6 +5738,8 @@ def _make_lifespan():
         # than during the synchronous CLI startup sequence so a per-candidate
         # HF lookup never delays accepting connections. Best-effort, logged
         # only; skipped under pytest like its siblings above.
+        _restart_for_pending_update_steps(app)
+
         mmproj_task = None
         if "pytest" not in sys.modules:
             try:
@@ -5623,6 +5772,10 @@ def _make_lifespan():
                 sat_stop.set()
                 if sat_thread is not None:
                     sat_thread.join(timeout=2)
+            if stall_watch is not None:
+                from localm.inference import _stall_watch as _sw
+                _sw.set_active(None)
+                stall_watch.stop(timeout=2)
             if hang_alarm is not None:
                 hang_alarm.stop()
                 # Retire this lifespan's alarm as the process's restart authority.

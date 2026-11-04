@@ -343,6 +343,30 @@ def test_gui_load_route_loads_an_embedding_entry_as_chat_once_confirmed(monkeypa
     assert switched == [name]
 
 
+def test_gui_load_route_returns_a_busy_confirm_after_as_chat_and_forwards_force(monkeypatch):
+    reg = _registry()
+    monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+    calls = []
+    busy = {"status": "confirm_required", "model": "emb", "detail": "needs to free 'x'"}
+
+    async def switch_model(model, **kw):
+        calls.append((model, kw))
+        return {"status": "loaded", "model": model} if kw.get("force") else busy
+
+    monkeypatch.setattr("localm.model_manager.registry.set_model_type",
+                        lambda name, kind: True)
+    app = FastAPI()
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "aaa-working")
+    with TestClient(app) as client:
+        first = client.post("/api/models/load", json={"model": "emb", "as_chat": True})
+        second = client.post("/api/models/load",
+                             json={"model": "emb", "as_chat": True, "force": True})
+    assert first.json() == busy
+    assert second.json()["status"] == "loaded"
+    assert calls == [("emb", {}), ("emb", {"force": True})]
+
+
 def test_gui_load_route_does_not_load_when_marking_as_chat_fails(monkeypatch):
     client, switched, _ = _gui_client(monkeypatch)
     monkeypatch.setattr("localm.model_manager.registry.set_model_type",

@@ -318,6 +318,15 @@ def register(app: FastAPI, ctx) -> None:
         info["available"] = True
         return info
 
+    def _probes_held(fn, *args, **kwargs):
+        """Call *fn* with the GPU meter's torch probe children held
+        (``discover.torch_probes_held``): while an update or rollback replaces the
+        install's files, a probe child would run from a half-replaced tree and
+        hold PyTorch's libraries. Blocks: call it off the event loop."""
+        from localm import discover
+        with discover.torch_probes_held():
+            return fn(*args, **kwargs)
+
     def _restart_after_apply(res: dict) -> None:
         """Restart in place after a successful apply so the swapped code loads,
         except for a setup-class update, which needs setup.bat re-run by the user.
@@ -386,7 +395,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
             res = await asyncio.to_thread(
-                updater.apply, asset["id"], signature=rel.get("signature"),
+                _probes_held, updater.apply, asset["id"], signature=rel.get("signature"),
                 target_version=rel["version"], allow_unverified=allow_unverified,
                 expect_sha256=sha256, defer_runtime=True)
         except updater.UnverifiedBuild as e:
@@ -447,7 +456,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
             res = await asyncio.to_thread(
-                updater.apply, asset["id"], signature=info.get("signature"),
+                _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
                 defer_runtime=True)
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
@@ -459,6 +468,50 @@ def register(app: FastAPI, ctx) -> None:
         res["available"] = True
         _restart_after_apply(res)
         return res
+
+    # -----------------------------------------------------------------------
+    #  Installed parts: which version each part is at, and the repair
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/update/parts", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def update_parts_ep(request: Request):
+        """Which version each part of the install is at against the installed
+        localm version (``updater_parts.installed_parts``): ``{app,
+        install_record, install_record_matches, deps_problems, runtime,
+        components, problems, consistent, last_steps}``. Read-only.
+        ``problems`` and each ``last_steps`` note are path-scrubbed for a caller
+        other than the local operator."""
+        from localm import updater_parts
+        parts = await asyncio.to_thread(updater_parts.installed_parts)
+        fmt = _hs.path_formatter(request)
+        parts["problems"] = [fmt(p) for p in parts["problems"]]
+        for step in parts["last_steps"]:
+            step["note"] = fmt(step["note"])
+        return parts
+
+    @app.post("/api/update/repair", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def update_repair_ep(request: Request):
+        """Bring every part of the install to the installed localm version
+        (``updater_parts.repair``): the dependencies now, the native runtime and
+        the components during the restart that follows. OWNER-only. Returns
+        ``{repaired, notes, restarting}``, or ``{repaired: false, error}`` when a
+        step failed (the dependencies are put back as they were)."""
+        from localm import updater_parts
+        from localm.bugreport import LocalmError
+        if not _hs.caller_is_operator(request):
+            raise HTTPException(
+                403, "Repairing the install requires an owner (admin) key: it reinstalls "
+                "localm's packages and native runtime.")
+        try:
+            res = await asyncio.to_thread(_probes_held, updater_parts.repair, defer=True)
+        except LocalmError as e:
+            return {"repaired": False, "error": format_localm_error(e)}
+        out = {"repaired": True, "notes": res["notes"], "restarting": False}
+        if res["restart_needed"]:
+            _request_restart(port=getattr(app.state, "instance_port", None),
+                             instance_id=getattr(app.state, "instance_id", None))
+            out["restarting"] = True
+        return out
 
     # -----------------------------------------------------------------------
     #  Update rollback: restore the previous build (owner-only)
@@ -499,10 +552,9 @@ def register(app: FastAPI, ctx) -> None:
         watchdog's failure action IS a rollback, so arming it here would answer a
         failed rollback with another one.
 
-        LIMIT: this restores the previous build's FILES, the same as the CLI. It
-        does not undo a deps-class update's package installs, and the class of the
-        last apply is not recorded anywhere, so it cannot warn about that case.
-        Only open mode or an owner key reaches this route, so its reply (including
+        Restores every part the update replaced, the same as the CLI: the files,
+        the venv as it was before the update's dependency step, the native runtime
+        and the components (``updater.rollback_last``). Only open mode or an owner key reaches this route, so its reply (including
         the ``backup`` path and error texts) is never path-scrubbed."""
         from localm import updater
         from localm.bugreport import LocalmError
@@ -515,7 +567,7 @@ def register(app: FastAPI, ctx) -> None:
         # back. rollback_info() is read-only and never calls rollback_last.
         target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
         try:
-            res = await asyncio.to_thread(updater.rollback_last)
+            res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:
         # A precondition failure, so nothing was touched: either there is no backup,
         # or an update/rollback already holds the single-flight lock. Kept distinct

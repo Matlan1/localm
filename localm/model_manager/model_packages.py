@@ -299,7 +299,8 @@ def plan(modules: list, *, run: Callable = subprocess.run) -> Plan:
         cmd = [uv, "pip", "compile", "-", "-c", str(constraints), "--generate-hashes",
                "--no-header", "--no-annotate", "--quiet", *_index_args(backend)]
         try:
-            proc = run(cmd, input=requested, capture_output=True, text=True,
+            proc = run(cmd, input=requested, capture_output=True, encoding="utf-8",
+                       errors="replace",
                        timeout=_PLAN_TIMEOUT_S, **{k: v for k, v in _run_kwargs().items()
                                                       if k != "stdin"})
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -366,8 +367,8 @@ def _stream(cmd: list, on_progress: ProgressCb,
     code, output)``; a run still going after *timeout* seconds is killed and
     reported with a nonzero code and a closing line saying so."""
     kw = _run_kwargs()
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1, **kw)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            encoding="utf-8", errors="replace", bufsize=1, **kw)
     expired = threading.Event()
 
     def kill() -> None:
@@ -393,12 +394,13 @@ def _stream(cmd: list, on_progress: ProgressCb,
 
 
 def _imports_fail(modules: list) -> Optional[str]:
-    """None when every module in *modules* imports in a fresh interpreter, else its error."""
+    """None when every module in *modules* imports in a fresh interpreter that does not
+    put the current folder on its path, else its error."""
     kw = _run_kwargs()
     try:
-        proc = subprocess.run([sys.executable, "-c", _VERIFY, *modules], capture_output=True,
-                              text=True, timeout=_IMPORT_TIMEOUT_S, **{k: v for k, v in kw.items()
-                                                                       if k != "stdin"})
+        proc = subprocess.run([sys.executable, "-P", "-c", _VERIFY, *modules], capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=_IMPORT_TIMEOUT_S,
+                              **{k: v for k, v in kw.items() if k != "stdin"})
     except (OSError, subprocess.TimeoutExpired) as e:
         return str(e)
     return None if proc.returncode == 0 else _tail(proc.stderr or proc.stdout)
@@ -418,6 +420,12 @@ def install(p: Plan, *, on_progress: ProgressCb = None) -> InstallResult:
 
 
 def _install(p: Plan, on_progress: ProgressCb) -> InstallResult:
+    present = installed_distributions()
+    already = [n for n, _v in p.adds if _canon(n) in present]
+    if already:
+        return InstallResult(ok=False, error=(
+            f"This install list is out of date: {', '.join(already)} "
+            f"{'is' if len(already) == 1 else 'are'} installed now. Open the list again."))
     try:
         check_network(p.torch_backend)
         uv = _uv()
@@ -434,7 +442,11 @@ def _install(p: Plan, on_progress: ProgressCb) -> InstallResult:
             try:
                 rc, out = _stream(cmd, on_progress)
             except OSError as e:
-                return InstallResult(ok=False, error=f"uv could not be started: {e}")
+                return InstallResult(ok=False, error=f"uv could not be started: {e}"
+                                     + _remove_added(uv, p, on_progress))
+            except Exception as e:
+                return InstallResult(ok=False, error=f"the install stopped unexpectedly: {e}"
+                                     + _remove_added(uv, p, on_progress))
         if rc != 0:
             error = "uv could not install the packages: " + _tail(out)
             return InstallResult(ok=False, error=error + _remove_added(uv, p, on_progress))
@@ -458,8 +470,11 @@ def _remove_added(uv: str, p: Plan, on_progress: ProgressCb) -> str:
     names = [n for n, _v in p.adds if _canon(n) in present]
     if not names:
         return ""
-    rc, out = _stream([uv, "pip", "uninstall", "--no-config", "--python", sys.executable,
-                       *names], on_progress)
+    try:
+        rc, out = _stream([uv, "pip", "uninstall", "--no-config", "--python", sys.executable,
+                           *names], on_progress)
+    except OSError as e:
+        return f"; removing the packages added failed too: {e}"
     return ("; the packages added were removed again" if rc == 0
             else "; removing the packages added failed too: " + _tail(out))
 

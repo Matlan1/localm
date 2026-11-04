@@ -27,7 +27,7 @@ import re
 import sys
 import warnings
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Collection, Iterable, Optional
 
 CONFIG_FILES = ("config.json", "tokenizer_config.json")
 
@@ -271,13 +271,21 @@ def package_label(module: str) -> str:
     return _NAMES.get(module, module.replace("_", "-"))
 
 
-def refusal_for(model_name: str, modules: list[str]) -> str:
+def refusal_for(model_name: str, modules: list[str],
+                addable: Optional[Collection[str]] = None) -> str:
     """The sentence that says model *model_name* needs the packages behind
     *modules*, which this install lacks, and what the user can do about it:
     repair the install (a package localm ships), add them with
     ``localm install-packages`` or the Models page (every other package localm
     can add here), or nothing (a package localm cannot add, with the reason, or
-    one it ships on other platforms but not on this one)."""
+    one it ships on other platforms but not on this one).
+
+    *addable* is the set of modules ``model_packages.folder_state`` offers to add
+    for this model. When given, the install is offered only if every module localm
+    could otherwise add is in it; a module outside it (needed by the model's
+    built-in support, or imported behind a guard) gets a sentence saying localm
+    cannot add it for this model, because the install action would find nothing
+    to do. None means the caller already derived *modules* from ``folder_state``."""
     from localm.model_manager import model_packages
     labels = ", ".join(package_label(m) for m in modules)
     noun = "package" if len(modules) == 1 else "packages"
@@ -303,9 +311,17 @@ def refusal_for(model_name: str, modules: list[str]) -> str:
                 f"{labels}, and localm cannot add "
                 f"{'it' if len(blocked) == 1 else 'them'} to its environment ({reasons}). "
                 "localm cannot run this model.")
-    them = "it" if len(others) == 1 else "them"
     noun = "package" if len(others) == 1 else "packages"
     labels = ", ".join(package_label(m) for m in others)
+    unreachable = [m for m in others if addable is not None and m not in addable]
+    if unreachable:
+        return (f"{model_name} cannot be loaded: its own code needs the Python {noun} {labels}, "
+                f"which this install lacks, and localm cannot add "
+                f"{'it' if len(others) == 1 else 'them'} for this model: localm adds packages only "
+                "for modules it finds imported by the model's bundled code, and it finds no such "
+                f"import for {', '.join(package_label(m) for m in unreachable)}. "
+                "localm cannot run this model.")
+    them = "it" if len(others) == 1 else "them"
     repair = (" It also needs " + ", ".join(package_label(m) for m in shipped)
               + ", which localm normally includes: update localm or run its setup again first."
               if shipped else "")
@@ -340,10 +356,12 @@ def _module_for_library(display: str) -> str:
     return _LIBRARY_MODULES.get(name, name.replace("-", "_").replace(" ", ""))
 
 
-def rewrite_import_error(model_name: str, text: str) -> Optional[str]:
+def rewrite_import_error(model_name: str, text: str, folder: Optional[str] = None) -> Optional[str]:
     """The localm sentence for a load failure whose *text* is a missing-package
     ImportError (transformers' remote-code check or a bare ``No module named``),
-    or None when *text* is neither. Never contains pip instructions."""
+    or None when *text* is neither. Never contains pip instructions. The install
+    is offered only when the model *folder* is given and
+    ``model_packages.folder_state`` lists the missing package as one it can add."""
     match = _REQUIRES_PACKAGES.search(text)
     if match:
         modules = [m for m in re.split(r"[,\s]+", match.group(1)) if m]
@@ -356,7 +374,19 @@ def rewrite_import_error(model_name: str, text: str) -> Optional[str]:
             modules = [_module_for_library(library.group(1))]
     if not modules:
         return None
-    return refusal_for(model_name, modules)
+    return refusal_for(model_name, modules, _addable_for(folder))
+
+
+def _addable_for(folder: Optional[str]) -> set[str]:
+    """The modules ``folder_state`` offers to add for the model *folder*; empty
+    without a folder or when the folder cannot be examined."""
+    if not folder:
+        return set()
+    from localm.model_manager import model_packages
+    try:
+        return set(model_packages.folder_state(Path(folder)).addable)
+    except (OSError, ValueError):
+        return set()
 
 
 def strip_pip_instructions(text: str) -> str:

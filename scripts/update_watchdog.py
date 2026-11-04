@@ -133,7 +133,19 @@ def _load_rollback_module(install_root: Path):
         return None
 
 
-def _invoke_rollback(install_root: Path, log_path: Optional[Path]) -> int:
+def _invoke_rollback(install_root: Path, log_path: Optional[Path],
+                     code_root: Optional[Path] = None) -> int:
+    """Run the rollback of *code_root* (the tree of the build that applied the
+    update, ``--code-root``) when it has one, else the install's, and map its exit
+    code to this watchdog's."""
+    rb = _load_rollback_module(code_root) if code_root else None
+    if rb is not None:
+        try:
+            rc = int(rb.main(["--yes"], install_root=install_root, code_root=code_root))
+        except Exception as e:
+            _log(log_path, f"rollback raised an unexpected error: {e}")
+            return EXIT_ROLLBACK_FAILED
+        return _rollback_result(rc, log_path)
     rb = _load_rollback_module(install_root)
     if rb is None:
         _log(log_path,
@@ -147,6 +159,10 @@ def _invoke_rollback(install_root: Path, log_path: Optional[Path]) -> int:
     except Exception as e:
         _log(log_path, f"rollback raised an unexpected error: {e}")
         return EXIT_ROLLBACK_FAILED
+    return _rollback_result(rc, log_path)
+
+
+def _rollback_result(rc: int, log_path: Optional[Path]) -> int:
     if rc == 0:
         _log(log_path, "rolled back to the previous build successfully")
         return EXIT_ROLLED_BACK
@@ -164,6 +180,9 @@ def main(argv=None) -> int:
     ap.add_argument("--scheme", default="http", choices=("http", "https"))
     ap.add_argument("--expect-version", required=True)
     ap.add_argument("--install-root", required=True, type=Path)
+    ap.add_argument("--code-root", type=Path, default=None,
+                    help="the localm tree of the build that applied the update; its "
+                         "rollback runs instead of the install's")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     ap.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL_S)
     ap.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT_S)
@@ -188,7 +207,8 @@ def main(argv=None) -> int:
         code = EXIT_HEALTHY
     else:
         _log(args.log_file, "health check failed - invoking automatic rollback")
-        code = _invoke_rollback(install_root, args.log_file)
+        code = _invoke_rollback(install_root, args.log_file,
+                                args.code_root.resolve() if args.code_root else None)
 
     _log(args.log_file, f"watchdog exiting with code {code}")
     return code

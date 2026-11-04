@@ -245,6 +245,7 @@ def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch
     # Force the cache stale so the NEXT _vram() call starts a fresh probe,
     # and make THAT probe fail outright.
     monkeypatch.setattr(sysstats, "_vram_last_at", 0.0)
+    monkeypatch.setattr(sysstats, "_vram_full_at", None)
     with patch("localm.discover.vram_capacity", side_effect=RuntimeError("boom")):
         assert _vram() == good, "must keep serving the last-known-good reading"
         deadline = time.monotonic() + 2
@@ -1580,3 +1581,257 @@ def test_prewarm_starts_every_probe_and_survives_a_failure(monkeypatch):
     monkeypatch.setattr(sysstats, "_gpu_util", lambda: calls.append("gpu"))
     sysstats.prewarm()
     assert calls == ["cpu", "vram", "gpu"]
+
+
+class TestNvidiaSmiUsedByBus:
+    """The nvidia-smi source of the meter's torch-free refresh, run against a
+    real stand-in executable."""
+
+    def _smi(self, monkeypatch, tmp_path, stdout, rc=0):
+        from localm import sysprog
+        body = tmp_path / "answer.txt"
+        body.write_text(stdout, encoding="utf-8")
+        if sys.platform == "win32":
+            exe = tmp_path / "nvidia-smi.cmd"
+            exe.write_text(f'@echo off\r\ntype "{body}"\r\nexit /b {rc}\r\n',
+                           encoding="utf-8")
+        else:
+            exe = tmp_path / "nvidia-smi"
+            exe.write_text(f'#!/bin/sh\ncat "{body}"\nexit {rc}\n', encoding="utf-8")
+            exe.chmod(0o755)
+        monkeypatch.setattr(sysprog, "find", lambda name: str(exe))
+
+    def test_every_board_is_keyed_by_its_pci_bus_with_total_and_used(
+            self, monkeypatch, tmp_path):
+        self._smi(monkeypatch, tmp_path,
+                  "00000000:01:00.0, 24564, 20000\n0000:2D:00.0, 8192, 8192\n")
+        assert sysstats._nvidia_smi_used_by_bus() == {
+            1: (24564 * 1024 ** 2, 4564 * 1024 ** 2),
+            0x2D: (8192 * 1024 ** 2, 0)}
+
+    def test_a_malformed_line_does_not_hide_the_others(self, monkeypatch, tmp_path):
+        self._smi(monkeypatch, tmp_path,
+                  "garbage\n00000000:01:00.0, [N/A], 1\n00000000:03:00.0, 100, 40\n")
+        assert sysstats._nvidia_smi_used_by_bus() == {
+            3: (100 * 1024 ** 2, 60 * 1024 ** 2)}
+
+    def test_a_failing_nvidia_smi_answers_nothing(self, monkeypatch, tmp_path):
+        self._smi(monkeypatch, tmp_path, "00000000:01:00.0, 100, 40\n", rc=9)
+        assert sysstats._nvidia_smi_used_by_bus() == {}
+
+    def test_no_nvidia_smi_answers_nothing(self, monkeypatch):
+        from localm import sysprog
+        monkeypatch.setattr(sysprog, "find", lambda name: None)
+        assert sysstats._nvidia_smi_used_by_bus() == {}
+
+
+_METER_STUB_TORCH = '''
+import os
+with open(os.environ["PROBE_COUNT_FILE"], "a", encoding="utf-8") as _fh:
+    _fh.write("import\\n")
+_N = int(os.environ.get("PROBE_STUB_DEVICES", "1"))
+
+
+class _Props:
+    def __init__(self, i):
+        self.pci_bus_id = 3 + i
+        self.is_integrated = 0
+
+
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+
+    @staticmethod
+    def device_count():
+        return _N
+
+    @staticmethod
+    def mem_get_info(i):
+        return (6 * 2**30, 8 * 2**30)
+
+    @staticmethod
+    def get_device_name(i):
+        return "STUB GPU %d" % i
+
+    @staticmethod
+    def get_device_properties(i):
+        return _Props(i)
+
+
+cuda = _Cuda()
+'''
+
+
+class TestMeterTorchSpawns:
+    """The meter's refresh must not start a torch child process every round.
+
+    The real probe child (``python -m localm._torch_gpu_probe``) runs against a
+    stub ``torch`` that records each import, so a spawn is counted, not inferred."""
+
+    def _meter(self, monkeypatch, tmp_path, *, used=2 * GB):
+        import pathlib
+
+        from localm import discover, gpu_usage
+        stub_dir = tmp_path / "stub"
+        stub_dir.mkdir()
+        (stub_dir / "torch.py").write_text(_METER_STUB_TORCH, encoding="utf-8")
+        repo = str(pathlib.Path(discover.__file__).resolve().parent.parent)
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(stub_dir), repo]))
+        self.count_file = tmp_path / "imports.txt"
+        monkeypatch.setenv("PROBE_COUNT_FILE", str(self.count_file))
+        monkeypatch.setenv("PROBE_STUB_DEVICES", "1")
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        from localm import sysprog
+        monkeypatch.setattr(sysprog, "find", lambda name: None)
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: [])
+        self.used = {"bytes": used}
+        monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped", lambda: False)
+        monkeypatch.setattr(
+            gpu_usage, "device_global_used_bytes",
+            lambda gpus: {g["index"]: self.used["bytes"] for g in gpus})
+        self.now = [1000.0]
+        clock = self.now
+
+        class _Clock:
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+            @staticmethod
+            def monotonic():
+                return clock[0]
+        monkeypatch.setattr(sysstats, "time", _Clock())
+
+    def _round(self, seconds=10.0):
+        """One meter refresh *seconds* after the previous one."""
+        self.now[0] += seconds
+        sysstats._vram_probe(sysstats._vram_probe_epoch)
+        return sysstats._vram_last
+
+    def _spawns(self):
+        if not self.count_file.exists():
+            return 0
+        return len(self.count_file.read_text(encoding="utf-8").splitlines())
+
+    def test_eight_rounds_start_one_torch_child_and_still_follow_usage(
+            self, monkeypatch, tmp_path):
+        self._meter(monkeypatch, tmp_path)
+        first = self._round()
+        assert first == {"vram": {"total": 8 * GB, "used": 2 * GB, "percent": 25.0}}
+        seen = []
+        for used in (3, 4, 5, 6, 7, 1, 2):
+            self.used["bytes"] = used * GB
+            seen.append(self._round()["vram"]["used"])
+        assert seen == [u * GB for u in (3, 4, 5, 6, 7, 1, 2)]
+        assert self._spawns() == 1
+
+    def test_the_device_list_is_read_again_after_the_topology_interval(
+            self, monkeypatch, tmp_path):
+        self._meter(monkeypatch, tmp_path)
+        assert "devices" not in self._round()["vram"]
+        monkeypatch.setenv("PROBE_STUB_DEVICES", "2")
+        before = self._round(sysstats._VRAM_TOPOLOGY_INTERVAL_S - 20)["vram"]
+        assert "devices" not in before
+        assert self._spawns() == 1
+        grown = self._round(20)["vram"]
+        assert self._spawns() == 2
+        assert [d["index"] for d in grown["devices"]] == [0, 1]
+        assert grown["total"] == 16 * GB
+
+    def test_a_device_without_a_torch_free_source_waits_for_the_uncovered_interval(
+            self, monkeypatch, tmp_path):
+        from localm import gpu_usage
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr(sysstats, "_nvidia_smi_used_by_bus", lambda: {})
+        first = self._round()
+        assert self._spawns() == 1
+        rounds_inside = int(sysstats._VRAM_UNCOVERED_INTERVAL_S // 10) - 1
+        for _ in range(rounds_inside):
+            assert self._round() == first
+        assert self._spawns() == 1
+        self._round()
+        assert self._spawns() == 2
+
+    def test_nvidia_smi_covers_a_device_the_windows_sources_do_not(
+            self, monkeypatch, tmp_path):
+        from localm import gpu_usage
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+        board = {"used": 3 * GB}
+        monkeypatch.setattr(sysstats, "_nvidia_smi_used_by_bus",
+                            lambda: {3: (8 * GB, board["used"])})
+        assert self._round()["vram"]["used"] == 2 * GB, "the first reading is the probe's"
+        assert self._round()["vram"]["used"] == 3 * GB
+        board["used"] = 6 * GB
+        assert self._round()["vram"]["used"] == 6 * GB
+        assert self._round()["vram"]["used"] == 6 * GB
+        assert self._spawns() == 1
+
+    def test_a_torch_already_in_this_process_is_asked_every_round(
+            self, monkeypatch, tmp_path):
+        from localm import discover
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: True)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident_bounded",
+            lambda: [{"index": 0, "name": "G", "total": 8 * GB, "free": 6 * GB}])
+        full = []
+        real = sysstats._compute_vram
+        monkeypatch.setattr(sysstats, "_compute_vram",
+                            lambda: (full.append(1), real())[1])
+        for _ in range(4):
+            self._round()
+        assert len(full) == 4
+        assert self._spawns() == 0
+
+    def test_a_box_with_no_torch_device_still_follows_usage_without_torch(
+            self, monkeypatch, tmp_path):
+        from localm import discover
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setenv("PROBE_STUB_DEVICES", "0")
+        monkeypatch.setattr(
+            discover, "_windows_largest_adapter_registry_entry",
+            lambda: {"index": 0, "name": "AMD Radeon", "total": 16 * GB})
+        assert self._round()["vram"]["used"] == 2 * GB
+        seen = []
+        for used in (3, 9, 1):
+            self.used["bytes"] = used * GB
+            seen.append(self._round()["vram"]["used"])
+        assert seen == [3 * GB, 9 * GB, 1 * GB]
+        assert self._spawns() == 1
+
+    def test_a_card_with_no_source_at_all_keeps_the_meter_on_the_old_reading(
+            self, monkeypatch, tmp_path):
+        from localm import gpu_usage
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr(sysstats, "_nvidia_smi_used_by_bus", lambda: {})
+        self._round()
+        devices = [{"index": 0, "name": "G", "total": 8 * GB, "free": 6 * GB,
+                    "free_scope": FREE_SCOPE_DEVICE}]
+        assert sysstats._fresh_device_readings(devices) is None
+        two = devices + [{"index": 1, "name": "H", "total": 8 * GB, "free": 6 * GB,
+                          "free_scope": FREE_SCOPE_DEVICE, "pci_bus_id": 4}]
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes",
+                            lambda gpus: {0: 1 * GB})
+        assert sysstats._fresh_device_readings(two) is None, (
+            "a device no source re-read was passed off as current")
+
+    def test_a_reading_that_was_not_ok_is_asked_for_again_next_round(
+            self, monkeypatch, tmp_path):
+        from localm.discover import GPU_PROBE_TIMEOUT
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr("localm.discover.vram_capacity",
+                            _status_aware({"total": 8 * GB}, GPU_PROBE_TIMEOUT))
+        calls = []
+        real = sysstats._compute_vram
+        monkeypatch.setattr(sysstats, "_compute_vram",
+                            lambda: (calls.append(1), real())[1])
+        for _ in range(3):
+            self._round()
+        assert sysstats._vram_full_at is None
+        assert len(calls) == 3
