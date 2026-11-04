@@ -16,6 +16,10 @@ from fastapi import HTTPException
 
 from localm.memory import MemoryRecord, MemoryStore, PendingCorrection
 from localm.plugins.builtin.memory import plug
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 NOW = 1_700_000_000.0
 DAY = 86400.0

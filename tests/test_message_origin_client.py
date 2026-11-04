@@ -34,6 +34,10 @@ from localm.inference.http_server import (
 )
 from localm.inference.protocol import ChatRequest, Message
 from localm.plugins.builtin.memory.plug import _recall_query
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 # The GUI's compaction request (compactConversation in static/app/chat.js).
 EXCERPT = ("USER: help me fix my rust cargo build\n\n"

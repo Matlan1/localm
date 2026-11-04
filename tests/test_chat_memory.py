@@ -18,6 +18,10 @@ from fastapi.testclient import TestClient
 
 from localm.memory import MemoryRecord
 from localm.plugins.builtin.memory import plug
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 
 @pytest.fixture
