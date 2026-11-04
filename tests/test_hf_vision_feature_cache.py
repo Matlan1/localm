@@ -113,6 +113,7 @@ def _worker(model, processor, *, cache=True):
     worker._supports_image = True
     worker._supports_audio = False
     worker._loaded = True
+    worker._expert_store = None
     worker.context_capacity = 512
     worker.last_finish_reason = "stop"
     worker._vision_cache = hfmod._install_vision_feature_cache(model) if cache else None
