@@ -40,6 +40,19 @@ function nmSave(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
 }
 
+/** Replaces *from* with *to* wherever *choice* ({slot: name} models and
+ * {name} LoRAs) names it. Returns true when anything changed. */
+function nmRenamed(choice, from, to) {
+  let changed = false;
+  for (const [slot, name] of Object.entries(choice.models || {})) {
+    if (name === from) { choice.models[slot] = to; changed = true; }
+  }
+  for (const lora of choice.loras || []) {
+    if (lora && lora.name === from) { lora.name = to; changed = true; }
+  }
+  return changed;
+}
+
 function nmStem(value) {
   return String(value || "").trim().toLowerCase().replace(/\.(safetensors|gguf|ckpt|sft|pt)$/, "");
 }
@@ -101,6 +114,10 @@ export function createNativeModelPicker({ media, prefix, mountId, onData }) {
   let seq = 0;
 
   const persist = () => nmSave(storeKey, state);
+
+  window.addEventListener("localm:model-renamed", (e) => {
+    if (nmRenamed(state, e.detail.from, e.detail.to)) persist();
+  });
 
   const query = () => {
     const q = new URLSearchParams();
@@ -442,6 +459,10 @@ export function createMusicModelPicker({ mountId }) {
   const storeKey = "localm.nativeModels.music";
   let state = nmLoad(storeKey, {});
   let data = null;
+
+  window.addEventListener("localm:model-renamed", (e) => {
+    if (nmRenamed({ models: state }, e.detail.from, e.detail.to)) nmSave(storeKey, state);
+  });
 
   async function refresh() {
     const mount = document.getElementById(mountId);

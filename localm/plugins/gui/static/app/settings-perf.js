@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
@@ -2818,6 +2818,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let audioRejected = false;
   let mediaOffer = null;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
+  let pinGone = false;   // the chat's pinned model is no longer registered
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
   let serverCompacted = false;
@@ -3041,6 +3042,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
               { model: modelName })
           : t("chat.requestFailed", { message: e.message }), true);
       }
+    } else if (pinnedModel && e.status === 404 && /not registered/i.test(e.detail || "")) {
+      pinGone = true;
     } else {
       requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
@@ -3054,6 +3057,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // marks the conversation as server-compacted unless the reply failed.
   if (serverCompacted && readOk && finishReason !== "error") conv.serverCompacted = true;
   const outcome = { stopped: aborted, liveRow };
+  if (pinGone) {
+    renderChat();
+    outcome.liveRow = showPinnedGone(conv);
+    return outcome;
+  }
 
   // User pressed Stop (BUG-13 / U-STOP). BUG-13's original bug was that the
   // AbortError catch only suppressed the error toast and then fell straight
@@ -3719,6 +3727,11 @@ export async function sendChat() {
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
+
+  if (!(await resolvePinnedModel(conv))) {
+    showPinnedGone(conv);
+    return;
+  }
 
   const item = {
     text,

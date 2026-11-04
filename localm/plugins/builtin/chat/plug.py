@@ -256,6 +256,48 @@ async def conversation_delete(conv_id: str):
     return {"status": "absent", "id": conv_id}
 
 
+def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
+    """Rewrite ``pinned_model`` from *old_name* to *new_name* in every stored
+    conversation that carries it.
+
+    A rewritten conversation gets a fresh ``updated_at`` so that a browser
+    holding an older cached copy takes this one rather than uploading its own
+    over it. Returns ``(rewritten, failed)``: the ids rewritten, and the ids of
+    files that name *old_name* but could not be rewritten. A file that does not
+    contain *old_name* is not parsed. Works in every session mode: it edits
+    files that already exist and creates none."""
+    import time
+
+    chats_dir = _home() / "chats"
+    if not chats_dir.is_dir():
+        return [], []
+    needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
+    rewritten: list = []
+    failed: list = []
+    for p in sorted(chats_dir.glob("*.json")):
+        try:
+            text = p.read_text(encoding="utf-8")
+            if needle not in text:
+                continue
+            data = json.loads(text)
+            if not isinstance(data, dict) or data.get("pinned_model") != old_name:
+                continue
+            data["pinned_model"] = new_name
+            data["updated_at"] = int(time.time() * 1000)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(p)
+            rewritten.append(p.stem)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, RecursionError) as e:
+            from localm.debuglog import logger
+            logger.warning("rename: conversation %s could not be rewritten (%s)",
+                           p.stem, type(e).__name__)
+            failed.append(p.stem)
+    return rewritten, failed
+
+
 # ------------------------------------------------------------------ #
 #  Prompt library (personas)                                          #
 # ------------------------------------------------------------------ #

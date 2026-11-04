@@ -791,9 +791,11 @@ export async function refreshModelsPage() {
         // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
         // to the user, not left in the server log alone.
         if (Array.isArray(data.notes) && data.notes.length) {
-          msg += ". " + data.notes.join(" ");
+          msg += ". " + data.notes.map((n) => String(n).replace(/\.+$/, "")).join(". ") + ".";
         }
         toast(msg);
+        window.dispatchEvent(new CustomEvent("localm:model-renamed",
+          { detail: { from: m.name, to: data.new_name || name.trim() } }));
         refreshModelsPage();
       } else toast(data.detail || t("models.rename.failed"), true);
     };

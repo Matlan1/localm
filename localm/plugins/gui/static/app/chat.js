@@ -1261,9 +1261,11 @@ export function syncPinModelToggle(conv) {
   const note = $("pin-mismatch");
   if (note) {
     const active = modelCache.active;
-    const mismatch = !!pinned && !!active && pinned !== active;
-    note.hidden = !mismatch;
-    note.textContent = mismatch ? t("chat.pinModel.mismatch", { pinned, active }) : "";
+    const gone = !!pinned && isModelGone(pinned);
+    const mismatch = !gone && !!pinned && !!active && pinned !== active;
+    note.hidden = !(gone || mismatch);
+    note.textContent = gone ? t("chat.pinModel.gone", { pinned })
+      : mismatch ? t("chat.pinModel.mismatch", { pinned, active }) : "";
   }
 }
 
@@ -1280,6 +1282,84 @@ export function setConversationPin(on) {
   syncPinModelToggle(conv);
 }
 window.setConversationPin = setConversationPin;
+
+/** True when *name* is certainly not a registered model: the list the page
+ *  holds is known (not empty) and neither lists nor serves it. */
+export function isModelGone(name) {
+  const listed = (modelCache.models || []).map((m) => m.name);
+  return !!name && listed.length > 0 && !listed.includes(name) && name !== modelCache.active;
+}
+
+/** Whether *conv*'s pinned model can answer: true when it is not pinned or
+ *  its model is registered. A model renamed elsewhere is picked up from the
+ *  server's copy of the chat when that copy names a registered model. False
+ *  means the pinned model no longer exists. Asks the server for the registry;
+ *  when it cannot be asked, the model list already held decides. */
+export async function resolvePinnedModel(conv) {
+  const name = conv && conv.pinnedModel;
+  if (!name) return true;
+  let registered = null;
+  try {
+    const r = await fetch("/api/models", { headers: authHeaders() });
+    const data = r.ok ? await r.json() : null;
+    if (data && Array.isArray(data.models) && data.models.length) {
+      registered = new Set(data.models.map((m) => m.name));
+    }
+  } catch { /* the held list decides */ }
+  if (registered === null) return !isModelGone(name);
+  if (registered.has(name)) return true;
+  if (chat.persist && !conv._meta) {
+    try {
+      const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                            { headers: authHeaders() });
+      const stored = r.ok ? (await r.json()).pinned_model : null;
+      if (stored && registered.has(stored)) {
+        conv.pinnedModel = stored;
+        saveConversations();
+        syncPinModelToggle(conv);
+        return true;
+      }
+    } catch { /* the stored copy cannot be read; the pin is gone */ }
+  }
+  return false;
+}
+
+/** Removes the pin of *conv* and says in the chat that the model it named no
+ *  longer exists, so the person can pick another. The row is not saved with
+ *  the chat. Returns the row, or null when there is no chat on screen. */
+export function showPinnedGone(conv) {
+  const gone = conv.pinnedModel;
+  delete conv.pinnedModel;
+  saveConversations(conv);
+  syncPinModelToggle(conv);
+  const box = $("chat-messages");
+  if (!box) return null;
+  const row = el("div", "msg-row tool-event tool-notice-row");
+  row.appendChild(el("div", "msg-role", t("chat.pinGone.label")));
+  row.appendChild(el("div", "tool-notice", t("chat.pinGone.notice", { model: gone })));
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+  return row;
+}
+
+/** After a model was renamed: the chats pinned to it (in this page, its
+ *  browser copy and the server) and its avatar follow the new name. */
+export function applyModelRename(from, to) {
+  const moved = chat.conversations.filter((c) => c.pinnedModel === from);
+  for (const c of moved) c.pinnedModel = to;
+  if (moved.length) {
+    saveConversations();
+    for (const c of moved) pushConversation(c);
+  }
+  const avatars = chat.modelAvatarOverrides;
+  if (avatars && Object.prototype.hasOwnProperty.call(avatars, from)) {
+    avatars[to] = avatars[from];
+    delete avatars[from];
+  }
+  syncPinModelToggle(currentConv());
+}
+window.addEventListener("localm:model-renamed", (e) => applyModelRename(e.detail.from, e.detail.to));
+window.addEventListener("localm:models-refreshed", () => syncPinModelToggle(currentConv()));
 
 /* ---- per-conversation parameter fields ---- */
 
