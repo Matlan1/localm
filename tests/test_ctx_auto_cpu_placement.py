@@ -141,10 +141,37 @@ class TestHeadroomLeavesNoBudget:
         b, _ = make(0, vram=80 * GIB, ram=ram)
         assert b._auto_ctx_sized() == (4096, "from free RAM")
 
-    def test_a_budget_after_the_headroom_is_still_held_to_it(self, make):
+    def test_a_small_budget_after_the_headroom_keeps_the_fallback_window(self, make):
         ram = MODEL + HOST_RAM_HEADROOM_BYTES + 1500 * MIB
         b, _ = make(0, vram=80 * GIB, ram=ram)
-        assert b._auto_ctx_sized(capped=False)[0] == _ceiling(1500 * MIB, PER_TOKEN) == 12288
+        assert _ceiling(1500 * MIB, PER_TOKEN) == 12288
+        assert b._auto_ctx_sized(capped=False)[0] == b._AUTO_CTX_FALLBACK == 16384
+
+    def test_a_large_budget_after_the_headroom_is_held_to_it(self, make):
+        ram = MODEL + HOST_RAM_HEADROOM_BYTES + 4 * GIB
+        b, _ = make(0, vram=80 * GIB, ram=ram)
+        tokens = b._auto_ctx_sized(capped=False)[0]
+        assert tokens == _ceiling(4 * GIB, PER_TOKEN) > b._AUTO_CTX_FALLBACK
+
+    @pytest.mark.parametrize("per_token", [PER_TOKEN, 100_000, 4096, 1_000_000])
+    def test_the_ceiling_never_falls_as_free_ram_rises(self, make, per_token):
+        previous_tokens = previous_ceiling = -1
+        for spare in range(0, 8 * GIB, 16 * MIB):
+            b, _ = make(0, vram=80 * GIB, ram=MODEL + spare)
+            b._gguf_kv_bpt = per_token
+            tokens = b._ram_ctx_tokens(0, per_token)
+            ceiling = b._auto_ctx_sized(capped=False)[0]
+            assert tokens >= previous_tokens, f"spare {spare}"
+            assert ceiling >= previous_ceiling, f"spare {spare}"
+            previous_tokens, previous_ceiling = tokens, ceiling
+
+    @pytest.mark.parametrize("spare_mib,expected", [
+        (1900, 16384), (2048, 16384), (2060, 16384), (2150, 16384), (3072, 16384),
+        (3900, 18432)])
+    def test_the_ceiling_around_the_headroom(self, make, spare_mib, expected):
+        b, _ = make(0, vram=80 * GIB, ram=MODEL + spare_mib * MIB)
+        b._gguf_kv_bpt = 100 * 1024
+        assert b._auto_ctx_sized(capped=False)[0] == expected
 
     def test_a_partial_offload_with_a_short_headroom_keeps_its_window(self, make):
         cpu_held = 15 * BLOCK + INPUT

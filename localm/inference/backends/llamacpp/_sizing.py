@@ -2131,11 +2131,11 @@ class VramSizingMixin:
         load with *gpu_layers* on the GPU keeps there
         (:meth:`_cpu_held_weight_bytes`, the whole file when that count fails,
         plus :meth:`_cpu_draft_weight_bytes`; with no block on the GPU also the
-        recurrent state) and :data:`HOST_RAM_HEADROOM_BYTES`. When the headroom
-        leaves no budget but the weights and the cache still fit, the window is
-        sized without the headroom and capped at ``_AUTO_CTX_FALLBACK``. 0 when
-        the weights alone leave no room; None when available RAM cannot be
-        read."""
+        recurrent state) and :data:`HOST_RAM_HEADROOM_BYTES`, and never fewer
+        than fit beside the weights without the headroom, up to
+        ``_AUTO_CTX_FALLBACK``, so the answer never falls as available RAM
+        rises. 0 when the weights alone leave no room; None when available RAM
+        cannot be read."""
         from localm.sysstats import system_ram
         _total, available = system_ram()
         if available is None:
@@ -2147,10 +2147,9 @@ class VramSizingMixin:
         if gpu_layers <= 1:
             held += self._recurrent_state_vram_bytes()
         per_token = max(1, ram_per_token)
-        budget = available - held - HOST_RAM_HEADROOM_BYTES
-        if budget > 0:
-            return budget // per_token
-        return min(max(0, available - held) // per_token, self._AUTO_CTX_FALLBACK)
+        spare = max(0, available - held)
+        return max((spare - HOST_RAM_HEADROOM_BYTES) // per_token,
+                   min(spare // per_token, self._AUTO_CTX_FALLBACK))
 
     def _auto_ctx_sized(self, capped: bool = True,
                         split_budget: Optional[tuple[int, int]] = None

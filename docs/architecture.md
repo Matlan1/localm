@@ -353,6 +353,11 @@ comes back empty, the bridge carries a bounded digest of excerpts from the
 removed turns instead, and compaction never raises. Used by `localm run`
 interactive chat and by the server before a chat request that nearly fills
 the context; a client disconnect stops the server's summary generation.
+The server compacts instead of reloading the model with a larger window when
+the system prompt, the last four messages, a summary and the reply buffer fit
+the window and the request declares no window of its own (`min_context`,
+`context_reserve`); otherwise it reloads first, with at least twice the window,
+and compacts only if the reloaded window is still too small.
 The server compacts down to half the window, keeping as many recent messages
 as fit, and keeps each summary in memory per engine, keyed by a hash of the
 messages it covers: a later request that resends the same conversation gets

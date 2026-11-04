@@ -456,11 +456,23 @@ def register(app: FastAPI, ctx) -> None:
                 # would otherwise be the one to report it.
                 raise HTTPException(400, str(e)) from e
 
-            from localm.inference.compact import compactable
+            from localm.inference.compact import compactable, room_after_compaction
             capacity = engine.context_capacity()
-            wanted = _hs.context_window_wanted(
-                engine, prompt_tokens, max(req.min_context or 0, req.context_reserve or 0),
-                capacity)
+            declared = max(req.min_context or 0, req.context_reserve or 0)
+            wanted = _hs.context_window_wanted(engine, prompt_tokens, declared, capacity)
+            # A conversation compaction can bring inside the window compacts
+            # instead of growing it, unless the client declared a window.
+            if (wanted is not None and not declared
+                    and _hs._needs_compaction(capacity, prompt_tokens, messages,
+                                              encoder_decoder=_hs._engine_is_encoder_decoder(engine),
+                                              reply_reserve=_hs._engine_reply_reserve(engine))
+                    and compactable(messages)):
+                try:
+                    if await loop.run_in_executor(None, room_after_compaction, messages,
+                                                  capacity, engine.count_messages_tokens):
+                        wanted = None
+                except PretokenizerUnsafeInputError as e:
+                    raise HTTPException(400, str(e)) from e
             if wanted is not None:
                 engine = await _hs.grow_context_window(engine, wanted, on_status=say)
                 capacity = engine.context_capacity()
@@ -492,6 +504,10 @@ def register(app: FastAPI, ctx) -> None:
                             # it can carry a run of its own. This count gates the
                             # generation, so it refuses rather than estimating.
                             raise HTTPException(400, str(e)) from e
+                        wanted = _hs.context_window_wanted(engine, prompt_tokens, None, capacity)
+                        if wanted is not None:
+                            engine = await _hs.grow_context_window(engine, wanted, on_status=say)
+                            capacity = engine.context_capacity()
 
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):

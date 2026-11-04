@@ -385,6 +385,8 @@ _vram_probe_epoch = 0               # bumped by _reset_vram_probe_cache() to
                                     # retire an in-flight probe; read (never
                                     # assigned) by _vram_probe. See that
                                     # function and _reset_vram_probe_cache.
+_vram_devices_shown: list | None = None  # the last_known_gpus() reading the meter
+                                         # last took a figure from.
 _vram_full_at: float | None = None  # monotonic time of the last list_gpus()-driven
                                     # reading that completed GPU_PROBE_OK; None
                                     # until one has, and again after one that did not.
@@ -402,9 +404,10 @@ def _reset_vram_probe_cache() -> None:
     unmocked probe from writing its reading afterwards. Bumping the epoch makes
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
-    global _vram_ready, _vram_last_is_seed, _vram_full_at
+    global _vram_ready, _vram_last_is_seed, _vram_full_at, _vram_devices_shown
     with _vram_lock:
         _vram_full_at = None
+        _vram_devices_shown = None
         _vram_last = None
         _vram_last_is_seed = False
         _vram_last_at = None
@@ -662,16 +665,20 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     is None and the reading is :func:`_cheap_vram` of the re-read devices (for
     no device: the rest of ``vram_capacity`` that needs no torch, i.e. the
     Windows registry total with its ADL/PDH figure and the native runtime's
-    registry), or None (keep the reading already cached) when they cannot be
-    re-read.
+    registry). When they cannot be re-read it is :func:`_cheap_vram` of the
+    device list itself if another caller's probe changed that list since the
+    meter last read it, else None (keep the reading already cached).
 
     The device list is ``last_known_gpus()``, so a probe any other caller took
     is picked up at once. May raise; :func:`_vram_probe` is the boundary."""
+    global _vram_devices_shown
     from localm import discover
 
     def _full() -> tuple[dict | None, str | None]:
+        global _vram_devices_shown
         _full_status.value = None
         reading = _compute_vram()
+        _vram_devices_shown = discover.last_known_gpus()
         return reading, _full_status.value
 
     with _vram_lock:
@@ -686,7 +693,10 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     if age >= limit:
         return _full()
     if fresh is None:
-        return None, None
+        if devices == _vram_devices_shown:
+            return None, None
+        _vram_devices_shown = devices
+        return _cheap_vram(devices) or None, None
     return _cheap_vram(fresh) or None, None
 
 

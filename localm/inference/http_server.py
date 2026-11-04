@@ -7580,11 +7580,11 @@ def context_overflow_detail(prompt_tokens: int, capacity: int,
 def context_window_wanted(engine, prompt_tokens, min_context, capacity) -> Optional[int]:
     """The context window *engine* should grow to for a request of
     *prompt_tokens* that asks for *min_context* tokens, given its current
-    *capacity*: the prompt plus its reply buffer (``compact.reply_reserve``)
-    when that exceeds *capacity*, raised to *min_context* when that exceeds
-    *capacity*; None when neither does, when *capacity* is not a positive
-    int, or for an encoder-decoder or diffusion model, whose window is
-    fixed."""
+    *capacity*: the prompt plus its reply buffer (``compact.reply_reserve``),
+    at least twice *capacity*, when that sum exceeds *capacity*; raised to
+    *min_context* when that exceeds *capacity*. None when neither exceeds it,
+    when *capacity* is not a positive int, or for an encoder-decoder or
+    diffusion model, whose window is fixed."""
     if not (isinstance(capacity, int) and capacity > 0):
         return None
     if _engine_is_encoder_decoder(engine) or _engine_reply_reserve(engine) is not None:
@@ -7592,7 +7592,7 @@ def context_window_wanted(engine, prompt_tokens, min_context, capacity) -> Optio
     from localm.inference.compact import reply_reserve
     wanted = 0
     if isinstance(prompt_tokens, int) and prompt_tokens + reply_reserve(capacity) > capacity:
-        wanted = prompt_tokens + reply_reserve(capacity)
+        wanted = max(prompt_tokens + reply_reserve(capacity), capacity * 2)
     if isinstance(min_context, int) and min_context > capacity:
         wanted = max(wanted, min_context)
     return wanted or None
@@ -7633,9 +7633,10 @@ async def grow_context_window(engine, tokens: int, *,
     a resident model, another request holds it (``_context_grow_due``), or an
     earlier reload for at least that window did not grow it (the engine's
     ``context_grow_failed``, set here). When the reload raises, *engine* is
-    registered again and loaded with its earlier window, and returned; the
-    error is raised only when that fails too. Logs at INFO (a failed reload
-    at WARNING)."""
+    registered again and loaded with its earlier window, and returned, the
+    active model again when it was before the reload and no other model became
+    active meanwhile; the error is raised only when that fails too. Logs at
+    INFO (a failed reload at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or can() is not True:
@@ -7657,6 +7658,7 @@ async def grow_context_window(engine, tokens: int, *,
     _dbg.info("context: '%s' has a %s-token window and a request needs %s; "
               "reloading it with a %s-token window", name, capacity, tokens, target)
     previous = getattr(engine, "ctx_reserve", 0)
+    was_active = _active_model_name == name
     try:
         await switch_engine(name, None, preempt=False, activate=False,
                             reserve_ctx=target, on_status=on_status, own_pins=1)
@@ -7671,7 +7673,9 @@ async def grow_context_window(engine, tokens: int, *,
         if _engines.get(name) is None:
             engine.unloading = False
             _engines[name] = engine
-        await switch_engine(name, None, preempt=False, activate=False, on_status=on_status)
+        await switch_engine(name, None, preempt=False,
+                            activate=was_active and _active_model_name in (None, name),
+                            on_status=on_status)
     answering = _engines.get(name)
     if answering is None or not answering.loaded:
         raise HTTPException(503, f"'{name}' could not be reloaded with a larger "
