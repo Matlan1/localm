@@ -78,13 +78,15 @@ def find_uv(root) -> Optional[str]:
     """Full path of the uv this install runs, or None.
 
     Order: the contained ``.uv`` copy, the shared uv the install record names, a
-    uv on PATH, then Astral's default install directories (a shell started
-    before the installer ran does not have those on PATH yet)."""
+    uv in an absolute folder on PATH (never the current folder), then Astral's
+    default install directories (a shell started before the installer ran does
+    not have those on PATH yet)."""
+    from localm import sysprog
     before, after = search_places(root)
     for candidate in before:
         if usable(candidate):
             return str(candidate)
-    on_path = shutil.which("uv")
+    on_path = sysprog.find_on_path("uv")
     if on_path:
         return on_path
     for candidate in after:

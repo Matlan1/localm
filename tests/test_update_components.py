@@ -822,6 +822,10 @@ def test_a_comfy_restore_that_cannot_put_a_file_back_names_the_mixed_tree(tmp_pa
     assert "holds a mix of old and new files" in errors[0] and str(backup) in errors[0]
     assert (backup / "main.py").read_text(encoding="utf-8") == "v2\n"
 
+    again = uc._restore_tree(kept, root)
+    assert len(again) == 1 and str(backup) not in again[0]
+    assert (backup / "main.py").read_text(encoding="utf-8") == "v2\n"
+
 
 def test_a_comfy_snapshot_an_older_localm_kept_is_restored_without_git(tmp_path, home,
                                                                        monkeypatch):
