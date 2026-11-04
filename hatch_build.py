@@ -8,18 +8,23 @@ of the installed ``localm-*.dist-info``, so an installer neither deletes nor rew
 that launcher, and one line on the console says so. The launcher file stays and keeps
 starting ``localm``; the next rebuild with the launcher free writes and records it again.
 
+On Windows, a rebuild of an existing install also stops that install's runtime probe
+daemon, so the update step that replaces the runtime right after this build finds it free.
+
 With no such launcher, or on any other platform, the scripts pass through unchanged and
-nothing on disk is touched. Any failure here also passes the scripts through unchanged:
+no file is touched. Any failure here also passes the scripts through unchanged:
 the installer then fails on the locked launcher, as it would without this hook, and an
 update that ran it rolls back.
 
 Temporary: updates from 0.3.3 on do not reinstall the project over a running launcher.
 """
 import os
+import subprocess
 from pathlib import Path
 
 from hatchling.metadata.plugin.interface import MetadataHookInterface
 
+STOP_TIMEOUT_S = 20
 NOTICE = ("localm is running from {names}, so that file is left as it is. "
           "The update carries on and localm keeps starting the same way.\n")
 
@@ -67,6 +72,25 @@ def _tell_console(message: str) -> None:
         pass
 
 
+def stop_own_probe_daemon(root) -> None:
+    """On a rebuild of an existing install, stop this install's own runtime probe
+    daemon, by its ``.venv`` Python and ``updater_runtime.stop_own_probe_daemons``
+    (:data:`STOP_TIMEOUT_S` at most). Never raises; a failure leaves the daemon running."""
+    root = Path(root)
+    python = root / ".venv" / "Scripts" / "python.exe"
+    site = root / ".venv" / "Lib" / "site-packages"
+    try:
+        if not python.exists() or not any(site.glob("localm-*.dist-info")):
+            return
+        code = ("from localm import updater, updater_runtime as u; r = updater.repo_root(); "
+                "u.stop_own_probe_daemons(u.runtime_lib(r), r)")
+        subprocess.run([str(python), "-c", code], cwd=str(root), stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=STOP_TIMEOUT_S, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:
+        print(f"localm: could not stop the runtime probe: {e}")
+
+
 def scripts_for_this_build(root, scripts: dict) -> dict:
     """*scripts* without the ones whose launcher in ``<root>/.venv/Scripts`` is locked,
     with those launchers removed from the installed RECORD. Windows only."""
@@ -86,6 +110,7 @@ class LocalmScriptsHook(MetadataHookInterface):
     def update(self, metadata: dict) -> None:
         scripts = dict(self.config["console-scripts"])
         if os.name == "nt":
+            stop_own_probe_daemon(self.root)
             try:
                 scripts = scripts_for_this_build(self.root, scripts)
             except Exception as e:

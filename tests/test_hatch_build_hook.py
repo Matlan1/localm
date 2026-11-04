@@ -1,5 +1,6 @@
 """The console-scripts metadata hook (hatch_build.py): real files, real locks."""
 import os
+import subprocess
 import sys
 import tomllib
 import types
@@ -130,6 +131,29 @@ def test_any_failure_in_the_hook_leaves_things_as_they_are(install, monkeypatch,
     assert metadata["scripts"] == SCRIPTS
     assert _record(install) == RECORD
     assert "leaving the launchers as they are" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fails", [subprocess.TimeoutExpired("python", 20), OSError("cannot start")])
+def test_the_daemon_stop_failing_never_fails_the_build(install, monkeypatch, capsys, fails):
+    (install / ".venv/Scripts/python.exe").write_bytes(b"x")
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw))
+        raise fails
+    monkeypatch.setattr(hatch_build.subprocess, "run", run)
+    hatch_build.stop_own_probe_daemon(install)
+    assert len(calls) == 1 and calls[0][1]["timeout"] == hatch_build.STOP_TIMEOUT_S
+    assert "could not stop the runtime probe" in capsys.readouterr().out
+
+
+def test_no_existing_install_starts_no_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(hatch_build.subprocess, "run", lambda *a, **k: pytest.fail("started a process"))
+    hatch_build.stop_own_probe_daemon(tmp_path)
+    (tmp_path / ".venv/Scripts").mkdir(parents=True)
+    (tmp_path / ".venv/Scripts/python.exe").write_bytes(b"x")
+    (tmp_path / ".venv/Lib/site-packages").mkdir(parents=True)
+    hatch_build.stop_own_probe_daemon(tmp_path)
 
 
 def test_tell_console_with_no_console_writes_nothing(monkeypatch):
