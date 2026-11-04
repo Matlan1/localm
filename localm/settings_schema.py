@@ -1063,10 +1063,9 @@ CORE_FIELDS: list = [
                  "start can take minutes.",
                  group="Media", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
-                 "Your ComfyUI's output folder, needed whenever its copy is removed "
-                 "(the toggle, or privacy mode). Blank uses the output folder inside "
-                 "the ComfyUI folder. Not used for localm's own ComfyUI, which always "
-                 "uses its own output folder.",
+                 "Your ComfyUI's output folder, for removing its copy (the toggle, or "
+                 "privacy mode). Blank uses the output folder inside the ComfyUI folder. "
+                 "localm's own ComfyUI always uses its own.",
                  # admin_only: names a host folder this process deletes from when
                  # comfy_delete_outputs is on, and a scoped key never receives a
                  # host path.
@@ -1163,8 +1162,7 @@ CORE_FIELDS: list = [
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains localm may reach, model requests and model downloads alike. "
                  "Empty = any. e.g. example.com (also covers *.example.com). A list "
-                 "must also name the hosts you pull models from, huggingface.co for "
-                 "the embedding and speech models.",
+                 "must also name the hosts you pull models from.",
                  group="Network", owner="web"),
     # admin_only: net_deny is the SUPPRESSIVE half of the domain policy and is
     # stored verbatim, so without the gate a non-owner could CLEAR it
@@ -2036,10 +2034,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
-               "Needed whenever your ComfyUI's copy is removed (the toggle, or "
-               "privacy mode). Blank uses the shared value, else the output folder "
-               "inside this plugin's ComfyUI folder, else the shared one. Not used "
-               "for localm's own ComfyUI, which always uses its own output folder.",
+               "For removing your ComfyUI's copy (the toggle, or privacy mode). Blank "
+               "uses the shared value, else the output folder inside the ComfyUI "
+               "folder. localm's own ComfyUI always uses its own.",
                admin_only=True),
     # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
     # render before all checkboxes in each subsection.

@@ -34,6 +34,7 @@ from typing import Optional
 from localm import video_gen as _video_gen
 from localm.image_gen import comfy as _comfy
 from localm.media import backend_choice
+from localm.media.comfy_client import weight_dtype_warning
 from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
@@ -90,13 +91,7 @@ def settings(full_config: dict) -> dict:
     warning = media_config.combine_warnings(warning, url_warning)
     float_type = comfy_blk.get("float_type") or full_config.get("comfy_float_type")
     warning = media_config.combine_warnings(
-        warning, _comfy.weight_dtype_warning(float_type))
-    float_type = comfy_blk.get("float_type") or full_config.get("comfy_float_type")
-    warning = media_config.combine_warnings(
-        warning, _comfy.weight_dtype_warning(float_type))
-    float_type = comfy_blk.get("float_type") or full_config.get("comfy_float_type")
-    warning = media_config.combine_warnings(
-        warning, _comfy.weight_dtype_warning(float_type))
+        warning, weight_dtype_warning(float_type))
     launch_cmd = "" if own_active else (
         comfy_blk.get("launch_cmd")
         or legacy_comfy_value("comfy_launch_cmd", full_config) or "")

@@ -198,7 +198,7 @@ class TestGenerateVideo:
         comfy_out = tmp_path / "comfy_out"
         comfy_out.mkdir()
         orig = comfy_out / "clip.mp4"          # matches the fake history
-        orig.write_bytes(b"comfy-side copy")
+        orig.write_bytes(b"FAKE-MP4-BYTES")    # matches the fake /view
         ok, _, _ = self._run(tmp_path, delete_outputs=True)
         assert ok
         assert not orig.exists()

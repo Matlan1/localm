@@ -210,6 +210,7 @@ class TestHfHubDownloadEndpointPinned:
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
         monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
+        monkeypatch.setattr("localm.netpolicy.download_refusal", lambda url: None)
         import hashlib
         monkeypatch.setattr(embedder_mod, "_EMBEDDING_PINS", {
             key: (revision, hashlib.sha256(b"gguf-bytes").hexdigest())

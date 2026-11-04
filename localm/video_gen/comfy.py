@@ -53,8 +53,6 @@ from localm.media.comfy_client import (
     comfy_wait_heartbeat,
     comfy_submit_prompt,
     apply_weight_dtype,
-    apply_weight_dtype,
-    apply_weight_dtype,
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,

@@ -2486,10 +2486,10 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None, *,
     be resolved.
 
     Order: localm's own ComfyUI's ``output`` folder when *api_url* is that
-    instance (every setting below names the user's ComfyUI, so none of them
-    applies to it); explicit arg, COMFY_OUTPUT_DIR env, the ``comfy_output_dir``
-    config key; then a derived ``output`` folder that exists, under
-    *comfy_workdir* and after that under the ``comfy_workdir`` config key.
+    instance, where none of the settings below applies; explicit arg,
+    COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config key; then a derived
+    ``output`` folder that exists, under *comfy_workdir* and after that under the
+    ``comfy_workdir`` config key.
 
     ``comfy_output_dir`` (the arg, env var, and config key alike) is settable
     by a caller holding only the config:write scope - privileged, but NOT
@@ -2987,52 +2987,6 @@ def select_output_info(entry: dict, output_keys) -> Optional[dict]:
             if node_output.get(key):
                 return node_output[key][0]
     return None
-
-
-# The values ComfyUI's UNETLoader accepts for its weight_dtype input.
-UNET_WEIGHT_DTYPES = ("default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2")
-
-
-def apply_weight_dtype(workflow: dict, float_type: Optional[str]) -> None:
-    """Write *float_type* into ``weight_dtype`` of each UNETLoader in *workflow*.
-    A no-op for None, "default" and any value not in ``UNET_WEIGHT_DTYPES``. Other
-    loaders have no such input and are left as they are."""
-    if float_type == "default" or float_type not in UNET_WEIGHT_DTYPES:
-        return
-    for node in workflow.values():
-        if node.get("class_type") == "UNETLoader":
-            node.setdefault("inputs", {})["weight_dtype"] = float_type
-
-
-def weight_dtype_warning(float_type: Optional[str]) -> Optional[str]:
-    """The note for a stored Model weight dtype ComfyUI would refuse, else None."""
-    if not float_type or float_type in UNET_WEIGHT_DTYPES:
-        return None
-    return (f"Model weight dtype {float_type!r} is not one ComfyUI accepts, so the "
-            "workflow's own value is used; choose another in Settings -> Media")
-
-
-# The values ComfyUI's UNETLoader accepts for its weight_dtype input.
-UNET_WEIGHT_DTYPES = ("default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2")
-
-
-def apply_weight_dtype(workflow: dict, float_type: Optional[str]) -> None:
-    """Write *float_type* into ``weight_dtype`` of each UNETLoader in *workflow*.
-    A no-op for None, "default" and any value not in ``UNET_WEIGHT_DTYPES``. Other
-    loaders have no such input and are left as they are."""
-    if float_type == "default" or float_type not in UNET_WEIGHT_DTYPES:
-        return
-    for node in workflow.values():
-        if node.get("class_type") == "UNETLoader":
-            node.setdefault("inputs", {})["weight_dtype"] = float_type
-
-
-def weight_dtype_warning(float_type: Optional[str]) -> Optional[str]:
-    """The note for a stored Model weight dtype ComfyUI would refuse, else None."""
-    if not float_type or float_type in UNET_WEIGHT_DTYPES:
-        return None
-    return (f"Model weight dtype {float_type!r} is not one ComfyUI accepts, so the "
-            "workflow's own value is used; choose another in Settings -> Media")
 
 
 # The values ComfyUI's UNETLoader accepts for its weight_dtype input.
