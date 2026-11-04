@@ -372,6 +372,9 @@ class LoadModelRequest(BaseModel):
     # "not_chat_model"}: marks an embedding, reranker or text-encoder model as a
     # chat model (type 'llm') and loads it.
     as_chat: bool = False
+    # False: make the model resident without making it the active model (the
+    # active model stays as it is; see switch_engine's *activate*).
+    activate: bool = True
 
 
 class PullRequest(BaseModel):
@@ -714,8 +717,8 @@ def attach_gui(
         model through it (e.g. ``http://127.0.0.1:8642/v1``).
     switch_model:
         ``Callable[[str], Awaitable[None]]`` - swaps the active engine.
-        Accepts an optional keyword-only ``force`` (default False, every
-        existing caller unaffected) - see switch_engine's own docstring.
+        Accepts optional keyword-only ``force`` (default False) and
+        ``activate`` (default True) - see switch_engine's own docstring.
     active_model:
         ``Callable[[], str]`` - name of the currently served model.
     """

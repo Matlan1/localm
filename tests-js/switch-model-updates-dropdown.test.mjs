@@ -14,6 +14,12 @@ function makeFetch(state, calls) {
     const body = opts.body ? JSON.parse(opts.body) : {};
     calls.push({ url: u, body });
     const headers = { get: () => null };
+    if (u.startsWith("/api/models/unload")) {
+      state.active = "";
+      return { ok: true, status: 200, headers, text: async () => "",
+               json: async () => ({ status: "unloaded" }) };
+    }
+    if (u === "/v1/chat/completions" && state.loadOnChat) state.active = body.model;
     if (u.startsWith("/api/models/load")) {
       state.active = body.model;
       return { ok: true, status: 200, headers, text: async () => "",
@@ -36,6 +42,7 @@ async function boot() {
   const state = { active: "gemma" };
   const calls = [];
   const { window: win } = loadApp({ fetchImpl: makeFetch(state, calls) });
+  win.__state = state;
   win.readSSE = async (_r, onData) => {
     onData(JSON.stringify({ choices: [{ delta: { content: "an answer" } }] }));
     onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
@@ -121,4 +128,57 @@ test("an unpinned chat shows no pin notice after a switch", async () => {
   await switchTo(win, "coder");
 
   assert.equal(win.document.getElementById("pin-mismatch").hidden, true);
+});
+
+async function pinnedToGemmaWhileCoderLoaded() {
+  const ctx = await boot();
+  ctx.win.__testConv = { ...userTurn(), pinnedModel: "gemma" };
+  runScript(ctx.win, "chat.conversations = [window.__testConv]; chat.activeId = window.__testConv.id; renderChat();");
+  await switchTo(ctx.win, "coder");
+  const note = ctx.win.document.getElementById("pin-mismatch");
+  assert.equal(note.hidden, false, "precondition: the mismatch note shows");
+  return { ...ctx, note };
+}
+
+test("the pin notice clears once the pinned chat's message has loaded its model", async () => {
+  const { win, note } = await pinnedToGemmaWhileCoderLoaded();
+  win.__state.loadOnChat = true;
+
+  await win.runCompletion(win.__testConv);
+  await settle();
+
+  assert.equal(win.__state.active, "gemma", "precondition: the server loaded gemma to answer");
+  assert.equal(note.hidden, true, note.textContent);
+});
+
+test("the pin notice clears when the user stops the reply that loaded the pinned model", async () => {
+  const { win, note } = await pinnedToGemmaWhileCoderLoaded();
+  win.__state.loadOnChat = true;
+  win.readSSE = async () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); };
+
+  const outcome = await win.runCompletion(win.__testConv);
+  await settle();
+
+  assert.equal(outcome.stopped, true, "precondition: the turn was stopped");
+  assert.equal(win.__state.active, "gemma", "precondition: the server loaded gemma to answer");
+  assert.equal(note.hidden, true, note.textContent);
+});
+
+test("the pin notice clears after the sidebar unload", async () => {
+  const { win, note } = await pinnedToGemmaWhileCoderLoaded();
+
+  await win.document.getElementById("sidebar-unload-btn").onclick();
+  await settle();
+
+  assert.equal(note.hidden, true, note.textContent);
+});
+
+test("the pin notice clears when the poll sees the model was unloaded elsewhere", async () => {
+  const { win, note } = await pinnedToGemmaWhileCoderLoaded();
+  win.__state.active = "";
+
+  runScript(win, "refreshModels();");
+  await settle();
+
+  assert.equal(note.hidden, true, note.textContent);
 });

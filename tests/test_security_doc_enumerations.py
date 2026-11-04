@@ -242,9 +242,11 @@ def test_cuda_driver_floor_in_docs_matches_setup_llama():
 
 
 def test_server_api_md_status_codes_match_the_protocol_map():
-    from localm.inference.protocol import STATUS_CODE_BY_TEXT
+    from localm.inference.protocol import STATUS_ARGS_BY_CODE, STATUS_CODE_BY_TEXT
     doc = _collapsed("docs/server-api.md")
     section = _between(doc, "(a stable id):",
                        "A streaming request that is compacted")
     documented = set(re.findall(r"`([a-z_]+)`", section))
-    assert documented == set(STATUS_CODE_BY_TEXT.values())
+    args = {a for names in STATUS_ARGS_BY_CODE.values() for a in names}
+    assert documented == (set(STATUS_CODE_BY_TEXT.values()) | set(STATUS_ARGS_BY_CODE)
+                          | args | {"status_args"})
