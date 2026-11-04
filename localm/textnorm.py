@@ -514,6 +514,62 @@ def _could_become_marker(text: str) -> bool:
     return _prefix_fits(_SCRUB_TREE, text, 0)
 
 
+_CODE_TOKEN_RE = re.compile(r"`+|\n[ \t]*\n")
+
+
+class _CodeState:
+    """Whether the visible reply text fed so far ends inside a markdown code
+    span or fence, so a ``<think>`` written there is text and not a reasoning
+    opener.
+
+    A run of three or more backticks opens a fence that a run at least as long
+    closes; a shorter run opens an inline span that a run of the same length
+    closes, and a blank line ends an unclosed span. A backtick run at the end of
+    the text fed is held until the next character settles it, so the state does
+    not depend on how the text is cut into pieces."""
+
+    __slots__ = ("fence", "span", "run")
+
+    def __init__(self) -> None:
+        self.fence = 0
+        self.span = 0
+        self.run = 0
+
+    def _settle(self, n: int) -> None:
+        if self.fence:
+            if n >= self.fence:
+                self.fence = 0
+        elif self.span:
+            if n == self.span:
+                self.span = 0
+        elif n >= 3:
+            self.fence = n
+        else:
+            self.span = n
+
+    def advance(self, text: str) -> None:
+        """Note *text*, the next visible text."""
+        if not text:
+            return
+        data = "`" * self.run + text
+        self.run = 0
+        for m in _CODE_TOKEN_RE.finditer(data):
+            tok = m.group()
+            if tok[0] != "`":
+                self.span = 0
+            elif m.end() == len(data):
+                self.run = len(tok)
+            else:
+                self._settle(len(tok))
+
+    def in_code(self) -> bool:
+        """True when the next character, which is not a backtick, is in code."""
+        if self.run:
+            self._settle(self.run)
+            self.run = 0
+        return bool(self.fence or self.span)
+
+
 def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]:
     """Split *text* (already scrubbed to canonical ``<think>...</think>``) into
     ``(content, reasoning)``: the visible answer with the think block(s) removed,
@@ -529,6 +585,7 @@ def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]
     content: list[str] = []
     reasoning: list[str] = []
     i, n, in_think = 0, len(text), False
+    code = _CodeState()
     while i < n:
         if in_think:
             j = text.find(_THINK_CLOSE, i)
@@ -548,6 +605,11 @@ def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]
             if j == -1:
                 content.append(text[i:])
                 break
+            code.advance(text[i:j])
+            if code.in_code():
+                content.append(text[i:j + len(_THINK_OPEN)])
+                i = j + len(_THINK_OPEN)
+                continue
             content.append(text[i:j])
             i = j + len(_THINK_OPEN)
             in_think = True
@@ -606,6 +668,7 @@ class ThinkSplitter:
         self._exit_marker = exit_marker or None
         self._marked = False     # holding from exit_marker until </think> or the end
         self._scan = 0           # where the next </think> search in a held stretch starts
+        self._code = _CodeState()
         self.spans: list[tuple[int, int]] = []
 
     def _skip(self, n: int) -> None:
@@ -617,6 +680,7 @@ class ThinkSplitter:
             out.append(self._buf[:n])
             if content:
                 self.spans.append((self._pos, self._pos + n))
+                self._code.advance(self._buf[:n])
         self._skip(n)
 
     def feed(self, piece: str) -> tuple[str, str]:
@@ -658,6 +722,9 @@ class ThinkSplitter:
                     self._take(len(self._buf) - hold, out_c, True)
                     break
                 self._take(i, out_c, True)
+                if self._code.in_code():
+                    self._take(len(_THINK_OPEN), out_c, True)
+                    continue
                 self._skip(len(_THINK_OPEN))
                 self._in_think = True
         return "".join(out_c), "".join(out_r)

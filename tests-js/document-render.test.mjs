@@ -116,3 +116,33 @@ test("stripThink removes every reasoning block and an unclosed trailing one", ()
   assert.equal(win.stripThink(""), "");
   assert.equal(win.stripThink(null), "");
 });
+
+const QUOTED = "A code span: `<think>` and a fence: ```<think>demo</think>``` end.";
+
+test("a tag quoted in a code span and a fence stays text, whole and streamed", () => {
+  const { window: win } = loadApp();
+  const whole = win.splitThink(QUOTED);
+  assert.equal(whole.think, null);
+  assert.equal(whole.rest, QUOTED);
+  assert.equal(win.stripThink(QUOTED), QUOTED);
+  assert.equal(win.assistantHistoryText(QUOTED, false), QUOTED);
+  const opening = QUOTED.indexOf("<think>") + "<think>".length;
+  for (let i = 1; i <= QUOTED.length; i++) {
+    const s = win.splitThink(QUOTED.slice(0, i));
+    if (i === opening) {
+      assert.equal(s.open, true, "the span is still open here, so the tag reads as an opener");
+    } else {
+      assert.equal(s.think, null, QUOTED.slice(0, i));
+      assert.equal(s.rest, QUOTED.slice(0, i));
+    }
+  }
+});
+
+test("chat render: the quoted-tag reply shows no reasoning box once complete", () => {
+  const win = realPipeline();
+  const target = win.document.createElement("div");
+  win.document.body.appendChild(target);
+  for (let i = 1; i <= QUOTED.length; i++) win.renderMarkdown(target, QUOTED.slice(0, i));
+  assert.equal(target.querySelectorAll("details.think-block").length, 0);
+  assert.equal(target.textContent.trim(), "A code span: <think> and a fence: <think>demo</think> end.");
+});
