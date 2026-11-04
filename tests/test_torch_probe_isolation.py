@@ -836,8 +836,8 @@ class TestProbeChildThatDiedIsAskedAgain:
 
 
 class TestSlowFirstImportIsNotFinal:
-    """The first import of torch after an install compiles its bytecode and can
-    overrun the timeout. The next child resumes from what the first one wrote."""
+    """A child that overruns the timeout once is not the last word on torch: a later
+    round asks a new child, whose answer clears the latch."""
 
     def setup_method(self):
         discover._reset_gpu_probe_cache()
