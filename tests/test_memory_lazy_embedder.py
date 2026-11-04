@@ -208,6 +208,7 @@ def test_vectorless_records_are_backfilled_by_a_pass_that_finds_nothing_new(memh
     assert store.lacks_vector()
     plug.synthesize_memory(_stub())
     assert resolver.calls >= 1
+    assert not any(resolver.lock_held)
     assert not plug._chat_store().lacks_vector()
 
 
