@@ -1968,7 +1968,9 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
+        from localm.plugins import catalog as _cat
         manager.load_enabled_pending()
+        await _cat.check_hardware_off_loop()
         return manager.api_state()
 
     @app.post("/api/plugins/{name}/install",

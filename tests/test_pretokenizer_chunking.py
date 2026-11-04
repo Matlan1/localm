@@ -122,6 +122,89 @@ class TestCutPoints:
         assert guard.chunk_cuts(text, ("<|x|>",)) == [13]
 
 
+def _cuts_by_walking(text, separators, style):
+    """The cut rule of ``guard.chunk_cuts`` written out one cut at a time: a cut
+    is dropped when it lies inside or at the edge of a separator, or when the
+    run of blank characters around it reaches a separator's edge."""
+    cuts = guard.chunk_cuts(text, (), style)
+    spans = []
+    for sep in separators:
+        pos = text.find(sep)
+        while pos != -1:
+            spans.append((pos, pos + len(sep)))
+            pos = text.find(sep, pos + 1)
+    if not spans:
+        return cuts
+    blank = guard.regex.compile(r"[\s\p{Z}\p{C}]")
+    edges = {edge for span in spans for edge in span}
+    out = []
+    for c in cuts:
+        if any(s <= c <= e for s, e in spans):
+            continue
+        lo = hi = c
+        while lo > 0 and blank.match(text, lo - 1):
+            lo -= 1
+        while hi < len(text) and blank.match(text, hi):
+            hi += 1
+        if not any(lo <= edge <= hi for edge in edges):
+            out.append(c)
+    return out
+
+
+def _calls_in_chunk_cuts(text, separators, style):
+    """How many Python and C calls ``guard.chunk_cuts`` makes on *text*."""
+    calls = [0]
+
+    def count(frame, event, arg):
+        if event in ("call", "c_call"):
+            calls[0] += 1
+
+    previous = sys.getprofile()
+    sys.setprofile(count)
+    try:
+        guard.chunk_cuts(text, separators, style)
+    finally:
+        sys.setprofile(previous)
+    return calls[0]
+
+
+class TestCutPointsAgainstTheRule:
+    ALPHABET = ["a", "b ", " ", "  ", "\n", "\n\n", "\r\n", "\t", "/", "1", "22", "\u00a0",
+                "\u200b", "\u3000", "<s>", "<s>", "<|x y|>", "\n<s>\n", "\n "]
+
+    @pytest.mark.parametrize("style", ["words", "digits", "newlines"])
+    def test_the_cuts_equal_the_rule_applied_one_cut_at_a_time(self, style):
+        rnd = random.Random(29)
+        separators = ("<s>", "<|x y|>", "\n\n")
+        compared_with_a_dropped_cut = 0
+        for _ in range(3000):
+            text = "".join(rnd.choice(self.ALPHABET) for _ in range(rnd.randint(0, 24)))
+            want = _cuts_by_walking(text, separators, style)
+            assert guard.chunk_cuts(text, separators, style) == want, repr(text)
+            compared_with_a_dropped_cut += want != guard.chunk_cuts(text, (), style)
+        assert compared_with_a_dropped_cut > 100
+
+    @pytest.mark.parametrize("style", ["words", "digits", "newlines"])
+    def test_the_work_grows_in_line_with_a_blank_run_beside_a_separator(self, style):
+        small = _calls_in_chunk_cuts("\n" * 600 + "<sep>", ("<sep>",), style)
+        large = _calls_in_chunk_cuts("\n" * 1200 + "<sep>", ("<sep>",), style)
+        assert large <= small * 2 + 50
+
+    def test_the_work_stays_in_line_with_many_runs_and_separators(self):
+        block = "\n\n\n<sep>\n\nab\n"
+        small = _calls_in_chunk_cuts(block * 300, ("<sep>",), "newlines")
+        large = _calls_in_chunk_cuts(block * 600, ("<sep>",), "newlines")
+        assert large <= small * 2 + 50
+
+    def test_a_long_line_break_run_beside_a_separator_has_no_cut_in_it(self):
+        text = "a\n" + "\n" * 2000 + "<sep>\nb"
+        assert guard.chunk_cuts(text, ("<sep>",), "newlines") == []
+
+    def test_a_line_break_run_away_from_a_separator_keeps_its_cuts(self):
+        text = "<sep>a\n\n\nb"
+        assert guard.chunk_cuts(text, ("<sep>",), "newlines") == [7, 8, 9]
+
+
 class TestSplitText:
     def test_a_text_that_fits_is_one_chunk(self):
         assert guard.split_text("ab cd", 10) == ["ab cd"]
@@ -196,6 +279,37 @@ class TestPlanChunks:
         assert str(len(text)) in str(exc.value)
         parsed = guard.parse_refusal(str(exc.value))
         assert parsed == guard.Refusal("chars", _CAP, len(text), part=True)
+
+    def test_superbpe_refuses_long_prose_without_a_number(self):
+        text = "word " * 20000
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.plan_chunks("superbpe", text, ("<s>",))
+        assert "in a row without a number" in str(exc.value)
+        assert str(len(text)) in str(exc.value)
+
+    def test_superbpe_takes_the_same_prose_with_numbers_in_it(self):
+        text = "word " * 4000 + "12 " + "word " * 4000 + "34 " + "word " * 4000
+        chunks = guard.plan_chunks("superbpe", text * 2, ("<s>",))
+        assert len(chunks) > 1
+        assert "".join(chunks) == text * 2
+
+    def test_deepseek_llm_refuses_long_prose_without_a_line_break(self):
+        text = "word " * 20000
+        with pytest.raises(PretokenizerUnsafeInputError) as exc:
+            guard.plan_chunks("deepseek-llm", text)
+        assert "in a row without a line break" in str(exc.value)
+        assert str(len(text)) in str(exc.value)
+
+    def test_deepseek_llm_takes_the_same_prose_with_line_breaks_in_it(self):
+        text = "word\n" * 20000
+        chunks = guard.plan_chunks("deepseek-llm", text)
+        assert len(chunks) > 1
+        assert "".join(chunks) == text
+
+    def test_a_words_pre_tokenizer_takes_the_same_prose(self):
+        text = "word " * 20000
+        chunks = guard.plan_chunks("gpt-4o", text)
+        assert "".join(chunks) == text
 
     def test_the_refusal_quotes_none_of_the_text(self):
         text = "secret-" * ((_CAP + 5) // 7 + 1)

@@ -3360,6 +3360,7 @@ $("pull-start").onclick = async () => {
   // prefilled for; a hand-edited spec falls back to auto-detect.
   if (pendingPullTypeHint && pendingPullTypeHint.spec === spec) {
     payload.model_type = pendingPullTypeHint.type;
+    payload.type_is_hint = true;
   }
   await runPull(payload);
 };

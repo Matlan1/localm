@@ -180,28 +180,39 @@ def test_registry_lock_busy_is_false_when_nobody_holds_the_lock(home):
     assert not cfg.REGISTRY_FILE.exists()
 
 
+def _spy_on_lock_wait(monkeypatch) -> list:
+    waits = []
+    real = cfg._cross_process_lock
+
+    def spy(target, *, timeout=None):
+        waits.append(timeout)
+        return real(target, timeout=timeout)
+
+    monkeypatch.setattr(cfg, "_cross_process_lock", spy)
+    return waits
+
+
 def test_registry_lock_busy_waits_half_a_second_by_default_for_another_holder(
         home, monkeypatch):
     lockpath = _foreign_registry_lock(monkeypatch)
+    waits = _spy_on_lock_wait(monkeypatch)
 
     started = time.monotonic()
     busy = cfg.registry_lock_busy()
     elapsed = time.monotonic() - started
 
     assert busy is True
-    assert 0.4 <= elapsed < 1.4
+    assert waits == [0.5]
+    assert elapsed >= 0.4
     assert lockpath.read_text(encoding="utf-8") == "12345:foreign"
 
 
 def test_registry_lock_busy_waits_only_the_given_time(home, monkeypatch):
     _foreign_registry_lock(monkeypatch)
+    waits = _spy_on_lock_wait(monkeypatch)
 
-    started = time.monotonic()
-    busy = cfg.registry_lock_busy(wait=0.05)
-    elapsed = time.monotonic() - started
-
-    assert busy is True
-    assert elapsed < 1.0
+    assert cfg.registry_lock_busy(wait=0.05) is True
+    assert waits == [0.05]
 
 
 def test_registry_lock_busy_is_false_when_the_lock_cannot_be_attempted(home, monkeypatch):
