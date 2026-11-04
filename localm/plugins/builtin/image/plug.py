@@ -191,6 +191,9 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                            s, ([{"name": lora_name}] if lora_name else [])
                            + list(native_loras or [])))
             if refused:
+                if refused == native.NO_LLM_VISION_21:
+                    from localm.media import native_offer
+                    native_offer.push_missing(job, native_offer.vision_encoder(), refused)
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
         elif native_loras:
@@ -217,6 +220,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
+        if not ok and s.get("backend") == "native":
+            from localm.media import native_offer
+            from .backends import native
+            native_offer.push_missing(job, native_offer.job_missing("image", native, s), msg)
         job.push({"type": "line", "outcome": not ok, "text": msg})
         if not ok:
             return False

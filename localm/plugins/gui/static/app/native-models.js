@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { authHeaders, el, toast } from "./helpers.js";
+import { authHeaders, el, fmtBytes, offerNativeDownloads, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 
@@ -200,7 +200,23 @@ export function createNativeModelPicker({ media, prefix, mountId, onData }) {
 
     if (prev && prev.error) {
       const err = el("div", "sub");
-      err.append(el("span", "job-state st-error", t("nativeModels.cannotRun")), " ", prev.error);
+      const offer = prev.offer || [];
+      err.append(el("span", "job-state st-error", t("nativeModels.cannotRun")), " ");
+      if (offer.length) {
+        const labels = (prev.missing || []).map((m) => m.label).join(", ");
+        const size = offer.reduce((n, m) => n + ((m.source && m.source.size_bytes) || 0), 0);
+        err.append(t("nativeModels.missingFiles", { parts: labels }), " ");
+        const dl = el("button", "btn-secondary btn-sm", size
+          ? t("nativeModels.downloadMissing", { size: fmtBytes(size) })
+          : t("nativeModels.downloadMissingNoSize"));
+        dl.onclick = async () => {
+          dl.disabled = true;
+          try { await offerNativeDownloads(offer, null); } finally { refresh(); }
+        };
+        err.appendChild(dl);
+      } else {
+        err.append(prev.error);
+      }
       box.appendChild(err);
     }
     for (const n of (prev && prev.notes) || []) box.appendChild(el("div", "sub", n));

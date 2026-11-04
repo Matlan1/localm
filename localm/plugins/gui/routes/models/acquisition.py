@@ -460,6 +460,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             native_choice = validate_choice(req.native_models, kind)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        from localm.media import native_offer
         from localm.media.comfy_client import describe_missing_models
         from localm.media.managed_comfy import resolve_comfy_target
         from localm.model_manager.comfy_resolve import (
@@ -481,30 +482,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 return None
             native = import_module(f"localm.plugins.builtin.{kind}.backends.native")
             s = apply_choice(s, native_choice)
-            st = native.status(s)
-            if not st["missing"]:
-                return {"status": "verified", "missing": [], "warning": None}
-            all_parts = st.get("missing_components") or []
-            parts = [p for p in all_parts if p.get("download")]
-            if parts:
-                return {"status": "verified",
-                        "warning": st["missing"] if len(parts) < len(all_parts) else None,
-                        "missing": [{
-                    "filename": p["download"]["filename"], "native": True,
-                    "searchable": False, "slot": p["slot"],
-                    "source": {**p["download"], "name": None, "origin": "curated"},
-                } for p in parts]}
-            if (s.get("native") or {}).get("model"):
-                return {"status": "verified", "missing": [], "warning": st["missing"]}
-            rec = st["recommended"]
-            files = rec["parts"] if "parts" in rec else [dict(rec, filename=rec["file"])]
-            return {"status": "verified", "warning": None, "missing": [{
-                "filename": f["filename"], "native": True, "searchable": False,
-                "source": {"repo": f["repo"], "file": f["file"], "spec": f["spec"],
-                           "sha256": f["sha256"], "name": f.get("name"),
-                           "size_bytes": f["size_bytes"],
-                           "model_type": f["model_type"], "origin": "curated"},
-            } for f in files]}
+            return native_offer.from_status(s, native.status(s))
 
         def _native_music_check():
             """The preflight answer when the music plugin runs the native
@@ -518,19 +496,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 return None
             from localm.plugins.builtin.music.backends import native
             s = apply_choice(s, native_choice)
-            st = native.status(s)
-            configured = s.get("native") or {}
-            from localm.media.koboldcpp.models import LABELS
-            unresolved = [str(LABELS.get(c, c)) for c, v in st["models"].items()
-                          if v is None and configured.get(c)]
-            warning = (f"Configured music models not found: {', '.join(unresolved)}."
-                       if unresolved else None)
-            return {"status": "verified", "warning": warning, "missing": [{
-                "filename": m["file"], "native": True, "searchable": False,
-                "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
-                           "sha256": m["sha256"], "name": m["name"], "size_bytes": m["size_bytes"],
-                           "model_type": m["model_type"], "origin": "curated"},
-            } for m in st["missing"]]}
+            return native_offer.from_music_status(s, native.status(s))
 
         def _workflow_check(wid: str):
             """The models of native workflow *wid* that are not registered,

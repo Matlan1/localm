@@ -7,7 +7,7 @@
 "use strict";
 
 import { chat, renderAttachChips } from "../app/chat.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
@@ -339,15 +339,19 @@ function addResultImage(name, shown) {
 async function followImageJob(jobId, log) {
   showStop("img-stop", jobId);
   const shown = new Set();
+  const missing = createMissingModelOffer(log);
   const end = await streamJob(jobId, (line) => {
+    if (!missing.show(line)) return;
     log.textContent += line + "\n";
     log.scrollTop = log.scrollHeight;
   }, undefined, imageLivePreview.show, (ev) => {
+    missing.onEvent(ev);
     if (ev.type === "image" && ev.name) addResultImage(ev.name, shown);
   });
   imageLivePreview.clear();
   if (end.status === "done" && end.result) addResultImage(end.result, shown);
   refreshImageHistory();
+  if (end.status !== "done") await missing.offer();
   return end;
 }
 
@@ -425,9 +429,10 @@ $("img-generate").onclick = async () => {
   log.textContent = "";
   $("img-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("image", log,
+    const proceed = await checkModelsBeforeGenerate("image", log,
       { model_overrides: native ? undefined : modelOverrides.image, lora_name: loraName || undefined,
         native_models: nativeChoice.native_models });
+    if (!proceed) return;
     if (native) refreshImageBackend();
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),

@@ -38,16 +38,30 @@ function preview(model, extra = {}) {
            missing: [], notes: [], error: null };
 }
 
-function makeFetch(calls, { status = 200 } = {}) {
-  return async (url) => {
+function makeFetch(calls, { status = 200, previewOver = null, pulls = null } = {}) {
+  return async (url, opts = {}) => {
     const u = String(url);
     calls.push(u);
+    if (u === "/api/models/pull" && pulls) {
+      pulls.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({ job_id: "job-1" }) };
+    }
+    if (u === "/api/jobs/job-1/events" && pulls) {
+      const bytes = new TextEncoder().encode('data: {"type":"end","status":"done"}\n\n');
+      let sent = false;
+      return { ok: true, status: 200, body: { getReader: () => ({ async read() {
+        if (sent) return { done: true, value: undefined };
+        sent = true;
+        return { done: false, value: bytes };
+      } }) } };
+    }
     if (u.includes("/native-models")) {
       const q = new URL(u, "http://x").searchParams;
       if (status === 400 && q.get("model") === "gone") {
         return { ok: false, status: 400, json: async () => ({ detail: "'gone' is not a registered model." }) };
       }
-      const body = { ...IMAGE_OPTIONS, preview: preview(q.get("model"), { clip_l: q.get("clip_l") }) };
+      const body = { ...IMAGE_OPTIONS, preview: (previewOver && previewOver(q.get("model")))
+        || preview(q.get("model"), { clip_l: q.get("clip_l") }) };
       if (u.includes("/api/music/")) {
         return { ok: true, status: 200, json: async () => ({
           components: { dit: [{ name: "acestep-dit", file: "dit.gguf" }], text_encoder: [],
@@ -173,4 +187,44 @@ test("Settings puts a registered-model dropdown in front of a native model field
   assert.equal(psel.value, "__custom_path__");
   assert.equal(pinput.hidden, false);
   assert.equal(win.__path.read(), "D:/m/my_vae.safetensors");
+});
+
+test("a model missing companion files offers their download instead of a command", async () => {
+  const VAE = { filename: "ae.safetensors", native: true, searchable: false, slot: "vae",
+    source: { repo: "black-forest-labs/FLUX.1-schnell", file: "ae.safetensors",
+              spec: "black-forest-labs/FLUX.1-schnell:ae.safetensors", sha256: "ab".repeat(32),
+              name: null, size_bytes: 335304388, model_type: "vae", origin: "curated" } };
+  const pulls = [];
+  const { win, $ } = app({
+    pulls,
+    previewOver: (model) => (model === "fluxunchained" ? {
+      model, kind: "diffusion", family: "flux", family_label: "FLUX.1",
+      needs: ["vae"], components: {}, notes: [],
+      missing: [{ slot: "vae", label: "VAE", download: VAE.source }], offer: [VAE],
+      error: "fluxunchained is a FLUX.1 model and needs a VAE (download it with 'localm pull "
+        + "black-forest-labs/FLUX.1-schnell:ae.safetensors --type vae')." } : null),
+  });
+  await settle(win, "await refreshImageBackend(); await imageModelPicker.refresh();");
+  const mount = $("img-native-models");
+  const model = mount.querySelector("select");
+  model.value = "fluxunchained";
+  model.dispatchEvent(new win.Event("change"));
+  await settle(win, "await imageModelPicker.refresh();");
+  assert.match(mount.textContent, /cannot run/);
+  assert.match(mount.textContent, /This model also needs: VAE\./);
+  assert.doesNotMatch(mount.textContent, /localm pull/);
+  const button = [...mount.querySelectorAll("button")].find((b) => /^Download/.test(b.textContent));
+  assert.ok(button, "a Download button");
+  assert.match(button.textContent, /\(\d+(\.\d+)? MB\)/);
+  button.click();
+  for (let i = 0; i < 100 && !win.document.querySelector("#modal-body button"); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.match(win.document.getElementById("modal-body").textContent, /ae\.safetensors/);
+  [...win.document.querySelectorAll("#modal-body button")]
+    .find((b) => b.textContent === "Download").click();
+  for (let i = 0; i < 100 && !pulls.length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(pulls.length, 1);
+  assert.equal(pulls[0].sha256, VAE.source.sha256);
+  assert.equal(pulls[0].model_type, "vae");
 });

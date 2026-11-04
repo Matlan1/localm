@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
@@ -214,9 +214,10 @@ $("video-generate").onclick = async () => {
   log.textContent = "";
   $("video-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("video", log,
+    const proceed = await checkModelsBeforeGenerate("video", log,
       { model_overrides: native ? undefined : modelOverrides.video,
         native_models: nativeChoice.native_models });
+    if (!proceed) return;
     if (native) refreshVideoBackend();
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
@@ -224,10 +225,12 @@ $("video-generate").onclick = async () => {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     showStop("video-stop", data.job_id);
+    const missing = createMissingModelOffer(log);
     const end = await streamJob(data.job_id, (line) => {
+      if (!missing.show(line)) return;
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
-    }, undefined, videoLivePreview.show);
+    }, undefined, videoLivePreview.show, missing.onEvent);
     videoLivePreview.clear();
     if (end.status === "done" && end.result) {
       toast(t("video.generatedToast"));
@@ -241,6 +244,7 @@ $("video-generate").onclick = async () => {
       refreshVideoHistory();
     } else {
       toast(t("video.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
+      await missing.offer();
     }
   } catch (e) {
     toast(t("video.generationFailed", { message: e.message }), true);
