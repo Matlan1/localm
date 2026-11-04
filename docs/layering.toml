@@ -56,7 +56,7 @@ units = ["model_manager", "image_gen", "music_gen", "video_gen"]
 name = "runtimes"
 role = "External runtimes localm provisions and drives: the shared ComfyUI client and managed install, per-plugin ComfyUI workflow files, the native llama.cpp binaries and their re-provision by an update, the update of every other provisioned component, the installed-parts view and its repair, headless Chromium, Whisper speech-to-text."
 units = [
-    "media", "media_workflows", "setup_llama", "updater_runtime", "updater_components",
+    "media", "media_workflows", "setup_llama", "updater_runtime", "updater_components", "updater_finish",
     "updater_parts", "browser", "voice",
 ]
 
