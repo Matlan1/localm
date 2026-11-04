@@ -386,3 +386,176 @@ def test_tk_windows_start_withdrawn_and_stay_withdrawn(monkeypatch):
         assert not root.winfo_ismapped() and not top.winfo_ismapped()
     finally:
         root.destroy()
+
+
+# --------------------------------------------------------------------------- #
+#  A text file named *.exe that a child could launch                           #
+# --------------------------------------------------------------------------- #
+
+def _fake(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not a program", encoding="utf-8")
+    return path
+
+
+def _real_stub(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"MZ" + b"\0" * 62)
+    return path
+
+
+def _scan(tmp_path, command, *, env=None, cwd=None, application=None):
+    return nw.fake_exe_in_reach(application, command, env, cwd,
+                                roots=[nw._norm(tmp_path.parent)])
+
+
+def test_an_exe_without_the_mz_header_in_the_cwd_is_found(tmp_path):
+    fake = _fake(tmp_path / "uv.exe")
+    assert _scan(tmp_path, "cmd /c setup.bat", cwd=str(tmp_path)) == str(fake)
+
+
+@pytest.mark.parametrize("where", [".uv/uv.exe", ".venv/Scripts/localm.exe",
+                                   ".python/cpython/python.exe"])
+def test_the_folders_a_setup_script_uses_are_scanned(tmp_path, where):
+    fake = _fake(tmp_path / where)
+    assert _scan(tmp_path, "cmd /c setup.bat", cwd=str(tmp_path)) == str(fake)
+
+
+def test_an_empty_exe_is_not_a_program(tmp_path):
+    (tmp_path / "uv.exe").write_bytes(b"")
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) == str(tmp_path / "uv.exe")
+
+
+def test_a_real_stub_passes(tmp_path):
+    _real_stub(tmp_path / "uv.exe")
+    _real_stub(tmp_path / ".venv" / "Scripts" / "localm.exe")
+    assert _scan(tmp_path, "cmd /c setup.bat", cwd=str(tmp_path)) is None
+
+
+def test_the_childs_own_path_is_scanned_not_only_ours(tmp_path):
+    fake = _fake(tmp_path / "tools" / "uv.exe")
+    other = tmp_path / "other"
+    other.mkdir()
+    env = {"Path": os.pathsep.join([str(tmp_path / "tools"), r"C:\Windows\System32"])}
+    assert _scan(tmp_path, "cmd /c x.bat", env=env, cwd=str(other)) == str(fake)
+    assert _scan(tmp_path, "cmd /c x.bat", env={"Path": r"C:\Windows\System32"},
+                 cwd=str(other)) is None
+
+
+def test_a_path_folder_is_scanned_top_level_only(tmp_path):
+    _fake(tmp_path / "tools" / "sub" / "uv.exe")
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _scan(tmp_path, "cmd /c x.bat", env={"PATH": str(tmp_path / "tools")},
+                 cwd=str(other)) is None
+
+
+def test_the_program_given_as_a_path_is_checked(tmp_path):
+    fake = _fake(tmp_path / "prog" / "tool.exe")
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _scan(tmp_path, f'"{fake}" --version', cwd=str(other)) == str(fake)
+    assert _scan(tmp_path, None, application=str(fake), cwd=str(other)) == str(fake)
+
+
+def test_the_folder_of_a_script_on_the_command_line_is_scanned(tmp_path):
+    fake = _fake(tmp_path / "scripts" / ".uv" / "uv.exe")
+    other = tmp_path / "other"
+    other.mkdir()
+    script = tmp_path / "scripts" / "setup.bat"
+    assert _scan(tmp_path, f'cmd.exe /d /c "{script}"', cwd=str(other)) == str(fake)
+
+
+def test_folders_outside_the_temp_roots_are_never_scanned(tmp_path):
+    _fake(tmp_path / "uv.exe")
+    assert nw.fake_exe_in_reach(None, "cmd /c x.bat", {"PATH": str(tmp_path)}, str(tmp_path),
+                                roots=[nw._norm(tmp_path / "elsewhere")]) is None
+
+
+def test_a_temp_root_itself_is_not_scanned(tmp_path):
+    _fake(tmp_path / "uv.exe")
+    assert nw.fake_exe_in_reach(None, "cmd /c x.bat", None, str(tmp_path),
+                                roots=[nw._norm(tmp_path)]) is None
+
+
+def test_the_scan_stops_at_its_depth(tmp_path):
+    too_deep = tmp_path.joinpath(*(["d"] * (nw.SCAN_DEPTH + 1)))
+    _fake(too_deep / "uv.exe")
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) is None
+    last = tmp_path.joinpath(*(["d"] * nw.SCAN_DEPTH))
+    _fake(last / "uv.exe")
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) == str(last / "uv.exe")
+
+
+def test_the_scan_stops_at_its_entry_limit(tmp_path, monkeypatch):
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+    _fake(tmp_path / "zz" / "uv.exe")
+    monkeypatch.setattr(nw, "SCAN_ENTRY_LIMIT", 3)
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) is None
+
+
+def test_a_rewritten_exe_is_looked_at_again(tmp_path):
+    exe = _real_stub(tmp_path / "uv.exe")
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) is None
+    exe.write_text("now text", encoding="utf-8")
+    assert _scan(tmp_path, "cmd /c x.bat", cwd=str(tmp_path)) == str(exe)
+
+
+@_needs_windows
+def test_the_pytest_temp_folder_counts_as_a_temp_root(tmp_path):
+    assert nw.under_temp(tmp_path)
+    assert not nw.under_temp(Path(os.environ["SystemRoot"]) / "System32")
+    assert not nw.under_temp(Path(__file__).resolve().parent)
+
+
+@_needs_windows
+@pytest.mark.parametrize("command", [
+    ["cmd", "/c", r".\setup.bat"],
+    ["cmd.exe", "/d", "/c", "exit 0"],
+    ["powershell", "-NoProfile", "-Command", "exit 0"],
+])
+def test_a_text_exe_in_the_cwd_is_refused_before_any_child_starts(stop_spy, tmp_path, command):
+    fake = _fake(tmp_path / ".uv" / "uv.exe")
+    with pytest.raises(_Refused, match="not a program") as info:
+        subprocess.run(command, cwd=tmp_path)
+    assert str(fake) in str(info.value) and "Add-Type" in str(info.value)
+    assert stop_spy == []
+
+
+@_needs_windows
+def test_a_text_exe_on_the_childs_path_is_refused_before_any_child_starts(stop_spy, tmp_path):
+    tools = tmp_path / "tools"
+    _fake(tools / "uv.exe")
+    other = tmp_path / "other"
+    other.mkdir()
+    env = {**os.environ, "PATH": f"{tools};{os.environ['PATH']}"}
+    with pytest.raises(_Refused, match="not a program"):
+        subprocess.run(["cmd.exe", "/c", "exit 0"], cwd=other, env=env)
+    assert stop_spy == []
+
+
+@_needs_windows
+def test_a_text_exe_started_directly_is_refused_before_any_child_starts(stop_spy, tmp_path):
+    fake = _fake(tmp_path / "prog" / "tool.exe")
+    with pytest.raises(_Refused, match="not a program"):
+        subprocess.Popen([str(fake), "--version"])
+    assert stop_spy == []
+
+
+@_needs_windows
+def test_the_same_layout_with_real_stubs_starts_the_child(stop_spy, tmp_path):
+    _real_stub(tmp_path / ".uv" / "uv.exe")
+    _real_stub(tmp_path / ".venv" / "Scripts" / "localm.exe")
+    with pytest.raises(_Stop):
+        subprocess.run(["cmd", "/c", r".\setup.bat"], cwd=tmp_path)
+    assert len(stop_spy) == 1
+
+
+@_needs_windows
+def test_allow_window_skips_the_fake_exe_scan(stop_spy, tmp_path):
+    _fake(tmp_path / "uv.exe")
+    with nw.allow_window():
+        with pytest.raises(_Stop):
+            subprocess.run(["cmd", "/c", "exit 0"], cwd=tmp_path)
+    assert len(stop_spy) == 1
