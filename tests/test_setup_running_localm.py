@@ -154,5 +154,5 @@ def test_nothing_running_asks_nothing(gui, two_folders, monkeypatch):
 
 
 def test_the_running_check_is_the_first_step(gui):
-    labels = [s.label for s in gui.all_steps(gui.Plan())]
+    labels = [s.label for s in gui.window_steps(gui.Plan())]
     assert labels[0].startswith("Checking for running")

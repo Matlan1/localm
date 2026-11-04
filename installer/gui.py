@@ -667,7 +667,12 @@ def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     the Portable choice needs it."""
     steps = build_steps(plan, resume)
     first = contained_uv_step(plan)
-    return [running_programs_step(), *([first] if first else []), *steps]
+    return [first, *steps] if first else steps
+
+
+def window_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
+    """Every step the window runs: the running-programs check, then all_steps."""
+    return [running_programs_step(), *all_steps(plan, resume)]
 
 
 def running_programs_step() -> Step:
@@ -1672,7 +1677,7 @@ class Wizard:
         global ASK
         ASK = self._ask_from_worker
         resume = begin_journal(self._emit)
-        steps = all_steps(plan, resume)
+        steps = window_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
         self.root.after(80, self._pump)
 
