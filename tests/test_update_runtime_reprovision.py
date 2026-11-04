@@ -574,6 +574,26 @@ def test_the_restart_path_carries_out_a_pending_reprovision(install, monkeypatch
     assert updater_runtime.last_status()["state"] == "updated"
 
 
+def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do(install,
+                                                                                 monkeypatch):
+    from localm import updater_parts
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    fake = _fake_setup_llama(install, "b1355-cpu-b11908", rc=1)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
+    assert hs._finish_pending_runtime_update() is True
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    steps = updater_parts.installed_parts(install)["last_steps"]
+    note = next(s["note"] for s in steps if s["part"] == "runtime")
+    assert "NOT updated" in note and "setup-llama exited 1" in note
+    assert "To try again" in note and "Update now" in note
+    assert "--force" not in note, "the command of the version rolled back from is not offered"
+
+
 # ------------------------------------ doctor ---------------------------------
 
 def test_doctor_flags_a_runtime_behind_the_release_pin(tmp_path, cfg, monkeypatch):

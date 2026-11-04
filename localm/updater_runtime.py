@@ -586,6 +586,79 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
         return holders(lib) or [{"pid": None, "name": f"a process ({e})"}]
 
 
+# The end of the runtime probe daemon's command line
+# (``backends.llamacpp._loader._spawn_probe_daemon``).
+_PROBE_COMMAND_TAIL = ["-u", "-m", "localm.inference.backends.llamacpp._vram_probe"]
+
+
+def _is_probe_command(cmdline: Optional[str]) -> bool:
+    return bool(cmdline) and cmdline.split()[-3:] == _PROBE_COMMAND_TAIL
+
+
+def own_probe_daemons(found: list, root, *, procs: list,
+                      read_command: Optional[Callable] = None) -> Optional[list]:
+    """The pids to stop to end the holders *found* (from :func:`holders`), or
+    None unless every named holder is a runtime probe daemon of the install at
+    *root*. A daemon is identified by its command line and by the full path of
+    its program, which is inside *root* or, for a venv launcher's base
+    interpreter outside it, belongs to a parent inside *root* with the same
+    command line (then both pids are listed, the holder first). Never by process
+    name. *procs* is ``install_manifest.list_processes()``; a holder no longer
+    in it is skipped, and so is one with no pid. *read_command* maps a pid to its
+    command line (default ``install_manifest.command_line``)."""
+    from localm import install_manifest
+    read_command = read_command or install_manifest.command_line
+    by_pid = {p[0]: p for p in procs}
+    root_s = str(Path(root).resolve())
+
+    def in_root(pid: int) -> bool:
+        p = by_pid[pid]
+        progs = [x for x in (p[2], p[4] if len(p) > 4 else None) if x and os.path.isabs(x)]
+        return any(install_manifest._inside(x, root_s) for x in progs)
+
+    out: list = []
+    for h in found:
+        pid = h.get("pid")
+        if not pid or pid not in by_pid:
+            continue
+        if not _is_probe_command(read_command(pid)):
+            return None
+        if in_root(pid):
+            out.append(pid)
+            continue
+        parent = _parent(by_pid, pid)
+        if parent is None or not in_root(parent) or not _is_probe_command(read_command(parent)):
+            return None
+        out += [pid, parent]
+    return out
+
+
+def stop_own_probe_daemons(lib, root) -> Optional[int]:
+    """Stop the runtime probe daemons of the install at *root* that hold its
+    runtime at *lib* (:func:`own_probe_daemons`). The running localm that started
+    one starts another on its next query. Returns how many pids were stopped, 0
+    when no process was named, and None, having stopped nothing, when a holder
+    is anything else or processes cannot be listed. Never raises."""
+    try:
+        from localm import install_manifest
+        named = [h for h in holders(lib) if h.get("pid")]
+        if not named:
+            return 0
+        procs = install_manifest.list_processes()
+        if procs is None:
+            return None
+        pids = own_probe_daemons(named, root, procs=procs)
+        if pids is None:
+            return None
+        for pid in pids:
+            install_manifest._stop(pid, timeout=_STOP_WAIT_S)
+        return len(pids)
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not stop the runtime probe daemon: %s", e)
+        return None
+
+
 def in_use_message(found: list, retry: str) -> str:
     """The user-facing refusal for the holders *found*: which to close, then
     *retry*."""
@@ -706,7 +779,9 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
 
     Returns None when nothing is pending, else a status ``{"state", "backend",
     "from", "to", "holders", "error", "note", "version"}`` (also recorded for ``localm
-    doctor``), ``version`` being the localm version installed. ``state`` is:
+    doctor``), ``version`` being the localm version installed. A ``waiting`` or
+    ``failed`` status also has ``"why"``, the note without what to do next.
+    ``state`` is:
 
     - ``"updated"``: the runtime now is the release's build;
     - ``"current"``: it already was, or the user has since chosen a build;
@@ -759,9 +834,12 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
 
     found = stop_own_holders(lib, root, say=say, wait=wait)
     if found:
-        status.update(state="waiting", holders=found, note=(
-            f"the {backend} runtime is in use, so it was not changed: "
-            + in_use_message(found, f"start localm again (or run: {_manual_command(backend)})")))
+        status.update(state="waiting", holders=found,
+                      why=(f"the {backend} runtime is in use by {describe_holders(found)}, "
+                           "so it was not changed"),
+                      note=(f"the {backend} runtime is in use, so it was not changed: "
+                            + in_use_message(
+                                found, f"start localm again (or run: {_manual_command(backend)})")))
         _write_status(status)
         return status
     if say:
@@ -800,11 +878,16 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
                                             f"{pending.get('from')} -> {now_build or target}")
         _write_status(status)
         return status
+    held_by = holders(lib)
+    if problem is not None and held_by:
+        problem += f"; the runtime is in use by {describe_holders(held_by)}"
+        status["holders"] = held_by
     restore_errors = au.restore_runtime(snapshot, lib)
     kept = ("the previous runtime was put back" if not restore_errors
             else "putting the previous runtime back FAILED: " + "; ".join(restore_errors))
     status.update(state="failed", error=problem + ("; " + "; ".join(restore_errors)
                                                    if restore_errors else ""),
+                  why=f"the {backend} runtime was NOT updated to {target} ({problem}); {kept}",
                   note=(f"the {backend} runtime was NOT updated to {target} ({problem}); "
                         f"{kept}. To retry: {_manual_command(backend)}"))
     from localm.debuglog import logger

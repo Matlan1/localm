@@ -5541,11 +5541,14 @@ def _finish_pending_runtime_update() -> bool:
     ComfyUI, uv), with the same rollback when a component cannot be updated.
 
     While it runs, the GPU meter spawns no torch probe child
-    (``discover.torch_probes_held``, which also waits for running ones), so no
-    process of this install holds PyTorch's libraries for it."""
+    (``discover.torch_probes_held``, which also waits for running ones) and no
+    runtime probe daemon (``_loader.probe_daemon_held``, which also stops a
+    running one), so no process of this install holds PyTorch's libraries or the
+    native runtime for it."""
     try:
         from localm import discover
-        with discover.torch_probes_held():
+        from localm.inference.backends.llamacpp._loader import probe_daemon_held
+        with discover.torch_probes_held(), probe_daemon_held():
             return _finish_pending_update_steps()
     except Exception:
         _dbg_swallow("the pending runtime update or its rollback could not be carried out "
@@ -5571,12 +5574,6 @@ def _finish_pending_update_steps() -> bool:
         _dbg.info("runtime update during restart: this version pins another runtime build "
                   "than the installed one; installing it")
     if pending is not None:
-        try:
-            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
-            stop_probe_daemon()
-        except Exception:
-            _dbg_swallow("stopping the runtime probe daemon before the runtime update "
-                         "failed", level="warning")
         status = updater_runtime.finish_pending(
             say=lambda m: _dbg.info("runtime update during restart: %s", m))
         if status is not None and status["state"] not in ("updated", "current"):

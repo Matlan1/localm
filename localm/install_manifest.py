@@ -1015,6 +1015,54 @@ def list_processes() -> Optional[list]:
         return None
 
 
+def command_line(pid: int) -> Optional[str]:
+    """The command line of process *pid* as one string, or None when it cannot
+    be read (the process is gone, access is denied, or the platform offers no
+    way). Never raises."""
+    try:
+        if sys.platform == "win32":
+            return _win_command_line(pid)
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+        return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
+def _win_command_line(pid: int) -> Optional[str]:
+    """``NtQueryInformationProcess(ProcessCommandLineInformation)``, which needs
+    only PROCESS_QUERY_LIMITED_INFORMATION (Windows 8.1 and later)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT),
+                    ("Buffer", ctypes.c_void_p)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    nt = ctypes.WinDLL("ntdll")
+    nt.NtQueryInformationProcess.restype = ctypes.c_long
+    nt.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(0x10000 + ctypes.sizeof(_UnicodeString))
+        got = wintypes.ULONG(0)
+        if nt.NtQueryInformationProcess(h, 60, buf, len(buf), ctypes.byref(got)) != 0:
+            return None
+        us = _UnicodeString.from_buffer(buf)
+        if not us.Buffer or not us.Length:
+            return None
+        return ctypes.wstring_at(us.Buffer, us.Length // 2)
+    finally:
+        k32.CloseHandle(h)
+
+
 def _ancestors(procs: list, pid: int) -> set:
     parent = {p[0]: p[1] for p in procs}
     out = set()

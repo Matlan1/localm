@@ -575,7 +575,7 @@ def _fake_uv_exe(tmp_path: Path) -> Path:
 
 def _fake_uv_pip(site: Path, transformers="5.20.2", rc=0):
     def run(cmd):
-        if Path(cmd[0]).parent.name != "fake-uv-bin" or ".[gpu,audio]" not in cmd:
+        if Path(cmd[0]).parent.name != "fake-uv-bin" or "gpu" not in cmd:
             return 0
         if rc:
             _uninstall(site, "transformers")
@@ -593,7 +593,8 @@ def test_pytorch_stack_is_re_installed_when_the_release_pins_another_one(tmp_pat
     staged = _write_tree(tmp_path / "s", _files("0.3.2", pyproject=_PYPROJECT_032))
     p = _plans(staged, inst)["pytorch"]
     assert p["update"] is True and "transformers 5.15.1 (wants ~=5.20.2)" in p["note"]
-    assert p["items"] == [["pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"]]
+    assert p["items"] == [["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+                           "--extra", "gpu", "--extra", "audio"]]
     shallow = _plans(staged, inst, deep=False)["pytorch"]
     assert shallow["check"] is True and shallow["update"] is False
 
@@ -606,7 +607,8 @@ def test_pytorch_update_and_rollback_through_apply(tmp_path, torch_install):
     res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                         runner=lambda c: calls.append(c) or fake(c))
     uv = str(_fake_uv_exe(tmp_path))
-    assert [uv, "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"] in calls
+    assert [uv, "pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+            "--extra", "gpu", "--extra", "audio"] in calls
     assert res["components"]["state"] == "updated"
     assert uc.dists(site)["transformers"]["version"] == "5.20.2"
     updater.rollback_last(installed=inst)

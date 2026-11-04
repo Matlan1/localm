@@ -533,10 +533,14 @@ def torch_step(tree: Path, spec: str) -> tuple:
     """The requirements and ``uv pip`` argv lists (without the uv executable)
     of the PyTorch step setup runs for the torch-args *spec* in the tree at
     *tree*: ``(requirements, commands, wheel_line)``. ``wheel_line`` is the
-    ``--torch-backend`` value (``cu126``, ``rocm6.2``, ...) or None."""
+    ``--torch-backend`` value (``cu126``, ``rocm6.2``, ...) or None. The commands
+    install the project's dependencies and these extras from ``pyproject.toml``,
+    not the project: reinstalling it rewrites ``Scripts/localm.exe``, which fails
+    while that launcher is the running program."""
     if spec.strip() == "-e .[gpu]":
         return (_extras(tree, ["gpu", "audio"]),
-                [["pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"]], None)
+                [["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+                  "--extra", "gpu", "--extra", "audio"]], None)
     args = shlex.split(spec, posix=True)
     line = None
     for a in args:
@@ -544,7 +548,8 @@ def torch_step(tree: Path, spec: str) -> tuple:
             line = a.split("=", 1)[1]
     return (_requirements_in(args) + _extras(tree, ["hf", "audio"]),
             [["pip", "install", "-p", ".venv", *args],
-             ["pip", "install", "-p", ".venv", "-e", ".[hf,audio]"]], line)
+             ["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+              "--extra", "hf", "--extra", "audio"]], line)
 
 
 def _local_label(version: str) -> Optional[str]:

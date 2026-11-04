@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -471,6 +472,44 @@ def _clear_target(target: Path) -> list[Path]:
     return left
 
 
+# Seconds a replace keeps stopping this install's runtime probe daemon, which a
+# running localm starts again on its next query.
+_OWN_PROBE_RETRY_S = 15.0
+
+
+def _stop_own_probes(target: Path) -> Optional[int]:
+    """Stop the runtime probe daemons of this install that hold *target*
+    (``updater_runtime.stop_own_probe_daemons``). None when *target* is not this
+    install's runtime or a holder is anything else."""
+    from localm import updater, updater_runtime
+    root = updater.repo_root()
+    try:
+        if updater_runtime.runtime_lib(root).resolve() != Path(target).resolve():
+            return None
+    except OSError:
+        return None
+    return updater_runtime.stop_own_probe_daemons(target, root)
+
+
+def _locked_after_stopping_own_probes(target: Path, check) -> list[Path]:
+    """Call *check*, which returns the files that are in the way, until it
+    returns none. While this install's own runtime probe daemon is what holds
+    them it is stopped and *check* called again, for up to
+    :data:`_OWN_PROBE_RETRY_S` seconds. Returns what *check* last returned; a
+    holder that is anything else ends the retries at once, with nothing stopped."""
+    deadline = time.monotonic() + _OWN_PROBE_RETRY_S
+    stopped = False
+    while True:
+        locked = check()
+        if not locked or time.monotonic() >= deadline:
+            return locked
+        n = _stop_own_probes(target)
+        if n is None or (n == 0 and not stopped):
+            return locked
+        stopped = stopped or n > 0
+        time.sleep(0.1)
+
+
 def _clear_target_or_refuse(target: Path) -> None:
     """Clear *target*, but REFUSE BEFORE DELETING ANYTHING if the runtime is in
     use. Raises RuntimeInUseError with the existing install untouched.
@@ -485,11 +524,15 @@ def _clear_target_or_refuse(target: Path) -> None:
     The post-clear check is not redundant: a process can open a file in the
     window between the probe and the unlink. That race leaves a half-state, which
     is why it raises the same error rather than continuing - it cannot be
-    prevented here, but it must never be silent."""
-    in_use = _sl._files_in_use(target)
+    prevented here, but it must never be silent.
+
+    This install's own runtime probe daemon is not a reason to refuse: it is
+    stopped and the check or the clear repeated
+    (:func:`_locked_after_stopping_own_probes`)."""
+    in_use = _locked_after_stopping_own_probes(target, lambda: _sl._files_in_use(target))
     if in_use:
         raise RuntimeInUseError(in_use, partial=False)
-    left = _sl._clear_target(target)
+    left = _locked_after_stopping_own_probes(target, lambda: _sl._clear_target(target))
     if left:
         raise RuntimeInUseError(left, partial=True)
 
@@ -504,14 +547,15 @@ def _replace_target(target: Path, fill):
     """Replace the runtime in *target* with what *fill* puts into an empty
     staging directory, and return what *fill* returns.
 
-    Order: refuse when the runtime is in use (RuntimeInUseError, nothing
-    touched); call ``fill(staging)``; only when it returns, clear *target*
+    Order: refuse when the runtime is in use, this install's own probe daemon
+    aside (RuntimeInUseError, nothing touched); call ``fill(staging)``; only when
+    it returns, clear *target*
     (:func:`_clear_target_or_refuse`, which keeps the choice record and the git
     sentinels) and move the staged files in. When *fill* raises (a failed or
     refused download, an archive that does not verify), the exception
     propagates and *target* is exactly as it was. The staging directory is
     removed in every case."""
-    in_use = _sl._files_in_use(target)
+    in_use = _locked_after_stopping_own_probes(target, lambda: _sl._files_in_use(target))
     if in_use:
         raise RuntimeInUseError(in_use, partial=False)
     staging = _staging_path(target)

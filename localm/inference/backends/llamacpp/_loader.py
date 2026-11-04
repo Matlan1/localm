@@ -1136,6 +1136,8 @@ import threading as _threading
 
 _PROBE_PROC = None
 _PROBE_LOCK = _threading.Lock()
+# How many probe_daemon_held() blocks are active (no daemon is spawned above 0).
+_PROBE_HOLDS = 0
 
 
 def _spawn_probe_daemon():
@@ -1244,9 +1246,12 @@ def _probe_roundtrip(request: str, parse) -> Optional[object]:
     respawns fresh rather than trusting a desynced pipe again. Returns
     *parse*'s result, or ``None`` on: spawn/write failure, reply timeout, EOF
     (daemon crashed/exited), an "ERR" reply (the daemon is alive and answered
-    "genuinely unmeasurable" - it is NOT killed), or desync."""
+    "genuinely unmeasurable" - it is NOT killed), desync, or while
+    :class:`probe_daemon_held` is active (nothing is spawned)."""
     global _PROBE_PROC
     with _PROBE_LOCK:
+        if _PROBE_HOLDS > 0:
+            return None
         first_spawn = False
         if _PROBE_PROC is None or _PROBE_PROC.poll() is not None:
             try:
@@ -1316,6 +1321,25 @@ def stop_probe_daemon(wait: float = 5.0) -> None:
             except Exception as e:
                 logger.debug("vram-probe: stopped daemon did not exit within "
                              "%.1fs (%s)", wait, type(e).__name__)
+
+
+class probe_daemon_held:
+    """Context manager: on entry stops the probe daemon (:func:`stop_probe_daemon`);
+    while active no query spawns one (each answers None, "unmeasurable"), so no
+    process of this install holds the runtime for the GPU meter. Nests."""
+
+    def __enter__(self):
+        global _PROBE_HOLDS
+        with _PROBE_LOCK:
+            _PROBE_HOLDS += 1
+        stop_probe_daemon()
+        return self
+
+    def __exit__(self, *exc):
+        global _PROBE_HOLDS
+        with _PROBE_LOCK:
+            _PROBE_HOLDS = max(0, _PROBE_HOLDS - 1)
+        return False
 
 
 def _kill_and_clear_probe() -> None:

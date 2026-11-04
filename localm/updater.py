@@ -1836,6 +1836,7 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     from localm import _apply_update as au
     from localm import updater_components, updater_runtime
     from localm.bugreport import LocalmError
+    backup_made = backup_dir.stat().st_mtime
     comp_snap = updater_components.snapshot_dir(backup_dir)
     if not updater_components.snapshot_readable(comp_snap):
         raise LocalmError("the copy this update kept of the parts it replaced cannot be "
@@ -1926,15 +1927,17 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
         updater_runtime.clear_pending()
     except OSError as e:
         _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
-    _record_rollback(target, backup_dir, keep_failures=not record)
+    _record_rollback(target, backup_dir, keep_failures=not record, since=backup_made)
 
 
-def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = False) -> None:
+def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = False,
+                     since: Optional[float] = None) -> None:
     """Record, as the last runtime and component update status, that the
     update was rolled back, so ``localm doctor`` and the GUI do not report the
     state the rolled-back update left. A ``failed`` or ``waiting`` status written
-    since this update's backup was made stays named in the new note as the
-    reason; with *keep_failures* such a status stays, under the version the install is
+    since this update's backup was made (*since*, default the modification time of
+    *backup_dir*) stays named in the new note as the reason, followed by what to do
+    next; with *keep_failures* such a status stays, under the version the install is
     back on and with the rollback added to its note. Best-effort: a status that cannot
     be written is logged."""
     from localm import updater_components, updater_runtime
@@ -1946,7 +1949,8 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
         if not st or st.get("state") not in ("failed", "waiting") or not st.get("note"):
             return False
         try:
-            return float(st.get("at") or 0) >= backup_dir.stat().st_mtime
+            made = backup_dir.stat().st_mtime if since is None else since
+            return float(st.get("at") or 0) >= made
         except (OSError, TypeError, ValueError):
             return False
     if keep_failures:
@@ -1960,9 +1964,11 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
                         encoding="utf-8")
                 except OSError as e:
                     _apply_warn("could not record the version of the kept update result: %s", e)
-    why = [str((st or {}).get("note")) for st in (runtime_last, comp_last) if failed_now(st)]
+    why = [str((st or {}).get("why") or (st or {}).get("note"))
+           for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
-        note += " (" + "; ".join(why) + ")"
+        note += (" (" + "; ".join(why) + "). To try again, close anything else using this "
+                 "install, then choose Update now in Settings > Updates")
     write_runtime = not keep_failures or (runtime_last is not None
                                           and not failed_now(runtime_last))
     write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))
