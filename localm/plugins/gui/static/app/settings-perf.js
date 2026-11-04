@@ -22,6 +22,10 @@ import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./ta
 export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
+// The saved context window while the slider is untouched; the slider rounds it to
+// its step, so the help and the estimate read this value. Null once it is moved.
+let _perfCtxSaved = null;
+const _perfCtxValue = (ctx) => (_perfCtxSaved === null ? ctx.value : String(_perfCtxSaved));
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
 export async function refreshPerfEstimate() {
@@ -29,7 +33,7 @@ export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
   try {
-    const q = new URLSearchParams({ n_ctx: ctx.value, n_gpu_layers: gl.value });
+    const q = new URLSearchParams({ n_ctx: _perfCtxValue(ctx), n_gpu_layers: gl.value });
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
     if (!r.ok) { out.textContent = t("settings.perf.estimateUnavailable"); return; }
     const d = await r.json();
@@ -68,7 +72,7 @@ export async function refreshPerfEstimate() {
 export function syncPerfCtxHelp() {
   const ctx = $("perf-ctx"), help = $("perf-ctx-help");
   if (!ctx || !help) return;
-  const val = el("span", "", ctx.value);
+  const val = el("span", "", _perfCtxValue(ctx));
   val.id = "perf-ctx-val";
   help.replaceChildren(
     document.createTextNode(t("settings.perf.ctxHelpPrefix")),
@@ -141,7 +145,7 @@ export function setupPerfCard() {
     _perfEstTimer = setTimeout(refreshPerfEstimate, 150);   // debounce while dragging
   };
   gl.addEventListener("input", () => { touched.gl = true; onInput(); });
-  ctx.addEventListener("input", () => { touched.ctx = true; onInput(); });
+  ctx.addEventListener("input", () => { touched.ctx = true; _perfCtxSaved = null; onInput(); });
   const apply = $("perf-apply");
   if (apply) apply.onclick = async () => {
     const updates = {};
@@ -198,6 +202,7 @@ export function setupPerfCard() {
         // The slider's range grows to hold a larger saved window, so it shows it.
         if (cfg.n_ctx > Number(ctx.max)) ctx.max = String(cfg.n_ctx);
         ctx.value = Math.max(Number(ctx.min), cfg.n_ctx);
+        _perfCtxSaved = cfg.n_ctx >= Number(ctx.min) ? cfg.n_ctx : null;
       }
       syncPerfCtxHelp();
       refreshPerfEstimate();

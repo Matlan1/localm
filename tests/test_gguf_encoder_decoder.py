@@ -634,4 +634,4 @@ class TestWorkerAndParent:
         text = context_overflow_detail(3000, 2048, True)
         assert "3000" in text and "2048" in text and "encoder-decoder" in text
         assert "n_ctx_max" not in text
-        assert "n_ctx_max" in context_overflow_detail(3000, 2048)
+        assert "n_ctx_max" in context_overflow_detail(3000, 2048, ctx_auto=False)

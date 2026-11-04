@@ -296,6 +296,10 @@ test("Apply keeps a saved context window the slider's step would round", async (
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { config: { n_ctx: 5000, n_gpu_layers: 99 } }) });
   await waitFor(() => window.document.getElementById("perf-ctx").value !== "4096");
+  assert.equal(window.document.getElementById("perf-ctx-val").textContent, "5000",
+    "the help names the saved value, not the slider's rounded one");
+  assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/vram-estimate?n_ctx=5000"))),
+    "the estimate uses the saved value");
   setPerf(window, "perf-gpu-layers", "50");
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => patches(calls).length > 0));

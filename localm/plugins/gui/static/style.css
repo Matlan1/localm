@@ -1967,6 +1967,10 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 #coder-state.st-running { animation: mic-pulse 1.2s infinite; }
+#coder-state.st-running.st-warn {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
 /* interrupted: the server stopped while the operation was in flight, so its
    outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
    "needs attention", the same treatment st-skipped/st-unknown get - not the red
