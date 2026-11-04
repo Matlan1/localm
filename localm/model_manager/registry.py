@@ -35,6 +35,7 @@ from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _find_model_units
+from .gguf import _scan_model_units
 from .gguf import _is_hf_model_dir
 from .gguf import TRANSFER_TEMP_PREFIX
 from .gguf import _gguf_declared_min_size
@@ -505,6 +506,8 @@ _MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
 _MEDIA_PART_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "vocoder", "unknown"})
 _MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora",
                                     "controlnet", "textual-inversion", "upscaler"})
+_MEDIA_FILE_SUFFIXES = (".safetensors", ".sft")
+_CHECKPOINT_SUFFIXES = (".pth", ".pt")
 
 
 def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
@@ -515,7 +518,16 @@ def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str
     given; otherwise the file's tensor layout decides
     (``localm.media.sdcpp.families``). A file inside a HuggingFace model or
     PEFT adapter directory, and an LLM LoRA, is never one unless *model_type*
-    says so."""
+    says so.
+
+    A ``.pth`` / ``.pt`` checkpoint is only ever an ``upscaler``, and only when
+    its tensors (read without unpickling) have an ESRGAN layout; *model_type*
+    must be None or ``upscaler``."""
+    if path.suffix.lower() in _CHECKPOINT_SUFFIXES:
+        if model_type not in (None, "upscaler"):
+            return None
+        from localm.media.sdcpp.families import inspect_file
+        return "upscaler" if inspect_file(path).kind == "upscaler" else None
     if model_type in _MEDIA_COMPONENT_TYPES:
         return model_type
     if model_type is not None:
@@ -4705,6 +4717,26 @@ def _unfinished_gguf_reason(path: Path) -> Optional[str]:
     return None
 
 
+def _loose_media_files(candidates: list[Path], model_type: Optional[str]) -> list[Path]:
+    """The files among *candidates* that ``add_local`` registers as image or video
+    models for *model_type* (see ``_media_component_type``); none when
+    *model_type* is a type that is not an image or video one. Each candidate that
+    is not one is reported as skipped."""
+    from rich.markup import escape
+
+    media: list[Path] = []
+    if model_type is not None and model_type not in _MEDIA_COMPONENT_TYPES:
+        return media
+    for k, candidate in enumerate(candidates, 1):
+        _mm._import_status(f"Checking {candidate.name} ({k} of {len(candidates)})", log=False)
+        if _media_component_type(candidate, model_type) is not None:
+            media.append(candidate)
+        else:
+            console.print(f"[yellow]Skipped {escape(candidate.name)}:[/yellow] not an image or "
+                          "video model localm recognises.")
+    return media
+
+
 def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
     """*first_parts* without the GGUF files that cannot be registered
     (unsupported version, byte-swapped, importance matrix, unfinished copy or
@@ -5580,8 +5612,8 @@ def add_local(
     # (deterministic type detection below then classifies it); otherwise reject
     # with a precise, actionable reason instead of the bare "Not a model".
     media_type = None
-    if p.is_file() and p.suffix.lower() in (".safetensors", ".sft") and not (is_gguf or is_hf
-                                                                           or is_blob):
+    if (p.is_file() and p.suffix.lower() in _MEDIA_FILE_SUFFIXES + _CHECKPOINT_SUFFIXES
+            and not (is_gguf or is_hf or is_blob)):
         media_type = _media_component_type(p, model_type)
     if media_type is not None:
         if model_type is None:
@@ -5644,14 +5676,16 @@ def add_local(
 
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
-        first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
+        first_parts, hf_dirs, media_candidates = _scan_model_units(p, max_depth=max_depth)
         found = len(first_parts)
+        media_files = _loose_media_files(media_candidates, model_type)
+        media_note = f", {len(media_files)} image or video model file(s)" if media_files else ""
         _mm._import_status(
-            f"Found {found} GGUF file(s) and {len(hf_dirs)} Hugging Face folder(s) in {p}")
+            f"Found {found} GGUF file(s), {len(hf_dirs)} Hugging Face folder(s){media_note} in {p}")
         first_parts = _skip_unusable_ggufs(first_parts)
-        refused = found - len(first_parts)
-        if first_parts or hf_dirs:
-            only_one = len(first_parts) + len(hf_dirs) == 1
+        refused = found - len(first_parts) + len(media_candidates) - len(media_files)
+        if first_parts or hf_dirs or media_files:
+            only_one = len(first_parts) + len(hf_dirs) + len(media_files) == 1
             registered_any = False
             names_before = set(_mm.load_registry())
             stats: dict = {}
@@ -5666,25 +5700,26 @@ def add_local(
                 if stored is None:
                     return False
                 first_parts = stored
-            units = len(first_parts) + len(hf_dirs)
+            units = len(first_parts) + len(hf_dirs) + len(media_files)
             if first_parts:
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
                     fast, model_type=model_type, mmprojs=mmprojs,
                     stats=stats, total=units, recorded=recorded,
                 )
-            for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
-                _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
-                wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
+            for k, unit in enumerate(hf_dirs + media_files, len(first_parts) + 1):
+                _mm._import_status(f"Registering {unit.name} ({k} of {units})")
+                wanted = (_sanitize_name(name) if (name and only_one)
+                          else unit.name if unit.is_dir() else unit.stem)
                 reg = _mm.load_registry()
                 would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
-                external_store = bool(store) and _mm.is_external_path(hf_dir)
+                external_store = bool(store) and _mm.is_external_path(unit)
                 reuse = (would_skip and not external_store) or (
                     store == "move" and external_store)
-                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
+                hf_name = ((_registered_name_for_file(reg, unit, wanted) if reuse else None)
                            or _unique_registry_name(reg, wanted))
                 done = add_local(
-                    str(hf_dir), hf_name,
+                    str(unit), hf_name,
                     on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
                     model_type=model_type, store=store,
                 )

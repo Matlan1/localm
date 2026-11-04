@@ -2,8 +2,8 @@
 """What a model file is to stable-diffusion.cpp, read from its header, and which
 companion files a diffusion model needs.
 
-``inspect_file`` reads only the tensor names and shapes of a ``.gguf`` or
-``.safetensors`` file (never tensor data) and returns a ``FileInfo``:
+``inspect_file`` reads only the tensor names and shapes of a ``.gguf``,
+``.safetensors`` or zip-format ``.pth`` / ``.pt`` file (never tensor data) and returns a ``FileInfo``:
 
 * ``kind``: ``checkpoint`` (a full model with its own text encoder and VAE),
   ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``clip_h``
@@ -389,12 +389,17 @@ def _read_gguf(path: Path) -> Optional[tuple[dict, Optional[str]]]:
 
 
 def read_tensors(path: Path) -> Optional[tuple[dict, Optional[str]]]:
-    """``({tensor name: shape}, gguf architecture or None)`` for a ``.gguf``
-    or ``.safetensors`` file, or None when the header cannot be read. Never
-    raises."""
+    """``({tensor name: shape}, gguf architecture or None)`` for a ``.gguf``,
+    ``.safetensors`` or zip-format ``.pth`` / ``.pt`` file, or None when the
+    header cannot be read. A checkpoint is read without unpickling it
+    (``localm.model_manager.ckpt_tensors``). Never raises."""
     try:
         if path.suffix.lower() == ".gguf":
             return _read_gguf(path)
+        if path.suffix.lower() in (".pth", ".pt"):
+            from localm.model_manager.ckpt_tensors import read_checkpoint_tensors
+            t = read_checkpoint_tensors(path)
+            return None if t is None else (t, None)
         if path.suffix.lower() in (".safetensors", ".sft"):
             t = _read_safetensors(path)
             return None if t is None else (t, None)
