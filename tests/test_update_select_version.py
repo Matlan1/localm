@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import localm
 from localm import _version, updater
 from localm.bugreport import LocalmError
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset, pub_hex
 
@@ -386,9 +387,7 @@ def test_older_build_runs_its_dependency_step_with_the_found_uv(env, monkeypatch
     import subprocess
     import sys
     _home, inst = env
-    contained = inst / ".uv" / "uv.exe"
-    contained.parent.mkdir()
-    contained.write_bytes(b"")
+    contained = write_exe_stub(inst / ".uv" / "uv.exe")
     found = []
     monkeypatch.setattr(updater, "_uv_for_deps", lambda t: found.append(t) or str(contained))
     data = _zip("0.2.0", files={"localm/updater.py": _OLD_UPDATER,
