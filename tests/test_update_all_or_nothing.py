@@ -1281,6 +1281,40 @@ def test_a_run_backup_a_scanner_holds_is_still_promoted(install, home, monkeypat
 
 
 @_WINDOWS_HOLDS
+def test_a_run_backup_that_cannot_be_moved_puts_the_earlier_backup_back(install, home, monkeypatch):
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    kept = _files_of(backup)
+    real = au.swap_with_backup
+    holds = []
+
+    def swap_then_hold(root, target, run_backup):
+        names = real(root, target, run_backup)
+        holds.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
+        holds[0].__enter__()
+        return names
+
+    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
+    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
+    raised = None
+    try:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: 0)
+    except LocalmError as e:
+        raised = e
+    finally:
+        holds[0].__exit__(None, None, None)
+    assert _files_of(backup) == kept
+    assert not list(updater._updates_dir().glob("backup-replaced-*"))
+    assert raised is not None and "could not move this update's backup" in raised.reason
+    runs = list((updater._updates_dir() / "runs").glob("*/backup"))
+    assert len(runs) == 1, "the recovery could not read the held file, so this copy stays"
+    assert (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+@_WINDOWS_HOLDS
 def test_a_failed_recovery_after_a_refused_move_keeps_the_good_backup(install, home, monkeypatch):
     from tests._held_file import held
     inst, site = install
