@@ -293,15 +293,18 @@ class TestGrowthSafety:
     def test_a_failed_growth_reload_of_another_model_does_not_make_it_active(self, monkeypatch):
         backend = _GrowableBackend(capacity=100)
         calls = self._failing_first_load(backend)
-        client = TestClient(create_app(_EngineWithBackend(backend)))
+        engine = _EngineWithBackend(backend, display_name="m")
+        engine.active_requests = 1
         other = _EngineWithBackend(_GrowableBackend(capacity=100), display_name="other")
-        hs._engines["other"] = other
+        hs._engines.update({"m": engine, "other": other})
         monkeypatch.setattr(hs, "_active_model_name", "other")
         monkeypatch.setattr(hs, "_engine", other)
+        monkeypatch.setattr("localm.config.load_registry", lambda: {})
+        monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: None)
 
-        resp = _post_chat(client, "x" * 150)
+        answering = asyncio.run(hs.grow_context_window(engine, 4096))
 
-        assert resp.status_code == 413, resp.text
+        assert answering is engine and engine.loaded
         assert len(calls) == 2
         assert hs._active_model_name == "other"
         assert hs._engine is other

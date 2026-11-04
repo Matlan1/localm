@@ -7598,6 +7598,23 @@ def context_window_wanted(engine, prompt_tokens, min_context, capacity) -> Optio
     return wanted or None
 
 
+def compaction_avoids_growth(engine, messages, prompt_tokens, capacity) -> bool:
+    """Whether *messages* should be compacted rather than *engine*'s window of
+    *capacity* tokens grown: *engine* can reserve a window, the request needs
+    compaction (``_needs_compaction``), and compaction can make it fit with its
+    reply buffer free (``compact.room_after_compaction``, which counts tokens,
+    so this runs off the event loop). Raises what
+    ``engine.count_messages_tokens`` raises."""
+    from localm.inference.compact import compactable, room_after_compaction
+    can = getattr(engine, "can_reserve_context", None)
+    return (callable(can) and can() is True
+            and _needs_compaction(capacity, prompt_tokens, messages,
+                                  encoder_decoder=_engine_is_encoder_decoder(engine),
+                                  reply_reserve=_engine_reply_reserve(engine))
+            and compactable(messages)
+            and room_after_compaction(messages, capacity, engine.count_messages_tokens))
+
+
 def engine_context_limit(engine) -> tuple[Optional[int], Optional[str]]:
     """*engine*'s ``context_reserve_limit()``, or ``(None, None)`` for an
     engine without it. Reads the model file's header; never raises (a

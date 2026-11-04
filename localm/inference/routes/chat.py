@@ -456,20 +456,16 @@ def register(app: FastAPI, ctx) -> None:
                 # would otherwise be the one to report it.
                 raise HTTPException(400, str(e)) from e
 
-            from localm.inference.compact import compactable, room_after_compaction
+            from localm.inference.compact import compactable
             capacity = engine.context_capacity()
             declared = max(req.min_context or 0, req.context_reserve or 0)
             wanted = _hs.context_window_wanted(engine, prompt_tokens, declared, capacity)
             # A conversation compaction can bring inside the window compacts
             # instead of growing it, unless the client declared a window.
-            if (wanted is not None and not declared
-                    and _hs._needs_compaction(capacity, prompt_tokens, messages,
-                                              encoder_decoder=_hs._engine_is_encoder_decoder(engine),
-                                              reply_reserve=_hs._engine_reply_reserve(engine))
-                    and compactable(messages)):
+            if wanted is not None and not declared:
                 try:
-                    if await loop.run_in_executor(None, room_after_compaction, messages,
-                                                  capacity, engine.count_messages_tokens):
+                    if await loop.run_in_executor(None, _hs.compaction_avoids_growth, engine,
+                                                  messages, prompt_tokens, capacity):
                         wanted = None
                 except PretokenizerUnsafeInputError as e:
                     raise HTTPException(400, str(e)) from e

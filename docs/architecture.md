@@ -354,7 +354,7 @@ removed turns instead, and compaction never raises. Used by `localm run`
 interactive chat and by the server before a chat request that nearly fills
 the context; a client disconnect stops the server's summary generation.
 The server compacts instead of reloading the model with a larger window when
-the system prompt, the last four messages, a summary and the reply buffer fit
+the system prompt, the recent messages it keeps, a summary and the reply buffer fit
 the window and the request declares no window of its own (`min_context`,
 `context_reserve`); otherwise it reloads first, with at least twice the window,
 and compacts only if the reloaded window is still too small.
