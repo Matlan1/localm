@@ -66,7 +66,7 @@ ON_DEMAND: dict[str, OnDemand] = {
     "timm": OnDemand("timm", "1.0.30"),
     "open_clip": OnDemand("open-clip-torch", "3.3.0"),
     "torchaudio": OnDemand("torchaudio", "2.0"),
-    "fla": OnDemand("fla-core", "0.6.0", platforms=("linux",), needs=("triton",)),
+    "fla": OnDemand("flash-linear-attention", "0.6.0", platforms=("linux",), needs=("triton",)),
 }
 
 _KERNELS = "a CUDA kernel package that PyPI publishes only as source code to compile"
@@ -544,47 +544,42 @@ def model_folder(name: str) -> Optional[Path]:
 class FolderState:
     """What the bundled code of a model folder needs that this install lacks.
     ``trusted`` is False when ``hf_trust_remote_code`` is off (the code is not
-    run, so nothing is checked). ``optional`` holds modules localm supplies itself
-    when the package is absent, whose package it can add here: the model loads
-    without them, so they are not in ``missing``."""
+    run, so nothing is checked)."""
     trusted: bool
     missing: list
     shipped: list
     blocked: list
     addable: list
-    optional: list = field(default_factory=list)
-
-    @property
-    def to_add(self) -> list:
-        """Every module an install for this model would add."""
-        return [*self.addable, *self.optional]
 
     def as_dict(self) -> dict:
         return {"missing": [package_label(m) for m in self.missing],
-                "addable": [package_label(m) for m in self.to_add],
-                "installable": bool(self.to_add) and not self.shipped and not self.blocked}
+                "addable": [package_label(m) for m in self.addable],
+                "installable": bool(self.addable) and not self.shipped and not self.blocked}
 
 
 def folder_state(folder: Path) -> FolderState:
     """The packages the bundled code of the model *folder* needs and this
     install lacks, sorted into ones localm ships here (the install is incomplete),
     ones it cannot add here (including a shipped module this platform does not
-    get), and ones it can add, plus the modules localm supplies itself whose package
-    it can add here. Never touches the network."""
-    from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
-    from localm.model_manager.missing_packages import PROVIDED_MODULES, is_available, is_importable, shipped_here
+    get), and ones it can add. Never touches the network."""
+    from localm.inference.backends.hf import (
+        _declares_custom_code,
+        _trust_remote_code_enabled,
+        uses_transformers_classes,
+    )
+    from localm.model_manager.missing_packages import is_importable, shipped_here
     if not folder.is_dir() or not _declares_custom_code(str(folder)):
         return FolderState(True, [], [], [], [])
     if not _trust_remote_code_enabled():
         return FolderState(False, [], [], [], [])
-    imports = _folder_imports(folder)
-    missing = sorted(m for m in imports if not is_available(m))
+    if uses_transformers_classes(str(folder)):
+        return FolderState(True, [], [], [], [])
+    missing = sorted(m for m in _folder_imports(folder) if not is_importable(m))
     shipped = [m for m in missing if shipped_here(m)]
     others = [m for m in missing if not shipped_here(m)]
     blocked = [m for m in others if not installable(m)]
     addable = [m for m in others if installable(m)]
-    optional = sorted(m for m in imports & PROVIDED_MODULES if not is_importable(m) and installable(m))
-    return FolderState(True, missing, shipped, blocked, addable, optional)
+    return FolderState(True, missing, shipped, blocked, addable)
 
 
 _scan_cache: dict = {}

@@ -1190,6 +1190,7 @@
   "models.empty.text": "Aucun modèle pour l'instant",
   "models.fit.fits": "tient dans votre VRAM",
   "models.fit.tight": "tient de justesse",
+  "models.fit.exceedsMemory": "Plus grand que la mémoire vidéo et la RAM réunies : il lit depuis le disque, les réponses sont donc très lentes. Un GGUF de ce modèle conviendra peut-être mieux.",
   "models.fit.tooBig": "nécessite un offload partiel sur CPU",
   "models.fmt.gguf": "GGUF",
   "models.fmt.hf": "HF",

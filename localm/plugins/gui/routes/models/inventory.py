@@ -86,6 +86,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import model_packages as _mpk
         registry = load_registry()
         current = active_model()
+        # Rows whose folder ships code that does not run because hf_trust_remote_code is off.
+        own_code_off: set = set()
         # Fetched once, off the event loop, before the row loop below: loaded_path()
         # blocks on embedder._LOCK, which get_embedder holds for the whole duration
         # of an IsolatedEmbedder load. The embedder's path cannot change mid-request,
@@ -119,8 +121,6 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # off the event loop, then build the response on the loop from its results.
         # The embedder's and the reranker's own paths are resolved in the same hop
         # for the identity comparison below.
-        own_code_off: set = set()
-
         def _probe_rows() -> tuple:
             sizes: dict = {}
             mtimes: dict = {}
@@ -173,7 +173,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     except (OSError, ValueError, RecursionError):
                         logger.debug("could not check the packages of %s", ep, exc_info=True)
                     else:
-                        if state.missing or state.optional:
+                        if state.missing:
                             packages[_n] = state.as_dict()
                 # ONE stat() for both size and mtime. mtime is recorded for a
                 # directory too (an HF model dir); size stays None for a directory.

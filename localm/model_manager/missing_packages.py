@@ -248,16 +248,6 @@ def third_party_imports(read: Callable[[str], Optional[str]],
             and read(m) is None}
 
 
-PROVIDED_MODULES = frozenset({"fla"})
-
-
-def is_available(module: str) -> bool:
-    """True when the bundled code of a model can import *module*: it is importable
-    in this interpreter, or localm supplies it itself (:data:`PROVIDED_MODULES`,
-    registered by ``_fla_torch.provide_for`` when the model loads)."""
-    return module in PROVIDED_MODULES or is_importable(module)
-
-
 def is_importable(module: str) -> bool:
     """True when *module* can be located in this interpreter."""
     try:
@@ -304,11 +294,11 @@ def missing_modules(folder: Path, guarded: bool = False) -> list[str]:
         needed = folder_third_party_imports(folder, guarded)
     except (OSError, ValueError, RecursionError):
         return []
-    return sorted(m for m in needed if not is_available(m))
+    return sorted(m for m in needed if not is_importable(m))
 
 
 _NAMES = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn", "cv2": "opencv",
-          "fla": "fla-core", "google": "protobuf"}
+          "fla": "flash-linear-attention", "google": "protobuf"}
 
 
 def package_label(module: str) -> str:
@@ -383,8 +373,14 @@ def folder_refusal(folder: Path) -> Optional[str]:
     needing custom code before its packages matter."""
     if not folder.is_dir():
         return None
-    from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
+    from localm.inference.backends.hf import (
+        _declares_custom_code,
+        _trust_remote_code_enabled,
+        uses_transformers_classes,
+    )
     if not _declares_custom_code(str(folder)) or not _trust_remote_code_enabled():
+        return None
+    if uses_transformers_classes(str(folder)):
         return None
     modules = missing_modules(folder)
     return refusal_for(folder.name, modules) if modules else None

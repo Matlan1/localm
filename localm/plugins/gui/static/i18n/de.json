@@ -1166,6 +1166,7 @@
   "models.empty.text": "Noch keine Modelle",
   "models.fit.fits": "passt in Ihren VRAM",
   "models.fit.tight": "knapp passend",
+  "models.fit.exceedsMemory": "Größer als Videospeicher und RAM zusammen: Es liest von der Festplatte, Antworten sind daher sehr langsam. Eine GGUF-Version dieses Modells passt vielleicht besser.",
   "models.fit.tooBig": "benötigt teilweises CPU-Offload",
   "models.fmt.gguf": "GGUF",
   "models.fmt.hf": "HF",

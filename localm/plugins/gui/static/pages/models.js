@@ -1286,6 +1286,7 @@ function discRepoRow(m, gpus) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, t(FIT_TEXT[m.fit])));
+      if (m.exceeds_memory) head.appendChild(el("span", "sub split-hint", t("models.fit.exceedsMemory")));
       // "fits"/"tight" already account for a configured split (the server sums
       // capacity across it - see discover.vram_capacity), so no split hint.
       const hint = (m.fit === "fits" || m.fit === "tight")

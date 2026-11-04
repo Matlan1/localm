@@ -156,6 +156,38 @@ def test_a_model_type_that_names_no_folder_of_transformers_has_no_support(tmp_pa
     assert hf_backend._has_transformers_support(str(folder)) is False
 
 
+def _kimi_folder(tmp_path) -> Path:
+    folder = tmp_path / "kimi"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps(
+        {"model_type": "kimi_linear", "auto_map": {"AutoModelForCausalLM": "modeling_kimi.KimiLinearForCausalLM"}}),
+        encoding="utf-8")
+    (folder / "modeling_kimi.py").write_text(
+        "try:\n    from fla.ops.kda import chunk_kda\nexcept ImportError:\n    raise ImportError('pip install fla-core')\n",
+        encoding="utf-8")
+    return folder
+
+
+def test_kimi_linear_uses_transformers_classes_with_the_setting_on_too_and_needs_no_package(tmp_path, setting):
+    from localm.model_manager import missing_packages as mp
+    from localm.model_manager import model_packages as mpk
+    folder = _kimi_folder(tmp_path)
+    assert hf_backend.uses_transformers_classes(str(folder)) is True
+    setting(True)
+    assert hf_backend.uses_transformers_classes(str(folder)) is True
+    assert hf_backend.runs_without_its_own_code(str(folder)) is False
+    assert mp.folder_refusal(folder) is None
+    state = mpk.folder_state(folder)
+    assert state.trusted is True and state.missing == []
+    assert with_bundled_code_note(str(folder), RuntimeError("x")).args == ("x",)
+
+
+def test_another_model_type_keeps_its_own_code_with_the_setting_on(tmp_path, setting):
+    folder = _model_folder(tmp_path / "m")
+    setting(True)
+    assert hf_backend.uses_transformers_classes(str(folder)) is False
+
+
 def test_the_note_the_gui_translates_is_the_one_the_server_sends():
     catalog = (Path(__file__).resolve().parents[1] / "localm/plugins/gui/static/app/i18n-en.js").read_text(encoding="utf-8")
     assert f'"models.bundledCodeNote": {json.dumps(BUNDLED_CODE_NOTE)}' in catalog

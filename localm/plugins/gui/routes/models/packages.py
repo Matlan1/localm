@@ -98,12 +98,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if not state.trusted:
                 raise HTTPException(409, "localm runs a model's own code only with "
                                          "hf_trust_remote_code on.")
-            if not state.to_add and not state.missing:
+            if not state.missing:
                 raise HTTPException(409, f"{req.model} needs no packages this install lacks.")
             if state.shipped or state.blocked:
                 raise HTTPException(409, refusal_for(req.model, state.missing))
             try:
-                p = model_packages.plan(state.to_add)
+                p = model_packages.plan(state.addable)
             except model_packages.PlanError as e:
                 raise HTTPException(409, str(e)) from e
             model_packages.remember(p)

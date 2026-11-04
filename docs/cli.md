@@ -282,7 +282,7 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 
 ### Packages a model's own code needs
 
-A Hugging Face model with `hf_trust_remote_code` on runs Python from its own folder, and that code can import a package localm does not include. localm refuses such a model when you add it and before a load starts, and names the package. When it is one localm can add on this machine (timm, open_clip, torchaudio, and fla-core on Linux with a PyTorch that brings Triton), add it here or with **install packages** on the Models page:
+A Hugging Face model with `hf_trust_remote_code` on runs Python from its own folder, and that code can import a package localm does not include. localm refuses such a model when you add it and before a load starts, and names the package. When it is one localm can add on this machine (timm, open_clip, torchaudio, and flash-linear-attention on Linux), add it here or with **install packages** on the Models page:
 
 ```bash
 localm install-packages mymodel          # lists what would be installed, then asks

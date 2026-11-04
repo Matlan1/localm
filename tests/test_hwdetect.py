@@ -559,7 +559,7 @@ def test_torch_pip_args_only_cuda_brings_the_triton_kernels(monkeypatch):
 
 def test_the_setup_pin_of_fla_core_is_the_version_localm_offers_on_demand():
     from localm.model_manager.model_packages import ON_DEMAND
-    assert hwdetect._FLA_CORE_LINUX_CUDA == f"{ON_DEMAND['fla'].project}=={ON_DEMAND['fla'].floor}"
+    assert hwdetect._FLA_CORE_LINUX_CUDA == f"fla-core=={ON_DEMAND['fla'].floor}"
 
 
 def test_torch_pip_args_cpu_is_empty():

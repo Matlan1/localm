@@ -1293,6 +1293,7 @@ export const I18N_EN = {
   "models.fit.fits": "fits your VRAM",
   "models.fit.tight": "tight fit",
   "models.fit.tooBig": "needs partial CPU offload",
+  "models.fit.exceedsMemory": "Larger than your video memory and RAM together: it reads from disk, so replies are very slow. A GGUF of this model may fit better.",
   "models.fmt.gguf": "GGUF",
   "models.fmt.hf": "HF",
   "models.importComfy.allAlreadyRegistered": "All {count} found model(s) are already registered.",

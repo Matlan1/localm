@@ -1806,15 +1806,6 @@ class HFWorker:
                 pass
         logger.debug("hf load: dtype=%s", dtype)
 
-        if trust_remote_code:
-            from localm.inference.backends import _remote_code_compat
-            from localm.inference.backends._fla_torch import kernel_note, provide_for
-            provide_for(self.model_path, device)
-            note = kernel_note()
-            if note:
-                self.load_notes.append(note)
-            _remote_code_compat.apply_for(self.model_path)
-
         # --- Processor / tokenizer ---
         logger.debug("hf load: loading processor")
         try:
@@ -1843,9 +1834,6 @@ class HFWorker:
             self._processor = None
             self.processor_error = shown
             self._tokenizer = _load_text_tokenizer(tr, self.model_path, trust_remote_code)
-        if trust_remote_code:
-            from localm.inference.backends import _remote_code_compat
-            _remote_code_compat.drop_encode_notice(self._tokenizer)
 
         # --- Model ---
         logger.debug("hf load: loading weights")
@@ -1894,9 +1882,6 @@ class HFWorker:
                     else:
                         self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 logger.debug("hf load: class=%s", cls_name)
-                if trust_remote_code:
-                    from localm.inference.backends import _remote_code_compat
-                    _remote_code_compat.apply_to_model(self._model)
                 break
             except (ValueError, OSError, RuntimeError, KeyError) as e:
                 # Record why each class was rejected so the final error names
@@ -1919,8 +1904,9 @@ class HFWorker:
             budget = _hf_on_demand_experts.free_bytes(device)
             self._expert_store = _hf_on_demand_experts.attach(self._model, self.model_path, target, budget)
             self.load_notes.append(
-                f"the routed experts stay on disk and are read as needed; up to {budget / 1024 ** 3:.1f} GB of "
-                f"them stay in {'RAM' if device == 'cpu' else 'video memory'}")
+                f"larger than this machine's memory: the routed experts stay on disk and are read as needed, so "
+                f"replies are slow; up to {budget / 1024 ** 3:.1f} GB of them stay in "
+                f"{'RAM' if device == 'cpu' else 'video memory'}. A GGUF of this model may fit better.")
 
         if fp8 is None:
             from localm.inference.backends._hf_fp8 import quant_method
