@@ -1859,7 +1859,7 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
             return float(st.get("at") or 0) >= backup_dir.stat().st_mtime
         except (OSError, TypeError, ValueError):
             return False
-    why = [(st or {}).get("note") for st in (runtime_last, comp_last) if failed_now(st)]
+    why = [str((st or {}).get("note")) for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += " (" + "; ".join(why) + ")"
     write_runtime = not keep_failures or (runtime_last is not None
