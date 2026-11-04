@@ -86,9 +86,11 @@ class DeferredEmbed:
         return self._fn is not None
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
-        if not self.ensure():
+        self.ensure()
+        fn = self._fn
+        if fn is None:
             raise EmbedderUnavailable("no embedding model is available")
-        return self._fn(texts)
+        return fn(texts)
 
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
