@@ -585,6 +585,7 @@ def _extract_zip(data: bytes, filename: str,
                     break
                 processed += 1
                 try:
+                    _refuse_uncappable_member(zf, member, filename)
                     with zf.open(member) as fh:
                         # Clamped to what is left of the whole-archive inflation
                         # budget, so the final member cannot overshoot it.
@@ -765,6 +766,14 @@ def _strip_compression_suffix(filename: str) -> str:
     return filename
 
 
+def _refuse_uncappable_member(zf: zipfile.ZipFile, member: str, filename: str) -> None:
+    """Raises ExtractError unless *member* is stored or deflated, the methods whose
+    output :mod:`zipfile` stops at the size a read asks for."""
+    if zf.getinfo(member).compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        raise ExtractError(f"{filename}: embedded '{member}' is packed with a method "
+                           "localm does not unpack; refusing to extract.")
+
+
 def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
     """Read one zip member as UTF-8 text with a HARD cap on the DECOMPRESSED
     size (zip-bomb guard). The compressed upload is capped upstream, but a
@@ -773,6 +782,7 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
     ZipInfo.file_size, which an attacker controls - is what prevents the
     amplification from exhausting RAM."""
     limit = MAX_ARCHIVE_MEMBER_BYTES
+    _refuse_uncappable_member(zf, member, filename)
     with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
         raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes
     if len(raw) > limit:

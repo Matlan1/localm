@@ -46,7 +46,6 @@ from .gguf import gguf_n_embd
 from .gguf import logical_model_path
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
-from .registry import alias_model
 from .registry import find_aliases_by_path
 
 # HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
@@ -1144,6 +1143,13 @@ def pull_model(
     return res
 
 
+def _kept_user_type(registered: bool, type_user_set: bool) -> bool:
+    """The result of a pull that found its file already on disk and asked to register
+    it (*registered*): False only when the type the user chose was lost with no
+    one to ask, so a job reports it; a person at a terminal answered the question."""
+    return registered or not type_user_set or _mm.can_prompt()
+
+
 def _pull_remote(model_spec: str, spec: str, name: Optional[str],
                  expected_sha256: Optional[str], redownload: bool,
                  mmproj_spec: Optional[str], model_type: str,
@@ -1196,7 +1202,7 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
         return _mm._pull_civitai_file(
             version_id, name, file_id=file_id or None,
             expected_sha256=expected_sha256, redownload=redownload,
-            register=register, model_type=model_type)
+            register=register, model_type=model_type, type_user_set=type_user_set)
 
     # A Hugging Face spec: the hub endpoint must pass the network policy
     # (domain lists, private-address guard) before any metadata or download call.
@@ -2497,13 +2503,14 @@ def _pull_gguf_file(
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec,
                 pinned_revision=revision is not None)
-            _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
+            registered = _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  digest=verify_digest, model_type=reg_type,
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
                                  refresh=_revision_record_differs(model_name, revision),
                                  type_user_set=type_user_set,
                                  **_register_revision(revision))
+            return _kept_user_type(registered, type_user_set)
         return True
 
     # Pre-download duplicate check: are the same bytes already on disk
@@ -2515,12 +2522,13 @@ def _pull_gguf_file(
     if verify_digest and not redownload and dest_dir is None:
         dups = _mm.find_by_sha256(verify_digest)
         if dups:
-            action = _mm._prompt_predownload_dup(dups, model_name)
+            user_type = model_type if type_user_set else None
+            action = ("alias" if _mm._must_alias_for_type(user_type)
+                      else _mm._prompt_predownload_dup(dups, model_name))
             if action == "skip":
                 return True
             if action == "alias":
-                alias_model(dups[0], model_name)
-                return True
+                return _mm._alias_duplicate(dups, model_name, user_type)
             # "download" falls through
 
     if dest_dir is not None:
@@ -3409,6 +3417,9 @@ def _pull_hf_snapshot_locked(
                 f"[yellow]This repo is already downloaded - registered as "
                 f"{names}[/yellow]"
             )
+            user_type = model_type if type_user_set else None
+            if _mm._must_alias_for_type(user_type):
+                return _mm._alias_duplicate(same_source, model_name, user_type)
             if not _mm.can_prompt():
                 console.print("[dim]Non-interactive session - skipping. "
                               "Use --redownload to force.[/dim]")
@@ -3422,8 +3433,7 @@ def _pull_hf_snapshot_locked(
             if choice.lower() == "s":
                 return True
             if choice.lower() == "a":
-                alias_model(same_source[0], model_name)
-                return True
+                return _mm._alias_duplicate(same_source, model_name, user_type)
 
     # COLLISION CHECK: model_name comes from _sanitize_name, a LOSSY coercion
     # (any run of disallowed characters collapses to a single '-', consecutive
@@ -4227,9 +4237,10 @@ def _pull_url_locked(
         if unusable is not None:
             console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
             return False
-        _mm._register_with_dedup(name, dest, url, model_type=model_type,
-                                 type_user_set=type_user_set)
-        return True
+        return _kept_user_type(
+            _mm._register_with_dedup(name, dest, url, model_type=model_type,
+                                     type_user_set=type_user_set),
+            type_user_set)
 
     if _refuse_name_held_by_external_file(name, dest):
         return False
@@ -4238,12 +4249,13 @@ def _pull_url_locked(
     if expected_sha256 and not redownload:
         dups = _mm.find_by_sha256(expected_sha256)
         if dups:
-            action = _mm._prompt_predownload_dup(dups, name)
+            user_type = model_type if type_user_set else None
+            action = ("alias" if _mm._must_alias_for_type(user_type)
+                      else _mm._prompt_predownload_dup(dups, name))
             if action == "skip":
                 return True
             if action == "alias":
-                alias_model(dups[0], name)
-                return True
+                return _mm._alias_duplicate(dups, name, user_type)
 
     _mm.ensure_dirs()
 
@@ -4458,8 +4470,8 @@ def _pull_url_locked(
                     existing_path = Path(epath)
                     if dest.resolve() != existing_path.resolve():
                         dest.unlink()
-                    alias_model(dups[0], name)
-                    return True
+                    return _mm._alias_duplicate(dups, name,
+                                                model_type if type_user_set else None)
 
     unusable = _mm.gguf_unusable_reason(dest)
     if unusable is not None:
@@ -4543,6 +4555,7 @@ def _pull_civitai_file_locked(
     register: bool,
     model_name: str,
     reg_type: str,
+    type_user_set: bool = False,
 ) -> bool:
     """The transfer half of :func:`_pull_civitai_file`, run holding the part
     lock on ``dest.name``.
@@ -4679,7 +4692,7 @@ def _pull_civitai_file_locked(
     if register:
         registered = _mm._register_with_dedup(
             model_name, dest, resolved.source_tag, digest=actual,
-            model_type=reg_type, refresh=True)
+            model_type=reg_type, refresh=True, type_user_set=type_user_set)
         if not registered:
             console.print(
                 f"[yellow]{escape(filename)} was downloaded to {escape(str(dest))}, "
@@ -4889,6 +4902,7 @@ def _pull_civitai_file(
     register: bool = True,
     model_type: str = "auto",
     include_legacy_formats: bool = False,
+    type_user_set: bool = False,
 ) -> bool:
     """Download one file from a CivitAI model VERSION id and register it into
     localm's own registry.json eagerly.
@@ -4996,8 +5010,11 @@ def _pull_civitai_file(
                 console.print(f"[dim]{held}{_civitai_next_step(others)}[/dim]")
                 return False
         if register:
-            _mm._register_with_dedup(model_name, dest, resolved.source_tag,
-                                     digest=verify_digest, model_type=reg_type)
+            return _kept_user_type(
+                _mm._register_with_dedup(model_name, dest, resolved.source_tag,
+                                         digest=verify_digest, model_type=reg_type,
+                                         type_user_set=type_user_set),
+                type_user_set)
         return True
 
     if dest.exists() and not redownload:
@@ -5016,7 +5033,8 @@ def _pull_civitai_file(
                 return False
             return _pull_civitai_file_locked(
                 version_id, resolved, dest, verify_digest=verify_digest,
-                register=register, model_name=model_name, reg_type=reg_type)
+                register=register, model_name=model_name, reg_type=reg_type,
+                type_user_set=type_user_set)
     except PullInFlight as e:
         console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
         return False

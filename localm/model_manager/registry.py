@@ -50,6 +50,7 @@ from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import GGUF_TEXT_ENCODER_ARCHITECTURES, gguf_non_chat_model_type
 from .gguf import speech_route_available as _speech_route_available
+from .ckpt_tensors import CAPPABLE_ZIP_METHODS, open_capped_zip
 from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
 from .media_parts import (ACE_STEP, companion_part_of, hf_media_part,
                           text_embedding_width)
@@ -2008,6 +2009,23 @@ def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
     return {"a": "alias", "d": "download", "s": "skip"}[choice.lower()]
 
 
+def _must_alias_for_type(user_type: Optional[str]) -> bool:
+    """True when a pull or add of a file that is already registered cannot ask the
+    user and was given *user_type*, the type the user chose (None when they chose
+    none): it takes an alias of that type, because skipping would lose the choice."""
+    return user_type is not None and not can_prompt()
+
+
+def _alias_duplicate(dup_names: list[str], new_name: str, user_type: Optional[str]) -> bool:
+    """Name the file already registered as *dup_names* also *new_name*, with the
+    type *user_type* when not None. When *new_name* is one of *dup_names* no alias
+    is needed and that entry only takes the type. Returns what ``alias_model`` or
+    ``set_model_type`` returns."""
+    if new_name in dup_names:
+        return set_model_type(new_name, user_type) if user_type is not None else True
+    return alias_model(dup_names[0], new_name, user_type=user_type)
+
+
 
 
 # ------------------------------------------------------------------ #
@@ -2100,11 +2118,13 @@ def find_by_size(size: int, reg: Optional[dict] = None) -> list[str]:
 
 
 
-def alias_model(existing: str, new_name: str) -> bool:
+def alias_model(existing: str, new_name: str, *, user_type: Optional[str] = None) -> bool:
     """
     Register *new_name* as an additional name for *existing* (same file,
-    same source, same digest). Returns False when *existing* is unknown
-    or *new_name* is already taken.
+    same source, same digest). *user_type*, when given, is the type the user
+    chose for *new_name*: the new entry takes it and records it as
+    ``type_user_set``, and *existing* keeps its own. Returns False when
+    *existing* is unknown or *new_name* is already taken.
     """
     from rich.markup import escape
 
@@ -2130,12 +2150,16 @@ def alias_model(existing: str, new_name: str) -> bool:
             r[safe_name] = dict(r[existing])
             r[safe_name].pop("base", None)
             r[safe_name].pop("scale", None)
+            if user_type is not None:
+                r[safe_name]["model_type"] = user_type
+                r[safe_name]["type_user_set"] = True
     _mm.update_registry(_apply)
     # existing: a confirmed registry key here, but a hand-edited registry.json
     # is not restricted to a safe charset - escaped anyway.
+    typed = "" if user_type is None else f", typed as {escape(user_type)}"
     console.print(
         f"[green]✓[/green] [bold]{escape(safe_name)}[/bold] is now an alias of "
-        f"[bold]{escape(existing)}[/bold]"
+        f"[bold]{escape(existing)}[/bold]{typed}"
     )
     return True
 
@@ -3877,17 +3901,19 @@ def _register_with_dedup(
         reason = "same size (--fast: content not hashed)"
 
     if dup_names:
-        action = (
-            _prompt_duplicate_action(dup_names, reason)
-            if on_duplicate == "ask" else on_duplicate
-        )
+        user_type = model_type if type_user_set else None
+        if on_duplicate != "ask":
+            action = on_duplicate
+        elif _must_alias_for_type(user_type):
+            action = "alias"
+        else:
+            action = _prompt_duplicate_action(dup_names, reason)
         if action == "skip":
             console.print(f"[dim]Skipped {escape(model_name)}: {reason}, already "
                           f"registered as {escape(dup_names[0])}.[/dim]")
             return False
         if action == "alias":
-            alias_model(dup_names[0], model_name)
-            return True
+            return alias_model(dup_names[0], model_name, user_type=user_type)
         if action in ("copy", "move"):
             # Capture the pre-move resolved path BEFORE _store_into_models_dir
             # touches anything - it's the key the alias-relink below matches on.
@@ -4953,7 +4979,7 @@ def _llamafile_ggufs(path: Path) -> list[str]:
     try:
         if not zipfile.is_zipfile(path):
             return []
-        with zipfile.ZipFile(path) as archive:
+        with open_capped_zip(path) as archive:
             return [i.filename for i in archive.infolist()
                     if not i.is_dir() and i.filename.lower().endswith(".gguf")]
     except (OSError, zipfile.BadZipFile, ValueError, NotImplementedError, RuntimeError):
@@ -5036,13 +5062,17 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
     magic. A file already at that name with the same bytes is reused (the sha256
     is None when the size and CRC alone matched); one with different bytes leaves
     the new copy under ``<stem>-<n>.gguf``. Raises RuntimeError, leaving no
-    partial file, when the member name is unsafe, the disk is too full, or the
-    member is unreadable, short or not a GGUF."""
+    partial file, when the member name is unsafe, it is packed with anything but
+    stored or deflate, the disk is too full, or the member is unreadable, short or
+    not a GGUF."""
     import hashlib
 
     filename = _mm._safe_models_filename(PurePosixPath(info.filename).name)
     if filename is None:
         raise RuntimeError(f"{info.filename!r} in {source_name} is not a safe file name")
+    if info.compress_type not in CAPPABLE_ZIP_METHODS:
+        raise RuntimeError(f"{filename} in {source_name} is packed with a method localm "
+                           "does not unpack")
     _mm.ensure_dirs()
     existing = _mm.MODELS_DIR / filename
     if (existing.is_file() and existing.stat().st_size == info.file_size
@@ -5101,7 +5131,7 @@ def _add_local_llamafile(path: Path, name: Optional[str], on_duplicate: str,
     cannot be extracted."""
     from rich.markup import escape
 
-    with zipfile.ZipFile(path) as archive:
+    with open_capped_zip(path) as archive:
         members = [i for i in archive.infolist()
                    if not i.is_dir() and i.filename.lower().endswith(".gguf")]
         models = [i for i in members if "mmproj" not in i.filename.lower()]
@@ -5866,7 +5896,7 @@ def add_local(
     # its own header is worth reading.
     detected_type, gguf_metadata = _detect_local_model_type(
         p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
-    type_user_set = model_type is not None and model_type != detected_type
+    type_user_set = model_type is not None
     if model_type is None:
         model_type = detected_type
 
