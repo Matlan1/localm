@@ -1307,6 +1307,14 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     for a manual recovery, and the previous update's manifest is replaced only after
     the swap and the move of the backup have succeeded.
 
+    THE BUILD'S OWN FINISHING STEP. When the build ships one (:mod:`localm.updater_finish`),
+    it runs right after the swap, before any built-in step, with a copy kept of the venv,
+    the native runtime and the components this update changes. Exiting non-zero, or being
+    stopped at its time limit, rolls every part back and raises LocalmError with its last
+    line of output as the reason. The dependency, runtime and component steps it names as
+    taken over are skipped; the others run as usual, and the uv for the dependency step is
+    then looked for after it instead of before the swap.
+
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
     primitives live in :mod:`localm._apply_update`. *installed* defaults to the real
@@ -1315,6 +1323,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     the post-swap command, returns an int exit code)."""
     import subprocess
     from localm import _apply_update as au
+    from localm import updater_finish
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     if installed is None and is_site_packages_install(target):
@@ -1383,8 +1392,10 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             if rt_plan["reprovision"]:
                 klass = _max_class(klass, "runtime")
             deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
-            uv_exe = _uv_for_deps(target) if deps_changed else None
-            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
+            has_finish = updater_finish.present(root)
+            uv_exe = _uv_for_deps(target) if deps_changed and not has_finish else None
+            post_cmd = (au.post_swap_command("deps", uv=uv_exe)
+                        if deps_changed and not has_finish else None)
             _require_runnable(post_cmd, "deps")
             if rt_plan["reprovision"] and klass != "setup":
                 _require_runnable([sys.executable], "runtime")
@@ -1480,7 +1491,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             # clean rollback over a broken install.
             try:
                 _restore_all(target, backup_dir, names, say=say,
-                             components=[updater_components.DEPS], record=False)
+                             components=None if has_finish else [updater_components.DEPS],
+                             record=False)
             except Exception as rb:
                 raise LocalmError(
                     f"{step} AND rollback failed - manual recovery needed",
@@ -1488,17 +1500,48 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             unpin()
             raise LocalmError(rolled_back, reason=reason or why)
 
-        cmd = post_cmd
-        if cmd:
+        took_over = frozenset()
+        if has_finish:
             try:
                 updater_components.snapshot(
-                    [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
-                    root=target, for_backup=updater_components.backup_version(backup_dir))
+                    [updater_components.DEPS] + [p["name"] for p in comp_plans if p["update"]],
+                    updater_components.snapshot_dir(backup_dir), root=target,
+                    for_backup=updater_components.backup_version(backup_dir))
+                rt_lib = updater_runtime.runtime_lib(target)
+                if rt_lib.is_dir():
+                    au.snapshot_runtime(rt_lib, au.runtime_snapshot_dir(backup_dir))
             except OSError as e:
-                _roll_back(f"could not keep a copy of the venv: {e}",
-                           "keeping a copy of the dependencies failed",
-                           "the dependencies could not be kept before the update, so it was "
-                           "rolled back")
+                _roll_back(f"could not keep a copy of the parts it may change: {e}",
+                           "keeping a copy of the installed parts failed",
+                           "the installed parts could not be kept before the update's finishing "
+                           "step, so it was rolled back")
+            try:
+                took_over = updater_finish.run(
+                    target, old=previous_version, new=new_version, klass=klass,
+                    result_file=updir / updater_finish.RESULT_FILE, env=_deps_env(target),
+                    say=say)
+            except updater_finish.FinishFailed as e:
+                _roll_back(str(e), "the update's finishing step failed",
+                           "the update's finishing step failed, so the update was rolled back")
+            if deps_changed and "dependencies" not in took_over:
+                try:
+                    post_cmd = au.post_swap_command("deps", uv=_uv_for_deps(target))
+                    _require_runnable(post_cmd, "deps")
+                except LocalmError as e:
+                    _roll_back(f"{e.summary}: {e.reason}", "looking for uv failed",
+                               e.summary, reason=e.reason)
+        cmd = post_cmd
+        if cmd:
+            if not has_finish:
+                try:
+                    updater_components.snapshot(
+                        [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
+                        root=target, for_backup=updater_components.backup_version(backup_dir))
+                except OSError as e:
+                    _roll_back(f"could not keep a copy of the venv: {e}",
+                               "keeping a copy of the dependencies failed",
+                               "the dependencies could not be kept before the update, so it was "
+                               "rolled back")
             run = runner or (lambda c: subprocess.run(
                 c, cwd=str(target), env=_deps_env(target)).returncode)
             try:
@@ -1510,6 +1553,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             if rc != 0:
                 _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
                            "the post-update step failed; rolled back")
+        if cmd or has_finish:
             try:
                 updater_components.record_changes(
                     updater_components.snapshot_dir(backup_dir), updater_components.DEPS,
@@ -1518,7 +1562,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _apply_warn("could not record which packages the update changed: %s; a "
                             "rollback puts back every package that differs", e)
         runtime_status, runtime_note = None, rt_plan["note"]
-        if not rt_plan["reprovision"]:
+        if not rt_plan["reprovision"] or "runtime" in took_over:
             try:
                 updater_runtime.clear_pending()
             except OSError as e:
@@ -1552,7 +1596,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     if runtime_status is not None:
                         runtime_note = runtime_status["note"]
         components_status, components_note = _apply_components(
-            comp_plans, comp_update, klass=klass, target=target, version=new_version,
+            comp_plans, comp_update and "components" not in took_over, klass=klass,
+            target=target, version=new_version,
             defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back)
         if not cmd:
             from localm import updater_parts
