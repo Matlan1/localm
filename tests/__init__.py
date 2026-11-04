@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-from tests import _no_console_window
+from tests import _no_console_window, _no_window
 
 _no_console_window.arm()
+_no_window.arm()

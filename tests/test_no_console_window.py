@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from tests import _no_console_window as guard
+from tests._no_window import allow_window
 
 REPO = Path(__file__).resolve().parents[1]
 TESTS = REPO / "tests"
@@ -87,14 +88,15 @@ def test_a_console_less_process_starts_children_without_a_window(tmp_path):
     script = tmp_path / "parent.py"
     script.write_text(_DETACHED_PARENT, encoding="utf-8")
     result = tmp_path / "result.json"
-    done = subprocess.run(
-        [getattr(sys, "_base_executable", sys.executable), str(script), str(result)],
-        cwd=str(REPO),
-        env={**os.environ, "PYTHONPATH": str(REPO)},
-        creationflags=guard.DETACHED_PROCESS,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        timeout=120,
-    )
+    with allow_window():
+        done = subprocess.run(
+            [getattr(sys, "_base_executable", sys.executable), str(script), str(result)],
+            cwd=str(REPO),
+            env={**os.environ, "PYTHONPATH": str(REPO)},
+            creationflags=guard.DETACHED_PROCESS,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
     out = json.loads(result.read_text(encoding="utf-8"))
     assert "error" not in out, out
     assert out["console_before"] is False, out
