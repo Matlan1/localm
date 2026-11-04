@@ -1031,7 +1031,10 @@ def command_line(pid: int) -> Optional[str]:
 
 def _win_command_line(pid: int) -> Optional[str]:
     """``NtQueryInformationProcess(ProcessCommandLineInformation)``, which needs
-    only PROCESS_QUERY_LIMITED_INFORMATION (Windows 8.1 and later)."""
+    only PROCESS_QUERY_LIMITED_INFORMATION (Windows 8.1 and later). None on any
+    other platform."""
+    if sys.platform != "win32":
+        return None
     import ctypes
     from ctypes import wintypes
 
