@@ -23,6 +23,7 @@ to download, signature verification, and the post-swap step.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import zipfile
@@ -46,6 +47,13 @@ PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 
 # The provisioned llama.cpp runtime, relative to the install root.
 RUNTIME_LIB = PRESERVE_WITHIN[0]
+
+# The file :func:`backup` writes last, inside the backup:
+# ``{"names": the swap set, "files": every file it copied}``.
+BACKUP_RECORD = ".localm-backup.json"
+
+# Top-level names every localm build has, so no update can have added them.
+_IN_EVERY_BUILD = ("VERSION", "localm")
 
 # Files up to this size are compared by content in :func:`runtime_differs`; larger
 # ones by size.
@@ -244,7 +252,9 @@ def swap_entries(staged_root) -> list:
 def backup(installed, names, backup_dir) -> None:
     """Copy the install's current version of each *name* into *backup_dir* (cleared
     first), so a failed apply can be rolled back. Names absent from the install are
-    skipped (recorded by their absence).
+    skipped (recorded by their absence). Writes :data:`BACKUP_RECORD` last, so it moves
+    with the folder (:func:`backup_names`, :func:`backup_problem`). ``__pycache__``
+    files are not listed.
 
     A name containing a PRESERVE_WITHIN sub-tree is backed up WITHOUT that sub-tree:
     the provisioned binaries are never modified by the swap, so there is nothing to
@@ -266,6 +276,64 @@ def backup(installed, names, backup_dir) -> None:
                 shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
+    files = sorted(p.relative_to(backup_dir).as_posix() for p in backup_dir.rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts)
+    (backup_dir / BACKUP_RECORD).write_text(json.dumps({"names": sorted(names), "files": files}),
+                                            encoding="utf-8")
+
+
+def _backup_record(backup_dir):
+    """The record :func:`backup` left in *backup_dir*, or None when it has none (a
+    backup made by an older build). Raises OSError or ValueError when it cannot be
+    read."""
+    try:
+        text = (Path(backup_dir) / BACKUP_RECORD).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    try:
+        record = json.loads(text)
+    except RecursionError as e:
+        raise ValueError(str(e)) from None
+    if not isinstance(record, dict) or not all(
+            isinstance(record.get(k), list) and all(isinstance(x, str) for x in record[k])
+            for k in ("names", "files")):
+        raise ValueError(f"{BACKUP_RECORD} is not a backup record")
+    return record
+
+
+def backup_names(backup_dir) -> Optional[list]:
+    """The swap set recorded inside *backup_dir*, or None when it has no readable
+    record. It describes this backup whatever ``applied_names.json`` says, because a
+    rename moves both at once."""
+    try:
+        record = _backup_record(backup_dir)
+    except (OSError, ValueError):
+        return None
+    return record["names"] if record else None
+
+
+def backup_problem(backup_dir, names) -> Optional[str]:
+    """Why *backup_dir* does not hold what a rollback needs, or None when it does.
+    Removes nothing.
+
+    With a record: every file the record lists must be there. A swap name absent from
+    the backup is not a problem: it was new in the update. A record that cannot be read
+    is a problem. Without a record (a backup made by an older build): any of
+    :data:`_IN_EVERY_BUILD` among *names* (the manifest of that update) must be there."""
+    import os
+    backup_dir = Path(backup_dir)
+    try:
+        record = _backup_record(backup_dir)
+    except (OSError, ValueError) as e:
+        return f"its list of files cannot be read: {e}"
+    if record is None:
+        missing = [n for n in _IN_EVERY_BUILD
+                   if n in names and not os.path.exists(backup_dir / n)]
+    else:
+        missing = [f for f in record["files"] if not os.path.isfile(backup_dir / f)]
+    if missing:
+        return f"{len(missing)} expected item(s) are missing, first {missing[0]}"
+    return None
 
 
 def apply_files(staged_root, installed, names) -> None:
@@ -320,9 +388,11 @@ def rollback(backup_dir, installed, names) -> None:
     manual recovery. Best-effort: it attempts every name even if one fails, and a
     folder with a file that cannot be removed still gets every backed-up file that can
     be written, then it reports the collected failures. Running it again once the file
-    is free finishes the job."""
+    is free finishes the job. A backed-up folder not among *names* still in the install
+    is such a failure, and is left as it is."""
     backup_dir, installed = Path(backup_dir), Path(installed)
     errors = []
+    removal_failed = set()
     for name in names:
         # The names can come from <home>/updates/applied_names.json, a plain file
         # in the data dir, so a poisoned entry would reach `installed / name` and
@@ -345,16 +415,20 @@ def rollback(backup_dir, installed, names) -> None:
                     dst.unlink()
         except OSError as e:
             errors.append(f"remove {name}: {e}")
+            removal_failed.add(name)
     if backup_dir.exists():
         for entry in backup_dir.iterdir():
+            if entry.name == BACKUP_RECORD:
+                continue
             dst = installed / entry.name
             try:
                 if entry.is_dir():
                     if _name_has_preserved(entry.name):
                         _copy_into(entry, dst, entry.name)   # dst still holds the preserved sub-tree
                     else:
-                        # dst can still exist when a held file stopped its removal.
-                        shutil.copytree(entry, dst, dirs_exist_ok=True)
+                        # Merges only over a folder whose removal failed: any other
+                        # existing folder fails here, since it was never removed.
+                        shutil.copytree(entry, dst, dirs_exist_ok=entry.name in removal_failed)
                 else:
                     shutil.copy2(entry, dst)
             except OSError as e:

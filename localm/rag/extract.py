@@ -22,11 +22,14 @@ MAX_TEXT_CHARS = 8_000_000
 # enforced with a bounded stream read rather than the zip header's self-reported
 # size.
 MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
+# Largest LZMA dictionary a zip member may ask for (that of LZMA's strongest preset).
+_MAX_LZMA_DICT_BYTES = 64 * 1024 * 1024
 
 # Hard cap on how many members an archive extractor will process, and the note
 # emitted when either that cap or the whole-archive text budget is reached.
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
+_ARCHIVE_NOT_READ_NOTE = "[{} archive member(s) not read: packed in a way localm does not unpack]"
 
 # Hard caps on PDF extraction: a page count and a wall-clock deadline,
 # checked between pages (a single page's own extract_text() call is not
@@ -552,8 +555,14 @@ def _archive_budget() -> int:
     return max(0, MAX_TEXT_CHARS - len(_ARCHIVE_TRUNCATED_NOTE) - 4)
 
 
-def _join_archive(texts: list, truncated: bool) -> str:
+def _join_archive(texts: list, truncated: bool, not_read: int = 0) -> str:
+    """The merged text of an archive, ending with a note when it was truncated or when
+    *not_read* members could not be unpacked. With no text at all a *not_read* note
+    is left out, so the archive counts as having no extractable text."""
     out = "\n\n".join(texts)
+    if not_read and out:
+        note = _ARCHIVE_NOT_READ_NOTE.format(not_read)
+        out = out[:_archive_budget() - len(note) - 2] + "\n\n" + note
     if truncated:
         cap = _archive_budget()
         if len(out) > cap:
@@ -567,12 +576,15 @@ def _extract_zip(data: bytes, filename: str,
                  *, _depth: int = 0) -> str:
     """Extract and merge text from a ZIP archive, BOUNDED in total output and
     member count so a many-member archive cannot amplify into a RAM DoS.
-    Per-member read failures are logged, not folded into the indexed text."""
+    Per-member read failures are logged, not folded into the indexed text; a member
+    packed in a way localm does not unpack is logged at WARNING and counted in a note
+    at the end of the text."""
     import io
     texts: list = []
     total = 0
     processed = 0
     inflated = 0
+    not_read = 0
     truncated = False
     limit = MAX_ARCHIVE_MEMBER_BYTES
     try:
@@ -585,11 +597,10 @@ def _extract_zip(data: bytes, filename: str,
                     break
                 processed += 1
                 try:
-                    _refuse_uncappable_member(zf, member, filename)
-                    with zf.open(member) as fh:
-                        # Clamped to what is left of the whole-archive inflation
-                        # budget, so the final member cannot overshoot it.
-                        member_data = fh.read(min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
+                    # Clamped to what is left of the whole-archive inflation
+                    # budget, so the final member cannot overshoot it.
+                    member_data = _read_member_capped(
+                        zf, member, filename, min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
                     # Charge and break BEFORE the per-member limit check below,
                     # which skips an oversized member that was already inflated.
                     inflated += len(member_data)
@@ -620,12 +631,17 @@ def _extract_zip(data: bytes, filename: str,
                             block = f"[file: {member}]\n{txt}"
                             texts.append(block)
                             total += len(block)
+                except _MemberNotUnpacked as e:
+                    not_read += 1
+                    _archive_log().warning("rag: an archive member is packed in a way localm "
+                                           "does not unpack; skipped")
+                    _archive_identity_debug("%s", e)
                 except Exception as e:
                     _archive_log().debug("rag: could not read archive member %s in %s: %s",
                                          member, filename, e)
     except Exception as e:
         raise ExtractError(f"Cannot parse {filename} as zip: {e}") from e
-    return _join_archive(texts, truncated)
+    return _join_archive(texts, truncated, not_read)
 
 
 def _extract_tar_or_stream(data: bytes, filename: str,
@@ -766,12 +782,80 @@ def _strip_compression_suffix(filename: str) -> str:
     return filename
 
 
-def _refuse_uncappable_member(zf: zipfile.ZipFile, member: str, filename: str) -> None:
-    """Raises ExtractError unless *member* is stored or deflated, the methods whose
-    output :mod:`zipfile` stops at the size a read asks for."""
-    if zf.getinfo(member).compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-        raise ExtractError(f"{filename}: embedded '{member}' is packed with a method "
-                           "localm does not unpack; refusing to extract.")
+class _MemberNotUnpacked(ExtractError):
+    """A zip member is encrypted, packed with a method localm has no decompressor
+    for, or asks for an LZMA dictionary over :data:`_MAX_LZMA_DICT_BYTES`."""
+
+
+def _zip_lzma_decompressor(header: bytes, member: str, filename: str):
+    """The raw LZMA1 decompressor for a zip member's 9-byte LZMA header (version, the
+    size of the properties, then lc/lp/pb and the dictionary size). Raises
+    :class:`_MemberNotUnpacked` over the dictionary limit, since the decompressor
+    allocates the whole dictionary when it starts, and ``zipfile.BadZipFile`` on a
+    header of another shape."""
+    import lzma
+    import struct
+    if len(header) != 9 or struct.unpack("<H", header[2:4])[0] != 5:
+        raise zipfile.BadZipFile(f"bad LZMA header in {member}")
+    dict_size = struct.unpack("<I", header[5:9])[0]
+    if dict_size > _MAX_LZMA_DICT_BYTES:
+        raise _MemberNotUnpacked(f"{filename}: embedded '{member}' asks for a {dict_size >> 20} "
+                                 "MiB LZMA dictionary; refusing to extract.")
+    rest, lc = divmod(header[4], 9)
+    pb, lp = divmod(rest, 5)
+    return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{
+        "id": lzma.FILTER_LZMA1, "dict_size": dict_size, "lc": lc, "lp": lp, "pb": pb}])
+
+
+def _read_member_capped(zf: zipfile.ZipFile, member: str, filename: str, max_bytes: int) -> bytes:
+    """At most *max_bytes* decompressed bytes of *member*, whatever its header declares.
+
+    Stored and deflated members are read through :mod:`zipfile`, whose output stops at
+    the size a read asks for. It has no such stop for bzip2 and LZMA, so those are fed
+    to a decompressor in small pieces with ``max_length``. Raises
+    :class:`_MemberNotUnpacked`, and ``zipfile.BadZipFile`` when a member read to its
+    end does not match its CRC."""
+    import zlib
+    info = zf.getinfo(member)
+    packed = info.compress_type in (zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA)
+    if info.flag_bits & 0x1 or not (packed or info.compress_type in (zipfile.ZIP_STORED,
+                                                                     zipfile.ZIP_DEFLATED)):
+        raise _MemberNotUnpacked(f"{filename}: embedded '{member}' is encrypted or packed with "
+                                 "a method localm does not unpack; refusing to extract.")
+    if not packed:
+        with zf.open(member) as fh:
+            return fh.read(max_bytes)
+    fp = zf.fp
+    if fp is None:
+        raise zipfile.BadZipFile("the archive is closed")
+    fp.seek(info.header_offset)
+    local = fp.read(30)
+    if len(local) != 30 or local[:4] != b"PK\x03\x04":
+        raise zipfile.BadZipFile(f"bad local header for {member}")
+    fp.seek(int.from_bytes(local[26:28], "little") + int.from_bytes(local[28:30], "little"), 1)
+    left = info.compress_size
+    if info.compress_type == zipfile.ZIP_LZMA:
+        header = fp.read(9)
+        left -= len(header)
+        decomp = _zip_lzma_decompressor(header, member, filename)
+    else:
+        import bz2
+        decomp = bz2.BZ2Decompressor()
+    out, crc, size = io.BytesIO(), 0, 0
+    while size < max_bytes and not decomp.eof:
+        piece = b""
+        if decomp.needs_input:
+            piece = fp.read(min(64 * 1024, max(left, 0)))
+            left -= len(piece)
+            if not piece:
+                break
+        chunk = decomp.decompress(piece, max_length=max_bytes - size)
+        out.write(chunk)
+        size += len(chunk)
+        crc = zlib.crc32(chunk, crc)
+    if size < max_bytes and crc != info.CRC:
+        raise zipfile.BadZipFile(f"bad CRC-32 for {member}")
+    return out.getvalue()
 
 
 def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
@@ -782,9 +866,7 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
     ZipInfo.file_size, which an attacker controls - is what prevents the
     amplification from exhausting RAM."""
     limit = MAX_ARCHIVE_MEMBER_BYTES
-    _refuse_uncappable_member(zf, member, filename)
-    with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
-        raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes
+    raw = _read_member_capped(zf, member, filename, limit + 1)
     if len(raw) > limit:
         raise ExtractError(
             f"{filename}: embedded '{member}' exceeds the "

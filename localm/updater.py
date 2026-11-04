@@ -970,7 +970,9 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
     All or nothing: the backup already at *backup_dir* is renamed aside first, so a
     held file in it refuses the move with both backups whole, and a failed move
     renames it back. A held file in *run_backup_dir* stops only the rename, and the
-    folder is copied into place instead.
+    folder is copied instead: to ``<backup_dir>-partial-*``, a name a rollback never
+    reads, and renamed into place only once whole. What cannot be removed of a failed
+    copy stays under that name and is logged; the next update removes it.
 
     Once the backup is in place, the backup it replaced goes, and with it the native
     runtime snapshot and the components snapshot of that update
@@ -978,9 +980,11 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
     the copy of the running code a rollback kept (``running-code``). What cannot be
     removed is logged. On a refusal all of these stay."""
     from localm import _apply_update as au
-    for left in backup_dir.parent.glob(f"{backup_dir.name}-replaced-*"):
-        shutil.rmtree(left, ignore_errors=True)
+    for kind in ("replaced", "partial"):
+        for left in backup_dir.parent.glob(f"{backup_dir.name}-{kind}-*"):
+            shutil.rmtree(left, ignore_errors=True)
     aside = backup_dir.with_name(f"{backup_dir.name}-replaced-{uuid.uuid4().hex[:8]}")
+    partial = backup_dir.with_name(f"{backup_dir.name}-partial-{uuid.uuid4().hex[:8]}")
     had_backup = backup_dir.exists()
     if had_backup:
         try:
@@ -991,9 +995,13 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
         try:
             _rename_folder(run_backup_dir, backup_dir)
         except OSError:
-            shutil.copytree(run_backup_dir, backup_dir)
+            shutil.copytree(run_backup_dir, partial)
+            _rename_folder(partial, backup_dir)
     except OSError as e:
-        shutil.rmtree(backup_dir, ignore_errors=True)
+        shutil.rmtree(partial, ignore_errors=True)
+        if partial.exists():
+            _apply_warn("update: could not remove the partial copy of a backup at %s; it can "
+                        "be deleted by hand", partial)
         why = f"could not move this update's backup from {run_backup_dir} to {backup_dir}: {e}"
         if had_backup:
             try:
@@ -1922,8 +1930,9 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
     update was rolled back, so ``localm doctor`` and the GUI do not report the
     state the rolled-back update left. A ``failed`` or ``waiting`` status written
     since this update's backup was made stays named in the new note as the
-    reason; with *keep_failures* such a status is left as it is. Best-effort: a
-    status that cannot be written is logged."""
+    reason; with *keep_failures* such a status stays, with its version changed to the
+    one the install is back on. Best-effort: a status that cannot be written is
+    logged."""
     from localm import updater_components, updater_runtime
     version = _version.read_version()
     note = f"the update was rolled back to localm {version}"
@@ -1936,6 +1945,16 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
             return float(st.get("at") or 0) >= backup_dir.stat().st_mtime
         except (OSError, TypeError, ValueError):
             return False
+    if keep_failures:
+        # A kept failure is listed under the version the install is back on.
+        for name, st in ((updater_runtime.STATUS_FILE, runtime_last),
+                         (updater_components.STATUS_FILE, comp_last)):
+            if failed_now(st):
+                try:
+                    (_updates_dir() / name).write_text(_json.dumps({**st, "version": version}),
+                                                       encoding="utf-8")
+                except OSError as e:
+                    _apply_warn("could not record the version of the kept update result: %s", e)
     why = [str((st or {}).get("note")) for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += " (" + "; ".join(why) + ")"
@@ -1965,7 +1984,9 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
 
 def rollback_last(*, installed=None, say=None) -> dict:
     """Restore the install from the most recent update backup. Returns
-    ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+    ``{rolled_back, backup}``. Raises LocalmError when there is no backup, or, before
+    anything is changed, when the backup does not hold what it should
+    (``_apply_update.backup_problem``).
 
     The code and the native runtime the update replaced are restored both or
     neither. When the runtime differs from the one the update kept
@@ -2000,13 +2021,14 @@ def rollback_last(*, installed=None, say=None) -> dict:
     # which no in-process lock could see.
     with _apply_lock("update or rollback"):
         # Prefer the recorded full swap set (includes brand-new top-level entries the update
-        # added, which are NOT in the backup dir) so those are removed too; fall back to the
-        # backup listing for an older backup written before the manifest existed. au.rollback
+        # added, which are NOT in the backup dir) so those are removed too: the one inside
+        # the backup, else the manifest of a backup made by an older build, else the
+        # backup listing for one written before the manifest existed. au.rollback
         # removes each name then restores whatever the backup holds, so a manifest-only (new)
         # name is removed-not-restored and a backed-up name is removed-then-restored.
-        names = None
+        names = au.backup_names(backup_dir)
         manifest = updir / "applied_names.json"
-        if manifest.is_file():
+        if names is None and manifest.is_file():
             try:
                 import json
                 loaded = json.loads(manifest.read_text(encoding="utf-8"))
@@ -2023,6 +2045,10 @@ def rollback_last(*, installed=None, say=None) -> dict:
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:
             names = [p.name for p in backup_dir.iterdir()]
+        problem = au.backup_problem(backup_dir, names)
+        if problem:
+            raise LocalmError("the backup is incomplete, so nothing was rolled back",
+                              reason=f"{problem} in {backup_dir}; the next update replaces it")
         try:
             unpin = au.keep_running_code(target, updir / "running-code")
         except OSError as e:

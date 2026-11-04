@@ -15,9 +15,9 @@ It restores the code, the venv and the native runtime. ComfyUI and the uv inside
 localm take localm's own modules to restore, so it leaves them, says so and records
 it; the next start of localm brings them to the pins of the version it restored.
 
-It NEVER reports success it did not achieve: if there is no backup, the restore
-helper cannot load, or a restore step fails, it says so, keeps the backup intact,
-and exits non-zero, pointing at the backup dir for a manual copy.
+It NEVER reports success it did not achieve: if there is no backup, the backup is
+incomplete, the restore helper cannot load, or a restore step fails, it says so, keeps
+the backup intact, and exits non-zero, pointing at the backup dir for a manual copy.
 """
 
 from __future__ import annotations
@@ -273,7 +273,6 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
               "and re-run.", file=sys.stderr)
         return 1
 
-    names = _read_names(updates_dir, backup_dir)
     print(f"Roll back localm at {install_root}")
     print(f"  restoring the previous version from {backup_dir}")
     if not args.yes and sys.stdin.isatty():
@@ -286,6 +285,15 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
         print("Could not load the rollback helper (localm/_apply_update.py). The backup "
               f"is intact at {backup_dir}: to recover by hand, copy each entry there back "
               f"into {install_root}, overwriting the current files.", file=sys.stderr)
+        return 2
+    # A helper from a build before these checks has neither function.
+    names = au.backup_names(backup_dir) if hasattr(au, "backup_names") else None
+    if names is None:
+        names = _read_names(updates_dir, backup_dir)
+    problem = au.backup_problem(backup_dir, names) if hasattr(au, "backup_problem") else None
+    if problem:
+        print(f"Rollback refused: the backup is incomplete: {problem} in {backup_dir}.\n"
+              "Nothing was changed; the next update replaces it.", file=sys.stderr)
         return 2
     try:
         errors, undo = _restore_venv(install_root, updates_dir, code_root)

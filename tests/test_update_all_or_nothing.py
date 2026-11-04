@@ -927,15 +927,20 @@ def test_the_standalone_rollback_puts_the_venv_back_too(install, home, monkeypat
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
 
 
+def _add_a_name_every_rollback_refuses() -> None:
+    record = updater._backup_dir() / au.BACKUP_RECORD
+    state = json.loads(record.read_text(encoding="utf-8"))
+    state["names"].append("../outside")
+    record.write_text(json.dumps(state), encoding="utf-8")
+
+
 def test_the_standalone_rollback_puts_the_packages_back_when_the_code_fails(
         install, home, monkeypatch, capsys):
     inst, site = install
     data, sig = _release_032(sd=None)
     updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                   runner=_deps_step(site))
-    manifest = updater._updates_dir() / "applied_names.json"
-    manifest.write_text(json.dumps(json.loads(manifest.read_text(encoding="utf-8"))
-                                   + ["../outside"]), encoding="utf-8")
+    _add_a_name_every_rollback_refuses()
     monkeypatch.setenv("LOCALM_HOME", str(home))
     repo = Path(__file__).resolve().parents[1]
     rb = _load_script("rollback_update")
@@ -1060,9 +1065,7 @@ def test_a_failed_undo_of_the_packages_is_reported_without_a_traceback(install, 
         "    if 'before-rollback' in str(copy):\n"
         "        raise ValueError('the undo broke')\n"
         "    return _real_restore(copy, venv, own=own, only=only)\n"), encoding="utf-8")
-    manifest = updater._updates_dir() / "applied_names.json"
-    manifest.write_text(json.dumps(json.loads(manifest.read_text(encoding="utf-8"))
-                                   + ["../outside"]), encoding="utf-8")
+    _add_a_name_every_rollback_refuses()
     out = _run_script(inst, home, "rollback_update.py", "--yes")
     assert out.returncode == 2, (out.stdout, out.stderr)
     assert "ALSO failed" in out.stderr and "the undo broke" in out.stderr
@@ -1356,6 +1359,283 @@ def test_a_failed_recovery_after_a_refused_move_keeps_the_good_backup(install, h
     assert len(runs) == 1 and (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
     assert raised is not None and "manual recovery needed" in raised.summary
     assert str(runs[0]) in raised.reason
+
+
+# ------------------------ a backup that is not whole ---------------------------
+
+def _roll_back_with_the_api(inst, home) -> tuple:
+    """(True when the rollback ran, what it said)."""
+    try:
+        updater.rollback_last(installed=inst)
+    except LocalmError as e:
+        return False, f"{e.summary}: {e.reason}"
+    return True, ""
+
+
+def _roll_back_with_the_script(inst, home) -> tuple:
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert "Traceback" not in out.stderr, out.stderr
+    assert out.returncode in (0, 2), (out.stdout, out.stderr)
+    return out.returncode == 0, out.stderr
+
+
+_BOTH_ROLLBACKS = pytest.mark.parametrize(
+    "roll_back", [_roll_back_with_the_api, _roll_back_with_the_script], ids=["api", "script"])
+
+
+def _updated_install(install, *, files=None):
+    """The install updated to 0.3.2 with the standalone tools in place."""
+    inst, site = install
+    data, sig = _release(files or _files("0.3.2", ["click", "rich"]))
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    return inst, site
+
+
+def _install_files(inst: Path) -> dict:
+    return {k: v for k, v in _files_of(inst).items()
+            if not k.startswith(".venv/") and "__pycache__" not in k}
+
+
+def _assert_refused_with_nothing_changed(roll_back, inst, site, home):
+    before, venv, status = _install_files(inst), _state(site), uc.last_status()
+    done, said = roll_back(inst, home)
+    assert not done
+    assert "the backup is incomplete" in said
+    assert _install_files(inst) == before, "nothing was removed"
+    assert _state(site) == venv, "the packages stay"
+    assert uc.last_status() == status, "no rollback was recorded"
+
+
+@_BOTH_ROLLBACKS
+def test_a_backup_missing_files_on_its_list_is_refused_with_nothing_removed(
+        install, home, roll_back):
+    import shutil
+    inst, site = _updated_install(install)
+    backup = updater._backup_dir()
+    shutil.rmtree(backup / "localm" / "setup_llama")
+    (backup / "pyproject.toml").unlink()
+    _assert_refused_with_nothing_changed(roll_back, inst, site, home)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+@_BOTH_ROLLBACKS
+@pytest.mark.parametrize("text", ["{ not json", '{"names": ["VERSION"]}', "[" * 100_000],
+                         ids=["garbage", "no-file-list", "deep"])
+def test_a_backup_whose_list_cannot_be_read_is_refused(install, home, roll_back, text):
+    inst, site = _updated_install(install)
+    (updater._backup_dir() / au.BACKUP_RECORD).write_text(text, encoding="utf-8")
+    _assert_refused_with_nothing_changed(roll_back, inst, site, home)
+
+
+@_BOTH_ROLLBACKS
+def test_an_older_builds_backup_without_what_every_build_has_is_refused(install, home, roll_back):
+    """The shape an older build's failed move could leave: one file of the backup,
+    beside the manifest of a whole update."""
+    import shutil
+    inst, site = _updated_install(install)
+    backup = updater._backup_dir()
+    (backup / au.BACKUP_RECORD).unlink()
+    (backup / "VERSION").unlink()
+    (backup / "pyproject.toml").unlink()
+    shutil.rmtree(backup / "localm" / "setup_llama")
+    _assert_refused_with_nothing_changed(roll_back, inst, site, home)
+
+
+@_BOTH_ROLLBACKS
+def test_a_whole_backup_rolls_back_and_removes_what_the_update_added(install, home, roll_back):
+    """A name of the swap set absent from the backup is one the update added: it is
+    removed, and the backup still counts as whole."""
+    files = {**_files("0.3.2", ["click", "rich"]), "added.txt": "new", "brand_new/f.txt": "new"}
+    inst, site = _updated_install(install, files=files)
+    backup = updater._backup_dir()
+    assert not (backup / "brand_new").exists() and not (backup / "added.txt").exists()
+    assert au.backup_problem(backup, au.backup_names(backup)) is None
+    done, said = roll_back(inst, home)
+    assert done, said
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.1"
+    assert not (inst / "brand_new").exists() and not (inst / "added.txt").exists()
+    assert not (inst / au.BACKUP_RECORD).exists(), "the list stays in the backup"
+    _assert_venv_is_031(site)
+
+
+@_BOTH_ROLLBACKS
+def test_an_older_builds_whole_backup_still_rolls_back(install, home, roll_back):
+    files = {**_files("0.3.2", ["click", "rich"]), "brand_new/f.txt": "new"}
+    inst, site = _updated_install(install, files=files)
+    (updater._backup_dir() / au.BACKUP_RECORD).unlink()
+    done, said = roll_back(inst, home)
+    assert done, said
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert not (inst / "brand_new").exists(), "named by the manifest"
+
+
+def test_the_backup_list_leaves_out_compiled_files(tmp_path):
+    (tmp_path / "inst" / "localm" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "inst" / "localm" / "a.py").write_text("a", encoding="utf-8")
+    (tmp_path / "inst" / "localm" / "__pycache__" / "a.pyc").write_text("c", encoding="utf-8")
+    au.backup(tmp_path / "inst", ["localm", "added"], tmp_path / "b")
+    assert json.loads((tmp_path / "b" / au.BACKUP_RECORD).read_text(encoding="utf-8")) == {
+        "names": ["added", "localm"], "files": ["localm/a.py"]}
+
+
+@_WINDOWS_HOLDS
+def test_a_partial_copy_that_cannot_be_removed_stays_away_from_the_backup_path(
+        install, home, monkeypatch):
+    """The rename of this run's backup and the copy fallback both fail, and a second
+    program holds a file of what the copy wrote."""
+    import shutil
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    kept = _files_of(backup)
+    real_swap, real_copy = au.swap_with_backup, shutil.copytree
+    source_hold, copy_hold = [], []
+
+    def swap_then_hold(root, target, run_backup):
+        names = real_swap(root, target, run_backup)
+        source_hold.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
+        source_hold[0].__enter__()
+        return names
+
+    def copy_then_hold(src, dst, *a, **kw):
+        try:
+            return real_copy(src, dst, *a, **kw)
+        except shutil.Error:
+            if source_hold and Path(src).name == "backup":
+                copy_hold.append(held(Path(dst) / "VERSION", exclusive=True))
+                copy_hold[0].__enter__()
+                source_hold[0].__exit__(None, None, None)
+                source_hold.clear()
+            raise
+
+    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
+    monkeypatch.setattr(shutil, "copytree", copy_then_hold)
+    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
+    raised = None
+    try:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: 0)
+    except LocalmError as e:
+        raised = e
+    finally:
+        monkeypatch.setattr(au, "swap_with_backup", real_swap)
+        monkeypatch.setattr(shutil, "copytree", real_copy)
+    assert copy_hold, "the copy failed and left a file that could not be removed"
+    try:
+        assert _files_of(backup) == kept, "the earlier backup is back and whole"
+        assert raised is not None and "could not move this update's backup" in raised.reason
+        left = list(updater._updates_dir().glob("backup-partial-*"))
+        assert len(left) == 1 and (left[0] / "VERSION").exists()
+        assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update is undone"
+    finally:
+        copy_hold[0].__exit__(None, None, None)
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=lambda c: 0)
+    assert res["version"] == "0.3.3"
+    assert not list(updater._updates_dir().glob("backup-partial-*")), "the next update removes it"
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+# ---------------------- a rollback over a stale update manifest ------------------
+
+def test_a_folder_the_rollback_did_not_remove_is_not_merged_over(tmp_path):
+    inst, backup = tmp_path / "inst", tmp_path / "backup"
+    _write_tree(inst, {"pkg/new_only.py": "new", "pkg/both.py": "new"})
+    _write_tree(backup, {"pkg/old_only.py": "old", "pkg/both.py": "old"})
+    with pytest.raises(RuntimeError, match="restore pkg"):
+        au.rollback(backup, inst, ["other"])
+    assert _files_of(inst / "pkg") == {"new_only.py": b"new", "both.py": b"new"}
+
+
+@_WINDOWS_HOLDS
+def test_a_folder_with_a_held_file_is_still_restored_around_it(tmp_path):
+    from tests._held_file import held
+    inst, backup = tmp_path / "inst", tmp_path / "backup"
+    _write_tree(inst, {"pkg/a_held.py": "new", "pkg/z.py": "new"})
+    _write_tree(backup, {"pkg/a_held.py": "old", "pkg/b.py": "old", "pkg/z.py": "old"})
+    with held(inst / "pkg" / "a_held.py"):
+        with pytest.raises(RuntimeError, match="remove pkg"):
+            au.rollback(backup, inst, ["pkg"])
+    assert (inst / "pkg" / "b.py").read_text(encoding="utf-8") == "old"
+    assert (inst / "pkg" / "z.py").read_text(encoding="utf-8") == "old"
+
+
+class _Killed(BaseException):
+    pass
+
+
+@_BOTH_ROLLBACKS
+def test_a_kill_right_after_the_backup_moved_still_rolls_back_this_update(
+        install, home, monkeypatch, roll_back):
+    """The process dies with the new backup in place and the manifest still that of
+    the update before, which does not name the folder this update replaced."""
+    inst, site = install
+    _write_tree(inst, {"pkg/old.py": "old"})
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    manifest = updater._updates_dir() / "applied_names.json"
+    previous = manifest.read_text(encoding="utf-8")
+    assert "pkg" not in previous
+    next_data, next_sig = _release({**_files("0.3.3", ["click", "rich"]), "pkg/new_only.py": "new"})
+
+    def die(run_dir):
+        raise _Killed
+
+    monkeypatch.setattr(updater, "_drop_run_dir", die)
+    with pytest.raises(_Killed):
+        updater.apply(1, signature=next_sig, installed=inst, download_opener=_download(next_data),
+                      runner=lambda c: 0)
+    assert manifest.read_text(encoding="utf-8") == previous, "the state of the crash window"
+    assert (inst / "pkg" / "new_only.py").exists()
+    _stage_standalone_tools(inst)
+    done, said = roll_back(inst, home)
+    assert done, said
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert _files_of(inst / "pkg") == {"old.py": b"old"}, "no mixed folder"
+
+
+# --------------------- the failure a terminal update keeps ----------------------
+
+def test_a_failed_component_step_stays_visible_after_the_update_is_undone(install, home):
+    from localm import updater_parts
+    inst, site = install
+    data, sig = _release_032()
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_children(home, site, sd_rc=1))
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    steps = updater_parts.installed_parts(inst)["last_steps"]
+    assert [(s["part"], s["state"]) for s in steps if s["state"] == "failed"] == [
+        ("components", "failed")]
+    assert any("setup-sdcpp exited 1" in s["note"] for s in steps)
+    assert uc.last_status()["version"] == "0.3.1"
+
+
+def test_a_failed_runtime_step_stays_visible_after_the_update_is_undone(install, home, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    monkeypatch.setattr(updater_runtime, "plan", lambda staged, target: {
+        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
+        "source": "release", "pins": {}, "note": "re-provisions the runtime"})
+    monkeypatch.setattr(updater_runtime, "stop_own_holders", lambda *a, **k: [])
+
+    def fail(**kw):
+        status = {"state": "failed", "note": "setup-llama exited 1", "version": "0.3.2"}
+        updater_runtime._write_status(status)
+        return status
+
+    monkeypatch.setattr(updater_runtime, "finish_pending", fail)
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site))
+    steps = updater_parts.installed_parts(inst)["last_steps"]
+    assert [(s["part"], s["state"], s["note"]) for s in steps] == [
+        ("runtime", "failed", "setup-llama exited 1")]
 
 
 # ------------------- a rollback during the restart and the watchdog --------------
