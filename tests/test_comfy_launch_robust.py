@@ -376,8 +376,11 @@ def _spawn_with_cfg(tmp_path, cfg):
     hardcoded 127.0.0.1:8188 URL to test independent launch attempts, which
     would otherwise short-circuit on the SECOND call via the cache the first
     call just populated (see conftest.py's _reset_comfy_readiness_cache for
-    the cross-TEST half of this same isolation concern)."""
+    the cross-TEST half of this same isolation concern). Clears the remembered
+    handle too, so the stub from the previous scenario is not health-checked
+    against the real port."""
     comfy_client._confirmed_alive.clear()
+    comfy_client._spawned_procs.clear()
     launcher = tmp_path / f"comfyui.{_ext()}"
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),

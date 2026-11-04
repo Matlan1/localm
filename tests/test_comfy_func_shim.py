@@ -299,8 +299,11 @@ def _capture_spawn_env(monkeypatch, tmp_path, *, once=False, remember=False,
     if once:
         comfy_client.enable_func_shim_once()
 
-    # The port reads as free, whatever listens on this machine.
+    # The port reads as free, whatever listens on this machine, and no stub
+    # handle from an earlier spawn is health-checked against the real port.
     monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
 
     if preexisting_pythonpath is None:
         monkeypatch.delenv("PYTHONPATH", raising=False)
