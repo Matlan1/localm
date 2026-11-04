@@ -741,10 +741,9 @@ CORE_FIELDS: list = [
     # This toggle is the opt-in that writes them anyway.
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
-                 "Writes crash and hang diagnostics (stack traces, restart breadcrumbs, a "
-                 "debug log) even in privacy mode. Code and operational logs only, never "
-                 "chat content. The debug log, crash guard and stall watchdog change from "
-                 "the next server start, the rest at once.",
+                 "Writes crash and hang diagnostics (stack traces, a debug log) even in "
+                 "privacy mode, never chat content. Debug log, crash guard and stall "
+                 "watchdog change from the next server start, the rest at once.",
                  group="Diagnostics", admin_only=True, applies=Applies.RESTART),
     # ---- Models ----
     # A small on-device model, loaded separately from the chat model. The known
@@ -810,10 +809,9 @@ CORE_FIELDS: list = [
     # for the same "where does an outbound credential go" boundary as
     # net_search_url/bugreport_upload_url above.
     SettingField("hf_token", Widget.SECRET, "Hugging Face API token",
-                 "Optional: raises rate limits and unlocks gated/login-required Hugging "
-                 "Face models. Blank uses the HF_TOKEN environment variable, else anonymous "
-                 "access. A saved huggingface-cli login then covers downloads only; model "
-                 "search and its file lists stay anonymous.",
+                 "Optional: raises rate limits and unlocks gated models. Blank uses HF_TOKEN, "
+                 "else anonymous access; a saved huggingface-cli login then covers downloads "
+                 "only, not model search and its file lists.",
                  group="Models", admin_only=True, secret=True,
                  link=("https://huggingface.co/settings/tokens", "Get a token")),
     SettingField("civitai_api_key", Widget.SECRET, "CivitAI API key",

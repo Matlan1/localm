@@ -1903,7 +1903,7 @@ export const I18N_EN = {
   "settings.field.autopruneMissingModels.label": "Auto-remove entries for missing files",
   "settings.field.autopruneMissingModels.help": "When a model file in the models folder has gone, delete its registry entry automatically instead of flagging it as missing. Models added from other folders are only flagged.",
   "settings.field.hfToken.label": "Hugging Face API token",
-  "settings.field.hfToken.help": "Optional: raises rate limits and unlocks gated/login-required Hugging Face models. Blank uses the HF_TOKEN environment variable, else anonymous access. A saved huggingface-cli login then covers downloads only; model search and its file lists stay anonymous.",
+  "settings.field.hfToken.help": "Optional: raises rate limits and unlocks gated models. Blank uses HF_TOKEN, else anonymous access; a saved huggingface-cli login then covers downloads only, not model search and its file lists.",
   "settings.field.hfToken.link.label": "Get a token",
   "settings.field.civitaiApiKey.label": "CivitAI API key",
   "settings.field.civitaiApiKey.help": "Optional: raises rate limits and unlocks gated/login-required CivitAI models. Blank = anonymous access. Falls back to the CIVITAI_API_KEY environment variable.",
@@ -2013,7 +2013,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Diagnostics
   "settings.field.keepDiagnostics.label": "Keep diagnostics for bug reports",
-  "settings.field.keepDiagnostics.help": "Writes crash and hang diagnostics (stack traces, restart breadcrumbs, a debug log) even in privacy mode. Code and operational logs only, never chat content. The debug log, crash guard and stall watchdog change from the next server start, the rest at once.",
+  "settings.field.keepDiagnostics.help": "Writes crash and hang diagnostics (stack traces, a debug log) even in privacy mode, never chat content. Debug log, crash guard and stall watchdog change from the next server start, the rest at once.",
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
