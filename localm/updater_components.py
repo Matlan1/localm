@@ -904,6 +904,13 @@ def _venv_copy_path(venv: Path, dest: Path, kind: str = "") -> Path:
     return venv.parent / (f".{venv.name}-{dest.name}" + (f"-{kind}" if kind else ""))
 
 
+def _long(path: Path) -> Path:
+    """*path* in the form that reaches a file deeper than 260 characters on
+    Windows."""
+    from localm.media.source_archive import long_path
+    return long_path(path)
+
+
 def _link(src: Path, dst: Path) -> None:
     try:
         os.link(src, dst)
@@ -942,6 +949,7 @@ def _clone_venv(venv: Path, copy: Path, owner: Path) -> None:
     """Recreate every file of *venv* in *copy* (replaced first) as a hard link,
     or a copy where a link cannot be made, and mark *copy* as belonging to the
     snapshot *owner*. Raises OSError."""
+    venv, copy = _long(venv), _long(copy)
     if copy.exists():
         shutil.rmtree(copy)
     copy.mkdir(parents=True)
@@ -1039,10 +1047,12 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
     already moved is moved back and the restore is refused with nothing
     changed. Returns the failures."""
     import uuid
+    shown, shown_copy = venv, copy
+    venv, copy = _long(venv), _long(copy)
     site_now, site_was = site_packages(venv), site_packages(copy)
     changed = venv_changes(copy, venv, own=own)
     if site_now is None or site_was is None or changed is None:
-        return [f"could not find the packages of {venv} or of its copy {copy}"]
+        return [f"could not find the packages of {shown} or of its copy {shown_copy}"]
     if only is not None:
         wanted = {_canon(n) for n in only}
         changed = [n for n in changed if n in wanted]
@@ -1086,9 +1096,9 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
             except OSError as be:
                 back.append(f"{pr}: {be}")
         if back:
-            return [f"{venv}: a file could not be replaced ({e}) AND putting the moved files "
+            return [f"{shown}: a file could not be replaced ({e}) AND putting the moved files "
                     "back failed: " + "; ".join(back[:5])]
-        return [f"{venv}: not restored, a file is in use ({e}); nothing was changed. Close "
+        return [f"{shown}: not restored, a file is in use ({e}); nothing was changed. Close "
                 "every localm process and run the rollback again"]
     errors = []
     for name in changed:
@@ -1113,7 +1123,7 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
                 break
             d = d.parent
     _clear_moved_aside(venv)
-    return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
+    return [f"{shown}: " + "; ".join(errors[:5])] if errors else []
 
 
 def _snapshot_tree(root: Path, dest: Path) -> dict:
@@ -1162,12 +1172,12 @@ def _restore_tree(kept: Path, root: Path) -> list:
     """Make the source files of the tree at *root* those kept in *kept* by
     :func:`_snapshot_tree`. Returns the failures; when a file could not be put
     back, the failure says that *root* holds a mix of old and new files and where
-    the originals are kept."""
+    the originals are kept, and that folder stays in place through a later
+    restore."""
     from localm.media import source_archive
     if source_archive.read_record(kept) is None:
         return [f"{root}: the kept copy of its source at {kept} cannot be read"]
-    backup = root.parent / f".{root.name}-restore-{os.getpid()}"
-    shutil.rmtree(source_archive.long_path(backup), ignore_errors=True)
+    backup = source_archive.new_backup_path(root, "restore")
     try:
         change = source_archive.apply_tree(kept, root, source_archive.tree_files(root), backup)
     except OSError as e:
@@ -1430,7 +1440,7 @@ def discard(src) -> None:
         _drop_one(src, name, info)
     if src.exists():
         try:
-            shutil.rmtree(src)
+            shutil.rmtree(_long(src))
         except OSError as e:
             _warn("update: could not remove the kept components %s: %s", src, e)
 
@@ -1442,7 +1452,7 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
     copy = _own_copy(info, src)
     if copy is not None:
         try:
-            shutil.rmtree(copy)
+            shutil.rmtree(_long(copy))
         except OSError as e:
             _warn("update: could not remove the kept venv copy %s: %s", copy, e)
     elif (info or {}).get("venv_copy"):
@@ -1454,7 +1464,7 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
         p = src / rel
         try:
             if p.is_dir():
-                shutil.rmtree(p)
+                shutil.rmtree(_long(p))
             elif p.exists():
                 p.unlink()
         except OSError as e:

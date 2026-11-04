@@ -1329,11 +1329,13 @@ ws     ::= [ \t\n\r]*
 
     def _is_context_overflow(self, error: Exception) -> bool:
         """True when *error* is a server's refusal of a prompt longer than the
-        model's context window (localm's HTTP 413 text, or an OpenAI-style
-        context-length error, or a llama-server's HTTP 400
-        ``exceed_context_size_error``)."""
+        model's context window (localm's refusal text, this version's or an
+        earlier one's, or an OpenAI-style context-length error, or a
+        llama-server's HTTP 400 ``exceed_context_size_error``)."""
         text = str(error).lower()
         return ("exceeds the model's maximum context capacity" in text
+                or ("tokens) exceeds" in text and "context" in text)
+                or "has outgrown the model's" in text
                 or "exceeds the available context size" in text
                 or "exceed_context_size_error" in text
                 or "context_length_exceeded" in text
@@ -1808,7 +1810,8 @@ ws     ::= [ \t\n\r]*
                         on_token=lambda piece: self._emit("token", text=piece),
                         on_reasoning=lambda piece: self._emit("reasoning", text=piece),
                         on_status=lambda text, code: self._emit(
-                            "status", text=text, code=code),
+                            "status", text=str(text), code=code,
+                            args=getattr(text, "args", None)),
                     )
                     self._record_prompt_usage(messages)
                     return reply

@@ -200,8 +200,13 @@ def register(app: FastAPI, ctx) -> None:
         if isinstance(routed_placement, dict) and routed_placement.get("degraded"):
             from localm.debuglog import logger as _dbg
             from localm.inference.engine import describe_gpu_placement
-            _dbg.warning("capability routing: %s answers with %s (slower)",
-                         route.resolved, describe_gpu_placement(routed_placement))
+            from localm.inference.engine import placement_moves_layers
+            if placement_moves_layers(routed_placement):
+                _dbg.warning("capability routing: %s answers with %s (slower)",
+                             route.resolved, describe_gpu_placement(routed_placement))
+            else:
+                _dbg.info("capability routing: %s answers with %s",
+                          route.resolved, describe_gpu_placement(routed_placement))
 
         if engine is None:
             engine = await _hs.get_engine(req.model, on_status=say)
@@ -401,7 +406,7 @@ def register(app: FastAPI, ctx) -> None:
                     # The executor re-raises in this coroutine, so every arm
                     # below still catches exactly what it caught before.
                     await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: engine.validate_grammar(
+                        None, lambda e=engine: e.validate_grammar(
                             grammar, lazy=bool(grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar at all. Separate from the
@@ -453,6 +458,12 @@ def register(app: FastAPI, ctx) -> None:
 
             from localm.inference.compact import compactable
             capacity = engine.context_capacity()
+            wanted = _hs.context_window_wanted(
+                engine, prompt_tokens, max(req.min_context or 0, req.context_reserve or 0),
+                capacity)
+            if wanted is not None:
+                engine = await _hs.grow_context_window(engine, wanted, on_status=say)
+                capacity = engine.context_capacity()
             compacted_here = False
             compact_in_stream = False
             if (_hs._needs_compaction(capacity, prompt_tokens, messages,
@@ -484,11 +495,14 @@ def register(app: FastAPI, ctx) -> None:
 
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
+                _limit, reason = await loop.run_in_executor(
+                    None, _hs.engine_context_limit, engine)
                 raise HTTPException(
                     413, _hs.context_overflow_detail(
                         prompt_tokens, capacity,
                         encoder_decoder=_hs._engine_is_encoder_decoder(engine),
-                        reply_reserve=_hs._engine_reply_reserve(engine)))
+                        reply_reserve=_hs._engine_reply_reserve(engine),
+                        limit=reason))
 
         except BaseException:
             _hs._unpin(engine)
@@ -1007,14 +1021,17 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(400, str(e)) from e
 
             capacity = engine.context_capacity()
+            wanted = _hs.context_window_wanted(engine, prompt_tokens, None, capacity)
+            if wanted is not None:
+                engine = await _hs.grow_context_window(engine, wanted)
+                capacity = engine.context_capacity()
             if (isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
+                _limit, reason = await loop.run_in_executor(
+                    None, _hs.engine_context_limit, engine)
                 raise HTTPException(
-                    413,
-                    f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
-                    f"context capacity ({capacity} tokens). Start a new chat, "
-                    f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
-                    f"true to size it from free VRAM).")
+                    413, _hs.context_overflow_detail(prompt_tokens, capacity,
+                                                     limit=reason))
 
             if req.stream:
                 streaming_handoff = True

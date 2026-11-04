@@ -110,12 +110,15 @@ def rmtree_robust(path: Path) -> None:
     rmtree then raises PermissionError (WinError 5) and the delete half-fails. Both
     ``localm comfy remove`` and S2's rollback-on-failed-provision must be able to
     remove such a tree. Re-raises the underlying OSError when a file genuinely
-    cannot be removed, so a failed delete is never reported as success."""
+    cannot be removed, so a failed delete is never reported as success. Files
+    deeper than 260 characters are removed too."""
+    from localm.media.source_archive import long_path
+
     def _onerror(func, p, _exc_info):
         # Clear the read-only bit and retry; let a genuine failure propagate.
         os.chmod(p, stat.S_IWRITE)
         func(p)
-    shutil.rmtree(str(path), onerror=_onerror)
+    shutil.rmtree(str(long_path(path)), onerror=_onerror)
 
 
 def is_managed_comfy_installed() -> bool:

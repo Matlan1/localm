@@ -88,7 +88,7 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
-`audio_cpu_retry`, `loading_model`, `recalling_memory`,
+`audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
 `downloading_embedder` (the embedding model memory recall needs, on its first
 download), `chat_hooks` (chat plugins' inlet hooks are running),
 `checking_grammar`, `generating` and `loading_beside` (the model loads beside

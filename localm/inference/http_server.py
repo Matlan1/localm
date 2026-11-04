@@ -61,7 +61,7 @@ from localm.inference.routing_latch import RoutingLatch
 from localm.inference.stop_sequences import StopFilter, apply_stop_matched
 from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
-    COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
+    COMPACTING_STATUS, GROWING_CONTEXT_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
     FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage,
     StatusText, StreamChoice, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
     status_code_of,
@@ -676,7 +676,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
                         on_status: Optional[Callable[[str], None]] = None,
-                        allow_embedding: bool = False) -> dict:
+                        allow_embedding: bool = False,
+                        reserve_ctx: Optional[int] = None,
+                        keep_others: bool = False, own_pins: int = 0) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
     An embedding-typed *name* (an embedding model, a reranker, a media text
     encoder) is refused with a 422 unless *allow_embedding*.
@@ -706,7 +708,22 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     by an earlier load is reloaded instead of reused, once, when a model that
     held the VRAM it lacked is idle or gone (``_placement_heal_due``) and a
     fresh VRAM reading is conclusive; an explicit switch reuses it as it is.
-    During that reload an unnamed request still resolves to it.
+    During that reload an unnamed request still resolves to it. With
+    *reserve_ctx*, a resident model whose context window is smaller and that
+    no request other than the caller's own *own_pins* holds
+    (``_context_grow_due``) is reloaded the same way with that window reserved
+    (``Engine.reserve_context``), and *on_status* gets
+    ``GROWING_CONTEXT_STATUS``; when its files cannot be resolved it is used
+    as loaded.
+
+    The ``unload_for_room`` setting decides whether other models are unloaded
+    to make room (``_switch_unload_policy_step``): "always" unloads this
+    instance's idle models without asking, "ask" asks an explicit switch
+    first, "never" loads beside them with the VRAM that is left (an explicit
+    switch that does not fit is offered the choice). *keep_others* loads
+    beside the other models for this call, whatever the setting. Another
+    localm instance's model is unloaded only for an explicit switch the user
+    confirmed.
 
     Returns a dict whose ``status`` is one of:
 
@@ -760,7 +777,38 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         was_active = False
         heal_budget = heal_probe = None
         resident = _engines.get(name)
-        if _is_reusable(resident):
+        growing = (reserve_ctx is not None and _is_reusable(resident)
+                   and _context_grow_due(resident, reserve_ctx, own_pins))
+        previous_reserve = getattr(resident, "ctx_reserve", 0)
+        if growing:
+            try:
+                heal_budget = await loop.run_in_executor(None, _switch_load_budget, name)
+            except HTTPException as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: not reloading '%s' with a larger context "
+                          "window, it is used as loaded: %s", name, exc.detail)
+                growing = False
+        if growing and resident is not None and reserve_ctx is not None:
+            if on_status is not None:
+                on_status(GROWING_CONTEXT_STATUS)
+            resident.reserve_context(reserve_ctx)
+            if heal_budget is not None:
+                heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
+                heal_probe = await _switch_probe_vram(loop, heal_budget)
+            if (_engines.get(name) is resident and _is_reusable(resident)
+                    and _context_grow_due(resident, reserve_ctx, own_pins)):
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: reloading '%s' with a %s-token context "
+                          "window (it has %s)", name, reserve_ctx,
+                          resident.context_capacity())
+                healing = resident
+                was_active = _switch_detach_victim(name, resident, activate=False,
+                                                   keep_sem=True)
+            else:
+                resident.reserve_context(previous_reserve)
+                growing = False
+                heal_budget = heal_probe = None
+        if healing is None and _is_reusable(resident):
             if not preempt and _placement_heal_due(name, resident):
                 try:
                     heal_budget = await loop.run_in_executor(
@@ -808,6 +856,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 sized = _engines.get(name)
                 if sized is None:
                     built = sized = await loop.run_in_executor(None, _engine_factory, name)
+                _apply_requested_context(name, sized, reserve_ctx)
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
@@ -817,15 +866,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             attempt = switch_admission.EvictionAttempt(started=time.monotonic())
             evictions: list[VictimRelease] = []
             if healing is not None:
-                release = await _switch_free_for_reload(loop, name, healing, heal_probe,
-                                                        heal_budget.needed_bytes)
+                release = await _switch_free_for_reload(
+                    loop, name, healing,
+                    heal_probe if heal_probe is not None else _UNMEASURED_PROBE,
+                    heal_budget.needed_bytes if heal_budget is not None else None,
+                    why="its context window is too small for a request" if growing
+                    else None)
                 attempt.release_wait_extended = release.extended
                 evictions.append(release)
             if budget is not None:
                 early = await _switch_make_room(loop, budget, preempt=preempt,
                                                 force=force, activate=activate,
                                                 attempt=attempt, evictions=evictions,
-                                                on_status=on_status, reading=reading)
+                                                on_status=on_status, reading=reading,
+                                                keep_others=keep_others)
                 if early is not None:
                     return early
 
@@ -842,6 +896,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             else:
                 new_engine = built if built is not None else await loop.run_in_executor(
                     None, _engine_factory, name)
+            if healing is None:
+                _apply_requested_context(name, new_engine, reserve_ctx)
             interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
                                              reading=reading)
             if interrupted is not None:
@@ -936,35 +992,49 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         check_split_fit=_is_gguf(m_path),
         plugin_backend=(info is not None
                         and backend_registry.backend_for(str(info[0])) is not None),
+        unload_policy=switch_admission.unload_policy(cfg),
     )
 
 
 async def _switch_with_backend_need(loop, budget: switch_admission.LoadBudget,
                                     engine, *, reading: Optional[_FirstPassReading] = None
                                     ) -> switch_admission.LoadBudget:
-    """*budget* with ``backend_need`` set to *engine*'s
-    ``full_offload_vram_bytes()``, read off the event loop under *reading*
-    when given. *budget* is returned unchanged when *engine* has no such
-    method or it answers None. An exception from it is logged at WARNING and
-    *budget* is returned unchanged."""
+    """*budget* with ``backend_need`` and ``min_need`` set from *engine*'s
+    ``gpu_offload_needs()`` (or ``backend_need`` from its
+    ``full_offload_vram_bytes()`` when it has only that), read off the event
+    loop under *reading* when given, and ``backend_sized`` set for a GGUF load
+    (``budget.check_split_fit``), whose figure includes the compute overhead.
+    *budget* is returned unchanged when *engine* has neither method or it
+    answers None. An exception from it is logged at WARNING and *budget* is
+    returned unchanged."""
+    needs = getattr(engine, "gpu_offload_needs", None)
     size = getattr(engine, "full_offload_vram_bytes", None)
-    if not callable(size):
+    if not callable(needs) and not callable(size):
         return budget
     from localm.debuglog import logger as _dbg
     try:
-        need = await _FirstPassReading.run(loop, reading, size)
+        if callable(needs):
+            answer = await _FirstPassReading.run(loop, reading, needs)
+        else:
+            full = await _FirstPassReading.run(loop, reading, size)
+            answer = (full, full) if full else None
     except Exception as exc:
         _dbg.warning("switch_engine: could not size a full GPU offload of '%s' "
                      "(%s: %s); admitting it on the whole-model estimate",
                      budget.name, type(exc).__name__, exc)
         return budget
-    if not need:
+    if not answer or not answer[0]:
         return budget
-    sized = dataclasses.replace(budget, backend_need=int(need))
-    _dbg.debug("switch_engine: '%s' needs ~%s MB free for a full GPU offload; "
-               "admission bar %s MB (estimate %s MB + headroom %s MB)",
-               budget.name, need // 1024 ** 2, sized.needed_bytes // 1024 ** 2,
-               budget.vram_required // 1024 ** 2, budget.headroom // 1024 ** 2)
+    need, low = int(answer[0]), int(answer[1] or answer[0])
+    sized = dataclasses.replace(budget, backend_need=need,
+                                backend_sized=budget.check_split_fit,
+                                min_need=low if low < need else None)
+    mb = 1024 ** 2
+    _dbg.debug("switch_engine: '%s' needs ~%s MB free for every layer and expert on "
+               "the GPU, ~%s MB for every layer on the GPU; admission bar %s MB "
+               "(file estimate %s MB + headroom %s MB, used only when the backend "
+               "cannot size the load)", budget.name, need // mb, sized.plan_bytes // mb,
+               sized.needed_bytes // mb, budget.vram_required // mb, budget.headroom // mb)
     return sized
 
 
@@ -973,7 +1043,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
                             attempt: Optional[switch_admission.EvictionAttempt] = None,
                             evictions: Optional[list] = None,
                             on_status: Optional[Callable[[str], None]] = None,
-                            reading: Optional[_FirstPassReading] = None
+                            reading: Optional[_FirstPassReading] = None,
+                            keep_others: bool = False
                             ) -> Optional[dict]:
     """Run the eviction loop until ``budget.name`` may load.
 
@@ -989,6 +1060,11 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     ``_switch_exhaustion_ladder``. The first iteration's VRAM reading is taken
     under *reading* when given; *reading* is closed when that iteration does
     not admit the load, so every later iteration reads the GPUs again.
+
+    Under an unload policy other than "always" for this call
+    (``switch_admission.effective_unload_policy`` of ``budget.unload_policy``,
+    *force* and *keep_others*), ``_switch_unload_policy_step`` decides instead
+    of the eviction.
 
     Before each eviction for an explicit switch without *force* that VRAM
     (not the resident cap) asks for, ``_switch_confirm_before_eviction`` may
@@ -1025,6 +1101,15 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
                 budget.resident_cap, budget.name, list(_engines_lru),
                 sorted(budget.pinned))
             return None
+
+        mode = switch_admission.effective_unload_policy(
+            budget.unload_policy, preempt=preempt, force=force, keep_others=keep_others)
+        if mode != switch_admission.UNLOAD_ALWAYS:
+            held = await _switch_unload_policy_step(
+                loop, probe, budget, decision, mode, preempt=preempt,
+                keep_others=keep_others, attempt=attempt)
+            if held is not _KEEP_FREEING:
+                return held
 
         victim, force_busy = decision.victim, False
         if decision.action == switch_admission.EXHAUSTED:
@@ -1111,6 +1196,48 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget, *,
         shares_adaptive=shares_adaptive, implicit_split=implicit is not None)
 
 
+# Context windows callers asked the next load of a model to keep usable
+# (request_context_window), by model name.
+_requested_context: dict = {}
+
+
+def request_context_window(name: str, tokens: int) -> None:
+    """Ask the next load of model *name* to keep a context window of at least
+    *tokens* usable. A resident model is not reloaded for this; a request that
+    needs the window grows it (``grow_context_window``)."""
+    _requested_context[name] = max(int(tokens), _requested_context.get(name, 0))
+
+
+def _apply_requested_context(name: str, engine, reserve_ctx: Optional[int]) -> None:
+    """Before *engine* loads as model *name*: reserve the larger of
+    *reserve_ctx* and the window ``request_context_window`` asked for, and
+    forget that request. No effect on an engine that cannot reserve a window."""
+    tokens = max(reserve_ctx or 0, _requested_context.pop(name, 0))
+    can = getattr(engine, "can_reserve_context", None)
+    if tokens > 0 and callable(can) and can() is True:
+        engine.reserve_context(tokens)
+
+
+# A reading that carries no free-VRAM figure: a reload freed against it does not
+# wait for the VRAM release.
+_UNMEASURED_PROBE = switch_admission.VramProbe(
+    free=None, probe_ok=False, process_scoped=False, shortfall=[], shares_adaptive=False)
+
+
+def _context_grow_due(engine, tokens: int, own_pins: int = 0) -> bool:
+    """Whether resident *engine* should be reloaded so its context window holds
+    *tokens*: its backend reserves context windows (``Engine.can_reserve_context``),
+    its window (``Engine.context_capacity``) is smaller, and no request other
+    than the caller's own *own_pins* holds it. Reads state only."""
+    if getattr(engine, "active_requests", 0) > own_pins:
+        return False
+    can = getattr(engine, "can_reserve_context", None)
+    if not callable(can) or can() is not True:
+        return False
+    capacity = engine.context_capacity()
+    return isinstance(capacity, int) and 0 < capacity < tokens
+
+
 def _probe_free_reader(probe: switch_admission.VramProbe):
     """A callable re-reading free VRAM as the same quantity as ``probe.free``:
     the summed free of llama.cpp's default-split GPUs for an
@@ -1137,12 +1264,16 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
                                     force: bool,
                                     on_status: Optional[Callable[[str], None]] = None
                                     ) -> switch_admission.EvictionStep:
-    """Find room once no idle chat model is evictable, in this order: free the
-    idle shared embedder; act on the probe verdict (load best-effort when the
+    """Find room once no idle chat model is evictable, in this order: load at
+    once when the model fits with its routed experts in system RAM
+    (``switch_admission.experts_in_ram_fit``); free the idle shared embedder; act on the probe verdict (load best-effort when the
     box cannot measure, retry or refuse when the probe was inconclusive); stop
     or wait for this process's native media runtimes
-    (``_switch_wait_for_busy_media``); ask
-    a sibling localm instance to free its VRAM; claim a busy resident model
+    (``_switch_wait_for_busy_media``); for an explicit switch, ask the user
+    before another localm instance's model is unloaded
+    (``switch_admission.unload_ask_confirm`` naming it, unless *force*), then
+    ask that instance to free its VRAM (a load that is not an explicit switch
+    never asks it); claim a busy resident model
     (explicit switch, ``_switch_claim_busy_victim``) or wait for it to go idle
     (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
     defer to the backend's own sizing
@@ -1166,6 +1297,15 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
             ask = await _switch_wait_busy_before_asking(loop, probe, budget, ask)
         if ask is not None:
             return step(switch_admission.RETURN_RESULT, result=ask)
+    if switch_admission.experts_in_ram_fit(probe, budget):
+        from localm.debuglog import logger as _dbg
+        _dbg.info("switch_engine: '%s' loads with some of its experts in system RAM "
+                  "(every layer on the GPU needs ~%s MB free, %s MB free; ~%s MB "
+                  "for every expert on the GPU too)", budget.name,
+                  budget.plan_bytes // 1024 ** 2, (probe.free or 0) // 1024 ** 2,
+                  budget.needed_bytes // 1024 ** 2)
+        return step(switch_admission.PROCEED_TO_LOAD)
+
     if not attempt.embedder_attempted:
         if await _switch_evict_embedder(loop, probe, attempt, embedder_mod):
             return step(switch_admission.REPROBE)
@@ -1187,7 +1327,13 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if media is not None:
         return media
 
-    if await _switch_ask_peers(loop, probe, budget, attempt):
+    if preempt and not force:
+        peers = await loop.run_in_executor(None, _peer_model_names)
+        if peers:
+            return step(switch_admission.RETURN_RESULT,
+                        result=switch_admission.unload_ask_confirm(
+                            budget.name, [], 0, peers=peers))
+    if preempt and await _switch_ask_peers(loop, probe, budget, attempt):
         return step(switch_admission.REPROBE)
 
     busy = await _switch_claim_busy_victim(budget, attempt, preempt=preempt, force=force)
@@ -1206,28 +1352,19 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.needed_bytes, probe.free,
-                        moe=_registered_as_moe(budget.name)))
+                        budget.name, budget, probe.free or 0))
     from localm.debuglog import logger as _dbg
     _dbg.info(
         "switch_engine: '%s' does not fit the free VRAM after eviction "
-        "(needs ~%s MB free including the safety margin, %s MB free) - deferring "
+        "(every layer on the GPU needs ~%s MB free, %s MB free) - deferring "
         "to the backend's own load-time sizing instead of refusing",
-        budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
+        budget.name, budget.plan_bytes // 1024 ** 2, (probe.free or 0) // 1024 ** 2)
     attempt.deferred_to_backend = True
     beside = [n for n, e in list(_engines.items())
               if n != budget.name and getattr(e, "loaded", False)]
     if beside and on_status is not None:
         on_status(loading_beside_status(budget.name, beside))
     return step(switch_admission.PROCEED_TO_LOAD)
-
-
-def _registered_as_moe(name: str) -> bool:
-    """True when the registry records mixture-of-experts weights for *name*
-    (a non-zero ``expert_count``)."""
-    from localm.config import load_registry
-    entry = load_registry().get(name)
-    return isinstance(entry, dict) and bool(entry.get("expert_count"))
 
 
 async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
@@ -1397,6 +1534,105 @@ def _switch_inconclusive_failure(name: str,
     if restarting:
         return HTTPException(503, switch_admission.inconclusive_restarting_refusal(name))
     return HTTPException(503, switch_admission.inconclusive_refusal(name, attempts, elapsed))
+
+
+# _switch_unload_policy_step's answer when the normal eviction loop goes on
+# (compared by identity).
+_KEEP_FREEING: dict = {}
+
+
+async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
+                                     budget: switch_admission.LoadBudget,
+                                     decision: switch_admission.AdmissionDecision,
+                                     mode: str, *, preempt: bool, keep_others: bool,
+                                     attempt: switch_admission.EvictionAttempt
+                                     ) -> Optional[dict]:
+    """What a load that does not fit beside the loaded models does under the
+    "ask" or "never" unload policy (*mode*), instead of evicting.
+
+    Returns None to load now: when only the resident cap wanted room, under
+    "never" when a Mixture-of-Experts model fits with its experts in system RAM
+    (``switch_admission.experts_in_ram_fit``), or under "never" for a load
+    that is not an explicit switch, for *keep_others*, or on a reading with
+    no free figure (``attempt.deferred_to_backend`` is set: the backend sizes
+    the load with what is left; logged at INFO). Returns
+    ``switch_admission.unload_choice_confirm`` under "never" for an explicit
+    switch, and under "ask" for a model that fits beside the loaded chat models
+    with its experts in system RAM (unloading them would keep more experts on
+    the GPU). Under "ask" otherwise: the ``_switch_confirm_before_eviction``
+    result when the load would not fit even after unloading everything, else
+    ``switch_admission.unload_ask_confirm`` naming every chat model it may
+    unload (a busy one marked so, since a confirmed switch stops its reply),
+    the loaded shared models and other instances' models, or
+    ``_KEEP_FREEING`` when nothing is there to unload. Unloads nothing."""
+    from localm.debuglog import logger as _dbg
+    if decision.vram_ok:
+        _dbg.info("switch_engine: unload_for_room=%s, loading '%s' beside the "
+                  "resident models over max_resident_models", mode, budget.name)
+        return None
+    others = [n for n in _engines_lru
+              if n != budget.name and _is_reusable(_engines.get(n))]
+    if switch_admission.experts_in_ram_fit(probe, budget):
+        if mode == switch_admission.UNLOAD_ASK and others:
+            return switch_admission.unload_choice_confirm(
+                budget.name, budget, probe.free or 0, others)
+        _dbg.info("switch_engine: unload_for_room=%s, '%s' loads beside the resident "
+                  "models with some of its experts in system RAM (~%s MB needed, "
+                  "%s MB free)", mode, budget.name, budget.plan_bytes // 1024 ** 2,
+                  (probe.free or 0) // 1024 ** 2)
+        return None
+    if mode == switch_admission.UNLOAD_NEVER:
+        if preempt and not keep_others and probe.measurable and others:
+            return switch_admission.unload_choice_confirm(
+                budget.name, budget, probe.free or 0, others)
+        _dbg.info("switch_engine: unload_for_room=never%s: loading '%s' beside %s with "
+                  "the VRAM that is left", " (chosen for this load)" if keep_others else "",
+                  budget.name, others or "nothing")
+        attempt.deferred_to_backend = True
+        return None
+    ask = await _switch_confirm_before_eviction(loop, probe, budget)
+    if ask is not None:
+        return await _switch_wait_busy_before_asking(loop, probe, budget, ask)
+    models = [n for n in switch_admission.evictable_residents(budget, _engines_lru, _engines)
+              if n in _engines]
+    busy = [n for n in models if getattr(_engines[n], "active_requests", 0) != 0]
+    shared = await loop.run_in_executor(None, _shared_vram_holds)
+    peers = await loop.run_in_executor(None, _peer_model_names)
+    if not (models or shared.holds or shared.unknown or peers):
+        return _KEEP_FREEING
+    engines = [_engines[n] for n in models]
+    holds = await loop.run_in_executor(
+        None, lambda: [_resident_vram_hold(e) for e in engines])
+    freed = sum(h for h in holds if h > 0) + sum(h for h in shared.holds if h > 0)
+    _dbg.info("switch_engine: unload_for_room=ask, asking before unloading %s%s%s for '%s'",
+              models, " and the shared models" if shared.holds or shared.unknown else "",
+              f" and {peers}" if peers else "", budget.name)
+    return switch_admission.unload_ask_confirm(
+        budget.name, models, freed, shared=bool(shared.holds or shared.unknown),
+        peers=peers, busy=busy)
+
+
+def _peer_model_names() -> list:
+    """``"'<model>' (port <port>)"`` for every live sibling localm instance
+    holding a model on a GPU this load can use (the peers
+    ``_attempt_cooperative_unload`` could ask); [] when this instance is not
+    registered for coordination, no such peer is live, or the lookup fails
+    (logged at INFO). Blocking network IO; must not run on the event loop
+    thread."""
+    if not _gpu_coord:
+        return []
+    try:
+        from localm import gpu_registry
+        peers = gpu_registry.list_gpu_peers(exclude_self_id=_gpu_coord.get("instance_id"))
+    except Exception as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.info("switch_engine: could not list peer instances (%s: %s)",
+                  type(exc).__name__, exc)
+        return []
+    my_gpus = _load_gpu_indices()
+    return [f"'{peer.get('model')}' (port {peer.get('port')})" for peer in peers
+            if peer.get("model") and (peer.get("gpu_index") is None
+                                      or peer.get("gpu_index") in my_gpus)]
 
 
 async def _switch_ask_peers(loop, probe: switch_admission.VramProbe,
@@ -1635,11 +1871,24 @@ def _victim_vram_estimate(engine) -> int:
 
 
 def _resident_vram_hold(engine) -> int:
-    """Bytes of VRAM resident *engine* is expected to hold: the free VRAM its
-    load took as measured (``Engine.vram_load_bytes``); else, for a load the
-    backend sized itself (``Engine.gpu_sizing`` mode "auto") with every layer
-    on the GPU (``gpu_placement`` not degraded), its sized model, KV cache and
-    overhead bytes; else 0 (unknown)."""
+    """Bytes of VRAM resident *engine* is expected to hold: the dedicated VRAM
+    its worker process holds now (``Engine.worker_vram_bytes``, which counts a
+    context grown since the load); else the free VRAM its load took as
+    measured (``Engine.vram_load_bytes``); else, for a load the backend sized
+    itself (``Engine.gpu_sizing`` mode "auto") with every layer on the GPU
+    (``gpu_placement`` not degraded), its sized model, KV cache and overhead
+    bytes; else 0 (unknown). Blocking; must not run on the event loop thread."""
+    live = getattr(engine, "worker_vram_bytes", None)
+    if callable(live):
+        try:
+            held = live()
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("switch_engine: worker VRAM reading failed (%s: %s)",
+                       type(exc).__name__, exc)
+            held = None
+        if type(held) is int and held > 0:
+            return held
     measured = getattr(engine, "vram_load_bytes", None)
     if type(measured) is int and measured > 0:
         return measured
@@ -1737,7 +1986,8 @@ async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProb
     (``switch_admission.evictable_residents``, each sized by
     ``_resident_vram_hold``), freeing the shared embedder, reranker and speech
     model (``_shared_vram_holds``) and every peer instance's model
-    (``_peer_vram_holds``) is still below ``budget.needed_bytes``. It is the
+    (``_peer_vram_holds``) is still below ``budget.plan_bytes`` (the load would
+    move layers to the CPU). It is the
     busy-media ``switch_admission.busy_media_confirm`` when a native media
     runtime is running a job (its VRAM is not counted as freed), else the
     degraded-load ``switch_admission.degraded_load_confirm``.
@@ -1770,7 +2020,7 @@ async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProb
     after = switch_admission.free_after_eviction(probe, holds)
     if after is None:
         return _cannot("the VRAM reading cannot be used for an estimate")
-    if after >= budget.needed_bytes:
+    if after >= budget.plan_bytes:
         return None
     shared = await loop.run_in_executor(None, _shared_vram_holds)
     if shared.unknown:
@@ -1782,21 +2032,22 @@ async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProb
         return _cannot("a peer instance gives no VRAM estimate")
     after = switch_admission.free_after_eviction(
         probe, holds + [h for h in shared.holds if h > 0] + peers)
-    if after is None or after >= budget.needed_bytes:
+    if after is None or after >= budget.plan_bytes:
         return None
     now = switch_admission.evictable_residents(budget, _engines_lru, _engines)
     if [_engines[n] for n in now] != engines:
         return _cannot("the resident models changed while estimating")
     _dbg.info("switch_engine: '%s' does not fit even after evicting %s and the "
-              "shared models (needs ~%s MB free including the safety margin, ~%s MB "
+              "shared models (every layer on the GPU needs ~%s MB free, ~%s MB "
               "expected free%s); asking before evicting anything", budget.name, names,
-              budget.needed_bytes // 1024 ** 2, after // 1024 ** 2,
+              budget.plan_bytes // 1024 ** 2, after // 1024 ** 2,
               f", the {' and the '.join(shared.busy_media)} running a job"
               if shared.busy_media else "")
     if shared.busy_media:
         return switch_admission.busy_media_confirm(budget.name, list(shared.busy_media))
     return switch_admission.degraded_load_confirm(
-        budget.name, budget.needed_bytes, after, moe=_registered_as_moe(budget.name))
+        budget.name, budget, after, names,
+        shared=any(h > 0 for h in shared.holds), peers=bool(peers))
 
 
 async def _switch_wait_busy_before_asking(loop, probe: switch_admission.VramProbe,
@@ -2097,9 +2348,11 @@ def _postpone_placement_recheck(engine) -> None:
 
 async def _switch_free_for_reload(loop, name: str, engine,
                                   probe: switch_admission.VramProbe,
-                                  needed: int) -> VictimRelease:
+                                  needed: Optional[int],
+                                  why: Optional[str] = None) -> VictimRelease:
     """Unload resident *engine* (model *name*, already detached with its
-    semaphore kept) so switch_engine can load it again at a better placement.
+    semaphore kept) so switch_engine can load it again at a better placement,
+    or with a larger context window when *why* says so.
     Logs why at INFO, frees it like an eviction victim (``_switch_free_victim``
     against *probe*, the VRAM reading taken before the detach, for a load that
     needs *needed* bytes) and clears its ``placement_heal``. Its ``unloading``
@@ -2110,15 +2363,20 @@ async def _switch_free_for_reload(loop, name: str, engine,
     from localm.debuglog import logger as _dbg
     heal = getattr(engine, "placement_heal", None)
     placement = getattr(engine, "gpu_placement", None) or {}
-    if heal is not None and heal.release_unconfirmed:
-        why = "its earlier eviction's VRAM release was not confirmed"
-    elif heal is not None and heal.recheck:
-        why = "enough VRAM is free now"
-    else:
-        why = "a model that held the VRAM it lacked is idle or gone"
     from localm.inference.engine import describe_gpu_placement
-    _dbg.info("switch_engine: reloading '%s' (%s) for a full GPU placement: %s",
-              name, describe_gpu_placement(placement), why)
+    if why is not None:
+        _dbg.info("switch_engine: reloading '%s' (%s): %s", name,
+                  describe_gpu_placement(placement) if placement else "placement unknown",
+                  why)
+    else:
+        if heal is not None and heal.release_unconfirmed:
+            why = "its earlier eviction's VRAM release was not confirmed"
+        elif heal is not None and heal.recheck:
+            why = "enough VRAM is free now"
+        else:
+            why = "a model that held the VRAM it lacked is idle or gone"
+        _dbg.info("switch_engine: reloading '%s' (%s) for a full GPU placement: %s",
+                  name, describe_gpu_placement(placement), why)
     try:
         return await _switch_free_victim(loop, name, engine, probe, needed=needed)
     finally:
@@ -2136,9 +2394,9 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
     placement = placement if isinstance(placement, dict) else None
     sizing = sizing if isinstance(sizing, dict) else None
     if placement:
-        from localm.inference.engine import describe_gpu_placement
+        from localm.inference.engine import describe_gpu_placement, placement_moves_layers
         where = describe_gpu_placement(placement)
-        if placement.get("degraded"):
+        if placement_moves_layers(placement):
             where += " (slower)"
     else:
         where = "GPU layer placement not reported by this backend"
@@ -2198,11 +2456,13 @@ def _log_switch_placement(name: str, engine, evictions=()) -> None:
     """Log ``_describe_load_placement`` for a load switch_engine just
     committed: at WARNING when fewer than all layers landed on the GPU and
     that is not the configured placement (``_placement_as_configured``), else
-    at INFO."""
+    at INFO (a Mixture-of-Experts load with routed experts in system RAM
+    included)."""
     from localm.debuglog import logger as _dbg
-    placement = getattr(engine, "gpu_placement", None)
+    from localm.inference.engine import placement_moves_layers
     line = "switch_engine: " + _describe_load_placement(name, engine, evictions)
-    if (isinstance(placement, dict) and placement.get("degraded")
+    placement = getattr(engine, "gpu_placement", None)
+    if (isinstance(placement, dict) and placement_moves_layers(placement)
             and not _placement_as_configured(placement,
                                              getattr(engine, "gpu_sizing", None))):
         _dbg.warning(line)
@@ -4637,10 +4897,12 @@ def mount_gui_surface(app) -> bool:
             mmproj_path=mmproj,
         )
 
-    async def switch_model(name: str, *, force: bool = False, activate: bool = True) -> dict:
+    async def switch_model(name: str, *, force: bool = False, activate: bool = True,
+                           keep_others: bool = False) -> dict:
         # Preemptive switch: a newer selection aborts an in-flight load rather
         # than waiting for the abandoned model to finish (see switch_engine).
-        return await switch_engine(name, _build_engine, force=force, activate=activate)
+        return await switch_engine(name, _build_engine, force=force, activate=activate,
+                                   keep_others=keep_others)
 
     from localm.plugins.gui.web import attach_gui
     # Marks the GUI mounted before attaching; unless attach_gui returns, the routes
@@ -6655,7 +6917,8 @@ async def _stream_sse_body(
             refusal = context_overflow_detail(
                 prompt_tokens, capacity,
                 encoder_decoder=_engine_is_encoder_decoder(engine),
-                reply_reserve=_engine_reply_reserve(engine))
+                reply_reserve=_engine_reply_reserve(engine),
+                limit=engine_context_limit(engine)[1])
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -7279,11 +7542,17 @@ def _engine_reply_reserve(engine) -> Optional[int]:
 
 def context_overflow_detail(prompt_tokens: int, capacity: int,
                             encoder_decoder: bool = False,
-                            reply_reserve: Optional[int] = None) -> str:
+                            reply_reserve: Optional[int] = None,
+                            limit: Optional[str] = None) -> str:
     """The refusal text for a prompt larger than the context capacity. With
     *encoder_decoder* the text names the model's one-pass prompt limit, and with
     *reply_reserve* (a diffusion model) the fixed window that holds prompt and
-    reply together, instead of the context window settings."""
+    reply together. Otherwise *limit* names what keeps the window from growing
+    (``Engine.context_reserve_limit``'s reason): "trained" (the model's trained
+    window), "n_ctx_max" (the Context window (max) setting with automatic
+    sizing off) or "auto_cap" (the automatic size's ceiling); None when the
+    window could not grow for another reason. The text names settings by
+    their Settings label and config key, never a command."""
     if encoder_decoder:
         return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
                 f"this encoder-decoder model reads in one pass. Shorten the "
@@ -7292,10 +7561,130 @@ def context_overflow_detail(prompt_tokens: int, capacity: int,
         return (f"Prompt ({prompt_tokens} tokens) does not fit the {capacity} "
                 f"tokens this diffusion model reads at once, prompt and reply "
                 f"together. Start a new chat or shorten the message.")
-    return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
-            f"context capacity ({capacity} tokens). Start a new chat, "
-            f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
-            f"true to size it from free VRAM).")
+    head = f"Prompt ({prompt_tokens} tokens) exceeds "
+    if limit == "trained":
+        return (head + f"the {capacity}-token context window this model was "
+                "trained for. Start a new chat or shorten the conversation.")
+    if limit == "n_ctx_max":
+        return (head + f"the {capacity}-token context window set by Context "
+                "window (max) (n_ctx_max). Start a new chat, or raise that "
+                "setting.")
+    if limit == "auto_cap":
+        return (head + f"the {capacity}-token ceiling of the automatic context "
+                "size. Start a new chat, or set Context window (max) "
+                "(n_ctx_max) to 0 for no ceiling.")
+    return (head + f"the model's {capacity}-token context window. Start a new "
+            "chat or shorten the conversation.")
+
+
+def context_window_wanted(engine, prompt_tokens, min_context, capacity) -> Optional[int]:
+    """The context window *engine* should grow to for a request of
+    *prompt_tokens* that asks for *min_context* tokens, given its current
+    *capacity*: the prompt plus its reply buffer (``compact.reply_reserve``)
+    when that exceeds *capacity*, raised to *min_context* when that exceeds
+    *capacity*; None when neither does, when *capacity* is not a positive
+    int, or for an encoder-decoder or diffusion model, whose window is
+    fixed."""
+    if not (isinstance(capacity, int) and capacity > 0):
+        return None
+    if _engine_is_encoder_decoder(engine) or _engine_reply_reserve(engine) is not None:
+        return None
+    from localm.inference.compact import reply_reserve
+    wanted = 0
+    if isinstance(prompt_tokens, int) and prompt_tokens + reply_reserve(capacity) > capacity:
+        wanted = prompt_tokens + reply_reserve(capacity)
+    if isinstance(min_context, int) and min_context > capacity:
+        wanted = max(wanted, min_context)
+    return wanted or None
+
+
+def engine_context_limit(engine) -> tuple[Optional[int], Optional[str]]:
+    """*engine*'s ``context_reserve_limit()``, or ``(None, None)`` for an
+    engine without it. Reads the model file's header; never raises (a
+    failure is logged at DEBUG)."""
+    limit = getattr(engine, "context_reserve_limit", None)
+    if not callable(limit):
+        return None, None
+    try:
+        answer = limit()
+    except Exception as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("context: limit of %s unreadable (%s: %s)",
+                   getattr(engine, "display_name", engine), type(exc).__name__, exc)
+        return None, None
+    return answer if isinstance(answer, tuple) and len(answer) == 2 else (None, None)
+
+
+# Growth targets round up to whole multiples of this many tokens.
+_CONTEXT_GROW_STEP = 4096
+
+
+async def grow_context_window(engine, tokens: int, *,
+                              on_status: Optional[Callable[[str], None]] = None):
+    """Reload the resident model of *engine*, which the calling request holds
+    pinned, so its context window holds *tokens* (rounded up to
+    ``_CONTEXT_GROW_STEP``, at most ``Engine.context_reserve_limit``), through
+    ``switch_engine`` with ``reserve_ctx`` and the request's own pin allowed.
+
+    Returns the engine that answers now, holding the request's pin: *engine*
+    itself, reloaded or not, or the engine registered under its name after a
+    reload that replaced it (the pin moves to it). Nothing is reloaded when
+    *engine* cannot reserve a window, its limit is already reached, it is not
+    a resident model, another request holds it (``_context_grow_due``), or an
+    earlier reload for at least that window did not grow it (the engine's
+    ``context_grow_failed``, set here). When the reload raises, *engine* is
+    registered again and loaded with its earlier window, and returned; the
+    error is raised only when that fails too. Logs at INFO (a failed reload
+    at WARNING)."""
+    from localm.debuglog import logger as _dbg
+    can = getattr(engine, "can_reserve_context", None)
+    if not callable(can) or can() is not True:
+        return engine
+    loop = asyncio.get_running_loop()
+    limit, _reason = await loop.run_in_executor(None, engine_context_limit, engine)
+    target = -(-int(tokens) // _CONTEXT_GROW_STEP) * _CONTEXT_GROW_STEP
+    if limit:
+        target = min(target, int(limit))
+    capacity = engine.context_capacity()
+    if not (isinstance(capacity, int) and capacity < target):
+        return engine
+    failed = getattr(engine, "context_grow_failed", None)
+    if isinstance(failed, int) and target >= failed:
+        return engine
+    name = next((n for n, e in _engines.items() if e is engine), None)
+    if name is None:
+        return engine
+    _dbg.info("context: '%s' has a %s-token window and a request needs %s; "
+              "reloading it with a %s-token window", name, capacity, tokens, target)
+    previous = getattr(engine, "ctx_reserve", 0)
+    try:
+        await switch_engine(name, None, preempt=False, activate=False,
+                            reserve_ctx=target, on_status=on_status, own_pins=1)
+    except Exception as exc:
+        _dbg.warning("context: reloading '%s' with a %s-token window failed (%s: %s); "
+                     "loading it again with its earlier window", name, target,
+                     type(exc).__name__, getattr(exc, "detail", exc))
+        reserve = getattr(engine, "reserve_context", None)
+        if callable(reserve):
+            reserve(previous)
+        engine.context_grow_failed = target
+        if _engines.get(name) is None:
+            engine.unloading = False
+            _engines[name] = engine
+        await switch_engine(name, None, preempt=False, activate=False, on_status=on_status)
+    answering = _engines.get(name)
+    if answering is None or not answering.loaded:
+        raise HTTPException(503, f"'{name}' could not be reloaded with a larger "
+                                 "context window; retry the request.")
+    if answering is not engine:
+        _unpin(engine)
+        _pin(answering)
+    new_capacity = answering.context_capacity()
+    if not (isinstance(new_capacity, int) and new_capacity > capacity):
+        answering.context_grow_failed = target
+        _dbg.info("context: reloading '%s' did not grow its %s-token window; not "
+                  "reloading it again for a window of %s or more", name, capacity, target)
+    return answering
 
 
 def _resolve_disconnect_poll(request):

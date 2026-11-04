@@ -9,8 +9,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from localm.inference.backends.base import (
-    AUDIO_CPU_FALLBACK_STATUS, LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS,
-    WAITING_FOR_MODEL_STATUS)
+    AUDIO_CPU_FALLBACK_STATUS, GROWING_CONTEXT_STATUS, LOADING_MODEL_STATUS,
+    VISION_CPU_FALLBACK_STATUS, WAITING_FOR_MODEL_STATUS)
 from localm.inference.stop_sequences import normalize_stop
 
 
@@ -292,6 +292,10 @@ class ChatRequest(SamplingFields):
     # Tokens the answering model's trained context window must hold. Combined
     # with the window the prompt's own size implies; the larger one applies.
     min_context: Optional[int] = Field(None, ge=1)
+    # Tokens of context the answering model's loaded window should hold. A
+    # model whose window is smaller is reloaded with a larger one when its
+    # settings allow. Does not affect which model answers.
+    context_reserve: Optional[int] = Field(None, ge=1)
     # The autoswitch mode (off, image, ask, loaded, auto, eager) this one request
     # is routed under, in place of the ``model_autoswitch`` setting. Unset: the
     # setting applies. Like the setting, it only matters to a request that is not
@@ -438,6 +442,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     WAITING_FOR_MODEL_STATUS: "waiting",
     COMPACTING_STATUS: "compacting",
     LOADING_MODEL_STATUS: "loading_model",
+    GROWING_CONTEXT_STATUS: "growing_context",
     RECALLING_MEMORY_STATUS: "recalling_memory",
     DOWNLOADING_EMBEDDER_STATUS: "downloading_embedder",
     RUNNING_CHAT_HOOKS_STATUS: "chat_hooks",

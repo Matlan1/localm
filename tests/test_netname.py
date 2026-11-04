@@ -7,6 +7,7 @@ live mDNS round-trip that proves ``<name>.local`` is actually advertised and
 browsable. Tailscale is always mocked (no real tailnet needed); the synthetic
 node/tailnet names here are fictitious, never a real machine's.
 """
+import os
 import socket
 import time
 
@@ -114,6 +115,24 @@ def test_tailscale_names_running_magicdns(monkeypatch):
     assert netname.tailscale_names() == ["mybox.tailnet.ts.net", "mybox"]
     assert netname.tailscale_node_label() == "mybox"
     assert netname.tailscale_name_reachable() is True
+
+
+def test_a_tailscale_in_the_current_folder_is_not_found(tmp_path, monkeypatch):
+    from localm import sysprog
+    name = "tailscale.exe" if sysprog.IS_WINDOWS else "tailscale"
+    here, bin_dir = tmp_path / "cwd", tmp_path / "bin"
+    for folder in (here, bin_dir):
+        folder.mkdir()
+        (folder / name).write_bytes(b"")
+        (folder / name).chmod(0o755)
+    monkeypatch.setattr(sysprog, "system_candidates", lambda n: [])
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    monkeypatch.chdir(here)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    found = netname._tailscale_cli()
+    assert found is not None and os.path.samefile(found, bin_dir / name)
+    monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+    assert netname._tailscale_cli() is None
 
 
 def test_tailscale_absent(monkeypatch):

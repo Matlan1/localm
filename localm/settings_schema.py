@@ -183,7 +183,7 @@ CORE_FIELDS: list = [
                  "Release tag setup-llama installs (e.g. 'b10355'). Blank uses "
                  "the build localm confirmed; 'latest' tracks upstream's newest, "
                  "untested. Set with `localm setup-llama --tag`, not here.",
-                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Engine", applies=Applies.LIVE, admin_only=True),
     # NOT engine_managed: that flag means PLUGIN STATE specifically (`plugins`,
     # `plugins_enabled`). The two flags are DISJOINT gates - admin_only also
     # hides a value from a non-owner, engine_managed only refuses the write - so
@@ -231,6 +231,18 @@ CORE_FIELDS: list = [
                  "VRAM. 0 is automatic: with auto-sized GPU layers, only as many as "
                  "needed, before a whole layer moves to the CPU.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    SettingField("ctx_reserve", Widget.NUMBER, "Context window (minimum)",
+                 "Every load keeps a window of at least this many tokens usable. "
+                 "MoE models keep more experts in system RAM to hold it on the GPU; "
+                 "the coding agent asks for 32768.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
+                 step=1024),
+    SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
+                 "always unloads this instance's idle models when a new model needs "
+                 "their VRAM; ask asks first; never keeps them and uses the VRAM that "
+                 "is left (slower). Another instance's model is always asked about.",
+                 group="Engine", applies=Applies.LIVE,
+                 options=["always", "ask", "never"]),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
                  "MoE models only. VRAM that keeps the most used experts of the layers whose "
                  "experts stay in system RAM. Used when those experts are not memory-mapped; set "
@@ -293,10 +305,9 @@ CORE_FIELDS: list = [
                  "Blank uses 128, or the reply length when shorter.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096),
     SettingField("diffusion_max_tokens", Widget.NUMBER, "Diffusion reply length",
-                 "Tokens a diffusion language model writes per reply. It fills "
-                 "the whole length every time, so longer is slower. Shortened "
-                 "when the prompt leaves less room in the model's window (2048 "
-                 "tokens at most).",
+                 "Tokens a diffusion language model writes per reply. It fills the whole "
+                 "length every time, so longer is slower. Limited by Max tokens per "
+                 "reply and by the room the prompt leaves (2048 at most).",
                  group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
@@ -312,8 +323,8 @@ CORE_FIELDS: list = [
     # /v1/config (and `localm config main_gpu_index N`) like any other field.
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
                  "GPU for HuggingFace models, the embedder, the vision projector and "
-                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU "
-                 "unless Split across GPUs names some. Blank uses device 0.",
+                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU unless "
+                 "Split across GPUs names some. Blank lets each choose.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
                  max=MAX_GPU_SPLIT_INDEX),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
@@ -406,17 +417,17 @@ CORE_FIELDS: list = [
                  group="Timeouts", min=10, step=60),
     SettingField("hf_embed_timeout_s", Widget.NUMBER,
                  "HuggingFace embed timeout (s)",
-                 "How long a HuggingFace-format model's embedding request may run "
-                 "in its isolated worker before it is treated as hung. Raise it if "
-                 "you regularly embed large batches.",
+                 "How long a HuggingFace-format model's embedding or rerank call may run "
+                 "in its isolated worker before it is treated as hung. Raise it if you "
+                 "regularly embed large batches.",
                  group="Timeouts", min=10, step=60),
     # The cap is low because a HuggingFace embed runs one text at a time with no
     # batching, so request cost is linear in the batch size.
     SettingField("hf_embed_max_texts", Widget.NUMBER,
                  "HuggingFace embed batch cap (texts)",
                  "Most texts accepted in one /v1/embeddings request against a "
-                 "HuggingFace-format model. These embed one text at a time with no "
-                 "batching, so a large request is slow.",
+                 "HuggingFace-format model. Most of these embed one text at a time with "
+                 "no batching, so a large request is slow.",
                  group="Timeouts", min=1, step=1),
     SettingField("hf_embed_max_chars", Widget.NUMBER,
                  "HuggingFace embed batch cap (characters)",
@@ -425,8 +436,9 @@ CORE_FIELDS: list = [
                  "HuggingFace-format model.",
                  group="Timeouts", min=1, step=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
-                 "Folder levels `localm add <dir>` and the models-folder scan search "
-                 "for GGUF files and HuggingFace model folders.",
+                 "Folder levels `localm add <dir>` and the models-folder scan search for "
+                 "GGUF files and HuggingFace model folders. The models-folder scan "
+                 "always searches at least 2 levels.",
                  group="Models", min=1, max=10, step=1),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
@@ -494,8 +506,9 @@ CORE_FIELDS: list = [
                  group="Chat", owner="chat", applies=Applies.LIVE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
-                 "Port the API/GUI server binds to (default 8642). If it is busy, "
-                 "localm uses the first free port in 8642-8741.",
+                 "Port the API/GUI server binds to (default 8642). If it is busy, localm "
+                 "uses the first free port in 8642-8741. Applies after a full stop and "
+                 "start; Restart server keeps the current port.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
     # admin_only: this decides WHICH NETWORK can reach the server at all - the
     # widest reach-widening key in the Server group, same trust boundary class
@@ -562,9 +575,9 @@ CORE_FIELDS: list = [
                  "replies or model names.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
-                 "Broadcast <name>.local over mDNS/Bonjour when bound past loopback "
-                 "so devices can reach localm by name. Off = reachable by IP "
-                 "address only. Loopback binds never advertise.",
+                 "Broadcast <name>.local over mDNS/Bonjour when bound past loopback so "
+                 "devices can reach localm by name. Off = no <name>.local; use the IP "
+                 "address or a Tailscale name. Loopback binds never advertise.",
                  group="Server", applies=Applies.RESTART),
     # ---- Security ----
     # admin_only: defense in depth on a LATENT fail-closed control, not an active
@@ -640,9 +653,9 @@ CORE_FIELDS: list = [
     # disclosure surface.
     SettingField("coder_projects_remembered", Widget.NUMBER,
                  "Projects to remember",
-                 "How many recent project folders to keep in that list. A lower "
-                 "number trims the list the next time a project is recorded; 0 stops "
-                 "adding folders and keeps the ones listed.",
+                 "How many recent project folders that list shows and keeps. A lower "
+                 "number shortens the list at once; 0 shows none and stops adding "
+                 "folders.",
                  group="Coder", min=0, step=5),
     SettingField("coder_rail_side", Widget.SELECT, "Coder session list side",
                  "Which side the coder's session list sits on. right "
@@ -661,10 +674,9 @@ CORE_FIELDS: list = [
                  group="General", applies=Applies.RESTART),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",
-                 "Only for the standalone app window (localm[desktop]). Off "
-                 "(default): closing hides the window and the server keeps "
-                 "running; use Stop to quit. On: closing quits the app and "
-                 "stops the server.",
+                 "Only for the standalone app window (localm[desktop]). Off (default): "
+                 "closing hides it and the server keeps running; use Stop to quit. On: "
+                 "closing stops the server. An attached window just closes.",
                  group="Desktop"),
     # ---- Privacy ----
     # admin_only, all three: they decide WHETHER LOCALM WRITES THE USER'S
@@ -674,8 +686,9 @@ CORE_FIELDS: list = [
     # cfg["effective_chat_mode"] / cfg["effective_coder_mode"], which
     # routes/config.py adds AFTER the admin_only strip, never cfg["mode"].
     SettingField("mode", Widget.SELECT, "Session persistence",
-                 "What localm saves: privacy = nothing written automatically; "
-                 "log = a JSONL audit trail; full = log plus a chat transcript.",
+                 "What localm saves: privacy = nothing written automatically; log = a "
+                 "JSONL audit trail; full = log plus Markdown transcripts of chat, "
+                 "server and coder sessions (coder ones in the project).",
                  group="Privacy", options=_PRIVACY, admin_only=True),
     # Both children name the parent setting rather than pointing at a position:
     # in the two-column grid the parent sits to the LEFT, not above.
@@ -686,15 +699,15 @@ CORE_FIELDS: list = [
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
-                 "Overrides Session persistence for the coder only. What the "
-                 "server records of coder requests is only ever made more private "
-                 "by it. Blank inherits whatever Session persistence is set to.",
+                 "Overrides Session persistence for the coder, unless the project's "
+                 ".localcoder/config.toml sets a mode. An open session keeps its mode. "
+                 "The server's own record only gets more private. Blank inherits.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
-                 "Recall the durable facts localm has learned about you and add "
-                 "them to the system prompt each chat turn. Off = keep the facts "
-                 "but stop recalling them.",
+                 "Recall the durable facts localm has learned about you and add them to "
+                 "the system prompt each chat turn. Off = keep the facts, but stop "
+                 "recalling them and saving \"remember that\" requests.",
                  group="Memory", owner="memory"),
     # No privacy exception here: consolidation WRITES, and privacy mode's
     # contract is that nothing is written automatically, so unlike recall it can
@@ -728,18 +741,17 @@ CORE_FIELDS: list = [
     # This toggle is the opt-in that writes them anyway.
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
-                 "Writes crash and hang diagnostics (stack traces, restart "
-                 "breadcrumbs, a debug log from the next server start) even in privacy "
-                 "mode. Code and operational logs only, never chat content.",
-                 group="Diagnostics", admin_only=True),
+                 "From the next server start, writes crash and hang diagnostics (stack "
+                 "traces, restart breadcrumbs, a debug log) even in privacy mode. Code "
+                 "and operational logs only, never chat content.",
+                 group="Diagnostics", admin_only=True, applies=Applies.RESTART),
     # ---- Models ----
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Until this is fetched, memory and RAG fall back to lexical "
-                 "search. Run 'localm setup-embeddings' to get one. Accepts a "
-                 "known key (bge-small-en-v1.5), a registered name, or a GGUF "
-                 "path.",
+                 "Until fetched, memory and RAG use lexical search; run 'localm "
+                 "setup-embeddings'. A known key (bge-small-en-v1.5), registered name or "
+                 "GGUF path. A loaded embedder stays until it is unloaded.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -764,9 +776,9 @@ CORE_FIELDS: list = [
     # last-token pooling and is DEGRADED by mean - last for those, or auto to
     # follow whatever the model declares.
     SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
-                 "Changing this invalidates existing document collections and "
-                 "memory vectors: re-index afterwards. mean suits bge/nomic; a "
-                 "decoder-based embedder needs last, or auto to follow the model.",
+                 "Changing this invalidates document collections and memory vectors: "
+                 "re-index after. A loaded embedder keeps the old value until unloaded. "
+                 "mean suits bge/nomic; a decoder-based one needs last or auto.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
                  options=_EMBEDDING_POOLING),
     # Blank is not simply "use the GPU": a large embedder sharing one card with a
@@ -797,9 +809,9 @@ CORE_FIELDS: list = [
     # for the same "where does an outbound credential go" boundary as
     # net_search_url/bugreport_upload_url above.
     SettingField("hf_token", Widget.SECRET, "Hugging Face API token",
-                 "Optional: raises rate limits and unlocks gated/login-required "
-                 "Hugging Face models. Blank = anonymous access. Falls back to "
-                 "the HF_TOKEN environment variable.",
+                 "Optional: raises rate limits and unlocks gated/login-required Hugging "
+                 "Face models. Blank uses the HF_TOKEN environment variable, then a "
+                 "saved huggingface-cli login, else anonymous access.",
                  group="Models", admin_only=True, secret=True,
                  link=("https://huggingface.co/settings/tokens", "Get a token")),
     SettingField("civitai_api_key", Widget.SECRET, "CivitAI API key",
@@ -819,8 +831,9 @@ CORE_FIELDS: list = [
     # server-side install (the install path is gated on the local principal).
     SettingField("auto_install_plugin_deps", Widget.TOGGLE,
                  "Auto-install plugin dependencies",
-                 "When you install or enable a plugin that needs extra Python "
-                 "packages, install them automatically on this machine.",
+                 "When you install or enable a plugin that needs extra Python packages, "
+                 "install them automatically on this machine. Skipped on a network bind "
+                 "and by `localm plugin install <folder>`.",
                  group="Plugins"),
     SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
                  "Names of enabled engine plugins. Managed by the Plugins page "
@@ -906,27 +919,27 @@ CORE_FIELDS: list = [
                  group="Coder", owner="coder", min=0, step=5),
     SettingField("coder_grep_max_per_file", Widget.NUMBER,
                  "Coder grep matches per file",
-                 "How many matches the coder's grep shows per file before it "
-                 "summarises the rest (0 = show all). Matches beyond the cap are "
-                 "still counted and reported, never hidden.",
+                 "Default for how many matches the coder's grep shows per file before it "
+                 "summarises the rest (0 = show all); the model can change it per "
+                 "search. Matches beyond the cap are still counted and reported.",
                  group="Coder", owner="coder", min=0, step=5),
     SettingField("coder_grep_max_output_lines", Widget.NUMBER,
                  "Coder grep output lines",
-                 "How many output lines the coder's grep produces before it stops "
-                 "and reports how many files it did not reach (0 = no cap). Raise "
-                 "it for wide sweeps, lower it to spend less context on search.",
+                 "Default for how many output lines the coder's grep produces before it "
+                 "stops and reports how many files it did not reach (0 = no cap); the "
+                 "model can change it per search.",
                  group="Coder", owner="coder", min=0, step=50),
     SettingField("coder_grep_max_file_bytes", Widget.NUMBER,
                  "Coder grep file size cap (bytes)",
-                 "Files larger than this are skipped by the coder's grep rather "
-                 "than read (0 = no cap); the skip is always reported. Keeps a "
-                 "multi-MB log or data dump from swamping a code search.",
+                 "Files larger than this are skipped by the coder's grep and "
+                 "search_replace (0 = no cap) and the skip is reported; the model can "
+                 "raise it for one grep. Keeps a multi-MB log from swamping a search.",
                  group="Coder", owner="coder", min=0, step=1048576),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls",
-                 "Once the model starts a <tool_call>, force it to be valid "
-                 "tool-call JSON (lazy GBNF grammar; local grammar-capable "
-                 "backends only). Free text and thinking are unaffected.",
+                 "Once the model starts a <tool_call>, force valid tool-call JSON (local "
+                 "grammar-capable backends only). If the model keeps answering with no "
+                 "call, one retry allows only thinking and a call.",
                  group="Coder", owner="coder"),
     # Recall is free; the write half is skipped in privacy mode and for shared
     # keys. Episodes are stored under the localm data dir, never inside the
@@ -934,9 +947,9 @@ CORE_FIELDS: list = [
     # `--forget-episodes`.
     SettingField("coder_episodic_memory", Widget.TOGGLE,
                  "Coder episodic memory",
-                 "Recall lessons from past sessions on a project and, at session "
-                 "close, distil the finished session into a new one. Costs one "
-                 "extra model call per session that changed files or failed.",
+                 "Recall lessons from past sessions on a project and distil each "
+                 "finished session into a new one (one extra model call if it changed "
+                 "files or failed). Applies to new sessions.",
                  group="Coder", owner="coder"),
     # admin_only: an INJECTION-HARDENING control, so a non-owner turning it off
     # would re-open the indirect-prompt-injection boundary for the OWNER's coder.
@@ -944,10 +957,9 @@ CORE_FIELDS: list = [
     # is defense in depth and blocks no legitimate use.
     SettingField("coder_untrusted_provenance", Widget.TOGGLE,
                  "Tag untrusted external content",
-                 "Marks coder tool results from the web, web search and external "
-                 "MCP servers as untrusted data, so a fetched page cannot inject "
-                 "commands into the agent. Leave on unless you have a specific "
-                 "reason.",
+                 "Marks coder tool results from the web, web search and external MCP "
+                 "servers as untrusted data, so a fetched page cannot inject commands. "
+                 "Leave on unless you have a reason. Applies to new sessions.",
                  group="Coder", owner="coder", admin_only=True),
     SettingField("coder_review", Widget.TOGGLE,
                  "Review changes before finishing",
@@ -987,10 +999,9 @@ CORE_FIELDS: list = [
     # may read (a filesystem-read boundary). Credential folders (.ssh, .aws, ...)
     # are refused in BOTH modes regardless - a hard floor.
     SettingField("rag_indexing_mode", Widget.SELECT, "Indexing folder rule",
-                 "Which folders document indexing may read. whitelist = home, "
-                 "the working directory and Allowed folders only. blacklist = "
-                 "anything except Denied folders. Credential folders are "
-                 "always refused.",
+                 "Which folders the server may index (`localm rag add` in a terminal is "
+                 "not bound). whitelist = home, the working directory and Allowed "
+                 "folders. blacklist = all but Denied folders. Credentials never.",
                  group="Knowledge", owner="rag", admin_only=True,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",
@@ -1000,8 +1011,9 @@ CORE_FIELDS: list = [
                  "continue.",
                  group="Knowledge", owner="rag", admin_only=True),
     SettingField("rag_denied_roots", Widget.PATHLIST, "Denied folders",
-                 "Folders that are never indexed in blacklist mode (everything "
-                 "else is allowed). Ignored in whitelist mode.",
+                 "Folders the server and scheduled jobs never index in blacklist mode "
+                 "(everything else is allowed). Ignored in whitelist mode. `localm rag "
+                 "add` in a terminal is not bound by this.",
                  group="Knowledge", owner="rag", admin_only=True),
     # Narrow by construction: format tagging from the extension and content is
     # already free, so the LLM is asked only about an unknown extension it cannot
@@ -1017,8 +1029,9 @@ CORE_FIELDS: list = [
                  "retrieval is unchanged.",
                  group="Knowledge", owner="rag"),
     SettingField("rag_rerank_model", Widget.TEXT, "Reranker model",
-                 "Name of the installed reranker used for Knowledge results. "
-                 "Blank uses the only installed reranker.",
+                 "Name of the installed reranker used for Knowledge results. Blank uses "
+                 "the reranker when only one is installed; with several, nothing is "
+                 "reranked until you name one.",
                  group="Knowledge", owner="rag"),
     SettingField("rag_rerank_candidates", Widget.NUMBER, "Reranker candidates",
                  "How many of the best matches the reranker re-scores. More finds "
@@ -1098,9 +1111,9 @@ CORE_FIELDS: list = [
     # self-expires once ComfyUI ships its own fix.
     SettingField("comfy_func_shim", Widget.TOGGLE,
                  "Fix ComfyUI ACE-Step __func__ crash (in-memory)",
-                 "Work around a known ComfyUI crash in native ACE-Step audio. Off "
-                 "by default. Patches only a ComfyUI that localm starts, in memory "
-                 "- nothing is written into your install.",
+                 "Work around a known ComfyUI crash in native ACE-Step audio. Off by "
+                 "default. Patches only a ComfyUI that localm starts, from its next "
+                 "start, in memory - nothing is written into your install.",
                  group="Media", owner="image"),
     # Per-component placement needs a ComfyUI that offers the multigpu
     # Select*Device nodes - localm's own managed ComfyUI has them, and an older
@@ -1112,9 +1125,9 @@ CORE_FIELDS: list = [
                  # The help must keep BOTH halves: that placement is not promised
                  # everywhere, and that single-GPU setups are unaffected. See
                  # test_placement_help_still_states_the_two_gpu_precondition.
-                 "EXPERIMENTAL, off by default. When the chat model is split across "
-                 "two or more GPUs, put the text encoder and VAE on a second card. "
-                 "Single-GPU setups are unaffected. Needs a recent ComfyUI.",
+                 "EXPERIMENTAL, off by default. When Split across GPUs names two or more "
+                 "GPUs, put the text encoder and VAE on a second card. Single-GPU setups "
+                 "are unaffected. Needs a recent ComfyUI.",
                  group="Media", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
@@ -1124,7 +1137,7 @@ CORE_FIELDS: list = [
     SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
                  "auto = keep chat loaded if the other model fits alongside; always = "
                  "always unload chat; never = keep chat hot. Also used when the "
-                 "embedding or speech model loads.",
+                 "embedding or speech model needs room.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
     # 'own' is INERT until `localm comfy setup` has been run. The user's own
@@ -1244,9 +1257,9 @@ CORE_FIELDS: list = [
     # ---- Browser automation (plugin) ----
     SettingField("browser_enabled", Widget.TOGGLE,
                  "Let the model drive a web browser",
-                 "Off by default. A key must also hold the browser capability. "
-                 "The browser reaches only what the network policy already "
-                 "allows.",
+                 "Off by default. A key must also hold the browser capability. The "
+                 "browser reaches only what the network policy already allows. A coder "
+                 "session already open keeps the value it started with.",
                  group="Network", owner="browser", admin_only=True),
     SettingField("browser_engine", Widget.SELECT, "Browser to drive",
                  "'bundled' runs the browser localm downloads. 'system' runs a "
@@ -1276,9 +1289,9 @@ CORE_FIELDS: list = [
                  group="Network", owner="browser", admin_only=True),
     SettingField("browser_inline_live_view", Widget.TOGGLE,
                  "Show the agent's browser inline in the coder session",
-                 "Off by default. On mirrors the same live view the Browser "
-                 "tab already offers directly inside the coder session that "
-                 "triggered it, in addition to the tab.",
+                 "Off by default. On mirrors the Browser tab's live view inside the "
+                 "coder session that triggered it, in addition to the tab. Checked once "
+                 "per session, at its first browser tool call.",
                  group="Coder", owner="browser"),
     # ---- Preview (GUI renderer, core) ----
     # owner="core": the artifact canvas is the GUI's own renderer and stays
@@ -1962,17 +1975,19 @@ MEDIA_PLUGIN_FIELDS: list = [
                "Optional VAE (registered name or file path).", plugins=_NATIVE,
                admin_only=True),
     MediaField("native_clip_l", ("native", "clip_l"), "", Widget.TEXT,
-               "Native CLIP-L text encoder", "Optional (FLUX, SD3).", plugins=_IMAGE_ONLY,
+               "Native CLIP-L text encoder", "Optional (SD1, SD2, SDXL, FLUX, SD3).", plugins=_IMAGE_ONLY,
                admin_only=True),
     MediaField("native_clip_g", ("native", "clip_g"), "", Widget.TEXT,
-               "Native CLIP-G text encoder", "Optional (SD3).", plugins=_IMAGE_ONLY,
+               "Native CLIP-G text encoder", "Optional (SDXL, SD3).", plugins=_IMAGE_ONLY,
                admin_only=True),
     MediaField("native_t5xxl", ("native", "t5xxl"), "", Widget.TEXT,
                "Native T5-XXL text encoder",
-               "Optional (FLUX, SD3). Wan video models take their umt5-xxl encoder here.",
+               "Optional (FLUX, SD3, Chroma, Hunyuan Video). Wan video models take "
+               "their umt5-xxl encoder here.",
                plugins=_NATIVE, admin_only=True),
     MediaField("native_llm", ("native", "llm"), "", Widget.TEXT,
-               "Native LLM text encoder", "Optional (Z-Image, Qwen Image, LTX-2).",
+               "Native LLM text encoder", "Optional (Z-Image, Qwen Image, FLUX.2, Ovis, Anima, ERNIE, Hunyuan "
+                                          "Video, LTX-2).",
                plugins=_NATIVE, admin_only=True),
     MediaField("native_clip_vision", ("native", "clip_vision"), "", Widget.TEXT,
                "Native CLIP vision encoder", "Optional (Wan image-to-video).",

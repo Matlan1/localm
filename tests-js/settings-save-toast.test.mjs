@@ -60,7 +60,13 @@ async function saveWith(key, value, section) {
 }
 
 test("a changed restart field says a restart is needed", async () => {
-  assert.match(await saveWith("port", 8700, "core-Server"), /restart localm/);
+  assert.match(await saveWith("mdns_name", "studio", "core-Server"), /restart localm/);
+});
+
+test("a changed port says it needs a full stop and start, since Restart keeps the current port", async () => {
+  const text = await saveWith("port", 8700, "core-Server");
+  assert.match(text, /full stop and start/);
+  assert.match(text, /keeps the current port/);
 });
 
 test("a changed next-load field says it applies on the next model load", async () => {

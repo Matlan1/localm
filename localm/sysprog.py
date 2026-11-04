@@ -92,10 +92,18 @@ def path_candidates(name: str) -> list:
     return out
 
 
-def find(name: str) -> Optional[str]:
-    """Full path of the program *name*: the system folders first, then the
-    absolute folders on PATH. None when it is in neither."""
-    for candidate in system_candidates(name) + path_candidates(name):
+def find_on_path(name: str) -> Optional[str]:
+    """Full path of the program *name* in the absolute folders on PATH, or None."""
+    for candidate in path_candidates(name):
         if _runnable(candidate):
             return candidate
     return None
+
+
+def find(name: str) -> Optional[str]:
+    """Full path of the program *name*: the system folders first, then the
+    absolute folders on PATH. None when it is in neither."""
+    for candidate in system_candidates(name):
+        if _runnable(candidate):
+            return candidate
+    return find_on_path(name)

@@ -71,6 +71,7 @@ GROUP_PLACEMENT = {
 VISIBLE_FIELD_GROUP = {
     "binary_dir": "Engine", "n_ctx": "Engine", "n_ctx_max": "Engine",
     "n_ctx_grow": "Engine", "ctx_auto": "Engine", "n_gpu_layers": "Engine",
+    "ctx_reserve": "Engine", "unload_for_room": "Engine",
     "n_cpu_moe": "Engine", "moe_cache_mib": "Engine", "use_mmap": "Engine",
     "kv_cache_type": "Engine", "n_gpu_layers_auto": "Engine", "mtp_enabled": "Engine",
     "mtp_draft_tokens": "Engine", "spec_source": "Engine", "spec_draft_tokens": "Engine",

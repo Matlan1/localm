@@ -2166,6 +2166,13 @@ window.openRecentErrors = openRecentErrors;
 export function renderRecentErrors(list = recentGuiErrors()) {
   const box = $("recent-errors-list");
   if (!box) return;
+  // The entry and button that hold keyboard focus, to restore after the rebuild.
+  const focused = document.activeElement;
+  const focusedRow = focused && box.contains(focused) ? focused.closest(".recent-error") : null;
+  const focusedAt = focusedRow ? {
+    row: [...box.children].indexOf(focusedRow),
+    button: [...focusedRow.querySelectorAll("button")].indexOf(focused),
+  } : null;
   box.replaceChildren();
   for (const entry of list) {
     const li = el("li", "recent-error");
@@ -2202,10 +2209,17 @@ export function renderRecentErrors(list = recentGuiErrors()) {
   if (empty) empty.hidden = list.length > 0;
   const clear = $("recent-errors-clear");
   if (clear) clear.disabled = list.length === 0;
+  if (focusedAt) {
+    const rows = box.children;
+    const row = rows[Math.min(focusedAt.row, rows.length - 1)];
+    if (row) row.querySelectorAll("button")[focusedAt.button]?.focus();
+    else if (empty) empty.focus();
+  }
 }
 
 onRecentGuiErrorsChange(renderRecentErrors);
 renderRecentErrors();
+document.addEventListener("localm:language", () => renderRecentErrors());
 if ($("recent-errors-clear")) $("recent-errors-clear").onclick = () => clearRecentGuiErrors();
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);

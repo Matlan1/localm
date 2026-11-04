@@ -195,11 +195,11 @@ export const chat = {
 
 // The human-facing label of a tagged row (kb/doc) or a tool event; used by
 // renderChat() below and by exportConversation() (settings-perf.js).
-const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
+const NOTE_LABEL_KEYS = { web: "chat.note.web", doc: "chat.note.doc", kb: "chat.note.kb" };
 
 export function noteLabel(m) {
-  if (isToolEvent(m)) return NOTE_LABELS.web;
-  return m.tag ? NOTE_LABELS[m.tag] : null;
+  if (isToolEvent(m)) return t(NOTE_LABEL_KEYS.web);
+  return m.tag && NOTE_LABEL_KEYS[m.tag] ? t(NOTE_LABEL_KEYS[m.tag]) : null;
 }
 
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
@@ -1576,7 +1576,8 @@ export function searchSnippet(conv, term) {
 export function buildConvItem(conv, snippet) {
   const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
   const title = el("span", "title");
-  title.appendChild(document.createTextNode(conv.title));
+  title.appendChild(document.createTextNode(
+    conv.title === "New chat" ? t("chat.conv.newTitle") : conv.title));
   if (snippet) title.appendChild(el("span", "snippet", snippet));
   title.ondblclick = (e) => {
     e.stopPropagation();
@@ -1597,7 +1598,7 @@ export function buildConvItem(conv, snippet) {
 
   const pin = el("button", "del" + (conv.pinned ? " pinned-btn" : ""));
   pin.appendChild(iconEl("pin", "ic"));
-  pin.title = conv.pinned ? "Unpin" : "Pin to top";
+  pin.title = t(conv.pinned ? "chat.conv.unpin" : "chat.conv.pin");
   pin.onclick = (e) => {
     e.stopPropagation();
     conv.pinned = !conv.pinned;
@@ -1609,12 +1610,11 @@ export function buildConvItem(conv, snippet) {
 
   const fold = el("button", "del");
   fold.appendChild(iconEl("folder", "ic"));
-  fold.title = conv.folder ? `Folder: ${conv.folder} (click to change)`
-                           : "Move to a folder";
+  fold.title = conv.folder ? t("chat.conv.folderTitle", { folder: conv.folder })
+                           : t("chat.conv.moveToFolder");
   fold.onclick = async (e) => {
     e.stopPropagation();
-    const name = await promptText("Folder name (empty removes it from the folder):",
-                        conv.folder || "");
+    const name = await promptText(t("chat.conv.folderPrompt"), conv.folder || "");
     if (name === null) return;
     if (name.trim()) conv.folder = name.trim();
     else delete conv.folder;
@@ -1798,11 +1798,11 @@ window.openImageLightbox = openImageLightbox;
 // server reports (store._vector_status). Shown in the memory chip's tooltip so
 // lexical-only / pending-embedding recall is visible, not invisible.
 const MEMORY_DEGRADE_LABELS = {
-  no_embedder: "keyword match only - no embedding model installed",
-  no_vectors: "keyword match only - memories not embedded yet (run setup-embeddings)",
-  low_coverage: "partial semantic match - some memories not embedded yet",
-  dim_mismatch: "keyword match only - the embedding model changed",
-  query_embed_failed: "keyword match only - could not embed this message",
+  no_embedder: "chat.memoryChip.noEmbedder",
+  no_vectors: "chat.memoryChip.noVectors",
+  low_coverage: "chat.memoryChip.lowCoverage",
+  dim_mismatch: "chat.memoryChip.dimMismatch",
+  query_embed_failed: "chat.memoryChip.queryEmbedFailed",
 };
 
 /** A chip on an assistant turn that was answered by a different model than
@@ -1859,13 +1859,13 @@ export function buildMemoryChip(mem) {
   chip.appendChild(iconEl("memory", "btn-ic"));
   chip.appendChild(document.createTextNode(String(n)));
   const facts = (mem.items || []).map((it) => it && it.text).filter(Boolean);
-  const reason = MEMORY_DEGRADE_LABELS[mem.degrade];
+  const reason = MEMORY_DEGRADE_LABELS[mem.degrade] ? t(MEMORY_DEGRADE_LABELS[mem.degrade]) : "";
   chip.title = [
-    `${n} remembered ${n === 1 ? "fact" : "facts"} used for this reply`,
+    tn("chat.memoryChip.used", n),
     facts.length ? facts.map((t) => "- " + t).join("\n") : "",
     reason ? "(" + reason + ")" : "",
   ].filter(Boolean).join("\n");
-  chip.setAttribute("aria-label", "Memory used: " + n + " - open memory");
+  chip.setAttribute("aria-label", t("chat.memoryChip.aria", { count: n }));
   chip.onclick = () => openMemoryModal();
   return chip;
 }
@@ -1949,7 +1949,7 @@ let activeSpeakBtn = null;
 function setSpeakButtonActive(btn, active) {
   btn.classList.toggle("speaking", active);
   btn.replaceChildren(iconEl(active ? "stop" : "speak", "ic"));
-  btn.title = active ? "Stop speaking" : "Speak this reply aloud";
+  btn.title = t(active ? "chat.action.stopSpeaking" : "chat.action.speak");
 }
 
 /** The "Speak this reply aloud" button's click handler: starts, or stops,
@@ -1976,8 +1976,8 @@ export function addMessageRow(container, role, text, opts = {}) {
   // marker) is not something the human typed, so it must not carry the role
   // class and inherit the user turn's right-aligned bubble layout.
   const row = el("div", "msg-row " + (opts.cls || role));
-  const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
-  const roleEl = el("div", "msg-role", opts.label || (role === "user" ? (chat.userName || "You") : mName));
+  const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || t("chat.row.model"));
+  const roleEl = el("div", "msg-role", opts.label || (role === "user" ? (chat.userName || t("chat.row.you")) : mName));
   const avatarEl = buildAvatarEl(avatarInfoFor(role, mName));
   if (avatarEl) {
     // Wrap only when there is an avatar. See
@@ -2482,21 +2482,21 @@ export function renderChat() {
     const tag = m.tag;
     const actions = [];
     if (m.role === "user" && !tag && !chatBusy()) {
-      actions.push(["edit", () => editMessage(conv, i)]);
-      actions.push(["revert", () => revertTo(conv, i)]);
+      actions.push([t("chat.action.edit"), () => editMessage(conv, i)]);
+      actions.push([t("chat.action.revert"), () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
-      actions.push(["Speak this reply aloud", (btn) => speakToggle(btn, msgText(m)), "speak"]);
+      actions.push([t("chat.action.speak"), (btn) => speakToggle(btn, msgText(m)), "speak"]);
     }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chatBusy()) {
-      actions.push(["regenerate", () => regenerate(conv)]);
+      actions.push([t("chat.action.regenerate"), () => regenerate(conv)]);
     }
     const noteSuffix = m.failed
-      ? "\n\n*[generation failed - the model's reply ended in an inference error; regenerate or ask again]*"
+      ? "\n\n*[" + t("chat.reply.failedNote") + "]*"
       : m.truncated
-      ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
+      ? "\n\n*[" + t("chat.reply.maxTokensNote") + "]*"
       : m.stopped
-      ? "\n\n*[stopped]*"
+      ? "\n\n*[" + t("chat.reply.stoppedNote") + "]*"
       : m.cut
       ? "\n\n*[" + t("chat.reply.cut") + "]*"
       : m.webUnfinished
@@ -2709,11 +2709,9 @@ export function revertTo(conv, index) {
 
   if (lost > 0) {
     confirmDanger(
-      "Revert conversation",
-      `This permanently deletes ${lost} alternative branch` +
-      `${lost === 1 ? "" : "es"} and everything after this message - it ` +
-      "can't be undone. Revert anyway?",
-      "Revert", apply);
+      t("chat.revert.title"),
+      tn("chat.revert.body", lost),
+      t("chat.revert.confirm"), apply);
   } else {
     apply();
   }
@@ -3157,6 +3155,16 @@ export function statusLabel(text, code = null, args = null) {
   return /\{\w+\}/.test(label) ? text : label;
 }
 
+/** Whether a server status takes the warning style: by its `code` when it has
+ *  one, otherwise by the English wording of `text`. */
+export function isWarnStatus(text, code = null) {
+  return code
+    ? WARN_STATUS_CODES.has(code)
+    : (typeof text === "string" && (
+        text.toLowerCase().includes("failed") || text.toLowerCase().includes("retrying")
+      ));
+}
+
 /** Update the text and warning state of an existing status indicator in bodyEl,
  *  or mount a new one if not present. `code` is the server's delta.status_code:
  *  when it resolves to a catalog entry, that localized text and the code's
@@ -3165,11 +3173,7 @@ export function statusLabel(text, code = null, args = null) {
 export function updateStatusIndicator(bodyEl, text, code = null, args = null) {
   if (!bodyEl) return null;
   const label = statusLabel(text, code, args);
-  const shouldWarn = code
-    ? WARN_STATUS_CODES.has(code)
-    : (typeof text === "string" && (
-        text.toLowerCase().includes("failed") || text.toLowerCase().includes("retrying")
-      ));
+  const shouldWarn = isWarnStatus(text, code);
   const ind = bodyEl.querySelector(".msg-status-indicator");
   if (!ind) {
     return mountStatusIndicator(bodyEl, label, shouldWarn);

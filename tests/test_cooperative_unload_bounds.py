@@ -227,7 +227,7 @@ def test_split_instance_still_asks_a_peer_on_its_other_split_device(
                               "total": 32 * GB}))
 
     engines = {"incoming": FakeEngine("incoming")}
-    res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__))
+    res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__, force=True))
     assert calls == ["peer-1"], (
         "a peer holding VRAM on one of THIS instance's own split devices was "
         f"dropped by the same-GPU filter, so the split load never cooperated: {calls}")
@@ -255,7 +255,7 @@ def test_cooperation_still_happens_when_it_can_actually_free_enough(
                               "total": 16 * GB}))
 
     engines = {"incoming": FakeEngine("incoming")}
-    res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__))
+    res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__, force=True))
     assert res["status"] == "loaded", res
     assert calls == ["peer-1"]
     assert engines["incoming"].loaded

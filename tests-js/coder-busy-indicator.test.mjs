@@ -176,6 +176,26 @@ test("a status event shows in the busy pill until the next event", () => {
     "statuses are not kept in the exported event log");
 });
 
+test("a parameterised status is localized from its args and takes the warning style", async () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  runScript(window, `
+    coder.activeId = "sid1";
+    window.__s = { info: { id: "sid1" }, busy: true, phaseStartedAt: Date.now(), lastEventAt: Date.now() };
+    coder.sessions.set("sid1", window.__s);
+    const node = document.getElementById("coder-state");
+    node.className = "job-state st-running";
+  `);
+  const node = window.document.getElementById("coder-state");
+  window.handleCoderEvent(window.__s, { type: "status", text: "english text", code: "loading_beside",
+                                        args: { model: "big", resident: "small" } });
+  assert.match(node.textContent, /big/);
+  assert.doesNotMatch(node.textContent, /english text/, "the catalog text is used, filled from the args");
+  assert.ok(node.classList.contains("st-warn"));
+  window.handleCoderEvent(window.__s, { type: "some_later_event" });
+  window.tickCoderBusyIndicator();
+  assert.ok(!node.classList.contains("st-warn"), "the warning ends with the status");
+});
+
 function busyPill(window, fields) {
   runScript(window, `
     coder.activeId = "sid1";

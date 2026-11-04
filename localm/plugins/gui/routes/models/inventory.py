@@ -435,13 +435,15 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # authoritative status: loaded, already_active, superseded (a newer
         # selection took over), or cancelled (aborted for any other reason) -
         # none of these is an error.
-        # force and activate are passed only when they differ from their
-        # defaults, so a single-argument switch_model callable keeps working.
+        # force, activate and keep_others are passed only when they differ from
+        # their defaults, so a single-argument switch_model callable keeps working.
         options = {}
         if req.force:
             options["force"] = True
         if not req.activate:
             options["activate"] = False
+        if req.keep_others:
+            options = {"keep_others": True, **({"activate": False} if not req.activate else {})}
         try:
             result = await switch_model(req.model, **options)
         except Exception as e:

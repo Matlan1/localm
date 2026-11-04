@@ -35,6 +35,7 @@ import pytest
 import localm.config as cfg
 from localm.media import managed_comfy as mc
 from localm.media import source_archive
+from tests._max_path import max_path  # noqa: F401
 from tests._source_archives import FakeGitHub
 
 
@@ -559,6 +560,51 @@ def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, 
     assert source_archive.tree_commit(root) == c1
     assert mc.is_managed_comfy_installed()
     assert [p.name for p in root.parent.iterdir() if "-backup-" in p.name] == []
+
+
+def test_a_custom_node_backup_that_is_kept_stays_out_of_custom_nodes(home, tmp_path, monkeypatch):
+    from localm.media import managed_comfy_update as upd
+
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, c1 = hub.add("o", "Node", {"__init__.py": "old\n"})
+    _, c2 = hub.add("o", "Node", {"__init__.py": "new\n"})
+    root = tmp_path / "comfyui"
+    node = root / "custom_nodes" / "Node"
+    node.parent.mkdir(parents=True)
+    source_archive.fetch_tree(repo, c1, node)
+    refused = _refuse_writes(monkeypatch, "__init__.py")
+
+    changes = []
+    ok, detail, _ = upd._replace_source(node, repo, c2, changes, None)
+
+    assert refused and not ok and "__init__.py is in use" in detail
+    assert [p.name for p in (root / "custom_nodes").iterdir()] == ["Node"]
+    kept = [p for p in root.iterdir() if "-backup-" in p.name]
+    assert len(kept) == 1 and changes[0].rollback() == ["__init__.py"]
+    assert (kept[0] / "__init__.py").read_text(encoding="utf-8") == "old\n"
+
+
+def test_update_and_remove_work_on_a_tree_past_the_path_limit(home, tmp_path, monkeypatch,
+                                                              max_path):  # noqa: F811
+    from localm.media import managed_comfy_update as upd
+
+    deep = "/".join(["a_rather_long_folder_name_for_testing"] * 7) + "/leaf.py"
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, c1 = hub.add("fake", "ComfyUI", _tree(**{deep: "one\n"}))
+    _, c2 = hub.add("fake", "ComfyUI", _tree(VERSION="0.9.3\n", **{deep: "two\n"}))
+    root = _install_managed_from(repo, c1)
+    long_file = source_archive.long_path(root / deep)
+    assert len(str(root / deep)) > 260
+
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2,
+                                      reinstall_requirements=False)
+    assert result.ok, result.message
+    assert source_archive.tree_commit(root) == c2
+    assert long_file.read_text(encoding="utf-8") == "two\n"
+
+    removed, failed = mc.remove_managed_comfy()
+    assert failed == []
+    assert root in removed and not os.path.lexists(source_archive.long_path(root))
 
 
 @pytest.mark.skipif(not _git_available(), reason="git builds the older-localm checkout")

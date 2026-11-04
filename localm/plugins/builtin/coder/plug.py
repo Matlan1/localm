@@ -94,6 +94,9 @@ class CreateSessionRequest(BaseModel):
     # Proceed with a model switch that answered 409 confirm_required (a busy
     # model in the way, or a load that would fall back to CPU offload).
     force: bool = False
+    # Load the model beside the other models instead of unloading them (the
+    # answer to a confirm_required with reason "unload_choice").
+    keep_others: bool = False
     scope: str | None = None          # glob restricting file-access tools
     dry_run: bool = False             # destructive tools report but don't run
     # The CLI's --interactive-confirm: auto-approve file writes but STILL prompt
@@ -189,6 +192,8 @@ class SetModelRequest(BaseModel):
     model: str
     # Proceed with a model switch that answered 409 confirm_required.
     force: bool = False
+    # Load the model beside the other models instead of unloading them.
+    keep_others: bool = False
     # True: the session is always answered by this model. False: it is the
     # preferred model (the GUI's follow-the-loaded-model repoint), and a
     # request it cannot serve is answered by an installed model that can.
@@ -546,7 +551,7 @@ def _resolve_backend(req: CreateSessionRequest, *, self_url: str,
 
 
 async def _ensure_model_loaded(request: Request, model: str, *,
-                               force: bool = False) -> None:
+                               force: bool = False, keep_others: bool = False) -> None:
     """Load *model* as the shared engine through ``app.state.switch_model``.
 
     Returns without loading anything, and without raising, when *model* has an
@@ -554,14 +559,16 @@ async def _ensure_model_loaded(request: Request, model: str, *,
 
     Otherwise returns only when the switch reports ``loaded`` or
     ``already_active``, or reports no status at all (a minimal switch
-    callable). ``force`` is passed to the switch only when True.
+    callable). ``force`` and ``keep_others`` are passed to the switch only
+    when True.
 
     Raises HTTPException, only for a model without a peer route:
       503  no switch_model is wired, or the load was superseded, cancelled or
            reported any other status;
-      409  the load needs confirmation; ``detail`` is
-           ``{"status": "confirm_required", "model", "detail"}`` and a retry
-           with ``force`` proceeds;
+      409  the load needs confirmation; ``detail`` is the switch's
+           ``confirm_required`` result (``status``, ``model``, ``detail`` and
+           any figures it carries) and a retry with ``force`` proceeds, or with
+           ``keep_others`` for a ``reason`` "unload_choice";
       500  the switch raised; an HTTPException it raised passes through
            unchanged.
     """
@@ -571,9 +578,15 @@ async def _ensure_model_loaded(request: Request, model: str, *,
     switch_model = getattr(request.app.state, "switch_model", None)
     if switch_model is None:
         raise HTTPException(503, "Model switching needs the localm GUI server.")
+    from localm.inference.http_server import request_context_window
+    from localm.plugins.coder.backends.http import HTTPBackend
+    request_context_window(model, HTTPBackend.AGENT_CONTEXT_RESERVE)
     try:
-        res = await (switch_model(model, force=True) if force
-                     else switch_model(model))
+        if keep_others:
+            res = await switch_model(model, keep_others=True)
+        else:
+            res = await (switch_model(model, force=True) if force
+                         else switch_model(model))
     except HTTPException:
         raise
     except Exception as e:
@@ -583,7 +596,7 @@ async def _ensure_model_loaded(request: Request, model: str, *,
         return
     if status == "confirm_required":
         raise HTTPException(409, {
-            "status": "confirm_required", "model": model,
+            **res, "status": "confirm_required", "model": model,
             "detail": res.get("detail") or f"Loading '{model}' needs confirmation."})
     if status == "superseded":
         raise HTTPException(
@@ -704,7 +717,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
                         from localm.config import load_registry
                         if req.model not in load_registry():
                             raise HTTPException(404, f"Model not registered: {req.model}")
-                        await _ensure_model_loaded(request, req.model, force=req.force)
+                        await _ensure_model_loaded(request, req.model, force=req.force,
+                                          keep_others=req.keep_others)
                     _set_session_model(existing, req.model, pinned=True)
                 return {**existing.info(), "resumed": False,
                         "notes": ["Already open - joined the session already "
@@ -728,7 +742,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
-        await _ensure_model_loaded(request, req.model, force=req.force)
+        await _ensure_model_loaded(request, req.model, force=req.force,
+                                          keep_others=req.keep_others)
 
     from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
@@ -1137,7 +1152,8 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
             from localm.config import load_registry
             if req.model not in load_registry():
                 raise HTTPException(404, f"Model not registered: {req.model}")
-            await _ensure_model_loaded(request, req.model, force=req.force)
+            await _ensure_model_loaded(request, req.model, force=req.force,
+                                          keep_others=req.keep_others)
     elif restricted:
         raise HTTPException(
             403, "Switching models needs the owner key; a scoped key uses the "

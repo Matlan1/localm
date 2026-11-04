@@ -6,11 +6,11 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { addMessageRow, lsSetScoped, statusLabel } from "./chat.js";
-import { $, authHeaders, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { addMessageRow, isWarnStatus, lsSetScoped, statusLabel } from "./chat.js";
+import { $, authHeaders, autoGrow, chooseAsync, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
-import { modelCache, refreshModels } from "./models-sidebar.js";
+import { confirmLoadText, modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
 import { composerEnterToSend, saveTextFile } from "./settings-perf.js";
 import { execCoderCommand, handleSlashSubmit } from "./slash.js";
@@ -88,6 +88,7 @@ export function tickCoderBusyIndicator() {
     }
   }
   node.textContent = text;
+  node.classList.toggle("st-warn", !!s.statusWarn);
 }
 setInterval(tickCoderBusyIndicator, 1000);
 
@@ -753,13 +754,14 @@ export function handleCoderEvent(s, ev) {
   if (ev.type !== "token" && ev.type !== "reasoning" && ev.type !== "status") {
     (s.eventLog = s.eventLog || []).push(ev);
   }
-  if (ev.type !== "status") s.statusText = null;
+  if (ev.type !== "status") { s.statusText = null; s.statusWarn = false; }
   switch (ev.type) {
     case "status": {
       // What the model is doing before it answers; shown in the busy pill
       // until the next event.
       if (!s.busy) break;
-      s.statusText = statusLabel(ev.text || "", ev.code || null);
+      s.statusText = statusLabel(ev.text || "", ev.code || null, ev.args || null);
+      s.statusWarn = isWarnStatus(ev.text || "", ev.code || null);
       if (s.info.id === coder.activeId) tickCoderBusyIndicator();
       break;
     }
@@ -1041,10 +1043,26 @@ function _needsModelConfirm(r, data) {
   return r.status === 409 && !!d && typeof d === "object" && d.status === "confirm_required";
 }
 
-// Asks with the same dialog the sidebar model picker uses. Resolves true to go ahead.
-function _confirmModelLoad(detail) {
-  return confirmDangerAsync(
-    t("models.switch.confirmTitle"), detail.detail || "", t("models.switch.confirmLabel"));
+// Asks with the same dialog the sidebar model picker uses. Resolves to the
+// fields a retry adds: {force: true} to go ahead, {keep_others: true} to load
+// beside the other models (an "unload_choice" answer), or null to stop.
+async function _confirmModelLoad(detail) {
+  if (detail && detail.reason === "unload_choice") {
+    const names = (Array.isArray(detail.unloaded) ? detail.unloaded : [])
+      .map((n) => `'${n}'`).join(", ");
+    const choice = await chooseAsync(t("models.switch.confirmTitle"), confirmLoadText(detail), [
+      { key: "beside", label: t("models.switch.loadBeside") },
+      { key: "unload", label: t("models.switch.unloadForThis", { names }), danger: true },
+    ]);
+    if (!choice) return null;
+    return choice === "beside" ? { keep_others: true } : { force: true };
+  }
+  const unloadAsk = detail && detail.reason === "unload_ask";
+  const ok = await confirmDangerAsync(
+    t(unloadAsk ? "models.switch.unloadAskTitle" : "models.switch.confirmTitle"),
+    confirmLoadText(detail),
+    t(unloadAsk ? "models.switch.unloadAskLabel" : "models.switch.confirmLabel"));
+  return ok ? { force: true } : null;
 }
 
 // The server's error text, whether detail is a string or a {detail} object.
@@ -1162,8 +1180,9 @@ export async function startCoderSession(opts = {}) {
     // Loading the chosen model needs the user's go-ahead: ask, then re-post
     // with force. Declining leaves no session and no model change.
     if (_needsModelConfirm(r, data)) {
-      if (!(await _confirmModelLoad(data.detail))) return;
-      body.force = true;
+      const retry = await _confirmModelLoad(data.detail);
+      if (!retry) return;
+      Object.assign(body, retry);
       r = await post();
       data = await r.json().catch(() => ({}));
     }
@@ -1548,6 +1567,10 @@ $("coder-compact").onclick = async () => {
 // both session listings for the new language.
 function repaintCoderI18n() {
   renderSessionSelect();
+  const activeOption = $("setup-model")?.options[0];
+  if (activeOption && activeOption.value === "") {
+    activeOption.textContent = t("coder.setup.activeModelOption", { name: modelCache.active || "?" });
+  }
   const node = $("coder-state");
   setCoderState(node.dataset.stateKey || "");
   const s = activeSession();
@@ -2113,8 +2136,9 @@ export async function postSessionModel(sessionId, model, pin = true) {
   let r = await post({ model, pin });
   let data = await r.json().catch(() => ({}));
   if (_needsModelConfirm(r, data)) {
-    if (!(await _confirmModelLoad(data.detail))) return null;
-    r = await post({ model, pin, force: true });
+    const retry = await _confirmModelLoad(data.detail);
+    if (!retry) return null;
+    r = await post({ model, pin, ...retry });
     data = await r.json().catch(() => ({}));
   }
   if (!r.ok) throw new Error(_detailText(data) || r.statusText);

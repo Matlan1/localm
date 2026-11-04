@@ -894,7 +894,8 @@
                 <select id="perf-main-gpu"></select>
                 <div class="sub" data-i18n="settings.perf.mainGpuHelp">GPU for HuggingFace models, the embedder, the
                 vision projector and localm's own ComfyUI; a GGUF chat model spreads over every GPU
-                unless Split across GPUs names some. Saves immediately; applies on the next model load.</div>
+                unless Split across GPUs names some. With none chosen each of these picks its own.
+                Saves immediately; applies on the next model load.</div>
               </div>
               <div id="perf-gpu-split-row" hidden>
                 <label data-i18n="settings.perf.splitLabel">Split across GPUs</label>
@@ -1117,7 +1118,7 @@
                 <div class="card-head-text"><h3 data-i18n="settings.recentErrors.title">Recent errors</h3></div></div>
               <div class="sub" data-i18n="settings.recentErrors.help">The last five error messages this page showed, newest first. In privacy mode the list is kept only until the page is reloaded.</div>
               <ol id="recent-errors-list" class="recent-errors-list"></ol>
-              <div id="recent-errors-empty" class="sub" data-i18n="settings.recentErrors.empty">No errors so far.</div>
+              <div id="recent-errors-empty" class="sub" tabindex="-1" data-i18n="settings.recentErrors.empty">No errors so far.</div>
               <div class="actions">
                 <button class="btn-secondary" id="recent-errors-clear" data-i18n="settings.recentErrors.clear">Clear</button>
               </div>
@@ -1453,10 +1454,10 @@
      "canvas" button on a renderable code block (app.js openArtifact). -->
 <div id="artifact-pane" class="artifact-pane" hidden>
   <div class="artifact-head">
-    <span class="artifact-title">Artifact</span>
+    <span class="artifact-title" data-i18n="artifact.title">Artifact</span>
     <span class="spacer"></span>
-    <button class="btn-secondary" id="artifact-refresh" data-icon="refresh" title="Re-render"></button>
-    <button class="btn-secondary" id="artifact-close" title="Close">&times;</button>
+    <button class="btn-secondary" id="artifact-refresh" data-icon="refresh" data-i18n-title="artifact.rerender" title="Re-render"></button>
+    <button class="btn-secondary" id="artifact-close" data-i18n-title="artifact.close" title="Close">&times;</button>
   </div>
   <div class="artifact-body"></div>
 </div>
@@ -1474,23 +1475,23 @@
      suppress prompt(), which left a phone/LAN client on a blank page (NET-1). -->
 <div id="key-gate" class="modal-backdrop" style="display:none">
   <div class="modal onboarding">
-    <div class="modal-head"><span>Connect to LocaLM</span></div>
+    <div class="modal-head"><span data-i18n="keygate.title">Connect to LocaLM</span></div>
     <div class="modal-body">
       <p id="key-gate-msg">This LocaLM server requires an API key.</p>
 
       <!-- Trust the certificate (shown only over HTTPS / built-in TLS). Mandatory
            to remove the browser warning and to install the app. -->
       <div id="key-gate-cert" class="onboard-step" style="display:none">
-        <div class="onboard-step-title">Trust this device's certificate</div>
-        <p class="dim">LocaLM secures the connection with its own certificate.
+        <div class="onboard-step-title" data-i18n="keygate.certTitle">Trust this device's certificate</div>
+        <p class="dim" data-i18n-rich="keygate.certBody">LocaLM secures the connection with its own certificate.
           Install it once to remove the browser's "not secure" warning and to enable
           <b>Install app</b>.</p>
         <a id="key-gate-cert-link" class="btn-secondary onboard-cta" href="/localm-ca.crt"
-           download="localm-ca.crt">Install certificate</a>
+           download="localm-ca.crt" data-i18n="keygate.certInstall">Install certificate</a>
         <!-- Shown by updateKeyGateCertStep() only when the browser is Firefox, which
              uses its OWN certificate store and ignores the OS/Windows one - the most
              common "I installed it but still get the warning" cause. -->
-        <p id="key-gate-cert-ff" class="dim" style="display:none">
+        <p id="key-gate-cert-ff" class="dim" style="display:none" data-i18n-rich="keygate.certFirefox">
           <b>You're using Firefox.</b> Firefox keeps its own certificate store, so a
           Windows install won't remove the warning here. Open the downloaded file and
           import it under <b>Authorities</b> (check "Trust this CA to identify
@@ -1498,21 +1499,21 @@
           <code>true</code> in <code>about:config</code> to reuse the Windows store.
         </p>
         <details class="onboard-help">
-          <summary>How do I install it?</summary>
+          <summary data-i18n="keygate.certHowTitle">How do I install it?</summary>
           <ul class="dim">
-            <li><b>Firefox (any OS):</b> Firefox uses its OWN certificate store, so a
+            <li data-i18n-rich="keygate.certHowFirefox"><b>Firefox (any OS):</b> Firefox uses its OWN certificate store, so a
               Windows / system install does not cover it. Open the downloaded file, or
-              go to Settings &rarr; Privacy &amp; Security &rarr; Certificates &rarr;
-              View Certificates &rarr; Authorities &rarr; Import, and check "Trust this
+              go to Settings → Privacy &amp; Security → Certificates →
+              View Certificates → Authorities → Import, and check "Trust this
               CA to identify websites". (Or set
               <code>security.enterprise_roots.enabled</code> to <code>true</code> in
               <code>about:config</code> to use the operating system store.)</li>
-            <li><b>Chrome / Edge (Windows, macOS, Android):</b> open the downloaded file
+            <li data-i18n-rich="keygate.certHowChrome"><b>Chrome / Edge (Windows, macOS, Android):</b> open the downloaded file
               and confirm "trust for websites" (they use the OS store).</li>
-            <li><b>iOS / iPadOS:</b> the profile downloads, then Settings &rarr; General
-              &rarr; VPN &amp; Device Management installs it, and Settings &rarr; General
-              &rarr; About &rarr; Certificate Trust Settings turns it on.</li>
-            <li><b>Windows (system store, for Chrome / Edge):</b> import it into "Trusted
+            <li data-i18n-rich="keygate.certHowIos"><b>iOS / iPadOS:</b> the profile downloads, then Settings → General
+              → VPN &amp; Device Management installs it, and Settings → General
+              → About → Certificate Trust Settings turns it on.</li>
+            <li data-i18n-rich="keygate.certHowWindows"><b>Windows (system store, for Chrome / Edge):</b> import it into "Trusted
               Root Certification Authorities" for your user.</li>
           </ul>
         </details>
@@ -1520,13 +1521,13 @@
 
       <!-- Enter the API key -->
       <div class="onboard-step">
-        <div class="onboard-step-title">Enter your API key</div>
-        <label for="key-gate-input">Saved on this device (a secure cookie) so you stay signed in.</label>
+        <div class="onboard-step-title" data-i18n="keygate.keyTitle">Enter your API key</div>
+        <label for="key-gate-input" data-i18n="keygate.keyHint">Saved on this device (a secure cookie) so you stay signed in.</label>
         <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
                placeholder="LOCALM_API_KEY">
         <div class="actions">
-          <button class="btn-secondary" id="key-gate-submit">Connect</button>
-          <button class="btn-secondary" id="key-gate-scan" style="display:none">Scan QR code</button>
+          <button class="btn-secondary" id="key-gate-submit" data-i18n="keygate.connect">Connect</button>
+          <button class="btn-secondary" id="key-gate-scan" style="display:none" data-i18n="keygate.scan">Scan QR code</button>
         </div>
       </div>
     </div>
@@ -1537,14 +1538,14 @@
      shown in the computer's Settings, so the key is saved without typing. -->
 <div id="qr-scanner" class="modal-backdrop" style="display:none">
   <div class="modal onboarding">
-    <div class="modal-head"><span>Scan the pairing QR</span></div>
+    <div class="modal-head"><span data-i18n="qr.title">Scan the pairing QR</span></div>
     <div class="modal-body">
-      <p class="sub">On the computer running LocaLM, open
-        <b>Settings &rarr; Companion app</b> and point your camera at the QR.</p>
+      <p class="sub" data-i18n-rich="qr.body">On the computer running LocaLM, open
+        <b>Settings → Companion app</b> and point your camera at the QR.</p>
       <video id="qr-video" class="qr-video" playsinline muted></video>
       <p id="qr-scan-status" class="sub"></p>
       <div class="actions">
-        <button class="btn-secondary" id="qr-scan-cancel">Cancel</button>
+        <button class="btn-secondary" id="qr-scan-cancel" data-i18n="common.modal.cancel">Cancel</button>
       </div>
     </div>
   </div>
@@ -1555,30 +1556,30 @@
      already-onboarded visits skip straight to the app (app.js shouldShowInstallGate). -->
 <div id="install-gate" class="modal-backdrop" style="display:none">
   <div class="modal onboarding">
-    <div class="modal-head"><span>Add localm to your phone</span></div>
+    <div class="modal-head"><span data-i18n="installGate.title">Add localm to your phone</span></div>
     <div class="modal-body">
-      <p class="sub">localm runs as an installable app. Add it to your home screen
+      <p class="sub" data-i18n="installGate.body">localm runs as an installable app. Add it to your home screen
         for a full-screen, app-like experience - then open it any time with one tap.
         You can also just continue in the browser.</p>
 
       <button class="btn-primary onboard-cta" id="install-gate-install"
-              style="display:none">Install app</button>
+              style="display:none" data-i18n="installGate.install">Install app</button>
 
       <div id="install-gate-ios" class="onboard-help" style="display:none">
-        <b>Add to Home Screen (iPhone / iPad):</b>
+        <b data-i18n="installGate.iosTitle">Add to Home Screen (iPhone / iPad):</b>
         <ol class="dim">
-          <li>Tap the <b>Share</b> button (the square with an up-arrow).</li>
-          <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
-          <li>Open localm from the new home-screen icon.</li>
+          <li data-i18n-rich="installGate.iosStep1">Tap the <b>Share</b> button (the square with an up-arrow).</li>
+          <li data-i18n-rich="installGate.iosStep2">Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+          <li data-i18n="installGate.iosStep3">Open localm from the new home-screen icon.</li>
         </ol>
       </div>
 
-      <p id="install-gate-hint" class="sub" style="display:none">
-        To install, open your browser's menu and choose <em>Install app</em> /
-        <em>Add to Home screen</em>.</p>
+      <p id="install-gate-hint" class="sub" style="display:none" data-i18n-rich="installGate.hint">
+        To install, open your browser's menu and choose <b>Install app</b> /
+        <b>Add to Home screen</b>.</p>
 
       <div class="actions">
-        <button class="btn-primary" id="install-gate-continue">Continue to localm &rarr;</button>
+        <button class="btn-primary" id="install-gate-continue" data-i18n="installGate.continue">Continue to localm →</button>
       </div>
     </div>
   </div>

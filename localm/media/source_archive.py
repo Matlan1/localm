@@ -124,6 +124,22 @@ def plain_path(path: Path) -> str:
     return text
 
 
+def new_backup_path(root: Path, what: str = "backup") -> Path:
+    """An absent folder for a backup of the tree at *root*: beside it, or, for a
+    tree inside a ``custom_nodes`` folder, beside that folder, where ComfyUI does
+    not load it as a custom node. A folder an earlier failed run kept is left
+    alone: the next free numbered name is returned instead."""
+    root = Path(root)
+    if root.parent.name == "custom_nodes":
+        base = root.parent.parent / f".custom_nodes-{root.name}-{what}-{os.getpid()}"
+    else:
+        base = root.parent / f".{root.name}-{what}-{os.getpid()}"
+    path, n = base, 1
+    while os.path.lexists(long_path(path)):
+        path, n = base.with_name(f"{base.name}-{n}"), n + 1
+    return path
+
+
 def _safe_name(name: str) -> Optional[str]:
     """*name* (a path inside the archive, below its top folder) as a relative
     POSIX path, or None when it is empty, absolute, climbs out, lies inside a

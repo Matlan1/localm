@@ -9,8 +9,8 @@
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
-import { t } from "./i18n.js";
-import { modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
+import { t, tn } from "./i18n.js";
+import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -22,6 +22,10 @@ import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./ta
 export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
+// The saved context window while the slider is untouched; the slider rounds it to
+// its step, so the help and the estimate read this value. Null once it is moved.
+let _perfCtxSaved = null;
+const _perfCtxValue = (ctx) => (_perfCtxSaved === null ? ctx.value : String(_perfCtxSaved));
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
 export async function refreshPerfEstimate() {
@@ -29,7 +33,7 @@ export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
   try {
-    const q = new URLSearchParams({ n_ctx: ctx.value, n_gpu_layers: gl.value });
+    const q = new URLSearchParams({ n_ctx: _perfCtxValue(ctx), n_gpu_layers: gl.value });
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
     if (!r.ok) { out.textContent = t("settings.perf.estimateUnavailable"); return; }
     const d = await r.json();
@@ -68,7 +72,7 @@ export async function refreshPerfEstimate() {
 export function syncPerfCtxHelp() {
   const ctx = $("perf-ctx"), help = $("perf-ctx-help");
   if (!ctx || !help) return;
-  const val = el("span", "", ctx.value);
+  const val = el("span", "", _perfCtxValue(ctx));
   val.id = "perf-ctx-val";
   help.replaceChildren(
     document.createTextNode(t("settings.perf.ctxHelpPrefix")),
@@ -98,8 +102,7 @@ export async function reloadWithToasts(model, keys) {
     const res = await reloadModel(model);
     if (res.status === "in_use") toast(t(keys.busy, { model }), true);
     else if (res.status === "cancelled" || res.status === "superseded") toast(t(keys.cancelled, { model }));
-    else if (model !== modelCache.active) toastLoadResult(res, model, t("models.reload.doneToast", { model }));
-    else toastLoadResult(res, model);
+    else toastLoadResult(res, model, t("models.reload.doneToast", { model }));
     return res;
   } catch (e) {
     toast(t(keys.failed, { model, message: e.message }), true);
@@ -108,10 +111,11 @@ export async function reloadWithToasts(model, keys) {
 }
 
 /** After a successful save in Settings: reload the active model so it picks the
- *  saved values up. With no model loaded the values simply apply on the next load. */
+ *  saved values up. With no model loaded, or a model answering through a peer
+ *  route, the values simply apply on the next load. */
 export async function reloadActiveModelAfterSave() {
   const model = modelCache.active;
-  if (!model) { toast(t("settings.perf.savedNextLoad")); return null; }
+  if (!model || isPeerSelected()) { toast(t("settings.perf.savedNextLoad")); return null; }
   const res = await reloadWithToasts(model, SAVED_RELOAD_KEYS);
   // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
   setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
@@ -119,48 +123,68 @@ export async function reloadActiveModelAfterSave() {
 }
 
 /** Show the reload offers in Settings (Live tuning "Reload model" and every
- *  section's "Save and reload model") only while a model is loaded. */
+ *  section's "Save and reload model") only while a model is loaded on this
+ *  instance: not while the selection answers through a peer route. */
 export function syncPerfReloadButton() {
+  const offer = !!modelCache.active && !isPeerSelected();
   const btn = $("perf-reload");
-  if (btn) btn.hidden = !modelCache.active;
+  if (btn) btn.hidden = !offer;
   for (const b of document.querySelectorAll(".settings-section-save-reload")) {
-    b.hidden = !modelCache.active;
+    b.hidden = !offer;
   }
 }
 
 export function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
+  // The controls changed since the last save; Apply writes only these.
+  const touched = { gl: false, ctx: false };
   const onInput = () => {
     syncPerfCtxHelp();
     clearTimeout(_perfEstTimer);
     _perfEstTimer = setTimeout(refreshPerfEstimate, 150);   // debounce while dragging
   };
-  gl.addEventListener("input", onInput);
-  ctx.addEventListener("input", onInput);
+  gl.addEventListener("input", () => { touched.gl = true; onInput(); });
+  ctx.addEventListener("input", () => { touched.ctx = true; _perfCtxSaved = null; onInput(); });
   const apply = $("perf-apply");
   if (apply) apply.onclick = async () => {
-    const glVal = Number(gl.value);
-    if (!Number.isInteger(glVal) || glVal < 0 || glVal > 999) {
-      toast(t("settings.perf.gpuLayersRangeToast"), true);
+    const updates = {};
+    if (touched.gl) {
+      const glVal = Number(gl.value);
+      if (!Number.isInteger(glVal) || glVal < 0 || glVal > 999) {
+        toast(t("settings.perf.gpuLayersRangeToast"), true);
+        return;
+      }
+      updates.n_gpu_layers = glVal;
+    }
+    if (touched.ctx) updates.n_ctx = Number(ctx.value);
+    if (!Object.keys(updates).length) {
+      if (modelCache.active && !isPeerSelected()) {
+        await reloadWithToasts(modelCache.active, PLAIN_RELOAD_KEYS);
+        setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
+      } else {
+        toast(t("settings.perf.nothingToApply"));
+      }
       return;
     }
     try {
       const r = await fetch("/v1/config", {
         method: "PATCH", headers: authHeaders(),
-        body: JSON.stringify({ n_gpu_layers: glVal, n_ctx: Number(ctx.value) }),
+        body: JSON.stringify(updates),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
     } catch (e) {
       toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
       return;
     }
+    touched.gl = false;
+    touched.ctx = false;
     await reloadActiveModelAfterSave();
   };
   const reload = $("perf-reload");
   if (reload) reload.onclick = async () => {
     const model = modelCache.active;
-    if (!model) return;
+    if (!model || isPeerSelected()) return;
     reload.disabled = true;
     try {
       await reloadWithToasts(model, PLAIN_RELOAD_KEYS);
@@ -172,10 +196,14 @@ export function setupPerfCard() {
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))
     .then((cfg) => {
-      if (typeof cfg.n_gpu_layers === "number")
+      if (typeof cfg.n_gpu_layers === "number" && !touched.gl)
         gl.value = cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers);
-      if (typeof cfg.n_ctx === "number")
-        ctx.value = Math.min(Number(ctx.max), Math.max(Number(ctx.min), cfg.n_ctx));
+      if (typeof cfg.n_ctx === "number" && !touched.ctx) {
+        // The slider's range grows to hold a larger saved window, so it shows it.
+        if (cfg.n_ctx > Number(ctx.max)) ctx.max = String(cfg.n_ctx);
+        ctx.value = Math.max(Number(ctx.min), cfg.n_ctx);
+        _perfCtxSaved = cfg.n_ctx >= Number(ctx.min) ? cfg.n_ctx : null;
+      }
       syncPerfCtxHelp();
       refreshPerfEstimate();
     })
@@ -742,10 +770,9 @@ export function confirmWebRequest(call) {
     };
     const args = (call && call.args) || {};
     const target = args.query || args.url || "";
-    const verb = call && call.name === "fetch_url"
-      ? "fetch a web page" : "search the web and read the top result pages";
-    openModal("Allow web access?", (body) => {
-      body.appendChild(el("p", "", "The model wants to " + verb + " for:"));
+    const ask = call && call.name === "fetch_url" ? "web.ask.fetch" : "web.ask.search";
+    openModal(t("web.ask.title"), (body) => {
+      body.appendChild(el("p", "", t(ask)));
       body.appendChild(el("p", "web-ask-target", target));
       // R27: "don't ask again this session" - remember Allow/Deny so the popup
       // does not fire on every model-initiated request for the rest of the session.
@@ -753,15 +780,15 @@ export function confirmWebRequest(call) {
       const cb = el("input");
       cb.type = "checkbox";
       remember.appendChild(cb);
-      remember.appendChild(document.createTextNode(" Don't ask again this session"));
+      remember.appendChild(document.createTextNode(" " + t("web.ask.remember")));
       body.appendChild(remember);
       const row = el("div", "actions");
-      const deny = el("button", "btn-secondary", "Deny");
+      const deny = el("button", "btn-secondary", t("web.ask.deny"));
       deny.onclick = () => {
         if (cb.checked) webAskSession = false;
         finish(false);
       };
-      const allow = el("button", "btn-primary", "Allow");
+      const allow = el("button", "btn-primary", t("web.ask.allow"));
       allow.onclick = () => {
         if (cb.checked) webAskSession = true;
         finish(true);
@@ -1427,7 +1454,7 @@ export async function runWebCall(conv, call, extraNote = "", reason = "") {
   } catch (e) {
     ev.status = "failed";
     ev.error = e.message;
-    toast("Web request failed: " + e.message, true);
+    toast(t("web.requestFailedToast", { message: e.message }), true);
   } finally {
     chat.webCall = null;
   }
@@ -1455,8 +1482,7 @@ export async function refreshVoiceStatus() {
       // enabled so the user records and dead-ends at "Transcription failed:
       // Not Found" from the missing /api/voice/transcribe route.
       voice.available = false;
-      voice.reason = "Speech-to-text is not installed. Enable the 'voice' "
-                   + "plugin on the Plugins page (needs the [voice] extra).";
+      voice.reason = t("voice.notInstalledReason");
       voice.canDownload = false;
       const mic = $("chat-mic");
       if (mic) { mic.classList.add("unavailable"); mic.title = voice.reason; }
@@ -1475,9 +1501,9 @@ export async function refreshVoiceStatus() {
     // later becomes available (extra installed, model cached) keeps claiming
     // it needs the extra forever, since nothing ever wrote over the stale text.
     btn.title = data.available
-      ? "Hold a thought, speak it - click to record, click again to transcribe"
+      ? t("voice.micReadyTitle")
       : (data.reason || "") + (voice.canDownload
-          ? " Click the mic to download it now (one-time; changes no settings)."
+          ? " " + t("voice.micDownloadSuffix")
           : "");
   } catch { /* server unreachable - status refreshes on next load */ }
 }
@@ -1498,8 +1524,7 @@ export function blobToB64(blob) {
 export async function downloadVoiceModel() {
   if (!confirm(
       (voice.reason ? voice.reason + "\n\n" : "") +
-      `Download the Whisper "${voice.model}" speech model once now? ` +
-      "This changes no settings; transcription runs fully offline afterwards."))
+      t("voice.downloadConfirm", { model: voice.model })))
     return;
   const btn = $("chat-mic");
   if (btn) btn.disabled = true;
@@ -1509,17 +1534,17 @@ export async function downloadVoiceModel() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.job_id) {
-      toast("Downloading the speech model…");
+      toast(t("voice.downloadingToast"));
       let lastLine = "";
       const end = await streamJob(data.job_id, (line) => { lastLine = line; });
       if (end.status !== "done" || /^error:/i.test(lastLine)) {
         throw new Error(lastLine.replace(/^error:\s*/i, "")
-                        || "download did not complete");
+                        || t("voice.downloadIncomplete"));
       }
     }
-    toast("Speech model ready - click the mic to record");
+    toast(t("voice.readyToast"));
   } catch (e) {
-    toast("Speech model download failed: " + e.message, true);
+    toast(t("voice.downloadFailedToast", { message: e.message }), true);
   } finally {
     if (btn) btn.disabled = false;
     await refreshVoiceStatus();
@@ -1538,7 +1563,7 @@ export async function toggleMic() {
     // authorize it (config:write / open mode). Offer the one-time download -
     // the "continue anyway" of the network-policy override; nothing persisted.
     if (voice.canDownload) { downloadVoiceModel(); return; }
-    toast(voice.reason || "Speech-to-text not installed", true);
+    toast(voice.reason || t("voice.notInstalledShort"), true);
     return;
   }
   if (!voice.modelCached) {
@@ -1547,20 +1572,18 @@ export async function toggleMic() {
     // reachable under net_mode=allow: any other mode already reports
     // available=false + can_download above.)
     if (!confirm(
-        `First use downloads the Whisper "${voice.model}" speech model ` +
-        "from HuggingFace (one-time). Transcription itself runs fully " +
-        "offline afterwards. Download now?")) return;
+        t("voice.firstUseConfirm", { model: voice.model }))) return;
     voice.modelCached = true;   // consent given - don't re-ask this session
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    toast("This browser does not support audio recording", true);
+    toast(t("voice.noRecording"), true);
     return;
   }
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    toast("Microphone unavailable: " + e.message, true);
+    toast(t("voice.micUnavailable", { message: e.message }), true);
     return;
   }
   voice.chunks = [];
@@ -1585,7 +1608,7 @@ export async function toggleMic() {
       autoGrow(input);
       input.focus();
     } catch (e) {
-      toast("Transcription failed: " + e.message, true);
+      toast(t("voice.transcriptionFailed", { message: e.message }), true);
     } finally {
       btn.disabled = false;
       btn.replaceChildren(iconEl("mic", "ic"));
@@ -1593,7 +1616,7 @@ export async function toggleMic() {
   };
   voice.rec.start();
   btn.classList.add("recording");
-  toast("Recording - click the mic again to stop");
+  toast(t("voice.recordingToast"));
 }
 
 $("chat-mic").onclick = toggleMic;
@@ -1646,7 +1669,7 @@ export function speak(text, opts = {}) {
     return false;
   }
   if (!window.speechSynthesis) {
-    toast("This browser has no speech synthesis", true);
+    toast(t("tts.noSynthesis"), true);
     return false;
   }
   if (speechSynthesis.speaking) {
@@ -1781,10 +1804,10 @@ export function onVoicePick() {
   if (ttsProvider) {
     ttsProvider.setVoice(id);
     try { localStorage.setItem(TTS_VOICE_KEY, id); }
-    catch { toast("This browser blocked storage, so the voice resets on reload", true); }
+    catch { toast(t("tts.storageBlocked"), true); }
   } else {
     try { localStorage.setItem("localm.ttsVoiceBrowser", id); }
-    catch { toast("This browser blocked storage, so the voice resets on reload", true); }
+    catch { toast(t("tts.storageBlocked"), true); }
   }
 }
 
@@ -1946,7 +1969,7 @@ export function pluginSuggestion(cmd) {
   const ALIAS = { web: "search-web" };
   const hit = pluginCommands.map[cmd] || pluginCommands.map[ALIAS[cmd]];
   if (!hit || hit.active) return null;
-  return `/${cmd} needs the ${hit.plugin} plugin - install or enable it on the Plugins page.`;
+  return t("slash.needsPlugin", { cmd, plugin: hit.plugin });
 }
 
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
@@ -1963,9 +1986,9 @@ export const NAV_ICON = { chat: "chat", code: "coder", image: "image", music: "m
 // rail does not reshuffle as plugins toggle; a member with an unlisted tab is
 // appended rather than dropped.
 export const NAV_GROUPS = {
-  studio: { label: "Studio", icon: "studio", order: ["images", "music", "video"],
+  studio: { label: "nav.group.studio", icon: "studio", order: ["images", "music", "video"],
             key: "localm.studioOpen" },
-  coder:  { label: "Agent",  icon: "coder",  order: ["coder", "browser"],
+  coder:  { label: "nav.group.agent",  icon: "coder",  order: ["coder", "browser"],
             key: "localm.coderOpen" },
 };
 export const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
@@ -2062,7 +2085,7 @@ export function renderNavGroup(slot, groupKey, members) {
   const wrap = el("div", "nav-group");
   const parent = el("button", "nav-group-parent" + (open ? " open" : ""));
   parent.appendChild(iconEl(group.icon, "nav-ic"));
-  parent.appendChild(document.createTextNode(group.label));
+  parent.appendChild(document.createTextNode(t(group.label)));
   const children = el("div", "nav-children");
   children.style.display = open ? "block" : "none";
   parent.onclick = () => {
@@ -2148,12 +2171,12 @@ function _relAge(tsSeconds) {
   // timestamp is missing or in the future (clock skew).
   if (!tsSeconds) return "";
   const secs = Date.now() / 1000 - Number(tsSeconds);
-  if (!(secs > 0)) return "just now";
+  if (!(secs > 0)) return t("memory.age.justNow");
   const day = 86400;
-  if (secs < 3600) return Math.max(1, Math.round(secs / 60)) + " min ago";
-  if (secs < day) return Math.round(secs / 3600) + " hr ago";
-  if (secs < 30 * day) return Math.round(secs / day) + " day(s) ago";
-  return Math.round(secs / (30 * day)) + " month(s) ago";
+  if (secs < 3600) return t("memory.age.minutes", { count: Math.max(1, Math.round(secs / 60)) });
+  if (secs < day) return t("memory.age.hours", { count: Math.round(secs / 3600) });
+  if (secs < 30 * day) return tn("memory.age.days", Math.round(secs / day));
+  return tn("memory.age.months", Math.round(secs / (30 * day)));
 }
 
 export async function resolveCorrection(cid, accept) {
@@ -2168,15 +2191,15 @@ export async function resolveCorrection(cid, accept) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshMemory();
-    toast(accept ? "Correction applied" : "Suggestion dismissed");
+    toast(t(accept ? "memory.correctionApplied" : "memory.suggestionDismissed"));
     return data;
   } catch (e) {
-    toast("Could not update memory: " + e.message, true);
+    toast(t("memory.updateFailed", { message: e.message }), true);
   }
 }
 
 export async function rememberFact(fact) {
-  if (!fact) { toast("Usage: /remember <fact>", true); return; }
+  if (!fact) { toast(t("memory.rememberUsage"), true); return; }
   try {
     const r = await fetch("/api/memory/append", {
       method: "POST", headers: authHeaders(),
@@ -2185,9 +2208,9 @@ export async function rememberFact(fact) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshMemory();
-    toast("Remembered");
+    toast(t("memory.remembered"));
   } catch (e) {
-    toast("Could not save: " + e.message, true);
+    toast(t("memory.couldNotSave", { message: e.message }), true);
   }
 }
 
@@ -2214,7 +2237,7 @@ export async function synthesizeMemoryNow(statusEl) {
   // immediate feedback (a tester can chat, then click this and watch facts
   // appear). Reads the conversation on screen; needs a loaded model (the route
   // 503s otherwise).
-  if (statusEl) statusEl.textContent = "Distilling facts from your chat...";
+  if (statusEl) statusEl.textContent = t("memory.synth.running");
   try {
     const r = await fetch("/api/memory/consolidate", {
       method: "POST", headers: authHeaders(),
@@ -2225,16 +2248,13 @@ export async function synthesizeMemoryNow(statusEl) {
     await refreshMemory();
     const n = data.added || 0;
     const msg = data.status === "skipped"
-      ? (data.reason === "privacy"
-          ? "Memory writes are off in privacy mode."
-          : "Nothing new to remember yet.")
-      : (n ? `Added ${n} new fact${n === 1 ? "" : "s"}.`
-           : "No new durable facts found.");
+      ? t(data.reason === "privacy" ? "memory.synth.privacy" : "memory.synth.nothingNew")
+      : (n ? tn("memory.synth.added", n) : t("memory.synth.noFacts"));
     if (statusEl) statusEl.textContent = msg;
     toast(msg);
     return data;
   } catch (e) {
-    const msg = "Synthesize failed: " + e.message;
+    const msg = t("memory.synth.failed", { message: e.message });
     if (statusEl) statusEl.textContent = msg;
     toast(msg, true);
   }
@@ -2244,8 +2264,8 @@ export async function downloadMemoryEmbedder(btn) {
   // One-time fetch of the configured embedding model via the SAME route the
   // Knowledge page's "Download now" button uses (POST /api/rag/embedding/download).
   // Writes nothing: no model switch, no config change.
-  const label = `Download '${memory.embedderModel}' now`;
-  if (btn) { btn.disabled = true; btn.textContent = "Downloading…"; }
+  const label = t("memory.embedder.downloadButton", { model: memory.embedderModel });
+  if (btn) { btn.disabled = true; btn.textContent = t("memory.embedder.downloading"); }
   let success = false;
   try {
     const r = await fetch("/api/rag/embedding/download",
@@ -2258,15 +2278,14 @@ export async function downloadMemoryEmbedder(btn) {
         if (btn && line) btn.textContent = line;
       });
       success = end.status === "done";
-      toast(success ? "Embedding model ready - semantic recall will resume"
-                    : "Embedding model download did not complete", !success);
+      toast(t(success ? "memory.embedder.ready" : "memory.embedder.incomplete"), !success);
     } else {
       success = true;                    // already installed
-      toast("Already installed");
+      toast(t("memory.embedder.alreadyInstalled"));
     }
     await refreshMemory();
   } catch (e) {
-    toast("Download failed: " + e.message, true);
+    toast(t("memory.embedder.downloadFailed", { message: e.message }), true);
   } finally {
     if (btn && !success) { btn.disabled = false; btn.textContent = label; }
   }
@@ -2274,22 +2293,15 @@ export async function downloadMemoryEmbedder(btn) {
 }
 
 export function openMemoryModal() {
-  openModal("Memory - what the model knows about you", (body) => {
-    body.appendChild(el("div", "sub", memory.writable
-      ? "Durable facts localm remembers about you, added to the prompt while the " +
-        "memory toggle is on. Memory grows automatically as you chat; edit freely - " +
-        "one fact per line; Save replaces the list."
-      : "Read-only: privacy mode blocks memory writes (no new traces). " +
-        "Existing memory is still recalled while the memory toggle is on."));
+  openModal(t("memory.modal.title"), (body) => {
+    body.appendChild(el("div", "sub",
+      t(memory.writable ? "memory.modal.writable" : "memory.modal.readOnly")));
     if (memory.canDownloadEmbedder) {
-      const hint = el("div", "sub",
-        `Semantic recall is off until '${memory.embedderModel}' is downloaded ` +
-        `once (network access is set to "ask", so it is not fetched ` +
-        `automatically).`);
+      const hint = el("div", "sub", t("memory.embedder.hint", { model: memory.embedderModel }));
       hint.style.marginTop = "6px";
       body.appendChild(hint);
       const dlBtn = el("button", "btn-secondary",
-        `Download '${memory.embedderModel}' now`);
+        t("memory.embedder.downloadButton", { model: memory.embedderModel }));
       dlBtn.id = "mem-embed-download";
       dlBtn.style.marginTop = "6px";
       dlBtn.onclick = async () => {
@@ -2308,7 +2320,7 @@ export function openMemoryModal() {
       status.style.marginTop = "8px";
       const row = el("div");
       row.style.cssText = "margin-top:10px;display:flex;gap:8px;align-items:center";
-      const save = el("button", "btn-primary", "Save");
+      const save = el("button", "btn-primary", t("settings.save"));
       save.onclick = async () => {
         try {
           const r = await fetch("/api/memory", {
@@ -2318,15 +2330,15 @@ export function openMemoryModal() {
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
           await refreshMemory();
-          toast("Memory saved");
+          toast(t("memory.saved"));
           $("modal").style.display = "none";
         } catch (e) {
-          toast("Save failed: " + e.message, true);
+          toast(t("memory.saveFailed", { message: e.message }), true);
         }
       };
       // btn-secondary: `.btn` has no rule in style.css and rendered native.
-      const synth = el("button", "btn-secondary", "Synthesize now");
-      synth.title = "Distil durable facts from your recent chats into memory now";
+      const synth = el("button", "btn-secondary", t("memory.synth.button"));
+      synth.title = t("memory.synth.title");
       synth.onclick = async () => {
         synth.disabled = true;
         await synthesizeMemoryNow(status);
@@ -2348,8 +2360,7 @@ export function openMemoryModal() {
         corrWrap.textContent = "";
         const list = memory.corrections || [];
         if (!list.length) return;
-        corrWrap.appendChild(el("div", "sub",
-          `Suggested corrections (${list.length}) - nothing changes until you choose`));
+        corrWrap.appendChild(el("div", "sub", t("memory.corrections.head", { count: list.length })));
         for (const c of list) {
           const card = el("div");
           card.style.cssText =
@@ -2359,14 +2370,14 @@ export function openMemoryModal() {
           was.style.cssText = "text-decoration:line-through;opacity:.65";
           card.appendChild(was);
           card.appendChild(el("div", undefined, c.action === "delete"
-            ? "→ no longer true - suggest forgetting it"
+            ? t("memory.corrections.noLongerTrue")
             : "→ " + (c.proposed_text || "")));
           const age = _relAge(c.target_updated);
-          if (age) card.appendChild(el("div", "sub", "you last confirmed this " + age));
+          if (age) card.appendChild(el("div", "sub", t("memory.corrections.lastConfirmed", { age })));
           const btns = el("div");
           btns.style.cssText = "margin-top:6px;display:flex;gap:8px";
           const acc = el("button", "btn-primary",
-            c.action === "delete" ? "Forget it" : "Apply");
+            t(c.action === "delete" ? "memory.corrections.forget" : "memory.corrections.apply"));
           acc.onclick = async () => {
             acc.disabled = true;
             await resolveCorrection(c.id, true);
@@ -2376,7 +2387,7 @@ export function openMemoryModal() {
           // btn-secondary: the decline half of the primary/secondary pair. With
           // the old `.btn` (no rule in style.css) this rendered as a native OS
           // button directly beside the accent-filled primary above it.
-          const rej = el("button", "btn-secondary", "Keep as is");
+          const rej = el("button", "btn-secondary", t("memory.corrections.keep"));
           rej.onclick = async () => {
             rej.disabled = true;
             await resolveCorrection(c.id, false);
@@ -2418,7 +2429,7 @@ export async function refreshPersonas() {
       // now refuses (a 500 rather than {"prompts": []}). Say so, or the user
       // concludes their personas are gone and rebuilds them from scratch.
       const detail = await r.json().then((d) => d.detail).catch(() => null);
-      toast("Could not load personas: " + (detail || r.statusText), true);
+      toast(t("persona.loadFailed", { message: detail || r.statusText }), true);
       return;
     }
     personaCache = (await r.json()).prompts;
@@ -2441,7 +2452,7 @@ export async function refreshPersonas() {
 
 export function applyPersona(name) {
   const p = personaCache.find((x) => x.name === name);
-  if (!p) { toast("No such persona: " + name, true); return false; }
+  if (!p) { toast(t("persona.noSuch", { name }), true); return false; }
   $("p-system").value = p.system || "";
   for (const [key, id] of Object.entries(PERSONA_PARAM_IDS)) {
     $(id).value = p.params?.[key] ?? "";
@@ -2453,7 +2464,7 @@ export function applyPersona(name) {
   // the values, so a persona that sets only a temperature leaves the fold shut.
   revealFilledAdvanced($("params"));
   persistChatParams();
-  toast(`Persona '${name}' applied`);
+  toast(t("persona.applied", { name }));
   return true;
 }
 
@@ -2463,7 +2474,7 @@ $("p-persona").onchange = () => {
 };
 
 $("persona-save").onclick = async () => {
-  const name = await promptText("Persona name:", $("p-persona").value || "");
+  const name = await promptText(t("persona.namePrompt"), $("p-persona").value || "");
   if (!name || !name.trim()) return;
   const params = {};
   for (const [key, id] of Object.entries(PERSONA_PARAM_IDS)) {
@@ -2479,26 +2490,26 @@ $("persona-save").onclick = async () => {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshPersonas();
     $("p-persona").value = name.trim();
-    toast(`Persona '${name.trim()}' saved`);
+    toast(t("persona.saved", { name: name.trim() }));
   } catch (e) {
-    toast("Save failed: " + e.message, true);
+    toast(t("persona.saveFailed", { message: e.message }), true);
   }
 };
 
 $("persona-delete").onclick = () => {
   const name = $("p-persona").value;
-  if (!name) { toast("Select a persona first", true); return; }
-  confirmDanger(`Delete persona '${name}'?`, "The drawer values stay as they are.",
-    "Delete", async () => {
+  if (!name) { toast(t("persona.selectFirst"), true); return; }
+  confirmDanger(t("persona.deleteTitle", { name }), t("persona.deleteBody"),
+    t("persona.deleteLabel"), async () => {
       try {
         const r = await fetch("/api/prompts/" + encodeURIComponent(name), {
           method: "DELETE", headers: authHeaders() });
         if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
         await refreshPersonas();
         $("p-persona").value = "";
-        toast(`Persona '${name}' deleted`);
+        toast(t("persona.deleted", { name }));
       } catch (e) {
-        toast("Delete failed: " + e.message, true);
+        toast(t("persona.deleteFailed", { message: e.message }), true);
       }
     });
 };
@@ -2991,7 +3002,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       } else {
         toast(n
           ? t("chat.audio.rejected", { detail: e.detail || e.message })
-          : "Chat request failed: " + e.message, true);
+          : t("chat.requestFailed", { message: e.message }), true);
       }
     } else if (sentAudio && e.status === 501 && e.refusal !== "image" && !full.trim()) {
       // The server cannot read this clip (no decoder for its format): drop the
@@ -3001,7 +3012,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       saveConversations(conv);
       toast(n
         ? t("chat.audio.rejected", { detail: e.detail || e.message })
-        : "Chat request failed: " + e.message, true);
+        : t("chat.requestFailed", { message: e.message }), true);
     } else if (sentImage && (e.status === 413 || e.status === 501) && e.refusal === "image" && !full.trim()) {
       // The server could not use the image just sent (unreadable, too large, a
       // format it does not decode, over a request limit): drop that image so
@@ -3011,7 +3022,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       saveConversations(conv);
       toast(n
         ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
-        : "Chat request failed: " + e.message, true);
+        : t("chat.requestFailed", { message: e.message }), true);
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
@@ -3028,12 +3039,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         toast(n
           ? t(pinnedModel ? "chat.vision.rejectedPinned" : "chat.vision.rejectedNoModel",
               { model: modelName })
-          : "Chat request failed: " + e.message, true);
+          : t("chat.requestFailed", { message: e.message }), true);
       }
     } else {
       requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
-      toast("Chat request failed: " + e.message, true);
+      toast(t("chat.requestFailed", { message: e.message }), true);
     }
   } finally {
     signal.removeEventListener("abort", forwardAbort);
@@ -3110,8 +3121,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     if (finishReason === "error") {
       // The server reported a failed generation without any visible text:
       // leave a failure marker in the live bubble and persist nothing.
-      renderMarkdown(liveBody, "*[generation failed]*");
-      toast("The model's reply failed (inference error) - nothing was generated", true);
+      renderMarkdown(liveBody, "*[" + t("chat.reply.generationFailed") + "]*");
+      toast(t("chat.reply.failedNothingToast"), true);
       return outcome;
     }
     if (requestFailed) {
@@ -3152,7 +3163,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     conv.messages.push(failedReply);
     saveConversations(conv);
     renderChat();
-    toast("The model's reply failed partway (inference error) - see the message for details", true);
+    toast(t("chat.reply.failedPartwayToast"), true);
     return outcome;
   }
 
@@ -3170,7 +3181,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
-    toast("Reply hit the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”", true);
+    toast(t("chat.reply.maxTokensToast"), true);
   } else if (!finishReason) {
     // The stream ended without a finish reason: the reply is persisted as cut
     // off, never as a finished reply.
@@ -3497,7 +3508,7 @@ export async function retrieveKnowledge(conv, query, opts = {}) {
     renderChat();
   } catch (e) {
     if (e.name === "AbortError") return;
-    toast("Knowledge retrieval failed: " + e.message, true);
+    toast(t("chat.knowledgeFailed", { message: e.message }), true);
   }
 }
 
@@ -3536,7 +3547,7 @@ export function renderQueuedIndicator() {
     if (item.convId && conv && item.convId !== conv.id) continue;
     const { row } = addMessageRow(box, "user", item.text, {
       cls: "user queued",
-      label: (chat.userName || "You") + " (" + t("chat.queuedBadge") + ")",
+      label: (chat.userName || t("chat.row.you")) + " (" + t("chat.queuedBadge") + ")",
       actions: [
         [t("chat.cancel") || "Cancel", () => {
           const at = chat.queue.indexOf(item);
@@ -3671,10 +3682,10 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
 export function refuseWithoutModel() {
   if (modelCache.active || modelCache.resumable) return false;
   if (modelCache.loading) {
-    toast(`${modelCache.loading} is still loading - try again in a moment.`, true);
+    toast(t("chat.stillLoading", { model: modelCache.loading }), true);
     return true;
   }
-  toast("No model loaded - load a model on the sidebar before chatting.", true);
+  toast(t("chat.noModelToast"), true);
   return true;
 }
 
@@ -3690,7 +3701,7 @@ export async function sendChat() {
   }
 
   if (chat.webCall) {
-    toast("A web request is still running - wait for its result before sending", true);
+    toast(t("chat.webStillRunning"), true);
     return;
   }
 
@@ -3770,7 +3781,7 @@ export function compactedTurns(messages) {
 
 export function exportConversation() {
   const conv = currentConv();
-  if (!conv || !conv.messages.length) { toast("Nothing to export", true); return; }
+  if (!conv || !conv.messages.length) { toast(t("chat.nothingToExport"), true); return; }
   const lines = [`# ${conv.title}`, ""];
   for (const m of conv.messages) {
     lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
@@ -3915,10 +3926,10 @@ $("export-conv").onclick = exportConversation;
 $("compact-conv").onclick = async () => {
   const conv = currentConv();
   if (!conv || conv.messages.length <= COMPACT_KEEP) {
-    toast("Nothing to compact yet", true);
+    toast(t("chat.nothingToCompact"), true);
     return;
   }
-  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (chat.abort) { toast(t("chat.waitForReply"), true); return; }
   await compactConversation(conv);
 };
 $("new-conv").onclick = () => { newConversation(); showView("chat"); };

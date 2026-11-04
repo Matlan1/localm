@@ -651,7 +651,7 @@ def test_consent_flow_transcripts(world, capsys, tmp_path):
     case("not now", [""])
     case("self", ["3"])
     _, opened, _ = case("email", ["2"])
-    assert opened == [bugreport.mailto_url("contract summary", text)]
+    assert opened == [bugreport.mailto_url("it broke", text)]
     case("upload", ["1"])
     case("upload after a rejection, retry yes", ["1", "y"],
          responses=[_http_error(503, "down")])

@@ -402,9 +402,7 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
-    text = path.read_text(encoding="utf-8") if path is not None else ""
-    bugreport.offer_to_send(summary, path, text, interactive=interactive,
-                            auto_send=send)
+    bugreport.offer_to_send(summary, path, "", interactive=interactive, auto_send=send)
 
 
 

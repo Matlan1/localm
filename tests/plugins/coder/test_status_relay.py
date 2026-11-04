@@ -35,6 +35,20 @@ STOP = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
 class TestHTTPBackend:
     @patch("requests.post")
+    def test_status_args_travel_with_the_status(self, mock_post):
+        mock_post.return_value = _stream_response([
+            _delta(status="Loading big beside small", status_code="loading_beside",
+                   status_args={"model": "big", "resident": "small"}),
+            STOP,
+        ])
+        seen = []
+        backend = HTTPBackend("http://127.0.0.1:8080/v1", "m")
+        list(backend.chat_stream([{"role": "user", "content": "hi"}],
+                                 on_status=lambda text, code: seen.append((text, code))))
+        assert seen == [("Loading big beside small", "loading_beside")]
+        assert seen[0][0].args == {"model": "big", "resident": "small"}
+
+    @patch("requests.post")
     def test_statuses_reach_on_status_and_are_never_yielded(self, mock_post):
         mock_post.return_value = _stream_response([
             _delta(status="Loading model...", status_code="loading_model"),

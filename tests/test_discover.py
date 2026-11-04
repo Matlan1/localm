@@ -1585,6 +1585,7 @@ class TestListGpusInconclusiveStatus:
         real hardware this round. A non-empty reading is conclusive regardless of
         the latch - it must never be downgraded just because torch sat out."""
         monkeypatch.setattr(discover, "_isolated_torch_unavailable", True)
+        monkeypatch.setattr(discover, "_isolated_torch_retry_at", float("inf"))
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(
@@ -1676,6 +1677,7 @@ class TestListGpusAmdSingleAdapterFallback:
         earlier and is latched unavailable (a genuine prior wedge/timeout),
         not the known-doomed skip."""
         monkeypatch.setattr(discover, "_isolated_torch_unavailable", True)
+        monkeypatch.setattr(discover, "_isolated_torch_retry_at", float("inf"))
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(
