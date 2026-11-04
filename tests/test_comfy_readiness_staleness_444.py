@@ -49,6 +49,12 @@ def _isolated_comfy_handles(monkeypatch):
     monkeypatch.setattr(comfy_client, "_device_errors", {})
 
 
+@pytest.fixture(autouse=True)
+def _comfy_port_reads_free(monkeypatch):
+    """comfy_port_holder reports a free port, whatever listens on this machine."""
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
+
+
 @pytest.fixture
 def no_launch(monkeypatch, tmp_path):
     """No launch command configured, so ensure_comfy's "cannot launch" branch
