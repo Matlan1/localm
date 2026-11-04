@@ -8,11 +8,16 @@ name, a call is never made, and the only calls that are understood are the
 tensor rebuilders (``torch._utils._rebuild_tensor``, ``_rebuild_tensor_v2``,
 ``_rebuild_parameter``) and ``collections.OrderedDict``, which are evaluated as
 data. No module is imported and no object is constructed, so nothing in the
-file can run.
+file can run. Only ``str`` keys and ``str`` global operands are ever hashed or
+converted, and at most ``PICKLE_MAX_BYTES`` of the member are read whatever its
+size fields say.
 """
 
+import contextlib
+import io
 import pickletools
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +25,8 @@ from localm.debuglog import logger
 
 PICKLE_MAX_BYTES = 8 * 1024 * 1024
 _MAX_OPS = 2_000_000
+CAPPABLE_ZIP_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+_MAX_ZIP_READ = 16 * 1024 * 1024
 _WRAPPER_KEYS = ("params_ema", "params", "state_dict", "model", "model_state_dict")
 _TENSOR_REBUILDERS = {("torch._utils", "_rebuild_tensor"), ("torch._utils", "_rebuild_tensor_v2")}
 _PARAMETER_REBUILDERS = {("torch._utils", "_rebuild_parameter"),
@@ -161,7 +168,9 @@ def _replay(data: bytes):
         elif name == "STACK_GLOBAL":
             attr = stack.pop()
             module = stack.pop()
-            stack.append(_Global(str(module), str(attr)))
+            if not (isinstance(module, str) and isinstance(attr, str)):
+                raise _Unsupported("STACK_GLOBAL operands")
+            stack.append(_Global(module, attr))
         elif name == "REDUCE":
             args = stack.pop()
             func = stack.pop()
@@ -195,13 +204,10 @@ def _replay(data: bytes):
 
 
 def _set_item(target, key, value) -> None:
-    if isinstance(target, dict):
-        if not isinstance(key, (str, int, float, bool, bytes, type(None), tuple)):
-            raise _Unsupported("unhashable key")
-        try:
-            target[key] = value
-        except TypeError as e:
-            raise _Unsupported("unhashable key") from e
+    # Keeps str keys only and never hashes any other key. See
+    # test_hostile_pickle_returns_none_in_a_child.
+    if isinstance(target, dict) and isinstance(key, str):
+        target[key] = value
 
 
 def _pairs_to_dict(items: list) -> dict:
@@ -229,23 +235,62 @@ def _state_dict(obj) -> Optional[dict]:
     return None
 
 
+class _CappedReads(io.BufferedReader):
+    """A read-only file that raises OSError instead of returning more than
+    ``_MAX_ZIP_READ`` bytes from one read, and takes no more than that plus one
+    from the disk for it."""
+
+    def read(self, size: Optional[int] = -1, /) -> bytes:
+        if size is None or size < 0 or size > _MAX_ZIP_READ:
+            data = super().read(_MAX_ZIP_READ + 1)
+            if len(data) > _MAX_ZIP_READ:
+                raise OSError(f"a single read of more than {_MAX_ZIP_READ} bytes")
+            return data
+        return super().read(size)
+
+
+@contextlib.contextmanager
+def open_capped_zip(path: Path) -> Iterator[zipfile.ZipFile]:
+    """*path* as a :class:`zipfile.ZipFile`, reading no more than ``_MAX_ZIP_READ``
+    bytes at a time. Raises OSError for a central directory larger than that and
+    whatever ``ZipFile`` raises for a file that is not a zip."""
+    with _CappedReads(io.FileIO(path)) as fh, zipfile.ZipFile(fh) as zf:
+        yield zf
+
+
+def read_member_capped(zf: zipfile.ZipFile, member: zipfile.ZipInfo,
+                       limit: int) -> bytes:
+    """The bytes of *member* of *zf*. Raises ValueError, reading nothing, when it
+    declares more than *limit* bytes or is packed with anything but stored or
+    deflate. Reads and inflates about *limit* bytes at most, whatever its size fields
+    claim. Raises what :mod:`zipfile` and :mod:`zlib` raise for a damaged member,
+    including one whose bytes do not match its CRC."""
+    if member.file_size > limit:
+        raise ValueError(f"the member declares {member.file_size} bytes, over {limit}")
+    if member.compress_type not in CAPPABLE_ZIP_METHODS:
+        raise ValueError(f"the member uses zip method {member.compress_type}")
+    with zf.open(member) as fh:
+        return fh.read(member.file_size)
+
+
 def read_checkpoint_tensors(path: Path) -> Optional[dict]:
     """``{tensor name: shape}`` for the zip-format ``.pth`` / ``.pt`` checkpoint at
     *path*, read from its ``data.pkl`` member (at most ``PICKLE_MAX_BYTES``)
     without importing or calling anything the pickle names. None for any other
-    file, a checkpoint with no tensors, one whose pickle uses constructs this
-    reader does not model, and an unreadable file (logged at debug level). Never
-    raises."""
+    file (a legacy non-zip checkpoint included), a checkpoint with no tensors, one
+    whose pickle uses constructs this reader does not model or whose member is
+    packed with a method other than stored or deflate, and an unreadable file
+    (logged at debug level). Never raises."""
     path = Path(path)
     if path.suffix.lower() not in (".pth", ".pt"):
         return None
     try:
-        with zipfile.ZipFile(path) as zf:
+        with open_capped_zip(path) as zf:
             member = next((i for i in zf.infolist()
                            if i.filename == "data.pkl" or i.filename.endswith("/data.pkl")), None)
-            if member is None or member.file_size > PICKLE_MAX_BYTES:
+            if member is None:
                 return None
-            blob = zf.read(member)
+            blob = read_member_capped(zf, member, PICKLE_MAX_BYTES)
         return _state_dict(_replay(blob))
     except Exception as e:
         logger.debug("checkpoint tensor probe could not read %s: %s: %s",
