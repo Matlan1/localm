@@ -138,15 +138,16 @@ def ensure_ids(reg: Any, previous: Optional[dict] = None) -> bool:
             entry.pop(FORMER_KEY, None)
         else:
             old = (previous or {}).get(name)
-            old_id = old.get("id") if isinstance(old, dict) else None
-            if isinstance(old_id, str) and old_id and old_id not in seen:
-                entry["id"] = old_id
-                seen.add(old_id)
-                kept.add(old_id)
-                if isinstance(old.get(FORMER_KEY), list):
-                    entry.setdefault(FORMER_KEY, old[FORMER_KEY])
-                changed = True
-                continue
+            if isinstance(old, dict):
+                old_id = old.get("id")
+                if isinstance(old_id, str) and old_id and old_id not in seen:
+                    entry["id"] = old_id
+                    seen.add(old_id)
+                    kept.add(old_id)
+                    if isinstance(old.get(FORMER_KEY), list):
+                        entry.setdefault(FORMER_KEY, old[FORMER_KEY])
+                    changed = True
+                    continue
         fresh = new_model_id()
         entry["id"] = fresh
         seen.add(fresh)

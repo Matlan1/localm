@@ -147,7 +147,7 @@ def delete_collection(name: str, base: Optional[Path] = None,
     return True
 
 
-def current_embedding_label(meta: dict) -> Optional[str]:
+def current_embedding_label(meta: Any) -> Optional[str]:
     """The current name of the embedding model a collection's *meta* records, or
     None when it records none."""
     from localm.config import model_index
@@ -155,7 +155,7 @@ def current_embedding_label(meta: dict) -> Optional[str]:
     return stored_to_current(meta.get("embedding_model"), meta.get(REFS_KEY), model_index())
 
 
-def meta_json(meta: dict) -> str:
+def meta_json(meta: Any) -> str:
     """*meta* as the text of meta.json, its embedding model label current and its
     ``model_refs`` rebuilt. Updates *meta* in place."""
     from localm.config import model_index
