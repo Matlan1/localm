@@ -226,7 +226,7 @@ def _make_self_classify(self_url: str, active_model):
             logger.debug("rag classify: self-classification tie-break failed, "
                          "falling back to heuristic label: %s", e)
         return None
-    _self_classify.ready = lambda: bool(active_model())
+    _self_classify.ready = lambda: bool(active_model())  # pyright: ignore[reportFunctionMemberAccess]
     return _self_classify
 
 
