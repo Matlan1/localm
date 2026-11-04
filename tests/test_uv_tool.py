@@ -78,6 +78,17 @@ class TestFindUv:
         monkeypatch.setenv("PATH", str(on_path.parent))
         assert Path(uv_tool.find_uv(root)).samefile(on_path)
 
+    def test_a_uv_in_the_current_folder_is_not_found(self, machine, tmp_path, monkeypatch):
+        root, _home = machine
+        here = _uv(tmp_path / "cwd")
+        on_path = _uv(tmp_path / "bin")
+        monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+        monkeypatch.chdir(here.parent)
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert Path(uv_tool.find_uv(root)).samefile(on_path)
+        monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        assert uv_tool.find_uv(root) is None
+
     def test_the_recorded_shared_uv_beats_path_and_defaults(self, machine, tmp_path, monkeypatch):
         root, home = machine
         own = _uv(tmp_path / "mine")

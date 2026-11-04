@@ -113,6 +113,34 @@ def test_rmtree_robust_removes_a_deep_read_only_file(tmp_path):
     assert not os.path.lexists(_long(root))
 
 
+def _fake_venv(path, version, file_text):
+    site = path / "Lib" / "site-packages"
+    info = site / f"pkg-{version}.dist-info"
+    _write(info / "METADATA", f"Name: pkg\nVersion: {version}\n\n")
+    rel = _DEEP_REL.replace("leaf.py", "pkg.py")
+    _write(info / "RECORD", f"{rel},,\npkg-{version}.dist-info/METADATA,,\n")
+    _write(site / rel, file_text)
+    return site, rel
+
+
+def test_a_deep_venv_file_is_kept_and_put_back(tmp_path):
+    venv = tmp_path / ("v" * 40) / "venv"
+    site, rel = _fake_venv(venv, "1.0", "old\n")
+    assert len(str(site / rel)) > 260
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    copy = uc._venv_copy_path(venv, snap)
+
+    uc._clone_venv(venv, copy, snap)
+    assert _read(copy / "Lib" / "site-packages" / rel) == "old\n"
+
+    shutil.rmtree(_long(venv))
+    _fake_venv(venv, "2.0", "new\n")
+    assert uc._restore_venv(copy, venv) == []
+    assert _read(site / rel) == "old\n"
+    assert uc.dists(_long(site))["pkg"]["version"] == "1.0"
+
+
 def _user_comfyui(tmp_path):
     user = tmp_path / ("u" * 40) / "ComfyUI"
     _write(user / _DEEP_REL, "deep\n")
