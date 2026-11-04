@@ -185,12 +185,12 @@ class TestLexicalIndexMemory:
         words = [f"t{i}" for i in range(3000)]
         texts = [" ".join(rnd.choice(words) for _ in range(80)) for _ in range(600)]
         gc.collect()
-        tracemalloc.start()
+        tracemalloc.start(_TRACE_FRAMES)
         try:
-            before = tracemalloc.get_traced_memory()[0]
+            before = _rag_traced_bytes()
             index = BM25(texts)
             gc.collect()
-            held = tracemalloc.get_traced_memory()[0] - before
+            held = _rag_traced_bytes() - before
         finally:
             tracemalloc.stop()
 
