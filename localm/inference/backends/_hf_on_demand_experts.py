@@ -110,6 +110,9 @@ class OnDemandExperts(nn.Module):
         self.down_proj = torch.empty(0)
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
+        store = self.store
+        if store is None:
+            raise RuntimeError("the expert weights were not attached to this model")
         final = torch.zeros_like(hidden_states)
         with torch.no_grad():
             mask = nn.functional.one_hot(top_k_index, num_classes=self.num_experts + 1).permute(2, 1, 0)
@@ -119,7 +122,7 @@ class OnDemandExperts(nn.Module):
             if expert == self.num_experts:
                 continue
             position, token = torch.where(mask[expert])
-            gate_up, down = self.store.expert(self.layer, expert)
+            gate_up, down = store.expert(self.layer, expert)
             gate, up = nn.functional.linear(hidden_states[token], gate_up).chunk(2, dim=-1)
             out = nn.functional.linear(self.act_fn(gate) * up, down) * top_k_weights[token, position, None]
             final.index_add_(0, token, out.to(final.dtype))
