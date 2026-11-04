@@ -99,6 +99,7 @@ test("Enhance with no chat model loaded fails loudly and leaves the prompt alone
 
 test("Enhance with the chat model unloaded but resumable sends the request to it and shows it loading", async () => {
   const { win, calls, $ } = makeApp({ active: "", resumable: "llama-8b" });
+  await settle(300);
   $("img-prompt").value = "a fox";
   const btn = enhanceBtn($, "img-prompt");
   const labels = [];
