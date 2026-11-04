@@ -543,9 +543,9 @@ def _download_progress_class(label: str, on_progress, every: float = 2.0):
             if now - self._report_at < every:
                 return
             self._report_at = now
-            done = max(self._report_done, self._report_transfer, 0)
+            done = int(max(self._report_done, self._report_transfer, 0))
             if self._report_total:
-                done = min(done, self._report_total)
+                done = min(done, int(self._report_total))
             try:
                 on_progress(download_progress_line(label, done, self._report_total))
             except Exception as e:
