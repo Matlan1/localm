@@ -187,6 +187,30 @@ def _embed_fn():
         return None
 
 
+def _deferred_embed():
+    """An embed callable for a write pass that resolves the shared embedder on
+    its first use, so a pass that stores nothing never downloads or loads it.
+    With no embedder available a write stores the record without a vector."""
+    from localm.memory import DeferredEmbed
+
+    def _resolve():
+        fn = _embed_fn()
+        if fn is None:
+            from localm.debuglog import logger
+            logger.debug("memory: no embedder resolved, this pass's records "
+                         "will have no vector")
+        return fn
+    return DeferredEmbed(_resolve)
+
+
+def _ensure_embedder(embed_fn) -> None:
+    """Resolve a deferred embedder now, before the store lock is taken. A plain
+    callable or None is left alone."""
+    from localm.memory import DeferredEmbed
+    if isinstance(embed_fn, DeferredEmbed):
+        embed_fn.ensure()
+
+
 def _embedder_download_status(request: Request | None) -> dict:
     """Whether semantic (vector) recall is degraded to lexical-only for lack of
     an installed embedding model, and whether THIS caller could fetch it with
@@ -845,14 +869,7 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Newly added facts come from diffing record ids: store.replace reuses the same
     # record objects, so an UPDATE keeps its id and only true ADDs appear.
     before = {r.id for r in store.all()}
-    embed_fn = _embed_fn()
-    if embed_fn is None:
-        # No embedder resolvable: recall and consolidation fall back to lexical BM25,
-        # and this round's records get no vector. Logged so it is distinguishable from
-        # a per-record embed failure.
-        from localm.debuglog import logger
-        logger.debug("memory synthesize_memory: no embedder resolved, "
-                     "this round's records will have no vector")
+    embed_fn = _deferred_embed()
     res = run_consolidation(store, sessions, complete, embed_fn=embed_fn,
                             surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
@@ -868,8 +885,9 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
     # over several passes. No-op when no embedder.
-    if embed_fn is not None:
+    if store.lacks_vector():
         try:
+            embed_fn.ensure()
             filled = store.backfill_vectors(embed_fn)
             if filled:
                 res["backfilled"] = filled
@@ -1095,7 +1113,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
     pass), the failure is counted against the session in the watermark sidecar,
     and after EPISODIC_MAX_ATTEMPTS counted failures the session is skipped with
     a warning and the pass continues."""
-    ef = _embed_fn() if embed_fn is _UNSET else embed_fn
+    ef = _deferred_embed() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
         from difflib import SequenceMatcher
@@ -1217,6 +1235,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                     continue
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
+                _ensure_embedder(ef)
                 store.update(keep.id, text=summ, embed_fn=ef,
                              meta={"session": f.stem, "session_mtime": mt,
                                    "judged": True})
@@ -1227,6 +1246,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                    and SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85
                    for r in store.all()):
                 continue                           # already have this episode
+            _ensure_embedder(ef)
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt,

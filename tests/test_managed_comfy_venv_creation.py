@@ -109,6 +109,8 @@ def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path
         raise AssertionError(f"unexpected call reached past the pip probe: {cmd}")
 
     monkeypatch.setattr(fresh, "_run", _fake_run)
+    monkeypatch.setattr(fresh, "_probe_pip",
+                        lambda python, on_progress: _fake_run([str(python), "-m", "pip", "--version"]))
     monkeypatch.setattr(fresh, "_fetch_at_commit", lambda *a, **k: (True, ""))
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 

@@ -20,10 +20,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from localm import _apply_update as au
 from localm import _version, updater, updater_components as uc, updater_runtime, uv_tool
 from localm.bugreport import LocalmError
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
 _REAL_RUN = subprocess.run
+_PROGRAM = Path(sys.executable).read_bytes() if os.name == "nt" else b"trampoline"
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
 
@@ -99,7 +101,7 @@ def _uninstall(site: Path, name: str) -> None:
         shutil.rmtree(info)
 
 
-def _localm_dist(site: Path, version: str, exe: bytes = b"trampoline") -> None:
+def _localm_dist(site: Path, version: str, exe: bytes = _PROGRAM) -> None:
     _dist(site, "localm", version, {"_editable_impl_localm.pth": f"# {version}".encode(),
                                     "../../Scripts/localm.exe": exe})
 
@@ -113,9 +115,7 @@ def _venv(root: Path) -> Path:
 
 
 def _fake_uv(tmp_path: Path) -> Path:
-    exe = tmp_path / "fake-uv-bin" / uv_tool.UV_NAME
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_bytes(b"")
+    exe = write_exe_stub(tmp_path / "fake-uv-bin" / uv_tool.UV_NAME)
     exe.chmod(0o755)
     return exe
 
@@ -1157,9 +1157,7 @@ def test_the_next_start_brings_uv_back_after_a_standalone_rollback(install, home
 
     (inst / script).write_text(pin("0.13.4"), encoding="utf-8")
     uv_dir = inst / uv_tool.CONTAINED_DIR
-    uv_dir.mkdir()
-    (uv_dir / uv_tool.UV_NAME).write_bytes(b"")
-    (uv_dir / uv_tool.UV_NAME).chmod(0o755)
+    write_exe_stub(uv_dir / uv_tool.UV_NAME).chmod(0o755)
     monkeypatch.setattr(uv_tool, "uv_version", lambda path: "0.13.6")
     files = _files("0.3.2", ["click", "rich"])
     files[script] = pin("0.13.6")

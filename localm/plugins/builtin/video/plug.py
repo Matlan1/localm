@@ -174,6 +174,10 @@ async def video(req: VideoRequest, request: Request):
             return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
+        if not ok and s.get("backend") == "native":
+            from localm.media import native_offer
+            from .backends import native
+            native_offer.push_missing(job, native_offer.job_missing("video", native, s), msg)
         job.push({"type": "line", "text": msg})
         if not ok:
             return False

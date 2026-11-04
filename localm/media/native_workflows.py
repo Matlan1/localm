@@ -580,6 +580,63 @@ def delete_workflow(media: str, wid: str) -> None:
         raise WorkflowNotFound(wid) from e
 
 
+def relabel_model(old_name: str, new_name: str) -> tuple[list, list]:
+    """Rewrite every model reference named *old_name* to *new_name* in the
+    user workflow files of every media (the ``models`` slots and the
+    ``loras``). Other fields are kept as stored.
+
+    Returns ``(rewritten, failed)``: ``"<media>/<id>"`` of each file rewritten,
+    and of each file that names *old_name* but could not be rewritten. A file
+    that does not contain *old_name* is not parsed."""
+    from localm.storekit import atomic_write
+    needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
+
+    def _swap(ref):
+        if ref == old_name:
+            return new_name, True
+        if isinstance(ref, dict) and ref.get("name") == old_name:
+            return dict(ref, name=new_name), True
+        return ref, False
+
+    rewritten: list = []
+    failed: list = []
+    for media in MEDIA_TYPES:
+        d = native_dir(media)
+        if not d.is_dir():
+            continue
+        with lock_for(media):
+            for path in sorted(d.glob("*.json")):
+                label = f"{media}/{path.stem}"
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    if needle not in text:
+                        continue
+                    data = json.loads(text)
+                    changed = False
+                    models = data.get("models") if isinstance(data, dict) else None
+                    if isinstance(models, dict):
+                        for slot, ref in list(models.items()):
+                            models[slot], hit = _swap(ref)
+                            changed = changed or hit
+                    loras = data.get("loras") if isinstance(data, dict) else None
+                    if isinstance(loras, list):
+                        for i, ref in enumerate(loras):
+                            loras[i], hit = _swap(ref)
+                            changed = changed or hit
+                    if not changed:
+                        continue
+                    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+                    rewritten.append(label)
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError, RecursionError) as e:
+                    from localm.debuglog import logger
+                    logger.warning("rename: native workflow %s could not be rewritten (%s)",
+                                   label, type(e).__name__)
+                    failed.append(label)
+    return rewritten, failed
+
+
 def import_workflow(media: str, data, *, name: Optional[str] = None) -> tuple[str, dict]:
     """Store *data* as a new *media* workflow: a localm native workflow as is,
     a ComfyUI workflow (API or UI format) converted by

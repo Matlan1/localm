@@ -2196,13 +2196,15 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
     registry entry to a new key (unlike alias_model, which copies - *old_name*
     stops working here), and best-effort migrates every OTHER place inside
     <data dir> that stores the plain name string (config.json's pinned_models
-    / embedding_model / coder_reviewer_model / spec_draft_model, scheduled
-    jobs' `model` field,
-    RAG collection metadata). A per-project ``.localcoder/config.toml``
-    ``model`` setting lives OUTSIDE <data dir> (in the user's own project
-    repo, discoverable only relative to a `cwd` a coder session supplies) and
-    cannot be enumerated or migrated from here - always reported in the
-    returned notes, never silently dropped.
+    / embedding_model / coder_reviewer_model / spec_draft_model /
+    rag_rerank_model / model_avatar_overrides and the model slots of the
+    image, music and video ``native`` blocks, scheduled jobs' `model` field,
+    RAG collection metadata, saved chats' ``pinned_model`` and the model
+    references of the media native workflow files). A per-project
+    ``.localcoder/config.toml`` ``model`` setting lives OUTSIDE <data dir>
+    (in the user's own project repo, discoverable only relative to a `cwd` a
+    coder session supplies) and cannot be enumerated or migrated from here -
+    always reported in the returned notes, never silently dropped.
 
     Sibling aliases - other registry entries whose file happens to be the same
     one *old_name* pointed at - are left untouched: they are independent
@@ -2269,6 +2271,14 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
     return True, notes
 
 
+# Config keys holding one registered model name, and the registered-name slots
+# of a media plugin's ``native`` block (config["plugins"][<media>]["native"]).
+_CONFIG_MODEL_KEYS = ("embedding_model", "coder_reviewer_model", "spec_draft_model",
+                      "rag_rerank_model")
+_NATIVE_MODEL_KEYS = ("model", "vae", "clip_l", "clip_g", "t5xxl", "llm", "clip_vision",
+                      "dit", "text_encoder", "lm")
+
+
 def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
     """Best-effort: rewrite every *old_name* reference this process can reach
     inside <data dir>, after rename_model has already moved the registry
@@ -2280,17 +2290,35 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
     notes: list[str] = []
 
     try:
+        changed: list[str] = []
+
         def _apply_cfg(cfg: dict) -> None:
+            changed.clear()
             pinned = cfg.get("pinned_models")
             if isinstance(pinned, list) and old_name in pinned:
                 cfg["pinned_models"] = [new_name if n == old_name else n for n in pinned]
-            if cfg.get("embedding_model") == old_name:
-                cfg["embedding_model"] = new_name
-            if cfg.get("coder_reviewer_model") == old_name:
-                cfg["coder_reviewer_model"] = new_name
-            if cfg.get("spec_draft_model") == old_name:
-                cfg["spec_draft_model"] = new_name
+                changed.append("pinned_models")
+            for key in _CONFIG_MODEL_KEYS:
+                if cfg.get(key) == old_name:
+                    cfg[key] = new_name
+                    changed.append(key)
+            avatars = cfg.get("model_avatar_overrides")
+            if isinstance(avatars, dict) and old_name in avatars:
+                avatars[new_name] = avatars.pop(old_name)
+                changed.append("model_avatar_overrides")
+            plugins = cfg.get("plugins")
+            for media in ("image", "music", "video"):
+                block = plugins.get(media) if isinstance(plugins, dict) else None
+                native = block.get("native") if isinstance(block, dict) else None
+                if not isinstance(native, dict):
+                    continue
+                for key in _NATIVE_MODEL_KEYS:
+                    if native.get(key) == old_name:
+                        native[key] = new_name
+                        changed.append(f"plugins.{media}.native.{key}")
         update_config(_apply_cfg)
+        if changed:
+            notes.append("Updated the settings that named it: " + ", ".join(changed))
     except Exception as e:
         logger.debug("rename_model: config migration failed for %s -> %s: %s",
                      old_name, new_name, e)
@@ -2325,6 +2353,34 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
         logger.debug("rename_model: RAG collection migration failed for %s -> %s: %s",
                      old_name, new_name, e)
         notes.append(f"Could not update RAG collection metadata: {e}")
+
+    try:
+        from localm.plugins.builtin.chat.plug import relabel_pinned_model
+        migrated, failed = relabel_pinned_model(old_name, new_name)
+        if migrated:
+            notes.append(f"Updated {len(migrated)} saved chat(s) pinned to it")
+        if failed:
+            notes.append(
+                "Could not update the saved chat(s) "
+                f"{', '.join(failed)}: they are still pinned to '{old_name}'")
+    except Exception as e:
+        logger.debug("rename_model: saved chat migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update saved chats: {e}")
+
+    try:
+        from localm.media.native_workflows import relabel_model
+        migrated, failed = relabel_model(old_name, new_name)
+        if migrated:
+            notes.append(f"Updated {len(migrated)} media workflow(s) to the new name")
+        if failed:
+            notes.append(
+                "Could not update the media workflow(s) "
+                f"{', '.join(failed)}: they still name '{old_name}'")
+    except Exception as e:
+        logger.debug("rename_model: media workflow migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update media workflows: {e}")
 
     notes.append(
         "A per-project .localcoder/config.toml 'model' setting (if any) lives "

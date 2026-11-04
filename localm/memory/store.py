@@ -45,6 +45,53 @@ from .relevance import generic_tokens, lexical_match
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
 
+
+class EmbedderUnavailable(Exception):
+    """Raised by a DeferredEmbed that resolved to no embedding model. The store
+    treats it as "no vector for this record", never as an error."""
+
+
+class DeferredEmbed:
+    """An embed callable that resolves its embedder on the first call.
+
+    *resolve* returns the embed callable, or None when no embedding model is
+    available. It runs at most once, on the first ``ensure()`` or call; the
+    outcome (including "unavailable") is kept. A call with no embedder raises
+    EmbedderUnavailable, which the store's writers treat as "store without a
+    vector", the same as ``embed_fn=None``. ``unavailable`` is True only once the
+    resolution found no embedder, so ``_vector_status`` reports ``no_embedder``
+    only when that is true.
+
+    ``ensure()`` resolves now and returns whether an embedder exists. Resolving
+    must not happen while the namespace lock is held: a caller that is about to
+    take the lock and knows a vector will be needed calls ``ensure()`` first."""
+
+    def __init__(self, resolve: Callable[[], Optional[EmbedFn]]):
+        self._resolve = resolve
+        self._fn: Optional[EmbedFn] = None
+        self._resolved = False
+
+    @property
+    def unavailable(self) -> bool:
+        return self._resolved and self._fn is None
+
+    @property
+    def resolved(self) -> bool:
+        return self._resolved
+
+    def ensure(self) -> bool:
+        if not self._resolved:
+            self._fn = self._resolve()
+            self._resolved = True
+        return self._fn is not None
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        self.ensure()
+        fn = self._fn
+        if fn is None:
+            raise EmbedderUnavailable("no embedding model is available")
+        return fn(texts)
+
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
 # (files written before versioning are format 1). Bump this on a breaking
@@ -572,6 +619,8 @@ class MemoryStore:
             return None
         try:
             vec = embed_fn([text])[0]
+        except EmbedderUnavailable:
+            return None
         except Exception as e:
             from localm.debuglog import debug_content_enabled, logger as _dbg
             # The FAILURE is always reported. *text* is a memory RECORD, i.e.
@@ -731,6 +780,8 @@ class MemoryStore:
             return -1, 0.0
         try:
             qvec = embed_fn([text])[0]
+        except EmbedderUnavailable:
+            return -1, 0.0
         except Exception as e:
             from localm.debuglog import logger as _dbg
             _dbg.debug("memory semantic_nearest query embed failed: %s", e)
@@ -747,6 +798,12 @@ class MemoryStore:
             if s > best_s:
                 best_i, best_s = i, s
         return best_i, best_s
+
+    def lacks_vector(self, records=None) -> bool:
+        """Whether any of *records* (default: every record in the store) has no
+        vector yet. Side-effect free; reads the in-memory state without a reload."""
+        return any(r.id not in self._vectors
+                   for r in (self._records if records is None else records))
 
     def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64) -> int:
         """Embed records that have no vector yet, up to *limit* per call, and
@@ -831,7 +888,7 @@ class MemoryStore:
         (records not embedded yet, e.g. before ``setup-embeddings``),
         ``low_coverage`` (< VEC_COVERAGE of records carry a vector), ``dim_mismatch``
         (mixed vector dimensions in the sidecar)."""
-        if embed_fn is None:
+        if embed_fn is None or getattr(embed_fn, "unavailable", False):
             return False, "no_embedder"
         if not self._vectors:
             return False, "no_vectors"

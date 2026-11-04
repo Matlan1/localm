@@ -1051,6 +1051,7 @@ export async function refreshModels() {
     }
     _modelsEverRefreshed = true;
     _publishActiveChange(previousActive);
+    window.dispatchEvent(new CustomEvent("localm:models-refreshed"));
   } catch {
     setStatus("err", t("sidebar.status.serverUnreachable"));
   }

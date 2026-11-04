@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import importlib
 import sys
 import struct
 from pathlib import Path
@@ -1484,3 +1485,79 @@ def test_a_generation_through_the_route_embeds_and_imports_back(native_app, monk
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
     monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)
+
+
+# --------------------------------------------------------------------------- #
+#  the download offer beside the command text                                 #
+# --------------------------------------------------------------------------- #
+
+def _offer_events(job):
+    return [e for e in job._history if e.get("type") == "missing_model"]
+
+
+def test_a_job_with_no_model_carries_the_download_beside_the_command(native_app):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, runner = native_app
+    update_config(lambda cfg: cfg["plugins"]["image"].update({"native": {}}))
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    [event] = _offer_events(job)
+    rec = native.RECOMMENDED_MODELS[0]
+    [entry] = event["missing"]
+    assert entry["native"] is True and entry["filename"] == rec.file
+    assert entry["source"]["spec"] == rec.spec and entry["source"]["sha256"] == rec.sha256
+    assert entry["source"]["model_type"] == "diffusion-unet"
+    text_line = [e for e in job._history
+                 if e.get("type") == "line" and e.get("text") == event["text"]]
+    assert text_line and f"'localm pull {rec.spec}" in event["text"]
+    assert job._history.index(event) < job._history.index(text_line[0])
+    assert runner.loads == []
+
+
+def test_reference_images_without_the_vision_encoder_carry_its_download(native_app,
+                                                                       monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.media.sdcpp import pairing
+    app, runner = native_app
+    plugin_native = importlib.import_module("_localm_plugin_image.backends.native")
+    monkeypatch.setattr(plugin_native, "input_refusal", lambda s, **kw: native.NO_LLM_VISION_21)
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    [event] = _offer_events(job)
+    [entry] = event["missing"]
+    dl = pairing.QWEN3_VL_8B_MMPROJ
+    assert entry["filename"] == dl.filename and entry["source"]["sha256"] == dl.sha256
+    assert entry["source"]["model_type"] == "mmproj"
+    assert event["text"] == native.NO_LLM_VISION_21
+    assert "localm pull" in event["text"]
+    assert runner.loads == []
+
+
+def test_a_refusal_that_is_not_a_missing_file_offers_no_download(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    app, _runner = native_app
+    plugin_native = importlib.import_module("_localm_plugin_image.backends.native")
+    monkeypatch.setattr(plugin_native, "input_refusal",
+                        lambda s, **kw: "A mask needs a base image.")
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    assert _offer_events(job) == []
+
+
+def test_preflight_marks_the_image_offer_blocked_when_net_mode_is_off(gui_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/image/preflight", json={}).json()
+    [entry] = data["missing"]
+    assert entry["blocked"] == "net_mode_off"
+    assert entry["source"]["sha256"] == native.RECOMMENDED_MODELS[0].sha256
