@@ -1971,9 +1971,11 @@ def test_a_failing_finishing_step_puts_every_part_back(install, ending, reason):
     assert ei.value.reason == reason
 
 
-def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install):
+def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install, monkeypatch):
     inst, _site = install
     shutil.rmtree(inst / ".venv")
+    warned = []
+    monkeypatch.setattr(updater, "_apply_warn", lambda msg, *args: warned.append(msg % args))
     data, sig = _finish_release("import sys; print('no'); sys.exit(1)")
     with pytest.raises(LocalmError) as ei:
         updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
@@ -1983,6 +1985,7 @@ def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install)
     data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
     assert updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                          runner=_forbid_deps_step([]))["applied"]
+    assert warned == []
 
 
 def test_a_failing_finishing_step_with_no_output_says_how_it_exited(install):
