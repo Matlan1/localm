@@ -69,6 +69,12 @@ _FAKE_MODEL_BYTES = b"\x00"
 
 
 @pytest.fixture(autouse=True)
+def _public_addresses_need_no_dns(monkeypatch):
+    """check_url resolves the host; these tests run with no network."""
+    monkeypatch.setattr("localm.netpolicy._check_public_address", lambda host: None)
+
+
+@pytest.fixture(autouse=True)
 def _pin_whisper_to_fake_bytes(monkeypatch):
     """The Whisper models are pinned to the sha256 of the real model.bin; these
     tests lay down fake bytes, so pin each to the digest of those."""
@@ -891,3 +897,109 @@ class TestMemoryEmbedderDownloadHint:
                 assert owner_body["embedder_model"]
         finally:
             reset_embedder()
+
+
+# --------------------------------------------------------------------------- #
+#  net_allow and net_deny bind the speech and embedding model downloads        #
+# --------------------------------------------------------------------------- #
+
+class TestDomainListsBindDownloads:
+    @staticmethod
+    def _cfg(monkeypatch, tmp_path, **lists):
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        set_config(monkeypatch, lambda: {"voice_stt_model": "base", "net_mode": "allow", **lists})
+
+    @staticmethod
+    def _embedding_spy(monkeypatch):
+        calls = []
+
+        def _fake(*a, **k):
+            calls.append((a, k))
+            raise AssertionError("the download must not start")
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake)
+        return calls
+
+    @pytest.mark.parametrize("lists,needle", [
+        ({"net_deny": ["huggingface.co"]}, "net_deny"),
+        ({"net_allow": ["example.com"]}, "net_allow"),
+    ])
+    def test_whisper_download_is_refused(self, monkeypatch, tmp_path, lists, needle):
+        self._cfg(monkeypatch, tmp_path, **lists)
+        calls = _snapshot_spy(monkeypatch)
+        ok, reason = voice.prefetch_stt_model(allow_download=True)
+        assert calls == [], "the list must stop the network call"
+        assert ok is False
+        assert needle in reason
+
+    @pytest.mark.parametrize("lists,needle", [
+        ({"net_deny": ["huggingface.co"]}, "net_deny"),
+        ({"net_allow": ["example.com"]}, "net_allow"),
+    ])
+    def test_embedding_download_is_refused_and_reported(self, monkeypatch, tmp_path, lists, needle):
+        from localm.inference import embedder
+        self._cfg(monkeypatch, tmp_path, **lists)
+        calls = self._embedding_spy(monkeypatch)
+        got = embedder._download_known("bge", "org/repo", "m.gguf", tmp_path / "m.gguf", True)
+        assert got is None
+        assert calls == [], "the list must stop the network call"
+        assert needle in (embedder.last_error() or "")
+
+    def test_first_use_transcription_may_not_download_either(self, monkeypatch, tmp_path):
+        self._cfg(monkeypatch, tmp_path, net_deny=["huggingface.co"])
+        plan = voice._stt_plan(None)
+        assert plan["local_files_only"] is True, "the worker would download past the list"
+        assert "net_deny" in plan["blocked_reason"]
+
+    def test_first_use_transcription_downloads_when_the_list_names_the_host(
+            self, monkeypatch, tmp_path):
+        self._cfg(monkeypatch, tmp_path, net_allow=["huggingface.co"])
+        plan = voice._stt_plan(None)
+        assert plan["local_files_only"] is False
+        assert plan["blocked_reason"] is None
+
+    def test_status_greys_the_mic_when_the_list_refuses_first_use(self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "allow"))
+        update_config(lambda c: c.__setitem__("net_deny", ["huggingface.co"]))
+        body = voice_client.c.get("/api/voice/status", headers=_hdr(OWNER_KEY)).json()
+        assert body["available"] is False
+        assert "net_deny" in body["reason"]
+
+    def test_a_list_naming_the_host_allows_the_download(self, monkeypatch, tmp_path):
+        self._cfg(monkeypatch, tmp_path, net_allow=["huggingface.co"])
+        calls = _snapshot_spy(monkeypatch, create=True)
+        ok, reason = voice.prefetch_stt_model(allow_download=True)
+        assert len(calls) == 1
+        assert (ok, reason) == (True, "")
+
+    def test_a_cached_model_never_consults_the_lists(self, monkeypatch, tmp_path):
+        self._cfg(monkeypatch, tmp_path, net_deny=["huggingface.co"])
+        _lay_whisper_snapshot()
+        assert voice.prefetch_stt_model(allow_download=True) == (True, "")
+
+    def test_status_withholds_the_offer_and_names_the_list(self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_deny", ["huggingface.co"]))
+        body = voice_client.c.get("/api/voice/status", headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is False
+        assert "net_deny" in body["download_blocked"]
+
+    def test_status_names_the_missing_scope(self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        body = voice_client.c.get(
+            "/api/voice/status", headers=_hdr(voice_client.voice_only)).json()
+        assert body["can_download"] is False
+        assert "config:write" in body["download_blocked"]
+
+    def test_a_check_that_errors_is_a_refusal(self, monkeypatch):
+        from localm import netpolicy
+
+        def boom(*a, **k):
+            raise RuntimeError("no config")
+
+        monkeypatch.setattr(netpolicy, "check_url", boom)
+        assert "could not be checked" in netpolicy.download_refusal("https://huggingface.co")

@@ -1085,6 +1085,61 @@ export function deleteConversationRemote(convId) {
   });
 }
 
+/** Delete every conversation in the server store, page by page, until the list
+ *  holds nothing left to try, including files the list reports as unreadable.
+ *  Returns `{ deleted, failed, listFailed }`: the ids deleted, the ids still
+ *  stored (a DELETE refused, or the row still listed after an OK), and whether a
+ *  list request failed, in which case more may remain. Never throws. */
+export async function deleteAllServerConversations() {
+  for (const timer of _convPushTimers.values()) clearTimeout(timer);
+  _convPushTimers.clear();
+  const deleted = new Set();
+  const failed = new Set();
+  const result = (listFailed) => ({ deleted: [...deleted], failed: [...failed], listFailed });
+  for (;;) {
+    let data;
+    try {
+      const r = await fetch(`/api/conversations?meta=true&limit=${200 + failed.size}&offset=0`,
+                            { headers: authHeaders() });
+      if (!r.ok) return result(true);
+      data = await r.json();
+    } catch {
+      return result(true);
+    }
+    if (!data.enabled) return result(true);
+    const listed = [...(data.conversations || []).map((c) => c.id), ...(data.unreadable || [])];
+    for (const id of listed) {
+      if (deleted.delete(id)) failed.add(id);
+    }
+    const todo = listed.filter((id) => !failed.has(id));
+    if (!todo.length) return result(false);
+    const outcomes = await Promise.all(todo.map(async (id) => {
+      try {
+        const r = await fetch("/api/conversations/" + encodeURIComponent(id), {
+          method: "DELETE", headers: authHeaders(),
+        });
+        return r.ok;
+      } catch {
+        return false;
+      }
+    }));
+    todo.forEach((id, i) => (outcomes[i] ? deleted : failed).add(id));
+  }
+}
+
+/** Keep only the conversations *keep* accepts, here and in this browser's cache,
+ *  and repaint the list and the chat. */
+export function retainConversations(keep) {
+  chat.conversations = chat.conversations.filter(keep);
+  if (!chat.conversations.some((c) => c.id === chat.activeId)) {
+    chat.activeId = chat.conversations[0]?.id || null;
+  }
+  chat.queue = chat.queue.filter((q) => chat.conversations.some((c) => c.id === q.convId));
+  saveConversations();
+  renderConvList();
+  renderChat();
+}
+
 /** R40: fetch a full conversation's body on demand and replace its index-only
  *  ("_meta") placeholder in chat.conversations. Returns true on success. */
 export async function hydrateConversation(conv) {

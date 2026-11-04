@@ -459,11 +459,22 @@ def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
         # scan: the modules are pinned to fill #000000 over a fill #ffffff
         # background rect, never currentColor or a theme variable.
         assert 'fill="#000000"' in body and 'fill="#ffffff"' in body
-        # A non-owner (scoped) key cannot render pairing QRs - owner-gated.
+        # A key without keys:admin cannot render pairing QRs.
         r2 = client.post("/api/pairing/qr",
                          headers={"Authorization": f"Bearer {scoped['key']}"},
                          json={"key": scoped["key"]})
         assert r2.status_code in (401, 403)
+        # A keys:admin manager who is not the owner renders one for the key it minted.
+        manager = auth.create_key("manager", ["keys:admin"], allow_privileged=True)
+        minted = client.post("/v1/keys",
+                             headers={"Authorization": f"Bearer {manager['key']}"},
+                             json={"name": "tablet", "scopes": ["chat"]})
+        assert minted.status_code == 200, minted.text
+        r5 = client.post("/api/pairing/qr",
+                         headers={"Authorization": f"Bearer {manager['key']}"},
+                         json={"key": minted.json()["key"]})
+        assert r5.status_code == 200
+        assert r5.text.startswith("<svg")
         # Missing key -> 400.
         r3 = client.post("/api/pairing/qr",
                          headers={"Authorization": "Bearer ownersecret"}, json={})

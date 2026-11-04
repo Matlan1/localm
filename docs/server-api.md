@@ -1231,8 +1231,11 @@ every session - the HTTP sibling of `localm key clear` and the GUI's clear
 button (403 when a cookie-authenticated caller sends no valid CSRF token). It
 does two things that can fail independently, and reports on both:
 removing the stored credential, and revoking every browser session. Either one
-surviving still grants access, so `{"cleared": true, "warnings": []}` is
-returned ONLY when both completed. If either could not be finished, the
+surviving still grants access, so `{"cleared": true, "warnings": [],
+"still_protected": ...}` is returned ONLY when both completed. `still_protected`
+is null when the server is now in open mode, `"key"` when another key still
+protects it (`LOCALM_API_KEY`), and `"require_auth"` when it refuses everyone
+because `require_auth` is on and no key is left. If either could not be finished, the
 response is `{"cleared": false, "warnings": [...]}`, naming what survived: a
 credential the server could not remove (a virus scanner or search indexer
 holding the file open, for example), or `"browser sessions (some devices may

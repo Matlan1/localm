@@ -997,7 +997,7 @@
               <div class="actions">
                 <button class="btn-secondary" id="owner-key-clear" data-i18n="settings.ownerKey.removeButton">Remove the owner key</button>
               </div>
-              <div class="sub" data-i18n="settings.ownerKey.removeHelp">Removing it also deletes every named device key and signs out every browser, and returns this server to open mode: anyone who can reach it gets full access, with no key needed.</div>
+              <div class="sub" data-i18n="settings.ownerKey.removeHelp">Removing it also deletes every named device key and signs out every browser. This server then returns to open mode, where anyone who can reach it gets full access with no key needed, unless LOCALM_API_KEY is set (it stays protected) or Require an API key is on (everyone is refused until a key is set).</div>
             </section>
 
             <section class="card settings-section" id="keys-card" data-group="security" data-sec-label="Keys &amp; devices">

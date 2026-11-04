@@ -839,7 +839,7 @@ these live under a plugin of their own.
 
 ```bash
 localm plugin config image workdir /srv/comfy   # for image only, not music/video
-localm plugin config video float_type fp16
+localm plugin config video float_type fp8_e4m3fn
 localm plugin config music use_config_from image  # reuse image's backend settings
 localm plugin config image workflow mine.json     # pick an uploaded workflow
 localm plugin config tts voice af_heart

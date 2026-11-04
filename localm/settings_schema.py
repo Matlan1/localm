@@ -1063,9 +1063,10 @@ CORE_FIELDS: list = [
                  "start can take minutes.",
                  group="Media", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
-                 "ComfyUI's own output folder, needed whenever ComfyUI's copy is "
-                 "removed (the toggle, or privacy mode). Blank uses the output folder "
-                 "inside the ComfyUI folder.",
+                 "Your ComfyUI's output folder, needed whenever its copy is removed "
+                 "(the toggle, or privacy mode). Blank uses the output folder inside "
+                 "the ComfyUI folder. Not used for localm's own ComfyUI, which always "
+                 "uses its own output folder.",
                  # admin_only: names a host folder this process deletes from when
                  # comfy_delete_outputs is on, and a scoped key never receives a
                  # host path.
@@ -1146,10 +1147,9 @@ CORE_FIELDS: list = [
     SettingField("comfy_float_type", Widget.SELECT, "Media weight dtype (shared)",
                  "Shared fallback for the per-plugin 'Model weight dtype' Media "
                  "setting (ComfyUI only). default keeps the workflow's value; no "
-                 "effect on a workflow that loads a full checkpoint.",
+                 "effect on a workflow that loads a full checkpoint or a GGUF model.",
                  group="Media", owner="image",
-                 options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn",
-                          "fp8_e5m2"]),
+                 options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]),
     # ---- Network (web plugin) ----
     # "ask" prompts only a BROWSER-initiated request. A non-browser API or MCP
     # client holding the web scope is NOT prompted and its requests proceed. The
@@ -1163,7 +1163,8 @@ CORE_FIELDS: list = [
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains localm may reach, model requests and model downloads alike. "
                  "Empty = any. e.g. example.com (also covers *.example.com). A list "
-                 "must also name the hosts you pull models from.",
+                 "must also name the hosts you pull models from, huggingface.co for "
+                 "the embedding and speech models.",
                  group="Network", owner="web"),
     # admin_only: net_deny is the SUPPRESSIVE half of the domain policy and is
     # stored verbatim, so without the gate a non-owner could CLEAR it
@@ -2035,9 +2036,10 @@ MEDIA_PLUGIN_FIELDS: list = [
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
-               "Needed whenever ComfyUI's copy is removed (the toggle, or privacy "
-               "mode). Blank uses the shared value, else the output folder inside "
-               "the shared ComfyUI folder.",
+               "Needed whenever your ComfyUI's copy is removed (the toggle, or "
+               "privacy mode). Blank uses the shared value, else the output folder "
+               "inside this plugin's ComfyUI folder, else the shared one. Not used "
+               "for localm's own ComfyUI, which always uses its own output folder.",
                admin_only=True),
     # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
     # render before all checkboxes in each subsection.
@@ -2057,8 +2059,8 @@ MEDIA_PLUGIN_FIELDS: list = [
                Widget.SELECT, "Model weight dtype",
                "ComfyUI only: the dtype the diffusion model's weights load in. "
                "default keeps the workflow's value; no effect on a workflow that "
-               "loads a full checkpoint.",
-               options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn", "fp8_e5m2"],
+               "loads a full checkpoint or a GGUF model.",
+               options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
                plugins=["music", "video"]),
     MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
                Widget.TOGGLE, "Reload chat model after generating",
@@ -2115,6 +2117,8 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
         has_own = block_val not in (None, "")
         global_val = full_config.get(f.global_key) if f.global_key else None
         value = block_val if has_own else (global_val if global_val is not None else f.default)
+        if f.options and "default" in f.options and value not in f.options and value not in (None, ""):
+            value = "default"
         d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
              "value": value, "is_override": has_own, "global": global_val}
         if f.options:
@@ -2122,8 +2126,11 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
             
         if f.key == "launch_cmd":
             try:
+                from localm.media.managed_comfy import managed_comfy_active
+                from localm.pathsafe import is_unc_or_device_path
                 workdir = _block_get(block, ("comfy", "workdir")) or full_config.get("comfy_workdir")
-                if workdir:
+                if (workdir and not is_unc_or_device_path(str(workdir))
+                        and not managed_comfy_active(full_config)):
                     from localm.image_gen.comfy import discover_launch_cmd
                     from pathlib import Path
                     found = discover_launch_cmd(Path(workdir))
@@ -2135,9 +2142,10 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
                             "endpoint": f"/api/comfyui/create-launcher?workdir={urllib.parse.quote(str(workdir))}",
                             "success_msg": "Launcher script created!"
                         }
-            except Exception:
-                pass
-                
+            except Exception as e:
+                from localm.debuglog import logger
+                logger.debug("could not look for a ComfyUI launcher for %s: %s", name, e)
+
         out.append(d)
     return out
 

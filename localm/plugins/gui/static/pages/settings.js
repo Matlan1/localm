@@ -653,16 +653,18 @@ export function buildSettingControl(field) {
   if (field.action) {
     const actRow = el("div", "");
     actRow.style.marginTop = "0.5rem";
-    const btn = el("button", "btn-secondary", field.action.label);
+    const btn = el("button", "btn-secondary",
+      fieldCatalogText(field, "action.label", field.action.label));
     btn.type = "button";
     btn.onclick = async () => {
       const r = await fetch(field.action.endpoint, { method: "POST", headers: authHeaders() });
       if (r.ok) {
-        toast(field.action.success_msg || t("settings.field.actionCompleted"));
+        toast(fieldCatalogText(field, "action.done",
+          field.action.success_msg || t("settings.field.actionCompleted")));
         refreshSettingsPage();
       } else {
         const err = await r.json().catch(() => ({}));
-        toast(err.error || t("settings.field.actionFailed"), true);
+        toast(err.detail || err.error || t("settings.field.actionFailed"), true);
       }
     };
     actRow.appendChild(btn);
@@ -877,13 +879,14 @@ export function deleteKeyPreset(name, presets) {
 // Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
 // on the other device to pair it with exactly these capabilities (no typing).
 export async function renderKeyQR(box, key) {
+  const unavailable = () => box.appendChild(el("div", "sub", t("settings.keys.qrUnavailable")));
   try {
     const r = await fetch("/api/pairing/qr", {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
     });
-    if (!r.ok) return;                        // owner-only / older server: skip the QR
+    if (!r.ok) { unavailable(); return; }
     const svg = await r.text();
     const wrap = el("div", "key-qr");
     wrap.appendChild(el("div", "sub", t("settings.keys.qrHint")));
@@ -894,7 +897,7 @@ export async function renderKeyQR(box, key) {
     holder.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
     wrap.appendChild(holder);
     box.appendChild(wrap);
-  } catch { /* QR is best-effort; the copyable secret is the fallback */ }
+  } catch { unavailable(); }
 }
 
 export function keyExpiryLabel(expires) {
@@ -1152,6 +1155,16 @@ export async function refreshOwnerKeyPanel() {
           return;
         }
         const out = await r.json().catch(() => ({}));
+        if (out.cleared === true && out.still_protected) {
+          // The server still refuses keyless callers, so the message stays on screen
+          // until the next request reaches the key gate.
+          const text = t(out.still_protected === "require_auth"
+            ? "settings.ownerKey.removedRequireAuth" : "settings.ownerKey.removedStillKey");
+          toast(text);
+          box.replaceChildren(el("div", "sub", text));
+          box.style.display = "";
+          return;
+        }
         if (out.cleared === true) {
           toast(t("settings.ownerKey.removedToast"));
           // That call invalidates this session cookie, so re-read the page state
@@ -1840,13 +1853,13 @@ export async function refreshSettingsPage() {
           const data = await r.json();
           if (data.model_cached) {
             sttStatus.textContent = t("settings.voice.ready", { model: data.model || "Whisper" });
-            sttBtn.textContent = t("settings.voice.redownload");
-            sttBtn.style.display = "";
+            sttBtn.style.display = "none";
           } else {
+            const why = data.download_blocked || data.reason;
             sttStatus.textContent = t("settings.voice.notDownloaded", { model: data.model || "Whisper" }) +
-              (data.reason ? " " + data.reason : "");
+              (why ? " " + why : "");
             sttBtn.textContent = t("settings.voice.downloadNow");
-            sttBtn.style.display = "";
+            sttBtn.style.display = data.can_download ? "" : "none";
           }
         } catch {
           showInlineError(sttStatus, t("settings.voice.statusFailed"));
@@ -3422,6 +3435,7 @@ export function renderMediaSubsection(name) {
       catalog_scopes: [name, "media"],
       default: f.value, options: f.options,
       is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
+      auto: f.auto, action: f.action,
     });
     if (!ctrl) continue;
     ctrl.orig = f.value;

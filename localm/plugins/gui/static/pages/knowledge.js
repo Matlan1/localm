@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { chat, lsSetScoped } from "../app/chat.js";
+import { chat, deleteAllServerConversations, lsSetScoped, retainConversations } from "../app/chat.js";
 import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, showInlineError, streamJob, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -976,11 +976,17 @@ $("gui-clear-convs").onclick = () => {
   confirmDanger(t("knowledge.clearConvs.confirm.title", { where }),
     t("knowledge.clearConvs.confirm.body"), t("knowledge.deleteConfirm.confirm"), async () => {
       if (chat.persist) {
-        // Clear the server store as well as this browser's copy.
-        await Promise.allSettled(chat.conversations.map((c) =>
-          fetch("/api/conversations/" + encodeURIComponent(c.id), {
-            method: "DELETE", headers: authHeaders(),
-          })));
+        // Clear the server store as well as this browser's copy. On a failure the
+        // page stays, listing what is still stored, and says so.
+        const out = await deleteAllServerConversations();
+        if (out.listFailed || out.failed.length) {
+          const deleted = new Set(out.deleted);
+          const failed = new Set(out.failed);
+          retainConversations((c) => (out.listFailed ? !deleted.has(c.id) : failed.has(c.id)));
+          toast(out.listFailed ? t("knowledge.clearConvs.listFailed")
+                               : tn("knowledge.clearConvs.failed", out.failed.length), true);
+          return;
+        }
       }
       localStorage.removeItem("localm.conversations");
       location.reload();
