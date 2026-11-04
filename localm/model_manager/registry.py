@@ -3893,7 +3893,7 @@ def _register_with_dedup(
                 mmproj = stored.mmproj
             if action == "move":
                 dest_str = str(dest.resolve())
-                entry = {"path": dest_str, "source": source, "model_type": model_type}
+                entry: dict[str, Any] = {"path": dest_str, "source": source, "model_type": model_type}
                 if revision:
                     entry["revision"] = revision
                     if commit:
