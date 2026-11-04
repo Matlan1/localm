@@ -68,7 +68,8 @@ def _tools_path() -> list[str]:
 
 
 def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = False,
-         installer_creates_uv: bool = True, contained_on_path: bool = False):
+         installer_creates_uv: bool = True, contained_on_path: bool = False,
+         home_uv: bool = False):
     clone = tmp_path / "clone"
     clone.mkdir()
     shutil.copy2(ROOT / "setup-gui.sh", clone / "setup-gui.sh")
@@ -82,7 +83,8 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = 
             'chmod +x "$dest/uv"\n') if installer_creates_uv else "exit 0\n"
     installer = ('#!/bin/sh\n'
                  'echo "INSTALLER-RAN INSTALL_DIR=[${UV_INSTALL_DIR:-}] '
-                 'UNMANAGED=[${UV_UNMANAGED_INSTALL:-}]"\n' + made)
+                 'UNMANAGED=[${UV_UNMANAGED_INSTALL:-}]"\n'
+                 'echo "NO-MODIFY=${UV_NO_MODIFY_PATH:-}"\n' + made)
     _write_exec(stubs / "curl", (
         "#!/bin/sh\n"
         "while [ $# -gt 0 ]; do [ \"$1\" = -o ] && dest=\"$2\"; shift; done\n"
@@ -97,6 +99,8 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = 
         path_parts.insert(0, str(clone / ".uv"))
     home = tmp_path / "home"
     home.mkdir()
+    if home_uv:
+        _write_exec(home / ".local" / "bin" / "uv", _REPORT)
     env = dict(os.environ, PATH=os.pathsep.join(path_parts), DISPLAY=":0",
                HOME=_posix(home))
     for var in ("LOCALM_GUI_STORE", "LOCALM_GUI_UV", "LOCALM_GUI_UV_INSTALLED",
@@ -188,6 +192,20 @@ def test_no_uv_and_shared_asks_and_installs_per_user_without_an_install_dir(tmp_
     assert _field(out, "WINDOW-INSTALLED") == "1"
     assert not (clone / ".uv").exists()
     assert out.returncode == 0, (out.stdout, out.stderr)
+
+
+def test_shared_install_tells_the_uv_installer_not_to_edit_shell_startup_files(tmp_path):
+    _, _, home, out = _run(tmp_path, answers="2\n\n", system_uv=False)
+    assert _field(out, "NO-MODIFY") == "1", (out.stdout, out.stderr)
+    assert not (home / ".bashrc").exists() and not (home / ".profile").exists()
+
+
+def test_shared_reuses_a_uv_in_the_install_folder_that_is_on_no_path(tmp_path):
+    _, _, home, out = _run(tmp_path, answers="2\n", system_uv=False, home_uv=True)
+    assert NOT_INSTALLED not in out.stdout and "INSTALLER-RAN" not in out.stdout, (
+        out.stdout, out.stderr)
+    assert _path_field(out, "WINDOW-UV") == str(home / ".local" / "bin" / "uv")
+    assert _field(out, "WINDOW-INSTALLED") == ""
 
 
 def test_shared_never_takes_the_contained_uv_even_from_path(tmp_path):
