@@ -224,6 +224,54 @@ def test_identification_refuses_a_look_alike(tmp_path):
                                                  read_command=commands.get) is None
 
 
+def test_running_daemons_are_found_with_no_holder_named(tmp_path):
+    root = tmp_path / "inst"
+    launcher = str(root / ".venv" / "Scripts" / "python.exe")
+    inside_base = str(root / ".python" / "python.exe")
+    outside_base = str(tmp_path / "shared" / "python.exe")
+    other = str(tmp_path / "other" / "python.exe")
+    probe = f"x -u -m {PROBE_MODULE}"
+    procs = _procs((10, 1, launcher), (11, 10, inside_base), (20, 1, launcher), (21, 20, outside_base),
+                   (30, 1, inside_base), (40, 1, other), (41, 40, other), (50, 1, launcher), (51, 50, outside_base))
+    commands = {10: probe, 11: probe, 20: probe, 21: probe, 30: "x -m localm gui",
+                40: probe, 41: probe, 50: "x -m localm gui", 51: probe}
+    found = updater_runtime.running_own_probe_daemons(root, procs=procs, read_command=commands.get)
+    assert sorted(found) == [10, 11, 20, 21]
+    assert found.index(11) < found.index(10) and found.index(21) < found.index(20)
+
+
+def test_stop_ends_a_daemon_windows_does_not_name_and_refuses_a_foreign_holder(tmp_path, monkeypatch):
+    from localm import install_manifest
+    root = tmp_path / "inst"
+    launcher = str(root / ".venv" / "Scripts" / "python.exe")
+    probe = f"x -u -m {PROBE_MODULE}"
+    monkeypatch.setattr(install_manifest, "list_processes", lambda: _procs((10, 1, launcher), (40, 1, launcher)))
+    monkeypatch.setattr(install_manifest, "command_line", {10: probe, 40: "x -m other"}.get)
+    stopped = []
+    monkeypatch.setattr(install_manifest, "_stop", lambda pid, timeout=0: stopped.append(pid) or True)
+    monkeypatch.setattr(updater_runtime, "holders", lambda lib: [{"pid": None, "name": "an unidentified process"}])
+    assert updater_runtime.stop_own_probe_daemons(tmp_path, root) == 1
+    assert stopped == [10]
+    stopped.clear()
+    monkeypatch.setattr(updater_runtime, "holders", lambda lib: [{"pid": 40, "name": "other"}])
+    assert updater_runtime.stop_own_probe_daemons(tmp_path, root) is None
+    assert stopped == []
+
+
+def test_stop_own_holders_ends_an_unnamed_own_daemon_before_counting_it_a_stranger(tmp_path, monkeypatch):
+    state = {"running": True}
+    monkeypatch.setattr(updater_runtime, "holders",
+                        lambda lib: [{"pid": None, "name": "?"}] if state["running"] else [])
+    monkeypatch.setattr(updater_runtime, "classify_holders",
+                        lambda found, root, home=None: ({}, found))
+    def stop(lib, root):
+        state["running"] = False
+        return 1
+    monkeypatch.setattr(updater_runtime, "stop_own_probe_daemons", stop)
+    assert updater_runtime.stop_own_holders(tmp_path, tmp_path, wait=0.1) == []
+    assert state["running"] is False
+
+
 def test_a_holder_with_no_pid_or_already_gone_needs_no_stop(tmp_path):
     assert updater_runtime.own_probe_daemons(
         [{"pid": None, "name": "?"}, {"pid": 99, "name": "gone"}], tmp_path,

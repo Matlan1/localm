@@ -55,10 +55,16 @@ def test_runtime_deps_present_true_in_this_env():
 
 
 def test_console_main_entrypoints_import():
-    # The pyproject [project.scripts] targets must resolve to callables.
-    from localm.cli import console_main as localm_entry
-    from localm.plugins.coder.cli import console_main as coder_entry
-    assert callable(localm_entry) and callable(coder_entry)
+    # The console-scripts targets in pyproject must resolve to callables.
+    import importlib
+    import tomllib
+    from pathlib import Path
+    data = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    table = data["tool"]["hatch"]["metadata"]["hooks"]["custom"]["console-scripts"]
+    assert set(table) == {"localm", "localcoder"}
+    for target in table.values():
+        module, attr = target.split(":")
+        assert callable(getattr(importlib.import_module(module), attr))
 
 
 def test_bare_main_still_importable_for_in_process_callers():

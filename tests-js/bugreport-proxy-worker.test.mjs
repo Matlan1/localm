@@ -278,6 +278,8 @@ async function updateFor(worker, query, releases, { listed = releases, tagStatus
     if (expect === 200) {
       const legacy = !new URLSearchParams(query.replace(/^\?/, "")).get("client");
       assert.equal(body.legacy_ceiling, legacy ? "v0.3.2" : undefined);
+      const c = new URLSearchParams(query.replace(/^\?/, "")).get("client");
+      assert.equal(body.client_ceiling, c && /^v?0\.3\.([0-2]$|3(rc|a|b))/.test(c) ? "v0.3.3" : undefined);
     }
     return body.version;
   } finally {
@@ -292,11 +294,32 @@ const rel = (tag, day, extra = {}) => ({
 const RELEASES = [rel("v0.3.1", 1), rel("v0.3.2", 2), rel("v0.3.3", 3), rel("v0.4.0", 4),
   rel("llama-cuda-linux-b9999", 5, { prerelease: true }), rel("v0.4.1rc1", 6, { prerelease: true })];
 
-test("a client that names its version gets the newest release", async () => {
+test("a client from 0.3.3 on, or one that names no version, gets the newest release", async () => {
   const worker = await loadWorker();
-  assert.equal(await updateFor(worker, "?client=0.3.2", RELEASES), "v0.4.0");
+  assert.equal(await updateFor(worker, "?client=0.3.3", RELEASES), "v0.4.0");
+  assert.equal(await updateFor(worker, "?client=v0.3.3", RELEASES), "v0.4.0");
+  assert.equal(await updateFor(worker, "?client=0.3.10", RELEASES), "v0.4.0");
   assert.equal(await updateFor(worker, "?client=unknown", RELEASES), "v0.4.0");
-  assert.equal(await updateFor(worker, "?client=0.3.2&channel=prerelease", RELEASES), "v0.4.1rc1");
+  assert.equal(await updateFor(worker, "?client=0.3.3&channel=prerelease", RELEASES), "v0.4.1rc1");
+});
+
+test("a client older than 0.3.3 never gets a release above v0.3.3", async () => {
+  const worker = await loadWorker();
+  assert.equal(await updateFor(worker, "?client=0.3.2", RELEASES), "v0.3.3");
+  assert.equal(await updateFor(worker, "?client=v0.3.2", RELEASES), "v0.3.3");
+  assert.equal(await updateFor(worker, "?client=0.3.1", RELEASES), "v0.3.3");
+  assert.equal(await updateFor(worker, "?client=0.3.3rc1", RELEASES), "v0.3.3");
+  assert.equal(await updateFor(worker, "?client=0.3.2&channel=prerelease", RELEASES), "v0.3.3");
+});
+
+test("before v0.3.3 exists an older client gets the newest below it", async () => {
+  const worker = await loadWorker();
+  const early = [rel("v0.3.1", 1), rel("v0.3.2", 2)];
+  assert.equal(await updateFor(worker, "?client=0.3.2", early), "v0.3.2");
+});
+
+test("the ceiling for older clients is v0.3.3", () => {
+  assert.match(readFileSync(WORKER, "utf8"), /^const OLD_CLIENT_CEILING = "v0\.3\.3";$/m);
 });
 
 test("a legacy client (no client parameter) never gets a release above the ceiling", async () => {
@@ -323,7 +346,9 @@ test("a legacy client still gets the ceiling release when 30 newer releases hide
   const newer = Array.from({ length: 30 }, (_, i) => rel(`v0.4.${i}`, i + 3));
   const all = [rel("v0.3.1", 1), rel("v0.3.2", 2), ...newer];
   assert.equal(await updateFor(worker, "", all, { listed: newer }), "v0.3.2");
-  assert.equal(await updateFor(worker, "?client=0.3.2", all, { listed: newer }), "v0.4.29");
+  assert.equal(await updateFor(worker, "?client=0.3.3", all, { listed: newer }), "v0.4.29");
+  const withOld = [rel("v0.3.3", 2), ...newer];
+  assert.equal(await updateFor(worker, "?client=0.3.2", withOld, { listed: newer }), "v0.3.3");
 });
 
 test("a draft ceiling release is never offered", async () => {
