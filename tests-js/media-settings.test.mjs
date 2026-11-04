@@ -119,6 +119,47 @@ test("media config renders one independent subsection per plugin", async () => {
     "all three subsections are inside the grid");
 });
 
+test("an old stored dtype is shown, and choosing default is a change Save writes", async () => {
+  const options = ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"];
+  const media = { plugins: [{ name: "video", label: "Video", fields: [
+    { key: "float_type", widget: "select", label: "Model weight dtype", help: "",
+      value: "fp16", options: [...options, "fp16"], is_override: true },
+  ] }] };
+  const posts = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const method = opts.method || "GET";
+    if (url === "/v1/config/schema") {
+      return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    }
+    if (url === "/v1/media/config" && method === "GET") {
+      return { ok: true, status: 200, json: async () => media, text: async () => "" };
+    }
+    if (url.startsWith("/v1/media/config/") && method === "POST") {
+      posts.push({ name: url.split("/").pop(), body: JSON.parse(opts.body) });
+      return { ok: true, status: 200, text: async () => "", json: async () => ({
+        plugin: "video",
+        fields: [{ ...media.plugins[0].fields[0], value: "default", options }],
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const select = () => win.document.querySelector('[data-key="float_type"] select');
+  assert.equal(select().value, "fp16", "the page shows what is stored");
+
+  await win.saveMediaPlugin("video");
+  assert.deepEqual(posts, [], "an untouched old value is not sent");
+
+  select().value = "default";
+  await win.saveMediaPlugin("video");
+  assert.deepEqual(posts, [{ name: "video", body: { float_type: "default" } }]);
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(select().value, "default");
+  assert.deepEqual([...select().options].map((o) => o.value), options, "the old value is gone");
+});
+
 test("saving a media plugin POSTs only the changed fields", async () => {
   const posts = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(posts) });

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import struct
 import threading
@@ -35,11 +36,13 @@ import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from localm.image_gen import comfy
+from localm.media import comfy_client
 from localm.media.comfy_client import _comfy_output_root
 from localm.music_gen import comfy as music_comfy
 from localm.video_gen import comfy as video_comfy
@@ -102,6 +105,17 @@ class _ComfyStub(HTTPServer):
         self.file_ext = ".png"
         self.media_bytes = None        # override what the save node writes
         self.uploaded_names: list = []  # filename each upload was sent under
+        self.upload_reply_name = None  # a reply name other than the stored one
+        self.store_other_bytes = False  # an upload stores bytes other than those sent
+        self.prompts: list = []        # workflow of each POST /prompt
+        self.submit_mode = None        # "http_error" | "no_id" | "drop"
+        self.job_state = "finished"    # "finished" | "exec_error" | "no_output" | "running"
+        self.view_fails = False        # force GET /view to fail
+        self.object_info = None        # GET /object_info reply, None answers 404
+        self.queue_running: list = []  # prompt ids GET /queue lists as running
+        self.queue_unreadable = False  # force GET /queue to fail
+        self.cancel_refused = False    # force the cancel and interrupt routes to fail
+        self.cancel_calls: list = []   # prompt ids of each cancel request
         self._counter = 0
 
     @property
@@ -133,12 +147,26 @@ class _Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path)
         if p.path == "/system_stats":
             return self._json(200, {"system": {}})
+        if p.path == "/object_info" and s.object_info is not None:
+            return self._json(200, s.object_info)
+        if p.path == "/queue":
+            if s.queue_unreadable:
+                return self._json(500, {"error": "boom"})
+            return self._json(200, {"queue_running": [[0, pid] for pid in s.queue_running],
+                                    "queue_pending": []})
         if p.path.startswith("/history/"):
             pid = p.path.rsplit("/", 1)[-1]
             if pid in s.history:
-                return self._json(200, {pid: {"outputs": s.history[pid]}})
+                entry = {"outputs": s.history[pid]}
+                if s.job_state == "exec_error":
+                    entry["status"] = {"status_str": "error", "messages": [
+                        ["execution_error", {"node_type": "VAEDecode",
+                                             "exception_message": "out of memory"}]]}
+                return self._json(200, {pid: entry})
             return self._json(200, {})
         if p.path == "/view":
+            if s.view_fails:
+                return self._json(500, {"error": "boom"})
             q = parse_qs(p.query)
             fn = q.get("filename", [""])[0]
             sub = q.get("subfolder", [""])[0]
@@ -156,8 +184,24 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
         if p.path == "/prompt":
+            s.prompts.append(json.loads(body)["prompt"])
+            if s.submit_mode == "http_error":
+                return self._json(400, {"error": {"type": "invalid_prompt",
+                                                  "message": "Cannot execute because a node is missing",
+                                                  "details": ""}, "node_errors": {}})
+            if s.submit_mode == "no_id":
+                return self._json(200, {})
+            if s.submit_mode == "drop":
+                self.close_connection = True
+                return None
             s._counter += 1
             pid = f"pid-{s._counter}"
+            if s.job_state == "running":
+                s.queue_running.append(pid)
+                return self._json(200, {"prompt_id": pid})
+            if s.job_state in ("exec_error", "no_output"):
+                s.history[pid] = {}
+                return self._json(200, {"prompt_id": pid})
             fn = f"ComfyUI_{s._counter:05d}_{s.file_ext}"
             s.output_dir.mkdir(parents=True, exist_ok=True)
             # Real container bytes for every kind, so each generator's metadata
@@ -174,8 +218,27 @@ class _Handler(BaseHTTPRequestHandler):
             sent = re.search(rb'filename="([^"]+)"', body)
             name = sent.group(1).decode() if sent else "uploaded_input.png"
             s.uploaded_names.append(name)
-            (s.input_dir / name).write_bytes(b"INPUTDATA")
-            return self._json(200, {"name": name})
+            data = re.search(rb"\r\n\r\n(.*)\r\n--[^\r\n]+--\r\n$", body, re.S).group(1)
+            if s.store_other_bytes:
+                data = b"other bytes"
+            # A clash takes ComfyUI's name: same bytes reuse the file, others get " (n)".
+            stem, ext = os.path.splitext(name)
+            n = 0
+            while (s.input_dir / name).exists() and (s.input_dir / name).read_bytes() != data:
+                n += 1
+                name = f"{stem} ({n}){ext}"
+            (s.input_dir / name).write_bytes(data)
+            return self._json(200, {"name": s.upload_reply_name or name})
+        if p.path.startswith("/api/jobs/") and p.path.endswith("/cancel"):
+            pid = p.path.split("/")[3]
+            s.cancel_calls.append(pid)
+            if s.cancel_refused:
+                return self._json(500, {"error": "boom"})
+            return self._json(200, {"cancelled": pid in s.queue_running})
+        if p.path == "/interrupt":
+            return self._json(500 if s.cancel_refused else 200, {})
+        if p.path == "/queue":
+            return self._json(200, {})
         if p.path == "/history":
             if s.fail_history_clear:
                 return self._json(500, {"error": "boom"})
@@ -240,7 +303,6 @@ def test_contain_default_keeps_comfy_copy_and_history(stub):
 def test_contain_with_dir_clears_history_and_deletes_copies(stub):
     fn = "ComfyUI_99999_.png"
     (stub.output_dir / fn).write_bytes(b"X")
-    (stub.input_dir / "src.png").write_bytes(b"Y")
     stub.history["pidX"] = {"9": {"images": [
         {"filename": fn, "subfolder": "", "type": "output"}]}}
 
@@ -248,14 +310,12 @@ def test_contain_with_dir_clears_history_and_deletes_copies(stub):
         stub.base_url, "pidX",
         {"filename": fn, "subfolder": "", "type": "output"},
         comfy_output_dir=str(stub.output_dir),
-        uploaded_input="src.png",
         output_sha256=_X_SHA256,
         delete_outputs=True,
     )
 
     assert warn == ""                                  # fully contained
     assert not (stub.output_dir / fn).exists()         # ComfyUI copy deleted
-    assert not (stub.input_dir / "src.png").exists()   # uploaded input deleted
     assert "pidX" in stub.history_deleted              # /history entry cleared
     assert "pidX" not in stub.history
 
@@ -369,17 +429,12 @@ class TestContainmentRejectsOutOfBoundsNames:
         if uploaded == self.ABS:
             uploaded = str(victim)
 
-        warn = comfy.contain_comfy_artifacts(
-            stub.base_url, "pidEsc2",
-            {"filename": "ok.png", "subfolder": "", "type": "output"},
-            comfy_output_dir=str(stub.output_dir),
-            uploaded_input=uploaded,
-            delete_outputs=True,
-        )
+        warn = comfy_client.remove_uploaded_input(
+            stub.base_url, uploaded, comfy_output_dir=str(stub.output_dir))
 
         assert victim.exists(), f"containment escaped via uploaded_input: {uploaded}"
         assert victim.read_text(encoding="utf-8") == "do not delete me"
-        assert "WARNING" in warn, "a refused name must be surfaced, not skipped"
+        assert "was not removed" in warn, "a refused name must be surfaced, not skipped"
 
     def test_legitimate_nesting_still_deletes(self, stub):
         """`subfolder` is a real ComfyUI feature, so confinement permits depth
@@ -937,8 +992,338 @@ def test_input_copy_cleanup_cannot_reach_a_users_same_named_image(stub, tmp_path
 
 def test_input_copy_warns_when_the_input_folder_cannot_be_located(stub, monkeypatch):
     monkeypatch.setattr("localm.config.load_config", lambda: {})
-    warn = comfy.contain_comfy_artifacts(
-        stub.base_url, "pidInp",
-        {"filename": "x.png", "subfolder": "", "type": "temp"},
-        uploaded_input="localm-input-abc.png", delete_outputs=True)
+    warn = comfy_client.remove_uploaded_input(
+        stub.base_url, f"localm-input-{'a' * 32}.png")
     assert "input image remains" in warn
+
+
+# --------------------------------------------------------------------------- #
+#  The uploaded source image, on every way out of a job                        #
+# --------------------------------------------------------------------------- #
+
+def _upload_name(data: bytes, ext: str = ".png") -> str:
+    return f"localm-input-{hashlib.sha256(data).hexdigest()[:32]}{ext}"
+
+
+def _input_files(stub) -> list:
+    return sorted(p.name for p in stub.input_dir.iterdir())
+
+
+def _generate(gen, stub, tmp_path, monkeypatch, **kwargs):
+    """Run the real generator for *gen* on an image to image job against the stub."""
+    source = tmp_path / "photo.png"
+    source.write_bytes(_minimal_png())
+    workdir = str(stub.output_dir.parent)
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    kwargs.setdefault("delete_outputs", True)
+    if gen == "image":
+        monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        return comfy.generate_image(
+            "a cat", tmp_path / "saved" / "img.png", api_url=stub.base_url,
+            input_image=source, denoise=0.5, workdir=workdir, write_sidecar=False, **kwargs)
+    monkeypatch.setattr(video_comfy, "workflow_path", lambda: video_comfy._WORKFLOW_PATH)
+    stub.output_kind = "videos"
+    stub.file_ext = ".mp4"
+    return video_comfy.generate_video(
+        "a fox", tmp_path / "saved" / "clip.mp4", api_url=stub.base_url, seconds=1.0,
+        input_image=source, workdir=workdir, write_sidecar=False, **kwargs)
+
+
+def _cancelled(stub):
+    stub.job_state = "running"
+    return {"cancel_check": lambda: True}
+
+
+def _timed_out(stub):
+    stub.job_state = "running"
+    return {"max_poll_seconds": 0}
+
+
+def _set(**attrs):
+    def apply(stub):
+        for key, value in attrs.items():
+            setattr(stub, key, value)
+        return {}
+    return apply
+
+
+_MISSING_VAE = {"VAELoader": {"input": {"required": {"vae_name": [["other.safetensors"], {}]}}}}
+
+_FAILED_EXITS = {
+    "cancel": (_cancelled, "cancelled"),
+    "timeout": (_timed_out, "timed out"),
+    "exec_error": (_set(job_state="exec_error"), "out of memory"),
+    "preflight": (_set(object_info=_MISSING_VAE), "not installed"),
+    "submit_http_error": (_set(submit_mode="http_error"), "HTTP 400"),
+    "submit_no_prompt_id": (_set(submit_mode="no_id"), "no prompt_id"),
+    "submit_dropped": (_set(submit_mode="drop"), "Error queuing"),
+    "no_output": (_set(job_state="no_output"), "no "),
+    "failed_fetch": (_set(view_fails=True), "Failed to download"),
+}
+_EXIT_IDS = list(_FAILED_EXITS)
+_GENS = ["image", "video"]
+
+
+@pytest.mark.parametrize("gen", _GENS)
+@pytest.mark.parametrize("exit_path", _EXIT_IDS)
+def test_a_failed_job_removes_its_input_copy(stub, tmp_path, monkeypatch, gen, exit_path):
+    prepare, says = _FAILED_EXITS[exit_path]
+    kwargs = prepare(stub)
+    users_file = stub.input_dir / "family.png"
+    users_file.write_bytes(b"the user's own photo")
+
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch, **kwargs)
+
+    assert len(stub.uploaded_names) == 1, "the job never uploaded, so this proves nothing"
+    assert not ok
+    assert _input_files(stub) == ["family.png"], "the input copy stayed"
+    assert users_file.read_bytes() == b"the user's own photo"
+    assert says in msg
+    assert "WARNING" not in msg
+
+
+@pytest.mark.parametrize("gen", _GENS)
+@pytest.mark.parametrize("exit_path", _EXIT_IDS)
+def test_a_failed_removal_is_in_the_failed_jobs_message(stub, tmp_path, monkeypatch, gen, exit_path):
+    prepare, says = _FAILED_EXITS[exit_path]
+    kwargs = prepare(stub)
+    stub.store_other_bytes = True
+
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch, **kwargs)
+
+    assert not ok
+    assert len(_input_files(stub)) == 1
+    assert says in msg
+    assert "WARNING:" in msg and "input image" in msg and "different content" in msg
+
+
+@pytest.mark.parametrize("gen", _GENS)
+@pytest.mark.parametrize("exit_path", _EXIT_IDS)
+def test_without_delete_outputs_a_failed_job_keeps_its_input_copy(
+        stub, tmp_path, monkeypatch, gen, exit_path):
+    prepare, _says = _FAILED_EXITS[exit_path]
+    kwargs = prepare(stub)
+
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch, delete_outputs=False, **kwargs)
+
+    assert not ok
+    assert _input_files(stub) == stub.uploaded_names
+    assert "WARNING" not in msg
+
+
+@pytest.mark.parametrize("gen", _GENS)
+def test_a_url_error_at_submit_removes_the_input_copy(stub, tmp_path, monkeypatch, gen):
+    module = comfy if gen == "image" else video_comfy
+    monkeypatch.setattr(module, "comfy_submit_prompt",
+                        lambda *_a, **_k: (comfy.SUBMIT_URL_ERROR, URLError("refused")))
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch)
+    assert stub.uploaded_names
+    assert not ok and "refused" in msg
+    assert _input_files(stub) == []
+
+
+@pytest.mark.parametrize("gen", _GENS)
+def test_a_successful_job_removes_its_input_copy_once(stub, tmp_path, monkeypatch, gen):
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch)
+    assert ok, msg
+    assert stub.uploaded_names
+    assert _input_files(stub) == []
+    assert "WARNING" not in msg, "the copy was removed, then reported missing"
+
+
+@pytest.mark.parametrize("gen", _GENS)
+def test_a_successful_job_names_an_input_copy_it_could_not_remove(stub, tmp_path, monkeypatch, gen):
+    stub.store_other_bytes = True
+    ok, msg = _generate(gen, stub, tmp_path, monkeypatch)
+    assert ok, msg
+    assert len(_input_files(stub)) == 1
+    assert "WARNING:" in msg and "different content" in msg
+
+
+@pytest.mark.parametrize("gen", _GENS)
+@pytest.mark.parametrize("prepare", [_cancelled, _timed_out], ids=["cancel", "timeout"])
+class TestAnUnfinishedJob:
+    def test_still_listed_is_cancelled_again_then_the_copy_goes(
+            self, stub, tmp_path, monkeypatch, gen, prepare):
+        ok, msg = _generate(gen, stub, tmp_path, monkeypatch, **prepare(stub))
+        assert not ok
+        assert stub.queue_running, "the job left the queue, so this proves nothing"
+        assert len(stub.cancel_calls) == 2
+        assert _input_files(stub) == []
+        assert "WARNING" not in msg
+
+    def test_a_refused_cancel_keeps_the_copy_and_says_so(
+            self, stub, tmp_path, monkeypatch, gen, prepare):
+        kwargs = prepare(stub)
+        stub.cancel_refused = True
+        ok, msg = _generate(gen, stub, tmp_path, monkeypatch, **kwargs)
+        assert not ok
+        assert _input_files(stub) == stub.uploaded_names, "a running job lost its input"
+        assert "WARNING: ComfyUI did not stop this job" in msg
+
+    def test_an_unreadable_queue_counts_as_stopped(
+            self, stub, tmp_path, monkeypatch, gen, prepare):
+        kwargs = prepare(stub)
+        stub.queue_unreadable = True
+        stub.cancel_refused = True
+        ok, msg = _generate(gen, stub, tmp_path, monkeypatch, **kwargs)
+        assert not ok
+        assert _input_files(stub) == []
+        assert "WARNING" not in msg
+
+
+@pytest.mark.parametrize("gen", _GENS)
+class TestAnExceptionInsideTheJob:
+    @staticmethod
+    def _boom():
+        raise OSError("boom")
+
+    def test_the_copy_goes_and_the_exception_stays(self, stub, tmp_path, monkeypatch, gen):
+        stub.job_state = "running"
+        with pytest.raises(OSError, match="boom") as caught:
+            _generate(gen, stub, tmp_path, monkeypatch, cancel_check=self._boom)
+        assert _input_files(stub) == []
+        assert stub.cancel_calls, "a job left running was not stopped"
+        assert type(caught.value) is OSError
+
+    def test_a_failed_removal_is_in_the_exception(self, stub, tmp_path, monkeypatch, gen):
+        stub.job_state = "running"
+        stub.store_other_bytes = True
+        with pytest.raises(RuntimeError) as caught:
+            _generate(gen, stub, tmp_path, monkeypatch, cancel_check=self._boom)
+        assert "boom" in str(caught.value) and "different content" in str(caught.value)
+        assert isinstance(caught.value.__cause__, OSError)
+
+    def test_keyboard_interrupt_is_not_turned_into_an_error(self, stub, tmp_path, monkeypatch, gen):
+        def interrupted():
+            raise KeyboardInterrupt
+        stub.job_state = "running"
+        stub.store_other_bytes = True
+        with pytest.raises(KeyboardInterrupt):
+            _generate(gen, stub, tmp_path, monkeypatch, cancel_check=interrupted)
+
+
+def test_a_failed_unlink_of_the_input_copy_is_named(stub, tmp_path, monkeypatch):
+    real_unlink = Path.unlink
+
+    def refuse(self, *a, **k):
+        if self.name.startswith("localm-input-"):
+            raise PermissionError("locked")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    stub.job_state = "exec_error"
+    ok, msg = _generate("image", stub, tmp_path, monkeypatch)
+    assert not ok
+    assert len(_input_files(stub)) == 1
+    assert "input image remains" in msg and "locked" in msg
+
+
+def test_a_removal_that_raises_cannot_lose_the_jobs_message(stub, tmp_path, monkeypatch):
+    def broken(*_a, **_k):
+        raise TypeError("hostile queue reply")
+
+    monkeypatch.setattr(comfy_client, "_comfy_job_stopped", broken)
+    ok, msg = _generate("image", stub, tmp_path, monkeypatch, **_timed_out(stub))
+    assert not ok
+    assert "timed out" in msg
+    assert "WARNING:" in msg and "hostile queue reply" in msg
+
+
+def test_the_uploaded_name_reaches_the_load_image_node(stub, tmp_path, monkeypatch):
+    ok, msg = _generate("image", stub, tmp_path, monkeypatch)
+    assert ok, msg
+    nodes = [n for n in stub.prompts[0].values() if n["class_type"] == "LoadImage"]
+    assert [n["inputs"]["image"] for n in nodes] == stub.uploaded_names
+
+
+def test_a_refused_image_workflow_uploads_nothing(stub, tmp_path, monkeypatch):
+    """Every failure the image builder can return comes before its upload."""
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    source = tmp_path / "photo.png"
+    source.write_bytes(_minimal_png())
+    ok, msg = comfy.generate_image(
+        "a cat", tmp_path / "img.png", api_url=stub.base_url, input_image=source,
+        lora_name="../bad", delete_outputs=True, write_sidecar=False)
+    assert not ok and "Invalid LoRA name" in msg
+    assert stub.uploaded_names == []
+
+
+def test_a_workflow_the_image_builder_cannot_shape_uploads_nothing(stub, tmp_path, monkeypatch):
+    workflow = tmp_path / "custom.json"
+    workflow.write_text(json.dumps({"6": {"class_type": "CLIPTextEncode",
+                                          "inputs": {"text": ""}}}), encoding="utf-8")
+    monkeypatch.setattr(comfy, "workflow_path", lambda: workflow)
+    source = tmp_path / "photo.png"
+    source.write_bytes(_minimal_png())
+    with pytest.raises(KeyError):
+        comfy.generate_image(
+            "a cat", tmp_path / "img.png", api_url=stub.base_url, input_image=source,
+            delete_outputs=True, write_sidecar=False)
+    assert stub.uploaded_names == []
+
+
+# --------------------------------------------------------------------------- #
+#  What a ComfyUI reply can make localm delete                                 #
+# --------------------------------------------------------------------------- #
+
+def test_a_hostile_upload_reply_cannot_delete_a_users_file(stub, tmp_path, monkeypatch):
+    victim = stub.input_dir / "family.png"
+    victim.write_bytes(b"the user's own photo")
+    stub.upload_reply_name = "family.png"
+
+    ok, msg = _generate("image", stub, tmp_path, monkeypatch)
+
+    assert ok, msg
+    assert victim.read_bytes() == b"the user's own photo", "the reply named a file and it went"
+    assert "WARNING:" in msg and "'family.png'" in msg and "left alone" in msg
+
+
+def test_a_reply_with_localms_form_cannot_delete_other_content(stub):
+    name = f"localm-input-{'a' * 32}.png"
+    other = stub.input_dir / name
+    other.write_bytes(b"the user's own photo")
+    warn = comfy_client.remove_uploaded_input(
+        stub.base_url, name, comfy_output_dir=str(stub.output_dir))
+    assert other.read_bytes() == b"the user's own photo"
+    assert "different content" in warn
+
+
+@pytest.mark.parametrize("name", [
+    "family.png",
+    "localm-input-abc.png",
+    f"localm-input-{'a' * 32}family.png",
+    f"sub/localm-input-{'a' * 32}.png",
+    12345,
+])
+def test_a_reply_outside_the_form_localm_sends_is_refused(stub, name):
+    target = stub.input_dir / str(name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"data")
+    warn = comfy_client.remove_uploaded_input(
+        stub.base_url, name, comfy_output_dir=str(stub.output_dir))
+    assert target.exists()
+    assert "not a name localm sent" in warn
+
+
+def test_comfyuis_clash_rename_removes_only_our_copy(stub, tmp_path, monkeypatch):
+    """A file already holds the name localm sends, with other content: ComfyUI
+    stores the upload as "<stem> (1)<ext>" and answers with that name."""
+    occupant = stub.input_dir / _upload_name(_minimal_png())
+    occupant.write_bytes(b"something else")
+
+    ok, msg = _generate("image", stub, tmp_path, monkeypatch)
+
+    assert ok, msg
+    assert _input_files(stub) == [occupant.name], "ours stayed, or the occupant went"
+    assert occupant.read_bytes() == b"something else"
+    assert "WARNING" not in msg
+
+
+def test_a_directory_with_the_uploaded_name_is_reported(stub):
+    name = _upload_name(b"x")
+    (stub.input_dir / name).mkdir()
+    warn = comfy_client.remove_uploaded_input(
+        stub.base_url, name, comfy_output_dir=str(stub.output_dir))
+    assert (stub.input_dir / name).is_dir()
+    assert "may remain" in warn

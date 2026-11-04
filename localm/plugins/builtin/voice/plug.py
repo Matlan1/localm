@@ -46,8 +46,10 @@ async def voice_status(request: Request):
     the download (``netpolicy.download_refusal``), and the caller could
     authorize it - open mode, or a key granting config:write, the same scope
     that governs net_mode itself. ``download_blocked`` says why not when the
-    model is missing and the package is there, else it is "". The flag only
-    drives UI; POST /api/voice/model/download re-checks all of it server-side."""
+    model is missing and the package is there, else it is "". When the mic is
+    unavailable for that cause, ``reason`` is the same text, except under
+    net_mode=off, which keeps its own. The flag only drives UI; POST
+    /api/voice/model/download re-checks all of it server-side."""
     import importlib.util
     from localm.voice import stt_available, stt_model_cached
     ok, reason = stt_available()
@@ -58,13 +60,14 @@ async def voice_status(request: Request):
     if have_pkg and not cached:
         import localm.inference.http_server as _hs
         from localm import scopes
-        from localm.netpolicy import download_refusal
+        from localm.netpolicy import download_refusal, network_mode
         from localm.voice import _STT_HUB_ENDPOINT
         refusal = await asyncio.get_running_loop().run_in_executor(
             get_plugin_executor(), download_refusal, _STT_HUB_ENDPOINT)
         if refusal:
             download_blocked = refusal
-            if ok:
+            # stt_available's net_mode=off text offers no download, so it stays.
+            if ok or network_mode() != "off":
                 ok, reason = False, refusal
         elif _hs.caller_grants(request, scopes.CONFIG_WRITE):
             can_download = True
@@ -72,6 +75,8 @@ async def voice_status(request: Request):
             download_blocked = ("Downloading the speech model needs the config:write "
                                 "scope (the same permission that governs the network "
                                 "policy).")
+            if not ok:
+                reason = download_blocked
     return {"available": ok, "reason": reason,
             "model_cached": cached, "model": model_name,
             "can_download": can_download, "download_blocked": download_blocked}
