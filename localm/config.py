@@ -1792,6 +1792,7 @@ def load_config_checked() -> tuple:
     produces (see _read_json_checked). A caller that needs to tell "no config
     yet" apart from "a config exists but is corrupt" (e.g. bug-report
     diagnostics) uses this instead of load_config()."""
+    from localm import model_ids
     ensure_dirs()
     # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
     # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
@@ -1800,7 +1801,9 @@ def load_config_checked() -> tuple:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored, read_ok = _read_json_checked(CONFIG_FILE, {})
+    refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
     _merge_stored_config(cfg, stored)
+    model_ids.config_to_current(cfg, refs, model_index())
     # gui_proxy_remote_images is off/ask/on but config.json may hold a boolean.
     # There is no migration step: this normalises on every read, so a stored
     # `true` reads as "on" for the route, the schema, the CLI and the bug report
@@ -1868,6 +1871,15 @@ def _user_delta(cfg: dict) -> dict:
             if k not in DEFAULT_CONFIG or v != DEFAULT_CONFIG[k]}
 
 
+def _config_for_disk(cfg: dict) -> dict:
+    """The dict config.json stores for *cfg*: its user-set delta (_user_delta)
+    plus the ``model_refs`` of the model names in that delta."""
+    from localm import model_ids
+    delta = _user_delta(cfg)
+    model_ids.attach_refs(delta, model_ids.config_names(delta), model_index())
+    return delta
+
+
 def save_config(cfg: dict) -> None:
     """Persist *cfg* atomically, writing ONLY the user-set delta.
 
@@ -1878,7 +1890,7 @@ def save_config(cfg: dict) -> None:
     exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
-        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
+        _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
 
 
 # update_config()/update_registry() are read-modify-write: read the file, let a
@@ -2159,6 +2171,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     loaded config dict (defaults merged) and edits it in place; the result is
     persisted with a single atomic write. Use this instead of a bare
     load_config()/save_config() pair wherever a lost update would matter."""
+    from localm import model_ids
     ensure_dirs()
     # LOCK ORDER: _rmw_lock -> config.json.lock -> _io_lock. See
     # test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock.
@@ -2182,32 +2195,81 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
                 f"{CONFIG_FILE.name} exists but could not be read, so saving "
                 f"would replace every setting in it with defaults; refused. "
                 f"Fix or remove {CONFIG_FILE.name} (a .bak may hold a good copy).")
+        refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
         _merge_stored_config(cfg, stored)
+        model_ids.config_to_current(cfg, refs, model_index())
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
-        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
+        _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
         return cfg
 
 
+_model_index_cache: Optional[tuple] = None
+
+
+def model_index():
+    """The :class:`~localm.model_ids.ModelIndex` of registry.json as it is on
+    disk now. Cached on the file's path, mtime and size, so an unchanged registry
+    costs one stat. Never raises and never writes; an absent or unreadable registry
+    gives an empty index."""
+    from localm import model_ids
+    global _model_index_cache
+    path = REGISTRY_FILE
+    try:
+        st = path.stat()
+    except OSError:
+        return model_ids.EMPTY_INDEX
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _model_index_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    with _io_lock:
+        reg = _read_json(path, {})
+    index = model_ids.build_index(reg)
+    _model_index_cache = (key, index)
+    return index
+
+
 def load_registry() -> dict:
+    """The registry, each entry's ``base`` holding its base model's current name.
+    Entries without their own ID get one on this read and it is written back. A
+    failed write-back is logged and retried by the next read; the entries are then
+    returned without an ID."""
+    from localm import model_ids
     ensure_dirs()
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-    return reg if isinstance(reg, dict) else {}
+    if not isinstance(reg, dict):
+        return {}
+    if model_ids.needs_ids(reg):
+        try:
+            return update_registry(lambda _r: None)
+        except (ConfigUnreadable, ConfigLockTimeout, OSError) as e:
+            print(f"[localm] could not give models their IDs yet ({e}); "
+                  "retrying on the next read.", file=sys.stderr)
+    model_ids.follow_bases(reg, model_ids.build_index(reg))
+    return reg
 
 
 def peek_registry() -> dict:
     """The registry as ``load_registry`` returns it, read without creating the
-    data dir or the models dir. ``{}`` when the file is absent, unreadable or
-    not a JSON object."""
+    data dir or the models dir and without writing anything, so an entry may have
+    no ID yet. ``{}`` when the file is absent, unreadable or not a JSON object."""
+    from localm import model_ids
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-    return reg if isinstance(reg, dict) else {}
+    if not isinstance(reg, dict):
+        return {}
+    model_ids.follow_bases(reg, model_ids.build_index(reg))
+    return reg
 
 
 def save_registry(reg: dict) -> None:
+    from localm import model_ids
     ensure_dirs()
+    model_ids.ensure_ids(reg)
+    model_ids.follow_bases(reg, model_ids.build_index(reg))
     with _io_lock:
         _atomic_write_json(REGISTRY_FILE, reg)
 
@@ -2243,6 +2305,7 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     update would matter. (save_registry() itself remains a blind overwrite -
     last-writer-wins by design, not a read-modify-write, so it needs no lock
     beyond the atomic write it already has.)"""
+    from localm import model_ids
     ensure_dirs()
     # LOCK ORDER: _rmw_lock -> registry.json.lock -> _io_lock. See
     # test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock.
@@ -2260,7 +2323,13 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
                 f"remove {REGISTRY_FILE.name} (a .bak may hold a good copy).")
         if not isinstance(reg, dict):
             reg = {}
+        model_ids.ensure_ids(reg)
+        model_ids.follow_bases(reg, model_ids.build_index(reg))
+        previous = {name: {k: entry.get(k) for k in ("id", model_ids.FORMER_KEY)}
+                    for name, entry in reg.items() if isinstance(entry, dict)}
         mutator(reg)
+        model_ids.ensure_ids(reg, previous)
+        model_ids.follow_bases(reg, model_ids.build_index(reg))
         _atomic_write_json(REGISTRY_FILE, reg)
         return reg
 

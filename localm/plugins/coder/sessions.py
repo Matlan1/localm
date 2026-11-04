@@ -783,6 +783,23 @@ class CoderSession:
         self._push({"type": "info", "text": f"Model switched to {model}"})
         return True
 
+    def follow_model_rename(self, old_name: str, new_name: str) -> None:
+        """Keep using the same model after it was renamed: the next request names
+        it *new_name*. Nothing else about the session changes. No effect when this
+        session's model is not *old_name*."""
+        if self.model != old_name:
+            return
+        backend = self.agent.backend
+        set_model = getattr(backend, "set_model", None)
+        if set_model is not None:
+            set_model(new_name)
+        elif hasattr(backend, "_model_id"):
+            backend._model_id = new_name
+        self.agent._model_name = new_name
+        if isinstance(self.backend_info, dict):
+            self.backend_info["model"] = new_name
+        self.model = new_name
+
     def audit_log_path(self) -> Optional[Path]:
         """Path of the JSONL audit log (log/full modes), or None in privacy mode."""
         return getattr(self.agent._audit, "path", None)
@@ -1035,6 +1052,13 @@ class SessionManager:
             self._sessions[session.id] = session
         return session
 
+    def follow_model_rename(self, old_name: str, new_name: str) -> None:
+        """Tell every live session that a model was renamed."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            session.follow_model_rename(old_name, new_name)
+
     def get(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:
             return self._sessions.get(session_id)
@@ -1253,3 +1277,12 @@ def close_all_for_exit(timeout_s: Optional[float] = None) -> int:
         from localm.debuglog import logger
         logger.warning("coder: closing sessions at exit failed", exc_info=True)
     return closed[0]
+
+
+def follow_model_rename(old_name: str, new_name: str) -> None:
+    """Tell every live session of every manager in this process that a model was
+    renamed."""
+    with _live_managers_lock:
+        managers = list(_live_managers)
+    for manager in managers:
+        manager.follow_model_rename(old_name, new_name)

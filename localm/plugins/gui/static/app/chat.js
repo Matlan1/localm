@@ -521,7 +521,7 @@ export async function compactConversation(conv, signal = null) {
 
   // The summary is written by the model that answers the conversation: its
   // pinned model, pinned, else the selected model as a preference.
-  const pinnedModel = conv.pinnedModel || "";
+  const pinnedModel = pinnedModelName(conv);
   let summary = earlier;
   // A placeholder assistant row shows "Compacting conversation..." until the
   // summary requests settle.
@@ -1033,7 +1033,7 @@ export function pushConversation(conv) {
                                updated_at: conv.updated_at,
                                pinned: !!conv.pinned,
                                folder: conv.folder || null,
-                               pinned_model: conv.pinnedModel || null,
+                               pinned_model: pinnedModelName(conv) || null,
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
@@ -1154,6 +1154,7 @@ export async function hydrateConversation(conv) {
     if (data.title != null) conv.title = data.title;
     conv.pinned = !!data.pinned;
     conv.folder = data.folder || null;
+    delete conv.pinnedModelId;
     if (data.pinned_model) conv.pinnedModel = data.pinned_model;
     else delete conv.pinnedModel;
     migrateConversation(conv);
@@ -1248,6 +1249,23 @@ export function currentConv() {
   return chat.conversations.find((c) => c.id === chat.activeId) || null;
 }
 
+/** The current name of the model *conv* is pinned to, "" when it is not pinned.
+ *  Finds the model by its stable id, then by the stored name, then by a name the
+ *  model used to have, and records what it found on *conv*. A pin no installed
+ *  model matches keeps its stored name, and the server refuses it by that name. */
+export function pinnedModelName(conv) {
+  const pinned = conv && conv.pinnedModel;
+  if (!pinned) return "";
+  const models = (modelCache && modelCache.models) || [];
+  const row = (conv.pinnedModelId && models.find((m) => m.model_id === conv.pinnedModelId))
+    || models.find((m) => m.name === pinned)
+    || models.find((m) => (m.former_names || []).includes(pinned));
+  if (!row) return pinned;
+  conv.pinnedModel = row.name;
+  if (row.model_id) conv.pinnedModelId = row.model_id;
+  return row.name;
+}
+
 /** Reflects *conv*'s pinned model in the drawer's pin checkbox and its label:
  *  checked and naming the pinned model when there is one, otherwise unchecked
  *  and naming the model selected in the sidebar. */
@@ -1255,7 +1273,7 @@ export function syncPinModelToggle(conv) {
   const box = $("p-pin-model");
   const label = $("p-pin-model-name");
   if (!box) return;
-  const pinned = conv && conv.pinnedModel;
+  const pinned = pinnedModelName(conv);
   box.checked = !!pinned;
   if (label) label.textContent = pinned || modelSelect.value || modelCache.active || "";
   const note = $("pin-mismatch");
@@ -1274,8 +1292,10 @@ export function setConversationPin(on) {
   const conv = currentConv();
   if (!conv) return;
   const model = modelSelect.value || modelCache.active;
+  delete conv.pinnedModelId;
   if (on && model) conv.pinnedModel = model;
   else delete conv.pinnedModel;
+  pinnedModelName(conv);
   saveConversations(conv);
   syncPinModelToggle(conv);
 }
