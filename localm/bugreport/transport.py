@@ -140,6 +140,27 @@ def _classify_url_error(exc) -> tuple:
             "The report could not be sent for an unexpected reason.")
 
 
+def _says_not_filed(text) -> bool:
+    """True when a proxy reply body is JSON carrying ``"filed": false``."""
+    import json as _json
+    try:
+        reply = _json.loads(text)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return isinstance(reply, dict) and reply.get("filed") is False
+
+
+def _not_filed_error(status) -> LocalmError:
+    """The failure for a report the proxy received and did not file, stage ``not_filed``."""
+    return LocalmError(
+        "the bug-report server did not file the report",
+        reason=f"HTTP {status}: not filed",
+        stage="not_filed",
+        hint=("The bug-report server received the report but did not file it, "
+              "because it is missing the sections localm writes into every report. "
+              f"Send the saved report by email to {MAINTAINER_EMAIL} instead."))
+
+
 def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   token: Optional[str] = None, timeout: float = 15.0,
                   opener=None) -> dict:
@@ -219,6 +240,8 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                     raise RateLimitedError(
                         _retry_after_from(getattr(e, "headers", None), detail),
                         reason=detail) from None
+                if _says_not_filed(detail):
+                    raise _not_filed_error(e.code) from None
                 raise LocalmError(
                     "the bug-report server rejected the upload",
                     reason=f"HTTP {e.code}: {detail}".strip(),
@@ -236,6 +259,8 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     if int(status) == 429:
         raise RateLimitedError(_retry_after_from(None, raw), reason=str(raw)[:300])
     if not (200 <= int(status) < 300):
+        if _says_not_filed(raw):
+            raise _not_filed_error(status)
         raise LocalmError(
             "the bug-report server rejected the upload",
             reason=f"HTTP {status}: {raw[:300]}".strip(),
@@ -247,13 +272,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     except (ValueError, RecursionError):
         return {"raw": raw[:300]}
     if isinstance(result, dict) and result.get("filed") is False:
-        raise LocalmError(
-            "the bug-report server did not file the report",
-            reason=f"HTTP {status}: not filed",
-            stage="not_filed",
-            hint=("The bug-report server received the report but did not file it, "
-                  "because it is missing the sections localm writes into every report. "
-                  f"Send the saved report by email to {MAINTAINER_EMAIL} instead."))
+        raise _not_filed_error(status)
     if isinstance(result, dict) and result.get("number") is not None:
         from localm import issue_tracker
         issue_tracker.record_filed(result["number"], title)
