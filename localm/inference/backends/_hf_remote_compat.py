@@ -4,7 +4,9 @@
 Ouro (``model_type`` ``ouro``) ships ``modeling_ouro.py`` written for transformers
 4.55. On 5.x it fails three ways: the config has no ``pad_token_id``, the rope
 table has no ``"default"`` entry, and ``create_causal_mask`` takes ``inputs_embeds``
-and no ``cache_position``. :func:`for_model` returns a :class:`RemoteCodeCompat`
+and no ``cache_position``. The Thinking checkpoints add a fourth: their cache class
+overrides ``get_mask_sizes`` for a ``cache_position`` tensor, and transformers 5.x
+passes the query length as an int. :func:`for_model` returns a :class:`RemoteCodeCompat`
 that closes those, for that ``model_type`` only and only while the owner has
 turned ``hf_trust_remote_code`` on; it returns None otherwise.
 
@@ -84,6 +86,31 @@ def adapt_mask_function(fn):
     return adapted
 
 
+def adapt_cache_class(cls) -> bool:
+    """Make *cls*'s own ``get_mask_sizes`` accept the query length as an int, the
+    form transformers 5.x passes, when it is written for a ``cache_position``
+    tensor: an int is handed over as an empty meta tensor of that length, which
+    has the ``shape`` the method reads. True when it was adapted; a class without
+    its own such method, or one already adapted, is left as it is."""
+    method = cls.__dict__.get("get_mask_sizes")
+    if method is None or method in _ADAPTED:
+        return False
+    names = list(inspect.signature(method).parameters)
+    if len(names) < 2 or names[1] != "cache_position":
+        return False
+
+    @functools.wraps(method)
+    def get_mask_sizes(self, cache_position, *args, **kwargs):
+        if isinstance(cache_position, int):
+            import torch
+            cache_position = torch.empty(cache_position, device="meta")
+        return method(self, cache_position, *args, **kwargs)
+
+    _ADAPTED.add(get_mask_sizes)
+    cls.get_mask_sizes = get_mask_sizes
+    return True
+
+
 class RemoteCodeCompat:
     """The fixes for one model directory, applied around its ``from_pretrained``."""
 
@@ -123,8 +150,9 @@ class RemoteCodeCompat:
                 ROPE_INIT_FUNCTIONS.pop("default", None)
 
     def after_load(self, model) -> None:
-        """Adapt the mask functions in the module that defines *model*; a
-        module that is not found, or that has none of them, is logged."""
+        """Adapt the mask functions and the cache classes in the module that
+        defines *model*; a module that is not found, or that has no mask function,
+        is logged."""
         name = type(model).__module__
         module = sys.modules.get(name)
         found = [attr for attr in _MASK_FUNCTIONS if callable(getattr(module, attr, None))]
@@ -132,6 +160,11 @@ class RemoteCodeCompat:
             logger.warning("remote-code compat: no mask function to adapt in module %s", name)
         for attr in found:
             setattr(module, attr, adapt_mask_function(getattr(module, attr)))
+        if module is None:
+            return
+        for value in list(vars(module).values()):
+            if inspect.isclass(value) and value.__module__ == name:
+                adapt_cache_class(value)
 
 
 def for_model(model_path: str, trust_remote_code: bool) -> Optional[RemoteCodeCompat]:
