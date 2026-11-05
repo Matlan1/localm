@@ -541,3 +541,35 @@ def test_loading_a_speech_model_kicks_the_feed(recorder, monkeypatch, tmp_path):
         assert recorder.reasons == ["speech model loaded"], "a reuse is not a load"
     finally:
         speech.reset_speech()
+
+
+def test_loading_a_reranker_kicks_the_feed(recorder, monkeypatch, tmp_path):
+    from localm.inference import embedder as emb
+    from localm.inference import reranker as rr
+
+    path = tmp_path / "r.gguf"
+    path.write_bytes(b"GGUF" + b"0" * 1024)
+    monkeypatch.setattr(rr, "_check_head", lambda p: None)
+    monkeypatch.setattr(emb, "_maybe_swap_for_embedder", lambda *a, **k: None)
+    monkeypatch.setattr(emb, "_choose_embedder_gpu_layers", lambda p, cfg: (0, None))
+
+    class Fake:
+        effective_pooling = emb._POOLING_RANK
+        cls_labels = None
+
+        def __init__(self, p, **kw):
+            self.model_path = p
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", Fake)
+    rr.reset_reranker()
+    recorder.reasons.clear()
+    try:
+        assert rr.get_reranker(str(path)) is not None
+        assert recorder.reasons == ["reranker loaded"]
+        assert rr.get_reranker(str(path)) is not None
+        assert recorder.reasons == ["reranker loaded"], "a reuse is not a load"
+    finally:
+        rr.reset_reranker()
