@@ -934,3 +934,90 @@ test("update: a legacy client still gets a numbered prerelease of the ceiling on
     assert.equal((await r.json()).version, "v0.3.2rc1");
   } finally { restore(); }
 });
+
+// ------------------------- signature text cache -------------------------
+
+// A /update fetch stub serving one release whose signature asset is *sigId*; the
+// signature text comes from sigText(sigId), which may return null for a 500.
+function sigCacheFetch(sigId, calls, sigText) {
+  return async (url) => {
+    const u = String(url);
+    if (u.includes("/releases/tags/")) return new Response("{}", { status: 404 });
+    if (u.includes("/releases?")) {
+      return new Response(JSON.stringify([{
+        tag_name: "v0.3.1", draft: false, prerelease: false, published_at: "2026-10-22T00:00:00Z",
+        assets: [{ id: sigId - 1, name: "localm-0.3.1.zip", size: 1 },
+                 { id: sigId, name: "localm-0.3.1.zip.sig", size: 9 }],
+      }]), { status: 200 });
+    }
+    if (u.endsWith(`/releases/assets/${sigId}`)) {
+      calls.push(sigId);
+      const text = sigText(sigId);
+      if (text === null) return new Response("boom", { status: 500 });
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? `https://objects.githubusercontent.com/sig-${sigId}` : null } };
+    }
+    if (u.startsWith("https://objects.githubusercontent.com/sig-")) {
+      const id = Number(u.split("sig-")[1]);
+      return new Response(sigText(id), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+}
+
+async function updateSignature() {
+  const r = await worker.fetch(req(undefined, { method: "GET", path: "/update", headers: UP_HDR }), ENV_UP);
+  return (await r.json()).signature;
+}
+
+test("update: two checks in a row download the signature once", async () => {
+  const calls = [];
+  const restore = stubFetch(sigCacheFetch(9101, calls, (id) => `sig-of-${id}\n`));
+  try {
+    assert.equal(await updateSignature(), "sig-of-9101");
+    assert.equal(await updateSignature(), "sig-of-9101");
+    assert.deepEqual(calls, [9101]);
+  } finally { restore(); }
+});
+
+test("update: a different signature asset id is fetched separately and never served the cached text", async () => {
+  const calls = [];
+  const restore = stubFetch(sigCacheFetch(9201, calls, (id) => `sig-of-${id}`));
+  try {
+    assert.equal(await updateSignature(), "sig-of-9201");
+  } finally { restore(); }
+  const restoreB = stubFetch(sigCacheFetch(9202, calls, (id) => (id === 9202 ? null : `sig-of-${id}`)));
+  try {
+    assert.equal(await updateSignature(), null, "a failed read is unsigned, not the other asset's text");
+  } finally { restoreB(); }
+  assert.deepEqual(calls, [9201, 9202]);
+});
+
+test("update: a failed signature read is not cached; the next check retries it", async () => {
+  const calls = [];
+  let fail = true;
+  const restore = stubFetch(sigCacheFetch(9301, calls, (id) => (fail ? null : `sig-of-${id}`)));
+  try {
+    assert.equal(await updateSignature(), null);
+    fail = false;
+    assert.equal(await updateSignature(), "sig-of-9301");
+    assert.deepEqual(calls, [9301, 9301]);
+  } finally { restore(); }
+});
+
+test("update: a cached signature is fetched again after ten minutes", async () => {
+  const calls = [];
+  const restore = stubFetch(sigCacheFetch(9401, calls, (id) => `sig-of-${id}`));
+  const realNow = Date.now;
+  let t = realNow.call(Date);
+  Date.now = () => t;
+  try {
+    await updateSignature();
+    t += 9 * 60 * 1000;
+    await updateSignature();
+    assert.deepEqual(calls, [9401], "still cached at nine minutes");
+    t += 2 * 60 * 1000;
+    await updateSignature();
+    assert.deepEqual(calls, [9401, 9401], "fetched again once the ten minutes have passed");
+  } finally { Date.now = realNow; restore(); }
+});

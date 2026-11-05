@@ -568,6 +568,29 @@ async function appReleases(env, includePrerelease, pages = 1, maxTag = null) {
 // download). Returns null on any failure or an implausibly large body - a missing
 // signature must degrade to "unsigned", never to an arbitrary fetch.
 async function fetchAssetText(env, id) {
+  const key = `${env.TARGET_REPO}#${id}`;
+  const now = Date.now();
+  const hit = ASSET_TEXT_CACHE.get(key);
+  if (hit && hit.expires > now) return hit.text;
+  ASSET_TEXT_CACHE.delete(key);
+  const text = await fetchAssetTextUncached(env, id);
+  if (text != null) {
+    if (ASSET_TEXT_CACHE.size >= ASSET_TEXT_CACHE_MAX) {
+      ASSET_TEXT_CACHE.delete(ASSET_TEXT_CACHE.keys().next().value);
+    }
+    ASSET_TEXT_CACHE.set(key, { text, expires: now + ASSET_TEXT_TTL_MS });
+  }
+  return text;
+}
+
+// Signature text per "<repo>#<asset id>" for ASSET_TEXT_TTL_MS, held in this isolate.
+// Only a successful read is stored, so a failure is retried by the next check and never
+// served from here; an asset id names one immutable file.
+const ASSET_TEXT_TTL_MS = 10 * 60 * 1000;
+const ASSET_TEXT_CACHE_MAX = 64;
+const ASSET_TEXT_CACHE = new Map();
+
+async function fetchAssetTextUncached(env, id) {
   const api = `https://api.github.com/repos/${env.TARGET_REPO}/releases/assets/${id}`;
   const r1 = await fetch(api, {
     headers: ghHeaders(env.UPDATE_GITHUB_TOKEN, "application/octet-stream"),
