@@ -70,6 +70,39 @@ pause
 exit /b 0
 :fresh_install
 
+rem ---- LocaLM programs running from this folder hold files setup must replace ----
+call :find_running
+if not defined RUNPIDS goto running_done
+echo.
+echo  These programs are running from this folder and would block the update:
+echo.
+call :find_running show
+echo.
+set "STOPRUN="
+call :flush
+rem SETUP-Q: running-localm
+set /p "STOPRUN=  Stop them and go on? [Y/n]: "
+if not defined STOPRUN set "STOPRUN=Y"
+if /i "!STOPRUN:~0,1!"=="N" (
+    echo  Nothing changed. Close them, then run setup again.
+    pause
+    exit /b 0
+)
+for %%p in (!RUNPIDS!) do taskkill /PID %%p /T /F >nul 2>nul
+timeout /t 2 /nobreak >nul 2>nul
+call :find_running
+if defined RUNPIDS (
+    echo.
+    echo  [^^!] These programs could not be stopped:
+    echo.
+    call :find_running show
+    echo.
+    echo  Nothing changed. Close them by hand, then run setup again.
+    pause
+    exit /b 1
+)
+:running_done
+
 rem ---- scratch folder and setup journal --------------------------------------
 rem  Temporary files setup needs live in .\.localm-setup-tmp inside this folder,
 rem  never in the system temp folder. The journal (.localm-setup-journal) gets one
@@ -579,6 +612,10 @@ rem  such site is :venv_retry above. Do not copy it back here.
 uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [^^!] Install failed - see the error above.
+echo      If it says a file is in use or access is denied, a LocaLM program is still
+echo      running from this folder. Close it, run setup.bat again and pick [1] Install
+echo      again / repair. Until then this folder is partly updated. Your chats,
+echo      settings and models are untouched.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
 pause
 exit /b 1
@@ -1360,6 +1397,23 @@ powershell -NoProfile -Command ^
     >"%STMP%\localm_lockers.txt" 2>nul
 for %%s in ("%STMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
 if not defined LOCKERS del "%STMP%\localm_lockers.txt" >nul 2>nul
+exit /b 0
+
+rem ===========================================================================
+rem  :find_running - every program whose executable lies inside THIS folder
+rem  (full path match, so a program of another LocaLM folder is never listed or
+rem  touched), except setup's own process and its parents. Sets RUNPIDS to the
+rem  PIDs, space separated; with the argument "show" it prints one line per
+rem  program instead. Needs no Python. Best-effort: when the process list cannot
+rem  be read, RUNPIDS stays empty.
+rem ===========================================================================
+:find_running
+set "RUNPIDS="
+for /f "usebackq tokens=1,* delims= " %%a in (`powershell -NoProfile -Command ^
+    "$root = ($env:LOCALM_SETUP_ROOT + '\').ToLowerInvariant(); $own = @(); $p = $PID; while ($p -and $own.Count -lt 16) { $own += $p; $p = (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p)).ParentProcessId }; foreach ($q in Get-CimInstance Win32_Process) { if ($q.ExecutablePath -and $q.ExecutablePath.ToLowerInvariant().StartsWith($root) -and ($own -notcontains $q.ProcessId)) { '{0} {1}' -f $q.ProcessId, $q.ExecutablePath } }" 2^>nul`) do (
+    set "RUNPIDS=!RUNPIDS! %%a"
+    if /i "%~1"=="show" echo    - %%b ^(PID %%a^)
+)
 exit /b 0
 
 rem ===========================================================================

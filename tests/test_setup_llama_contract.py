@@ -1558,15 +1558,19 @@ def test_an_explicit_backend_replaces_a_different_install(world, marker, message
     assert world.files() == WIN_VULKAN_FILES
 
 
-@pytest.mark.parametrize("marker, backend, message", [
-    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {sl._ROCM_BUILD}."),
+@pytest.mark.parametrize("marker, backend, message, prompt", [
+    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {sl._ROCM_BUILD}.",
+     f"Update the runtime to build {sl._ROCM_BUILD} now?"),
     (f"amd-rocm {ROCM}", "amd-rocm",
-     f"Upgrading the amd-rocm build: {ROCM} -> {sl._ROCM_BUILD}."),
-    ("vulkan b10000", "vulkan", "Re-downloading the vulkan build (b10000)."),
-    ("vulkan", "vulkan", "Re-downloading the vulkan build."),
+     f"Upgrading the amd-rocm build: {ROCM} -> {sl._ROCM_BUILD}.",
+     f"Update the runtime to build {sl._ROCM_BUILD} now?"),
+    ("vulkan b10000", "vulkan", "Re-downloading the vulkan build (b10000).",
+     f"Update the runtime to build {sl._PINNED_TAG} now?"),
+    ("vulkan", "vulkan", "Re-downloading the vulkan build.",
+     "Do you want to re-download/replace them?"),
 ])
 def test_interactive_replace_names_what_is_being_replaced(world, monkeypatch, capsys,
-                                                          marker, backend, message):
+                                                          marker, backend, message, prompt):
     world.seed_target("llama.dll", marker=marker)
     world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
     world.release(LEMONADE, ROCM, [(f"llama-{ROCM}-windows-rocm-gfx103X-x64.zip",
@@ -1580,7 +1584,27 @@ def test_interactive_replace_names_what_is_being_replaced(world, monkeypatch, ca
     text = " ".join(capsys.readouterr().out.split())
     _in_order(text, "Already provisioned", "Replacing existing build...", message,
               f"Backend: {backend}", f"OK - {backend} runtime loads on this machine.")
-    assert prompts == ["Do you want to re-download/replace them?"]
+    assert prompts == [prompt]
+
+
+@pytest.mark.parametrize("marker, default, stale", [
+    ("vulkan b10000", True, True),
+    (f"vulkan {sl._PINNED_TAG}", False, False),
+])
+def test_the_replace_question_defaults_to_updating_only_a_stale_runtime(
+        world, monkeypatch, capsys, marker, default, stale):
+    world.seed_target("llama.dll", marker=marker)
+    world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
+    _upstream_win_vulkan(world)
+    asked = []
+    monkeypatch.setattr(click, "confirm",
+                        lambda text, **kw: asked.append((text, kw.get("default"))) or False)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    sl.main.callback(from_dir=None, backend="vulkan", url=None, sha256=None, force=False,
+                     tag=None, rollback=False, assume_yes=False)
+    out = " ".join(capsys.readouterr().out.split())
+    assert [d for _, d in asked] == [default]
+    assert (f"This release ships build {sl._PINNED_TAG}" in out) is stale
 
 
 def test_from_a_local_build_copies_libraries_and_marks_custom(world, tmp_path):
