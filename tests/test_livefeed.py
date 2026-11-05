@@ -368,3 +368,42 @@ def test_a_job_starting_and_finishing_kicks_the_feed(recorder):
 def test_module_kick_is_false_without_a_feed():
     livefeed.install(None)
     assert livefeed.kick("x") is False
+
+
+class _Resident:
+    """Stands in for a resident embedder, reranker or speech engine."""
+
+    def __init__(self):
+        self.closed = False
+        self._stopped = False
+
+    def close(self):
+        self.closed = True
+
+    active_requests = 0
+    alive = True
+
+
+def test_releasing_a_resident_embedder_reranker_or_speech_model_kicks_the_feed(
+        recorder, monkeypatch):
+    from localm.inference import embedder, reranker, speech
+
+    monkeypatch.setattr(embedder, "_EMBEDDER", _Resident())
+    assert embedder.reset_embedder() is True
+    monkeypatch.setattr(reranker, "_RERANKER", _Resident())
+    assert reranker.reset_reranker() is True
+    monkeypatch.setattr(speech, "_ENGINE", _Resident())
+    assert speech.reset_speech() is True
+    assert recorder.reasons == ["embedding model unloaded", "reranker unloaded",
+                                "speech model unloaded"]
+
+
+def test_releasing_nothing_does_not_kick_the_feed(recorder, monkeypatch):
+    from localm.inference import embedder, reranker, speech
+
+    monkeypatch.setattr(embedder, "_EMBEDDER", None)
+    monkeypatch.setattr(reranker, "_RERANKER", None)
+    monkeypatch.setattr(speech, "_ENGINE", None)
+    assert (embedder.reset_embedder(), reranker.reset_reranker(),
+            speech.reset_speech()) == (False, False, False)
+    assert recorder.reasons == []

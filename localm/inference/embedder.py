@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import livefeed as _livefeed
 from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger
 from localm.inference import pretokenizer_guard
@@ -1945,6 +1946,7 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
                             pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
                 _LAST_ERROR = None
                 _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
+                _livefeed.kick("embedding model loaded")
                 return _EMBEDDER
             except Exception as e:
                 # Latch by SPEC: what just failed to load is whatever
@@ -2112,6 +2114,8 @@ def reset_embedder(*, force: bool = True) -> bool:
         _LAST_RESOLVE_WARNED = None
     if current is not None and busy:
         _stop_busy(current)
+    if current is not None:
+        _livefeed.kick("embedding model unloaded")
     return current is not None
 
 

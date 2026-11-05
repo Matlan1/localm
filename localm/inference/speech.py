@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import livefeed as _livefeed
 from localm import pathscrub
 from localm.debuglog import logger
 
@@ -478,6 +479,7 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
                     raise SpeechUnavailable(reason_text) from e
                 raise SpeechUnavailableError(reason_text) from e
             _ENGINE_KEY = key
+            _livefeed.kick("speech model loaded")
             logger.info("speech model ready: %s (%d Hz, projector on %s)", model.name,
                         _ENGINE.sample_rate, "GPU" if _ENGINE.projector_on_gpu else "CPU")
             if claim:
@@ -589,6 +591,8 @@ def reset_speech(*, force: bool = True) -> bool:
             stop()
         else:
             current.close()
+    if current is not None:
+        _livefeed.kick("speech model unloaded")
     return current is not None
 
 
