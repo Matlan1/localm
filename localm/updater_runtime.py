@@ -736,6 +736,38 @@ def read_pending() -> Optional[dict]:
     return data
 
 
+# Written in the install's venv by the build hook (hatch_build.py) before it stops the
+# runtime probe daemon; ignored once older than REBUILD_MARKER_MAX_AGE_S.
+REBUILD_MARKER = ".localm-rebuilding"
+REBUILD_MARKER_MAX_AGE_S = 300
+
+
+def replacing_runtime_now(root=None) -> bool:
+    """True while an update that left :data:`REBUILD_MARKER` in the venv of the install
+    at *root* (default the running install) still has work ahead that needs the runtime
+    free: the marker is younger than :data:`REBUILD_MARKER_MAX_AGE_S` and a runtime
+    update is pending or the installed project's record is not the version in
+    ``VERSION``. Never raises; False when it cannot tell."""
+    try:
+        import time
+        from importlib import metadata
+
+        from localm import updater
+        root = Path(root) if root else updater.repo_root()
+        marker = root / ".venv" / REBUILD_MARKER
+        if time.time() - marker.stat().st_mtime >= REBUILD_MARKER_MAX_AGE_S:
+            return False
+        if read_pending() is not None:
+            return True
+        return metadata.version("localm") != (root / "VERSION").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not read the state of a running update: %s", e)
+        return False
+
+
 def catch_up(root=None, *, repair: bool = False) -> Optional[dict]:
     """Record a pending re-provision when none is pending and the runtime
     installed at *root* (default the running install) is not the build that

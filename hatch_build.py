@@ -25,6 +25,8 @@ from pathlib import Path
 from hatchling.metadata.plugin.interface import MetadataHookInterface
 
 STOP_TIMEOUT_S = 20
+# updater_runtime.REBUILD_MARKER
+REBUILD_MARKER = ".localm-rebuilding"
 NOTICE = ("localm is running from {names}, so that file is left as it is. "
           "The update carries on and localm keeps starting the same way.\n")
 
@@ -73,7 +75,9 @@ def _tell_console(message: str) -> None:
 
 
 def stop_own_probe_daemon(root) -> None:
-    """On a rebuild of an existing install, stop this install's own runtime probe
+    """On a rebuild of an existing install, leave :data:`REBUILD_MARKER` in its venv, so
+    a probe daemon started from now on does not load the runtime
+    (``updater_runtime.replacing_runtime_now``), and stop this install's own running
     daemon, by its ``.venv`` Python and ``updater_runtime.stop_own_probe_daemons``
     (:data:`STOP_TIMEOUT_S` at most). Never raises; a failure leaves the daemon running."""
     root = Path(root)
@@ -82,6 +86,7 @@ def stop_own_probe_daemon(root) -> None:
     try:
         if not python.exists() or not any(site.glob("localm-*.dist-info")):
             return
+        (root / ".venv" / REBUILD_MARKER).write_bytes(b"")
         code = ("from localm import updater, updater_runtime as u; r = updater.repo_root(); "
                 "u.stop_own_probe_daemons(u.runtime_lib(r), r)")
         subprocess.run([str(python), "-c", code], cwd=str(root), stdin=subprocess.DEVNULL,

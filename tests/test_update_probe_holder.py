@@ -272,6 +272,52 @@ def test_stop_own_holders_ends_an_unnamed_own_daemon_before_counting_it_a_strang
     assert state["running"] is False
 
 
+def _rebuilding_install(tmp_path, version="0.3.3"):
+    root = tmp_path / "inst"
+    (root / ".venv").mkdir(parents=True)
+    (root / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (root / ".venv" / updater_runtime.REBUILD_MARKER).write_bytes(b"")
+    return root
+
+
+def test_replacing_runtime_now_needs_a_fresh_marker_and_work_ahead(tmp_path, monkeypatch):
+    from importlib import metadata
+    root = _rebuilding_install(tmp_path)
+    monkeypatch.setattr(updater_runtime, "read_pending", lambda: None)
+    monkeypatch.setattr(metadata, "version", lambda name: "0.3.2")
+    assert updater_runtime.replacing_runtime_now(root) is True
+    monkeypatch.setattr(metadata, "version", lambda name: "0.3.3")
+    assert updater_runtime.replacing_runtime_now(root) is False
+    monkeypatch.setattr(updater_runtime, "read_pending", lambda: {"backend": "cpu", "target": "x"})
+    assert updater_runtime.replacing_runtime_now(root) is True
+    marker = root / ".venv" / updater_runtime.REBUILD_MARKER
+    old = marker.stat().st_mtime - updater_runtime.REBUILD_MARKER_MAX_AGE_S - 1
+    os.utime(marker, (old, old))
+    assert updater_runtime.replacing_runtime_now(root) is False
+    marker.unlink()
+    assert updater_runtime.replacing_runtime_now(root) is False
+
+
+def test_the_hook_and_the_daemon_agree_on_the_marker():
+    text = (Path(__file__).resolve().parents[1] / "hatch_build.py").read_text(encoding="utf-8")
+    assert f'REBUILD_MARKER = "{updater_runtime.REBUILD_MARKER}"' in text
+
+
+def test_a_daemon_started_while_an_update_replaces_the_runtime_does_not_load_it(monkeypatch, capsys):
+    import io
+
+    from localm.inference.backends.llamacpp import _loader, _vram_probe
+    calls = []
+    monkeypatch.setattr(_loader, "load_lib", lambda: calls.append("load"))
+    monkeypatch.setattr(_loader, "gpu_memory", lambda: calls.append("mem"))
+    monkeypatch.setattr(_loader, "native_device_inventory", lambda: calls.append("devices"))
+    monkeypatch.setattr(updater_runtime, "replacing_runtime_now", lambda root=None: True)
+    monkeypatch.setattr("sys.stdin", io.StringIO("devices\nmem\n"))
+    assert _vram_probe.main() == 0
+    assert calls == []
+    assert capsys.readouterr().out.splitlines() == ["ERR an update is replacing the runtime"] * 2
+
+
 def test_a_holder_with_no_pid_or_already_gone_needs_no_stop(tmp_path):
     assert updater_runtime.own_probe_daemons(
         [{"pid": None, "name": "?"}, {"pid": 99, "name": "gone"}], tmp_path,
