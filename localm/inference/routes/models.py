@@ -192,12 +192,11 @@ def register(app: FastAPI, ctx) -> None:
         """
         Release model(s) from GPU/CPU memory.
 
-        With no `model`, releases EVERY currently-loaded model (unchanged
-        default behavior) - call this before a VRAM-intensive task (e.g.
-        ComfyUI FLUX generation) so the GPU memory is fully available. With
-        `model` set, releases only that one, leaving any other loaded models
-        untouched. Either way, the next matching /v1/chat/completions call
-        reloads lazily.
+        With no `model`, releases every currently loaded model, which frees
+        the GPU memory for a VRAM-intensive task such as ComfyUI generation.
+        With `model` set, releases only that one and leaves any other loaded
+        models untouched. An unregistered `model` answers 404. Either way, the
+        next matching /v1/chat/completions call reloads the model.
 
         A model still busy with a request is not cut off unless `force` is
         true (a query parameter, like `model`). Without it, a busy chat model
@@ -228,21 +227,12 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def rename_model(model: str, new_name: str):
         """
-        Rename a registered model, re-keying a loaded engine in place.
+        Rename a registered model (`model`) to `new_name`.
 
-        Unlike an alias, the old name stops working: this MOVES the
-        registration (and best-effort migrates config/job/RAG references that
-        named it). A model that is currently loaded keeps serving, under the
-        new name.
-
-        This lives on the always-present /v1 surface rather than only on the
-        GUI's /api one because the caller that needs it most is `localm
-        rename`, and a headless `localm serve` has no GUI routes. Renaming a
-        model from a separate process CANNOT re-key this server's in-memory
-        engine map, which would leave the engine orphaned under a name the
-        registry no longer has - so the CLI asks the server to do the whole
-        rename here instead, where the registry move and the re-key happen in
-        one process with no window between them.
+        Unlike an alias, the old name stops working: the registration moves to
+        the new name, and config, job and RAG references to the old name are
+        updated where possible. A model that is currently loaded keeps serving
+        under the new name.
         """
         return await _hs.rename_registered_model(model, new_name)
 
@@ -250,25 +240,13 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def load_model(model: str | None = None):
         """
-        Explicitly reload a model into memory.
+        Load a model into memory ahead of the first inference request.
 
-        Use this endpoint if you want to pre-warm the model before the first
-        inference request. If no model is specified, pre-warms the model an
-        unnamed request would currently resolve to.
-
-        THE UNNAMED CASE GOES THROUGH ``_resolve_unnamed_model_name`` rather
-        than re-deriving the chain here, and that is the fix rather than a
-        tidy-up. The inline version read
-        ``_active_model_name or _default_model_name`` and SKIPPED
-        ``_last_active_model_name``, which is precisely where an unload parks
-        the name of the model that was in use. So the media VRAM handover -
-        which unloads chat, generates, then POSTs here with no model name -
-        brought back the STARTUP model instead of the one the user had loaded,
-        and they returned to chat talking to something they never chose.
-
-        The shared helper already had it right and is used by ``GET /health``
-        and ``get_engine``'s own fallback; this route was the odd one out, so
-        the duplication WAS the defect.
+        With no `model`, loads the model an unnamed request would use: the
+        model currently loaded, else the one most recently unloaded, else the
+        configured default. Answers 503 when there is none. Returns `status`
+        `loaded`, `already_loaded` or `peer_routed` (the model is routed to a
+        peer instance), with the model name.
         """
         name = model or _hs._resolve_unnamed_model_name()
         if not name:
