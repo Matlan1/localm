@@ -91,7 +91,7 @@ def stop_own_probe_daemon(root) -> None:
                 "u.stop_own_probe_daemons(u.runtime_lib(r), r)")
         subprocess.run([str(python), "-c", code], cwd=str(root), stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=STOP_TIMEOUT_S, creationflags=subprocess.CREATE_NO_WINDOW)
+                       timeout=STOP_TIMEOUT_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as e:
         print(f"localm: could not stop the runtime probe: {e}")
 
