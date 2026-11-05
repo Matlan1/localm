@@ -322,6 +322,42 @@ class TestResolveRelease:
         assert out["push"] == "false"
         assert out["floating"] == "false"
 
+    @staticmethod
+    def _git(cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    def _repo_with_tag(self, cwd):
+        self._git(cwd, "init", "-q")
+        (cwd / "docker").mkdir()
+        (cwd / "docker" / "Dockerfile").write_text("old\n", encoding="utf-8")
+        (cwd / "localm").mkdir()
+        (cwd / "localm" / "code.py").write_text("old\n", encoding="utf-8")
+        (cwd / "tests.py").write_text("old\n", encoding="utf-8")
+        self._git(cwd, "add", "VERSION", "docker", "localm", "tests.py")
+        self._git(cwd, "commit", "-qm", "release")
+        self._git(cwd, "tag", "v1.2.3")
+
+    def test_dispatch_publishes_from_a_commit_with_the_tags_source(self, resolve, tmp_path):
+        resolve("pull_request")
+        self._repo_with_tag(tmp_path)
+        (tmp_path / "docker" / "Dockerfile").write_text("new\n", encoding="utf-8")
+        (tmp_path / "tests.py").write_text("new\n", encoding="utf-8")
+        self._git(tmp_path, "commit", "-qam", "fix the image")
+        code, _, out = resolve("workflow_dispatch", dry_run="false")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "true", "floating": "true"}
+
+    def test_dispatch_cannot_publish_a_commit_that_changes_the_source(self, resolve, tmp_path):
+        resolve("pull_request")
+        self._repo_with_tag(tmp_path)
+        (tmp_path / "localm" / "code.py").write_text("new\n", encoding="utf-8")
+        self._git(tmp_path, "commit", "-qam", "other change")
+        code, stdout, out = resolve("workflow_dispatch", dry_run="false")
+        assert code == 1
+        assert "requires the release tag ref refs/tags/v1.2.3" in stdout
+        assert out == {}
+
     def test_dispatch_cannot_publish_from_a_branch(self, resolve):
         code, stdout, out = resolve("workflow_dispatch", dry_run="false")
         assert code == 1
@@ -407,7 +443,8 @@ class TestWorkflow:
     def test_pull_requests_only_run_for_docker_paths_and_never_publish(self):
         wf = _workflow()
         triggers = wf[True] if True in wf else wf["on"]
-        assert triggers["pull_request"]["paths"] == ["docker/**", ".github/workflows/docker.yml"]
+        assert triggers["pull_request"]["paths"] == ["docker/**", ".github/workflows/docker.yml",
+                                           "pyproject.toml", "hatch_build.py"]
         assert triggers["release"]["types"] == ["published"]
         assert triggers["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
         assert wf["jobs"]["publish"]["if"] == "github.event_name != 'pull_request'"
