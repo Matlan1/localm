@@ -1846,6 +1846,13 @@ class HFWorker:
                    and not _is_compressed_tensors(self.model_path) else dtype),
             trust_remote_code=trust_remote_code,
         )
+        from localm.inference.backends import _hf_remote_compat
+        compat = _hf_remote_compat.for_model(self.model_path, trust_remote_code)
+        if compat is not None:
+            compat_config = compat.config(tr)
+            if compat_config is not None:
+                load_kwargs["config"] = compat_config
+            compat.before_load()
         if on_demand_device is not None:
             from localm.inference.backends import _hf_on_demand_experts
             _hf_on_demand_experts.prepare()
@@ -1899,6 +1906,9 @@ class HFWorker:
         if self._model is None:
             detail = "; tried: " + "; ".join(errors) if errors else ""
             raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
+
+        if compat is not None:
+            compat.after_load(self._model)
 
         if on_demand_device is not None:
             from localm.inference.backends import _hf_on_demand_experts
