@@ -225,18 +225,20 @@ class LiveFeed:
     async def _pause(self) -> bool:
         """Wait for the next reading; True when it is to be forced (a kick, or
         a follow-up coming due), False for a routine tick."""
+        kicked = self._kicked
+        assert kicked is not None, "the sampler runs only after subscribe() made its kick event"
         loop = asyncio.get_running_loop()
         now = loop.time()
         self._follow_ups = [t for t in self._follow_ups if t > now]
         due_follow_up = bool(self._follow_ups) and self._follow_ups[0] - now < self._interval_s
         delay = self._follow_ups[0] - now if due_follow_up else self._interval_s
-        if not self._kicked.is_set():
+        if not kicked.is_set():
             try:
-                await asyncio.wait_for(self._kicked.wait(), delay)
+                await asyncio.wait_for(kicked.wait(), delay)
             except TimeoutError:
                 pass
-        if self._kicked.is_set():
-            self._kicked.clear()
+        if kicked.is_set():
+            kicked.clear()
             return True
         if due_follow_up and self._follow_ups:
             self._follow_ups.pop(0)
