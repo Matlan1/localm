@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A damaged Whisper speech model can be downloaded again.** When the speech model file in localm's cache fails its check, localm now removes it completely, including the copy Hugging Face keeps in its shared store, so the next download fetches a good file instead of failing the same check every time.
 - **Decision-model GGUFs are no longer registered as chat models.** A GGUF that answers typed questions with option probabilities (Perplexity pplx-decider, Bespoke Nimble, JEV) is now typed `decision`: it stays out of the chat picker, automatic model choice and `/v1/models`, and naming it for chat says it is a decision model instead of failing opaquely. `localm set-type NAME llm` still overrides the type.
 
 ## [0.3.3] - 2026-11-05
