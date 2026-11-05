@@ -112,6 +112,7 @@ class TestAgreesWithTheLoadedModel:
         api = mock.MagicMock()
         api.has_kv_head_api.return_value = True
         api.has_hybrid_api.return_value = False
+        api.has_model_meta_api.return_value = False
         api.llama_model_n_embd.return_value = N_EMBD
         api.llama_model_n_head.return_value = N_HEAD
         api.llama_model_n_head_kv.return_value = N_HEAD_KV
@@ -120,6 +121,41 @@ class TestAgreesWithTheLoadedModel:
         with mock.patch("localm.inference.backends.llamacpp.llama.api", api):
             post = llm._read_kv_bytes_per_token()
         assert post == gguf_kv_bytes_per_token(f) == loops * PHYS * PER_LAYER_F16
+
+
+class TestStatedHeadWidth:
+    """Nanbeige4.2 has n_embd / n_head = 64 but states key_length = value_length = 128."""
+
+    KEY = VAL = 2 * (N_EMBD // N_HEAD)
+
+    def _loaded(self, n_layers, meta):
+        api = mock.MagicMock()
+        api.has_kv_head_api.return_value = True
+        api.has_hybrid_api.return_value = False
+        api.has_model_meta_api.return_value = True
+        api.llama_model_n_embd.return_value = N_EMBD
+        api.llama_model_n_head.return_value = N_HEAD
+        api.llama_model_n_head_kv.return_value = N_HEAD_KV
+        api.llama_model_meta_val_str.side_effect = lambda _model, key: meta.get(key)
+        llm = make_bare_llama(_model_ptr=111, n_layers=n_layers, is_encoder_decoder=False)
+        with mock.patch("localm.inference.backends.llamacpp.llama.api", api):
+            return llm._read_kv_bytes_per_token()
+
+    def test_the_loaded_figure_uses_the_stated_width_and_matches_the_header(self, tmp_path):
+        extra = [("nanbeige.attention.key_length", _T_UINT32, self.KEY),
+                 ("nanbeige.attention.value_length", _T_UINT32, self.VAL),
+                 ("nanbeige.num_loops", _T_UINT32, 2)]
+        f = _gguf(tmp_path / "m.gguf",
+                  _shape("nanbeige", PHYS, N_EMBD, N_HEAD, N_HEAD_KV, extra=extra))
+        meta = {"general.architecture": "nanbeige",
+                "nanbeige.attention.key_length": str(self.KEY),
+                "nanbeige.attention.value_length": str(self.VAL)}
+        post = self._loaded(2 * PHYS, meta)
+        assert post == gguf_kv_bytes_per_token(f) == 2 * PHYS * N_HEAD_KV * (self.KEY + self.VAL) * 2
+
+    def test_without_stated_widths_the_embedding_split_is_used(self):
+        meta = {"general.architecture": "llama"}
+        assert self._loaded(PHYS, meta) == PHYS * PER_LAYER_F16
 
 
 class TestPlacement:

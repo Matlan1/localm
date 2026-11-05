@@ -94,6 +94,7 @@ def _fake_api(*, has=True, n_embd=4096, n_head=32, n_head_kv=8,
     m = MagicMock()
     m.has_kv_head_api.return_value = has
     m.has_hybrid_api.return_value = has_hybrid
+    m.has_model_meta_api.return_value = False
     m.llama_model_is_hybrid.return_value = hybrid
     m.llama_model_is_recurrent.return_value = recurrent
     m.llama_model_n_embd.return_value = n_embd
