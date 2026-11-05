@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Looped models such as Nanbeige4.2 are no longer sized as if they ran their layers once.** Their GGUF states the layer stack and a loop count, and the KV cache holds one entry per loop and layer, so the memory check and the automatic GPU layer count undercounted the cache (2x for two loops) and could let a load run out of GPU memory. Both now apply the loop count.
 - **Decision-model GGUFs are no longer registered as chat models.** A GGUF that answers typed questions with option probabilities (Perplexity pplx-decider, Bespoke Nimble, JEV) is now typed `decision`: it stays out of the chat picker, automatic model choice and `/v1/models`, and naming it for chat says it is a decision model instead of failing opaquely. `localm set-type NAME llm` still overrides the type.
 
 ## [0.3.3] - 2026-11-05
