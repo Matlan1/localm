@@ -132,17 +132,22 @@ class Reader(threading.Thread):
         self.content_type = None
         self.stop = threading.Event()
         self.started = threading.Event()
+        self.dropped: Exception | None = None
 
     def run(self):
-        with httpx.Client(timeout=httpx.Timeout(10.0)) as c:
-            with c.stream("GET", self.url + "/api/live", headers=self.headers) as r:
-                self.status = r.status_code
-                self.content_type = r.headers.get("content-type")
-                self.started.set()
-                for line in r.iter_lines():
-                    self.lines.append((time.monotonic(), line))
-                    if self.stop.is_set():
-                        break
+        try:
+            with httpx.Client(timeout=httpx.Timeout(10.0)) as c:
+                with c.stream("GET", self.url + "/api/live", headers=self.headers) as r:
+                    self.status = r.status_code
+                    self.content_type = r.headers.get("content-type")
+                    self.started.set()
+                    for line in r.iter_lines():
+                        self.lines.append((time.monotonic(), line))
+                        if self.stop.is_set():
+                            break
+        except httpx.HTTPError as e:
+            if not self.stop.is_set():
+                self.dropped = e
 
     def frames(self, kind):
         out = []
@@ -161,9 +166,11 @@ class Reader(threading.Thread):
             time.sleep(0.01)
         return bool(cond())
 
-    def close(self):
+    def close(self, expect_drop=False):
         self.stop.set()
         self.join(timeout=5)
+        if not expect_drop:
+            assert self.dropped is None, f"the server dropped the stream: {self.dropped!r}"
 
 
 def _hdr(key):
@@ -369,3 +376,20 @@ def test_the_sampler_bounds_nest(app):
     assert live.FRESH_WAIT_S < live.FRESH_BUDGET_S, \
         "the forced reading's own wait must fit inside the budget that cuts it off"
     assert live.FRESH_BUDGET_S > sysstats.STATS_REPLY_BUDGET_S
+
+
+def test_the_server_stops_within_its_grace_period_with_a_tab_still_connected(app):
+    """An endless stream must not hold up a stop: the server gives open
+    connections timeout_graceful_shutdown seconds (2 here, 3 in production)."""
+    srv = Server(app)
+    r = Reader(srv.url)
+    r.start()
+    try:
+        assert r.wait_for(lambda: r.frames("stats"))
+        t0 = time.monotonic()
+        srv.server.should_exit = True
+        srv.thread.join(timeout=15)
+        assert not srv.thread.is_alive(), "the server never stopped with a stream open"
+        assert time.monotonic() - t0 < 8
+    finally:
+        r.close(expect_drop=True)
