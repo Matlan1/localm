@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Ouro models (ByteDance Ouro-1.4B, 2.6B and their Thinking variants) load and answer.** Their bundled code was written for an older transformers and failed to load on the one localm uses (`'OuroConfig' object has no attribute 'pad_token_id'`). With `hf_trust_remote_code` on, localm now bridges the three differences for these models only; models without bundled code, other bundled-code models and the default (off) setting are unchanged.
 - **Decision-model GGUFs are no longer registered as chat models.** A GGUF that answers typed questions with option probabilities (Perplexity pplx-decider, Bespoke Nimble, JEV) is now typed `decision`: it stays out of the chat picker, automatic model choice and `/v1/models`, and naming it for chat says it is a decision model instead of failing opaquely. `localm set-type NAME llm` still overrides the type.
 
 ## [0.3.3] - 2026-11-05
