@@ -347,9 +347,9 @@ def _release_build_when_stale(target: Path, have: Optional[str],
     if not have or not build:
         return None
     try:
-        from localm.setup_llama.versions import runtime_target
+        from localm.setup_llama.versions import runtime_target, tracks_latest
         want, source = runtime_target(have, pin=_sl.pinned_tag(),
-                                      tracking=_sl.tracks_latest())
+                                      tracking=tracks_latest())
         if have == "amd-rocm":
             if _sl.rocm_build_is_current(target, build):
                 return None
