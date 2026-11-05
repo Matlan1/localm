@@ -128,9 +128,21 @@ def test_fresh_stats_reports_the_forced_reading(gpu):
     assert sysstats.fresh_stats(timeout=5.0)["vram"]["used"] == 3 * GIB
 
 
+def test_a_probe_that_began_in_the_same_clock_tick_as_the_call_is_not_counted(gpu, monkeypatch):
+    """The Windows monotonic clock ticks about every 15 ms, so a probe started
+    just before the call can carry the same timestamp as the call. Which probe
+    began first is decided by counting probes, never by comparing times."""
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    first_reading()
+    gpu.truth = 2.0
+    assert sysstats.refresh_vram_now(5.0) is True
+    assert shown() == 2.0
+    assert gpu.runs == 2
+
+
 def test_a_reset_forgets_which_probe_made_the_reading(gpu):
     first_reading()
-    assert sysstats._vram_last_started is not None
+    assert sysstats._vram_last_claim > 0
     sysstats._reset_vram_probe_cache()
-    assert sysstats._vram_last_started is None
-    assert sysstats._vram_probe_started is None
+    assert sysstats._vram_last_claim == 0
+    assert sysstats._vram_probe_claim == 0

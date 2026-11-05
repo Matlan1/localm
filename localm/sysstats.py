@@ -369,8 +369,9 @@ _VRAM_UNCOVERED_INTERVAL_S = 60.0
 
 _vram_lock = threading.Lock()
 _vram_cond = threading.Condition(_vram_lock)   # notified when a probe lands
-_vram_probe_started: float | None = None   # monotonic start of the probe now in flight
-_vram_last_started: float | None = None    # monotonic start of the probe behind _vram_last
+_vram_claims = 0                           # probes started so far; never reset
+_vram_probe_claim = 0                      # the claim number of the probe now in flight
+_vram_last_claim = 0                       # the claim number of the probe behind _vram_last
 _vram_inflight = False
 _vram_last: dict | None = None      # last COMPLETED reading. May be {} (looked,
                                     # found nothing); None means no attempt has
@@ -408,10 +409,10 @@ def _reset_vram_probe_cache() -> None:
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
     global _vram_ready, _vram_last_is_seed, _vram_full_at, _vram_devices_shown
-    global _vram_probe_started, _vram_last_started
+    global _vram_probe_claim, _vram_last_claim
     with _vram_lock:
-        _vram_probe_started = None
-        _vram_last_started = None
+        _vram_probe_claim = 0
+        _vram_last_claim = 0
         _vram_full_at = None
         _vram_devices_shown = None
         _vram_last = None
@@ -728,7 +729,7 @@ def _vram_probe(my_epoch: int) -> None:
     means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
     reading is discarded instead of racing whatever probe holds the slot now."""
     global _vram_inflight, _vram_last, _vram_last_at, _vram_last_is_seed
-    global _vram_full_at, _vram_last_started
+    global _vram_full_at, _vram_last_claim
     with _vram_lock:
         first_ever = _vram_last is None
     if first_ever:
@@ -771,7 +772,7 @@ def _vram_probe(my_epoch: int) -> None:
         elif computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
-        _vram_last_started = _vram_probe_started
+        _vram_last_claim = _vram_probe_claim
         _vram_inflight = False
         _vram_cond.notify_all()
     _vram_ready.set()
@@ -796,7 +797,7 @@ def _vram(wait_first: bool = False) -> dict:
     is genuinely in flight, block for up to the underlying probe's own
     cold-init-tolerant deadline instead of omitting VRAM. Default False keeps
     the non-blocking contract for every repeating-poll caller."""
-    global _vram_inflight, _vram_probe_started
+    global _vram_inflight, _vram_claims, _vram_probe_claim
     now = time.monotonic()
     start_probe = False
     my_epoch = 0
@@ -806,7 +807,8 @@ def _vram(wait_first: bool = False) -> dict:
         probe_running = _vram_inflight
         if stale and not _vram_inflight:
             _vram_inflight = True
-            _vram_probe_started = now
+            _vram_claims += 1
+            _vram_probe_claim = _vram_claims
             start_probe = True
             my_epoch = _vram_probe_epoch
         last = _vram_last
@@ -842,11 +844,12 @@ def refresh_vram_now(timeout: float = 3.0) -> bool:
     (whatever it found), False when *timeout* seconds pass first - the last
     completed reading then stays in place and the probe keeps running."""
     global _vram_last_at
-    requested = time.monotonic()
-    deadline = requested + max(0.0, timeout)
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _vram_lock:
+        claimed_before = _vram_claims
 
     def landed() -> bool:
-        return _vram_last_started is not None and _vram_last_started >= requested
+        return _vram_last_claim > claimed_before
 
     while True:
         with _vram_cond:
