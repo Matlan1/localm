@@ -58,36 +58,47 @@ class TestConfig:
 
     def test_a_missing_pad_token_id_becomes_none(self):
         config = SimpleNamespace(bos_token_id=0)
-        out = compat.RemoteCodeCompat("m").config(self._tr(config))
+        out = compat.RemoteCodeCompat("m", True).config(self._tr(config))
         assert out is config and out.pad_token_id is None
 
     def test_a_stated_pad_token_id_is_kept(self):
         config = SimpleNamespace(pad_token_id=7)
-        assert compat.RemoteCodeCompat("m").config(self._tr(config)).pad_token_id == 7
+        assert compat.RemoteCodeCompat("m", True).config(self._tr(config)).pad_token_id == 7
+
+    def test_the_trust_flag_is_passed_as_given(self):
+        seen = []
+
+        def from_pretrained(path, trust_remote_code):
+            seen.append(trust_remote_code)
+            return SimpleNamespace()
+        tr = SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
+        compat.RemoteCodeCompat("m", False).config(tr)
+        compat.RemoteCodeCompat("m", True).config(tr)
+        assert seen == [False, True]
 
     def test_an_unreadable_config_is_reported_and_left_to_the_load(self, caplog):
         tr = self._tr(error=OSError("no config"))
         with caplog.at_level(logging.WARNING, logger=compat.logger.name):
-            assert compat.RemoteCodeCompat("m").config(tr) is None
+            assert compat.RemoteCodeCompat("m", True).config(tr) is None
         assert "could not read the config" in caplog.text and "no config" in caplog.text
 
 
 class TestRopeDefault:
     @pytest.fixture
     def table(self, monkeypatch):
-        from transformers import modeling_rope_utils
-        isolated = {"linear": object()}
-        monkeypatch.setattr(modeling_rope_utils, "ROPE_INIT_FUNCTIONS", isolated)
-        return isolated
+        module = types.ModuleType("transformers.modeling_rope_utils")
+        module.ROPE_INIT_FUNCTIONS = {"linear": object()}
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        return module.ROPE_INIT_FUNCTIONS
 
     def test_the_default_function_exists_only_while_the_model_is_built(self, table):
-        with compat.RemoteCodeCompat("m").loading():
+        with compat.RemoteCodeCompat("m", True).loading():
             assert table["default"] is compat.default_rope_parameters
         assert "default" not in table and "linear" in table
 
     def test_a_failed_load_still_removes_it(self, table):
         with pytest.raises(RuntimeError):
-            with compat.RemoteCodeCompat("m").loading():
+            with compat.RemoteCodeCompat("m", True).loading():
                 assert "default" in table
                 raise RuntimeError("load failed")
         assert "default" not in table
@@ -95,14 +106,15 @@ class TestRopeDefault:
     def test_an_existing_default_is_neither_replaced_nor_removed(self, table):
         sentinel = object()
         table["default"] = sentinel
-        with compat.RemoteCodeCompat("m").loading():
+        with compat.RemoteCodeCompat("m", True).loading():
             assert table["default"] is sentinel
         assert table["default"] is sentinel
 
     def test_the_real_table_is_unchanged_afterwards(self):
+        pytest.importorskip("transformers.modeling_rope_utils")
         from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
         before = dict(ROPE_INIT_FUNCTIONS)
-        with compat.RemoteCodeCompat("m").loading():
+        with compat.RemoteCodeCompat("m", True).loading():
             pass
         assert dict(ROPE_INIT_FUNCTIONS) == before
 
@@ -151,6 +163,10 @@ class TestMaskFunction:
     def test_the_wrapper_keeps_the_original_reachable(self):
         assert compat.adapt_mask_function(_new_mask).__wrapped__ is _new_mask
 
+    def test_adapting_a_wrapper_again_returns_it(self):
+        once = compat.adapt_mask_function(_new_mask)
+        assert compat.adapt_mask_function(once) is once
+
     def test_any_other_unknown_keyword_still_raises(self):
         wrapped = compat.adapt_mask_function(_new_mask)
         with pytest.raises(TypeError, match="bogus"):
@@ -183,7 +199,7 @@ class TestAfterLoad:
     def test_both_mask_functions_of_the_defining_module_are_adapted(self, monkeypatch):
         module, model = self._model(monkeypatch, create_causal_mask=_new_mask,
                                     create_sliding_window_causal_mask=_new_mask)
-        compat.RemoteCodeCompat("m").after_load(model)
+        compat.RemoteCodeCompat("m", True).after_load(model)
         for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
             assert getattr(module, name) is not _new_mask
             assert getattr(module, name)(config="c", input_embeds="e", attention_mask="a",
@@ -191,20 +207,20 @@ class TestAfterLoad:
 
     def test_a_module_with_only_one_of_them_adapts_that_one(self, monkeypatch):
         module, model = self._model(monkeypatch, create_causal_mask=_new_mask)
-        compat.RemoteCodeCompat("m").after_load(model)
+        compat.RemoteCodeCompat("m", True).after_load(model)
         assert module.create_causal_mask is not _new_mask
         assert not hasattr(module, "create_sliding_window_causal_mask")
 
     def test_a_module_with_none_is_reported(self, monkeypatch, caplog):
         _module, model = self._model(monkeypatch)
         with caplog.at_level(logging.WARNING, logger=compat.logger.name):
-            compat.RemoteCodeCompat("m").after_load(model)
+            compat.RemoteCodeCompat("m", True).after_load(model)
         assert "no mask function to adapt" in caplog.text
 
     def test_an_unknown_module_is_reported(self, caplog):
         model = type("M", (), {"__module__": "no_such_remote_module_anywhere"})()
         with caplog.at_level(logging.WARNING, logger=compat.logger.name):
-            compat.RemoteCodeCompat("m").after_load(model)
+            compat.RemoteCodeCompat("m", True).after_load(model)
         assert "no_such_remote_module_anywhere" in caplog.text
 
 

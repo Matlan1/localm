@@ -14,10 +14,12 @@ is built. The shim runs in the HF worker process.
 """
 
 import contextlib
+import functools
 import inspect
 import json
 import logging
 import sys
+import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +29,8 @@ _MODEL_TYPES = frozenset({"ouro"})
 
 _MASK_FUNCTIONS = ("create_causal_mask", "create_sliding_window_causal_mask")
 _REMOVED_MASK_KEYWORDS = frozenset({"cache_position"})
+
+_ADAPTED = weakref.WeakSet()
 
 
 def _model_type(model_path: str) -> Optional[str]:
@@ -57,7 +61,9 @@ def adapt_mask_function(fn):
     older API: ``input_embeds`` is passed on as ``inputs_embeds`` and a
     ``cache_position`` keyword *fn* does not take is dropped. Every other keyword
     is passed as given, so a mismatch still raises. *fn* itself when it needs
-    neither change."""
+    neither change or is already such a wrapper."""
+    if fn in _ADAPTED:
+        return fn
     params = inspect.signature(fn).parameters
     renames = "inputs_embeds" in params and "input_embeds" not in params
     drops = "cache_position" not in params and not any(
@@ -65,6 +71,7 @@ def adapt_mask_function(fn):
     if not renames and not drops:
         return fn
 
+    @functools.wraps(fn)
     def adapted(*args, **kwargs):
         if renames and "input_embeds" in kwargs:
             kwargs["inputs_embeds"] = kwargs.pop("input_embeds")
@@ -73,22 +80,24 @@ def adapt_mask_function(fn):
                 kwargs.pop(name, None)
         return fn(*args, **kwargs)
 
-    adapted.__wrapped__ = fn
+    _ADAPTED.add(adapted)
     return adapted
 
 
 class RemoteCodeCompat:
     """The fixes for one model directory, applied around its ``from_pretrained``."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, trust_remote_code: bool):
         self.model_path = model_path
+        self.trust_remote_code = trust_remote_code
 
     def config(self, tr):
         """The model's config with ``pad_token_id`` set to None when the running
         transformers leaves it off; None when the config cannot be loaded (the
         load itself then reports the failure)."""
         try:
-            config = tr.AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
+            config = tr.AutoConfig.from_pretrained(
+                self.model_path, trust_remote_code=self.trust_remote_code)
         except Exception as exc:
             logger.warning("remote-code compat: could not read the config (%s: %s)",
                            type(exc).__name__, exc)
@@ -130,4 +139,4 @@ def for_model(model_path: str, trust_remote_code: bool) -> Optional[RemoteCodeCo
     *trust_remote_code* is on."""
     if not trust_remote_code or _model_type(model_path) not in _MODEL_TYPES:
         return None
-    return RemoteCodeCompat(model_path)
+    return RemoteCodeCompat(model_path, trust_remote_code)
