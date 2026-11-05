@@ -306,17 +306,20 @@ autoencoder, vocoder, text encoder) takes its part type and, for ACE-Step, says
 which model it belongs to. Anything without a hard
 signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
 `text-encoder`, `vae`, `vocoder`, `planner`, `lora`, `embedding`, `tts`, `upscaler`,
-`controlnet`, `textual-inversion`, `segmentation`, and `unknown`.
+`controlnet`, `textual-inversion`, `segmentation`, `decision`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model. Neither
-is an `embedding`, `tts` or component model (`mmproj`, `diffusion-unet`, `text-encoder`,
+is an `embedding`, `tts`, `decision` or component model (`mmproj`, `diffusion-unet`, `text-encoder`,
 `vae`, `vocoder`, `planner`, `lora`, `upscaler`, `controlnet`, `textual-inversion`, `segmentation`), so a diffusion checkpoint
 or a text encoder cannot get loaded as if it were a chat model.
+A `decision` model (Perplexity pplx-decider, Bespoke Nimble, JEV) answers typed questions with
+option probabilities instead of writing text, so it is kept out of chat.
+
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae vocoder planner lora embedding tts upscaler controlnet textual-inversion segmentation unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae vocoder planner lora embedding tts upscaler controlnet textual-inversion segmentation decision unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder
