@@ -286,7 +286,13 @@ def _inject(app, *, owner=None, label="Model pull owner/repo"):
     return j
 
 
-def test_a_job_starting_and_ending_is_pushed_without_waiting_for_a_tick(app, server):
+def test_a_job_starting_and_ending_is_pushed_without_waiting_for_a_tick(
+        app, server, monkeypatch):
+    """The stream re-reads the job list when woken or when its keepalive
+    interval passes. The interval is made longer than the test, so only a kick
+    can wake it."""
+    import localm.plugins.gui.web as web
+    monkeypatch.setattr(web, "_KEEPALIVE_S", 30.0)
     r = Reader(server.url)
     r.start()
     release = threading.Event()

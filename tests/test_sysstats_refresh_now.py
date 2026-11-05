@@ -132,7 +132,8 @@ def test_a_probe_that_began_in_the_same_clock_tick_as_the_call_is_not_counted(gp
     """The Windows monotonic clock ticks about every 15 ms, so a probe started
     just before the call can carry the same timestamp as the call. Which probe
     began first is decided by counting probes, never by comparing times."""
-    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    real = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: float(int(real())))
     first_reading()
     gpu.truth = 2.0
     assert sysstats.refresh_vram_now(5.0) is True
