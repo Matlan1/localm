@@ -151,24 +151,61 @@ class TestMaskFunction:
     def test_the_wrapper_keeps_the_original_reachable(self):
         assert compat.adapt_mask_function(_new_mask).__wrapped__ is _new_mask
 
+    def test_any_other_unknown_keyword_still_raises(self):
+        wrapped = compat.adapt_mask_function(_new_mask)
+        with pytest.raises(TypeError, match="bogus"):
+            wrapped(config="c", input_embeds="e", attention_mask="a",
+                    past_key_values="p", bogus=1)
+
+    def test_a_var_keywords_function_that_names_inputs_embeds_still_gets_the_rename(self):
+        def open_ended(config, inputs_embeds, **kwargs):
+            return inputs_embeds, kwargs
+        out = compat.adapt_mask_function(open_ended)(
+            config="c", input_embeds="e", cache_position=1)
+        assert out == ("e", {"cache_position": 1})
+
+    @pytest.mark.parametrize("name", ["create_causal_mask", "create_sliding_window_causal_mask"])
+    def test_the_installed_transformers_functions_need_the_adapter(self, name):
+        masking_utils = pytest.importorskip("transformers.masking_utils")
+        fn = getattr(masking_utils, name)
+        wrapped = compat.adapt_mask_function(fn)
+        assert wrapped is not fn and wrapped.__wrapped__ is fn
+
 
 class TestAfterLoad:
-    def test_the_module_that_defines_the_model_gets_the_adapted_function(self, monkeypatch):
+    def _model(self, monkeypatch, **functions):
         module = types.ModuleType("fake_remote_modeling_ouro")
-        module.create_causal_mask = _new_mask
+        for name, fn in functions.items():
+            setattr(module, name, fn)
         monkeypatch.setitem(sys.modules, module.__name__, module)
-        model_cls = type("OuroForCausalLM", (), {"__module__": module.__name__})
-        compat.RemoteCodeCompat("m").after_load(model_cls())
-        assert module.create_causal_mask is not _new_mask
-        assert module.create_causal_mask(config="c", input_embeds="e", attention_mask="a",
+        return module, type("OuroForCausalLM", (), {"__module__": module.__name__})()
+
+    def test_both_mask_functions_of_the_defining_module_are_adapted(self, monkeypatch):
+        module, model = self._model(monkeypatch, create_causal_mask=_new_mask,
+                                    create_sliding_window_causal_mask=_new_mask)
+        compat.RemoteCodeCompat("m").after_load(model)
+        for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+            assert getattr(module, name) is not _new_mask
+            assert getattr(module, name)(config="c", input_embeds="e", attention_mask="a",
                                          cache_position=1, past_key_values="p")[2] == "e"
 
-    def test_a_module_without_the_function_is_left_alone(self, monkeypatch):
-        module = types.ModuleType("fake_remote_modeling_other")
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-        model_cls = type("M", (), {"__module__": module.__name__})
-        compat.RemoteCodeCompat("m").after_load(model_cls())
-        assert not hasattr(module, "create_causal_mask")
+    def test_a_module_with_only_one_of_them_adapts_that_one(self, monkeypatch):
+        module, model = self._model(monkeypatch, create_causal_mask=_new_mask)
+        compat.RemoteCodeCompat("m").after_load(model)
+        assert module.create_causal_mask is not _new_mask
+        assert not hasattr(module, "create_sliding_window_causal_mask")
+
+    def test_a_module_with_none_is_reported(self, monkeypatch, caplog):
+        _module, model = self._model(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger=compat.logger.name):
+            compat.RemoteCodeCompat("m").after_load(model)
+        assert "no mask function to adapt" in caplog.text
+
+    def test_an_unknown_module_is_reported(self, caplog):
+        model = type("M", (), {"__module__": "no_such_remote_module_anywhere"})()
+        with caplog.at_level(logging.WARNING, logger=compat.logger.name):
+            compat.RemoteCodeCompat("m").after_load(model)
+        assert "no_such_remote_module_anywhere" in caplog.text
 
 
 class TestWorkerWiring:

@@ -25,13 +25,16 @@ logger = logging.getLogger(__name__)
 
 _MODEL_TYPES = frozenset({"ouro"})
 
+_MASK_FUNCTIONS = ("create_causal_mask", "create_sliding_window_causal_mask")
+_REMOVED_MASK_KEYWORDS = frozenset({"cache_position"})
+
 
 def _model_type(model_path: str) -> Optional[str]:
     """``model_type`` from *model_path*'s config.json, or None when the file is
     missing, unreadable or states none."""
     try:
         data = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     value = data.get("model_type") if isinstance(data, dict) else None
     return value if isinstance(value, str) else None
@@ -50,19 +53,25 @@ def default_rope_parameters(config, device=None, seq_len=None):
 
 
 def adapt_mask_function(fn):
-    """*fn* (``create_causal_mask``) wrapped to accept the keywords of the older
-    API: ``input_embeds`` is passed on as ``inputs_embeds`` and any keyword *fn*
-    does not take is dropped. *fn* itself when it takes ``input_embeds`` or has
-    a ``**kwargs`` parameter."""
+    """*fn* (a transformers mask function) wrapped to accept the keywords of the
+    older API: ``input_embeds`` is passed on as ``inputs_embeds`` and a
+    ``cache_position`` keyword *fn* does not take is dropped. Every other keyword
+    is passed as given, so a mismatch still raises. *fn* itself when it needs
+    neither change."""
     params = inspect.signature(fn).parameters
-    if "input_embeds" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+    renames = "inputs_embeds" in params and "input_embeds" not in params
+    drops = "cache_position" not in params and not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if not renames and not drops:
         return fn
 
     def adapted(*args, **kwargs):
-        if "input_embeds" in kwargs and "inputs_embeds" in params:
+        if renames and "input_embeds" in kwargs:
             kwargs["inputs_embeds"] = kwargs.pop("input_embeds")
-        return fn(*args, **{k: v for k, v in kwargs.items() if k in params})
+        if drops:
+            for name in _REMOVED_MASK_KEYWORDS:
+                kwargs.pop(name, None)
+        return fn(*args, **kwargs)
 
     adapted.__wrapped__ = fn
     return adapted
@@ -105,11 +114,15 @@ class RemoteCodeCompat:
                 ROPE_INIT_FUNCTIONS.pop("default", None)
 
     def after_load(self, model) -> None:
-        """Adapt ``create_causal_mask`` in the module that defines *model*."""
-        module = sys.modules.get(type(model).__module__)
-        fn = getattr(module, "create_causal_mask", None)
-        if callable(fn):
-            module.create_causal_mask = adapt_mask_function(fn)
+        """Adapt the mask functions in the module that defines *model*; a
+        module that is not found, or that has none of them, is logged."""
+        name = type(model).__module__
+        module = sys.modules.get(name)
+        found = [attr for attr in _MASK_FUNCTIONS if callable(getattr(module, attr, None))]
+        if not found:
+            logger.warning("remote-code compat: no mask function to adapt in module %s", name)
+        for attr in found:
+            setattr(module, attr, adapt_mask_function(getattr(module, attr)))
 
 
 def for_model(model_path: str, trust_remote_code: bool) -> Optional[RemoteCodeCompat]:
