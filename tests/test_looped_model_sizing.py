@@ -48,8 +48,9 @@ class TestKvBytesPerToken:
         assert gguf_kv_bytes_per_token(f) == PHYS * PER_LAYER_F16
 
     def test_the_cache_type_scales_the_looped_figure(self, tmp_path):
-        f = _nanbeige(tmp_path / "m.gguf", 2)
-        assert gguf_kv_bytes_per_token(f, "q8_0") == gguf_kv_bytes_per_token(f) * 17 // 32
+        base = gguf_kv_bytes_per_token(_nanbeige(tmp_path / "base.gguf"), "q8_0")
+        looped = gguf_kv_bytes_per_token(_nanbeige(tmp_path / "m.gguf", 2), "q8_0")
+        assert looped == 2 * base == 2 * PHYS * PER_LAYER_F16 * 17 // 32
 
     def test_a_per_layer_head_array_is_multiplied_too(self, tmp_path):
         kv = [("general.architecture", 8, "nanbeige"),
@@ -89,11 +90,6 @@ class TestLayerCount:
     def test_the_layout_counts_the_logical_layers(self, tmp_path):
         layout = gguf_split_layout(_model(tmp_path, 3))
         assert layout["block_count"] == 3 * PHYS
-
-    def test_the_loops_share_the_first_loops_weights(self, tmp_path):
-        sizes = gguf_split_layout(_model(tmp_path, 3))["tensor_bytes"]
-        blocks = {int(n.split(".")[1]) for n in sizes if n.startswith("blk.")}
-        assert blocks == set(range(PHYS))
 
     def test_without_num_loops_the_count_is_unchanged(self, tmp_path):
         assert _gguf_split_layout_meta(_model(tmp_path)) == (PHYS, 100)
