@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import livefeed as _livefeed
 from localm.model_manager import PROGRESS_SENTINEL
 
 # Bound on the replay backlog and on each subscriber's queue.
@@ -930,10 +931,12 @@ class JobManager:
             self._gc()
             self._jobs[job.id] = job
             self._persist_locked()
+        _livefeed.kick("job registered")
 
     def _persist(self) -> None:
         with self._lock:
             self._persist_locked()
+        _livefeed.kick("job changed")
 
     def _persist_locked(self) -> None:
         """Mirror the registry to disk. Caller holds _lock.

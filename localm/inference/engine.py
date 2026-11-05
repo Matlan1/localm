@@ -15,6 +15,7 @@ from rich.markup import escape
 from localm.config import load_config
 from localm.console import console
 from localm.debuglog import logger
+from localm import livefeed as _livefeed
 from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
 from localm.kv_cache import resolve_kv_cache_type
@@ -515,6 +516,7 @@ class Engine:
                 self._load_locked()
             finally:
                 self.loading = False
+                _livefeed.kick("model loaded")
 
     def _load_locked(self) -> None:
         """The body of load(), for a backend that is not loaded yet. Caller
@@ -572,7 +574,10 @@ class Engine:
                 for a in applied if isinstance(a, dict)]
 
     def unload(self) -> None:
-        self._backend.unload()
+        try:
+            self._backend.unload()
+        finally:
+            _livefeed.kick("model unloaded")
 
     @property
     def effective_ctx_max(self):

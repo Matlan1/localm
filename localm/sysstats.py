@@ -368,6 +368,9 @@ _VRAM_TOPOLOGY_INTERVAL_S = 300.0
 _VRAM_UNCOVERED_INTERVAL_S = 60.0
 
 _vram_lock = threading.Lock()
+_vram_cond = threading.Condition(_vram_lock)   # notified when a probe lands
+_vram_probe_started: float | None = None   # monotonic start of the probe now in flight
+_vram_last_started: float | None = None    # monotonic start of the probe behind _vram_last
 _vram_inflight = False
 _vram_last: dict | None = None      # last COMPLETED reading. May be {} (looked,
                                     # found nothing); None means no attempt has
@@ -405,7 +408,10 @@ def _reset_vram_probe_cache() -> None:
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
     global _vram_ready, _vram_last_is_seed, _vram_full_at, _vram_devices_shown
+    global _vram_probe_started, _vram_last_started
     with _vram_lock:
+        _vram_probe_started = None
+        _vram_last_started = None
         _vram_full_at = None
         _vram_devices_shown = None
         _vram_last = None
@@ -722,7 +728,7 @@ def _vram_probe(my_epoch: int) -> None:
     means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
     reading is discarded instead of racing whatever probe holds the slot now."""
     global _vram_inflight, _vram_last, _vram_last_at, _vram_last_is_seed
-    global _vram_full_at
+    global _vram_full_at, _vram_last_started
     with _vram_lock:
         first_ever = _vram_last is None
     if first_ever:
@@ -765,7 +771,9 @@ def _vram_probe(my_epoch: int) -> None:
         elif computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
+        _vram_last_started = _vram_probe_started
         _vram_inflight = False
+        _vram_cond.notify_all()
     _vram_ready.set()
 
 
@@ -788,7 +796,7 @@ def _vram(wait_first: bool = False) -> dict:
     is genuinely in flight, block for up to the underlying probe's own
     cold-init-tolerant deadline instead of omitting VRAM. Default False keeps
     the non-blocking contract for every repeating-poll caller."""
-    global _vram_inflight
+    global _vram_inflight, _vram_probe_started
     now = time.monotonic()
     start_probe = False
     my_epoch = 0
@@ -798,6 +806,7 @@ def _vram(wait_first: bool = False) -> dict:
         probe_running = _vram_inflight
         if stale and not _vram_inflight:
             _vram_inflight = True
+            _vram_probe_started = now
             start_probe = True
             my_epoch = _vram_probe_epoch
         last = _vram_last
@@ -821,6 +830,46 @@ def _vram(wait_first: bool = False) -> dict:
             with _vram_lock:
                 last = _vram_last
     return last if last is not None else {}
+
+
+def refresh_vram_now(timeout: float = 3.0) -> bool:
+    """Take a VRAM reading now instead of waiting out ``_VRAM_REFRESH_INTERVAL_S``.
+
+    Blocks the calling thread, so call it off the event loop. A probe already
+    in flight began before this call and so may predate the change that
+    prompted it; its reading is not counted, and a second probe is started when
+    it lands. Returns True once a probe that began after this call has landed
+    (whatever it found), False when *timeout* seconds pass first - the last
+    completed reading then stays in place and the probe keeps running."""
+    global _vram_last_at
+    requested = time.monotonic()
+    deadline = requested + max(0.0, timeout)
+
+    def landed() -> bool:
+        return _vram_last_started is not None and _vram_last_started >= requested
+
+    while True:
+        with _vram_cond:
+            if landed():
+                return True
+            if not _vram_inflight:
+                _vram_last_at = None
+        _vram()
+        with _vram_cond:
+            if landed():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _vram_cond.wait(remaining)
+
+
+def fresh_stats(*, timeout: float = 3.0) -> dict:
+    """:func:`system_stats` with the VRAM reading taken now
+    (:func:`refresh_vram_now`). Blocks up to *timeout* for it; when it does not
+    land in time the VRAM section is the last completed reading."""
+    refresh_vram_now(timeout)
+    return system_stats()
 
 
 _GPU_UTIL_REFRESH_INTERVAL_S = 2.0    # do not re-probe more often than the GUI polls

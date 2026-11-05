@@ -13,6 +13,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **Decision-model GGUFs are no longer registered as chat models.** A GGUF that answers typed questions with option probabilities (Perplexity pplx-decider, Bespoke Nimble, JEV) is now typed `decision`: it stays out of the chat picker, automatic model choice and `/v1/models`, and naming it for chat says it is a decision model instead of failing opaquely. `localm set-type NAME llm` still overrides the type.
+- **The VRAM and hardware readout follows a model load or unload within a second.** The server now pushes CPU, RAM, VRAM and background activity to the open page as they change, instead of the page asking every 2.5 seconds, and takes a fresh VRAM reading the moment a model loads or unloads or a background job starts or ends. The figure used to lag a freed model by several seconds. If the live connection cannot be opened (an older server, a proxy that buffers it) the page falls back to the previous polling.
 
 ## [0.3.3] - 2026-11-05
 
