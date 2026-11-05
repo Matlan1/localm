@@ -147,6 +147,15 @@ def test_the_daemon_stop_failing_never_fails_the_build(install, monkeypatch, cap
     assert "could not stop the runtime probe" in capsys.readouterr().out
 
 
+def test_the_daemon_stop_leaves_the_rebuild_marker_before_it_stops_anything(install, monkeypatch):
+    (install / ".venv/Scripts/python.exe").write_bytes(b"x")
+    seen = []
+    monkeypatch.setattr(hatch_build.subprocess, "run", lambda cmd, **kw: seen.append(
+        (install / ".venv" / hatch_build.REBUILD_MARKER).is_file()))
+    hatch_build.stop_own_probe_daemon(install)
+    assert seen == [True]
+
+
 def test_no_existing_install_starts_no_process(tmp_path, monkeypatch):
     monkeypatch.setattr(hatch_build.subprocess, "run", lambda *a, **k: pytest.fail("started a process"))
     hatch_build.stop_own_probe_daemon(tmp_path)
