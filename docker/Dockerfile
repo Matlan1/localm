@@ -58,7 +58,7 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_PYTHON_PREFERENCE=only-managed \
     UV_NO_CACHE=1
 
-COPY --chown=localm:localm pyproject.toml VERSION /opt/localm/
+COPY --chown=localm:localm pyproject.toml hatch_build.py VERSION /opt/localm/
 COPY --chown=localm:localm docs/pypi-readme.md /opt/localm/docs/pypi-readme.md
 COPY --chown=localm:localm localm /opt/localm/localm
 COPY --chown=localm:localm runtime /opt/localm/runtime
