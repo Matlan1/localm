@@ -329,7 +329,9 @@ fi
 if [ -x .venv/bin/python ]; then
   run_rc=0
   run_list="$(.venv/bin/python -m localm.install_manifest running --root . 2>/dev/null)" || run_rc=$?
-  if [ "$run_rc" = 3 ]; then
+  if [ "$run_rc" = 3 ] && [ "$YES" = 1 ]; then
+    say "  [i] LocaLM is running from this folder and keeps running. Restart it after setup to use the new version."
+  elif [ "$run_rc" = 3 ]; then
     say ""
     say "  These programs are running from this folder and would block the update:"
     say ""
