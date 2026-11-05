@@ -2,7 +2,8 @@ name: docker
 
 # Builds the localm server images (docker/Dockerfile) and smoke-tests each one.
 #
-#   pull_request       only when docker/** or this file changes: build + smoke
+#   pull_request       only when docker/**, this file or the project's build files
+#                      (pyproject.toml, hatch_build.py) change: build + smoke
 #                      test, nothing is pushed.
 #   release: published build + smoke test, then push the tested images to
 #                      ghcr.io/matlan1/localm. The only trigger that pushes without
@@ -23,6 +24,8 @@ on:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
+      - "pyproject.toml"
+      - "hatch_build.py"
   release:
     types: [published]
   workflow_dispatch:
