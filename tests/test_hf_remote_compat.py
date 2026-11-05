@@ -224,6 +224,67 @@ class TestAfterLoad:
         assert "no_such_remote_module_anywhere" in caplog.text
 
 
+class _TensorCache:
+    def get_mask_sizes(self, cache_position, layer_idx=0):
+        return 10 + cache_position.shape[0], layer_idx
+
+
+_TENSOR_METHOD = _TensorCache.__dict__["get_mask_sizes"]
+
+
+class _QueryLengthCache:
+    def get_mask_sizes(self, query_length, layer_idx=0):
+        return query_length, layer_idx
+
+
+class _NoOverrideCache:
+    pass
+
+
+class TestCacheClass:
+    def test_an_int_query_length_reaches_a_tensor_written_method(self):
+        pytest.importorskip("torch")
+        cls = type("C", (_TensorCache,), {"get_mask_sizes": _TensorCache.get_mask_sizes})
+        assert compat.adapt_cache_class(cls) is True
+        assert cls().get_mask_sizes(5, 2) == (15, 2)
+
+    def test_a_tensor_like_argument_still_works(self):
+        cls = type("C", (), {"get_mask_sizes": _TensorCache.get_mask_sizes})
+        assert compat.adapt_cache_class(cls) is True
+        assert cls().get_mask_sizes(SimpleNamespace(shape=(3,)), layer_idx=1) == (13, 1)
+
+    def test_a_method_that_already_takes_the_query_length_is_left_alone(self):
+        cls = type("C", (), {"get_mask_sizes": _QueryLengthCache.get_mask_sizes})
+        assert compat.adapt_cache_class(cls) is False
+        assert cls().get_mask_sizes(4) == (4, 0)
+
+    def test_a_class_without_its_own_method_is_left_alone(self):
+        assert compat.adapt_cache_class(_NoOverrideCache) is False
+        sub = type("Sub", (_TensorCache,), {})
+        assert compat.adapt_cache_class(sub) is False
+        assert "get_mask_sizes" not in sub.__dict__
+
+    def test_adapting_twice_changes_nothing_more(self):
+        cls = type("C", (), {"get_mask_sizes": _TensorCache.get_mask_sizes})
+        assert compat.adapt_cache_class(cls) is True
+        once = cls.__dict__["get_mask_sizes"]
+        assert compat.adapt_cache_class(cls) is False
+        assert cls.__dict__["get_mask_sizes"] is once
+
+    def test_after_load_adapts_the_modules_own_classes_only(self, monkeypatch):
+        module = types.ModuleType("fake_remote_modeling_thinking")
+        module.create_causal_mask = _new_mask
+        own = type("Own", (), {"get_mask_sizes": _TensorCache.get_mask_sizes,
+                               "__module__": module.__name__})
+        module.Own = own
+        module.Imported = _TensorCache
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        model = type("M", (), {"__module__": module.__name__})()
+        compat.RemoteCodeCompat("m", True).after_load(model)
+        assert own.__dict__["get_mask_sizes"] is not _TENSOR_METHOD
+        assert _TensorCache.__dict__["get_mask_sizes"] is _TENSOR_METHOD
+
+
 class TestWorkerWiring:
     def test_load_applies_the_compat_around_the_model_load(self):
         src = inspect.getsource(HFWorker.load)
