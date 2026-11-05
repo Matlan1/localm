@@ -440,7 +440,8 @@ class TestWorkflow:
     def test_pull_requests_only_run_for_docker_paths_and_never_publish(self):
         wf = _workflow()
         triggers = wf[True] if True in wf else wf["on"]
-        assert triggers["pull_request"]["paths"] == ["docker/**", ".github/workflows/docker.yml"]
+        assert triggers["pull_request"]["paths"] == ["docker/**", ".github/workflows/docker.yml",
+                                           "pyproject.toml", "hatch_build.py"]
         assert triggers["release"]["types"] == ["published"]
         assert triggers["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
         assert wf["jobs"]["publish"]["if"] == "github.event_name != 'pull_request'"
