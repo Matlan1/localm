@@ -102,7 +102,7 @@ def _stop_hook(hook):
         _discard_stop_hook(hook)
 
 
-_servers: "weakref.WeakSet" = weakref.WeakSet()
+_servers: weakref.WeakSet = weakref.WeakSet()
 
 
 def _register_server(server):

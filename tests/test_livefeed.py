@@ -473,3 +473,71 @@ def test_every_direct_backend_load_in_engine_is_followed_by_a_kick():
                             bad.append((fn.name, st.lineno))
     assert seen >= 2, "the sentinel found no direct backend loads; it is looking in the wrong place"
     assert bad == [], f"a direct backend load with no kick after it: {bad}"
+
+
+def test_loading_an_embedder_kicks_the_feed(recorder, monkeypatch, tmp_path):
+    from localm.inference import embedder as emb
+
+    p = tmp_path / "e.gguf"
+    p.write_bytes(b"0" * 1024)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": str(p), "n_gpu_layers": 0,
+                                 "net_mode": "off"})
+    monkeypatch.setattr(emb, "_maybe_swap_for_embedder", lambda *a, **k: None)
+
+    class Fake:
+        dim = 3
+        effective_pooling = None
+
+        def __init__(self, path, **kw):
+            self.model_path = path
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", Fake)
+    emb.reset_embedder()
+    recorder.reasons.clear()
+    try:
+        assert emb.get_embedder() is not None
+        assert recorder.reasons == ["embedding model loaded"]
+        assert emb.get_embedder() is not None
+        assert recorder.reasons == ["embedding model loaded"], "a reuse is not a load"
+    finally:
+        emb.reset_embedder()
+
+
+def test_loading_a_speech_model_kicks_the_feed(recorder, monkeypatch, tmp_path):
+    from localm.inference import speech
+
+    class FakeEngine:
+        alive = True
+        active_requests = 0
+        sample_rate = 24000
+        projector_on_gpu = False
+
+        def __init__(self, model, n_gpu_layers=0):
+            self.model = model
+
+        def claim(self):
+            pass
+
+        def close(self, grace=5.0):
+            pass
+
+    monkeypatch.setattr(speech, "SpeechEngine", FakeEngine)
+    monkeypatch.setattr(speech, "_choose_gpu_layers", lambda model, n_ctx: (0, None))
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF" + b"m")
+    proj = tmp_path / "mmproj-m.gguf"
+    proj.write_bytes(b"GGUF")
+    model = speech.SpeechModel("m", str(gguf), str(proj))
+    speech.reset_speech()
+    recorder.reasons.clear()
+    try:
+        speech.get_engine(model)
+        assert recorder.reasons == ["speech model loaded"]
+        speech.get_engine(model)
+        assert recorder.reasons == ["speech model loaded"], "a reuse is not a load"
+    finally:
+        speech.reset_speech()

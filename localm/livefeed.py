@@ -83,7 +83,7 @@ class Subscription:
     """One connection's handle on the feed. Wakes when the feed has something
     new; the connection then reads the feed's state."""
 
-    def __init__(self, feed: "LiveFeed") -> None:
+    def __init__(self, feed: LiveFeed) -> None:
         self._feed = feed
         self._event = asyncio.Event()
         self.seen_seq = 0
