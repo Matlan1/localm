@@ -2278,6 +2278,9 @@ class LlamaCpp:
                         decoder_kv = self._decoder_kv_bytes_per_token(n_head_kv)
                         if decoder_kv:
                             return decoder_kv
+                    stated = self._stated_kv_head_width()
+                    if stated:
+                        return self.n_layers * n_head_kv * stated * 2
                     head_dim = n_embd // n_head
                     return self.n_layers * n_head_kv * head_dim * 2 * 2
         except Exception as exc:
@@ -2312,6 +2315,18 @@ class LlamaCpp:
         except (TypeError, ValueError):
             return 0
         return value if value > 0 else 0
+
+    def _stated_kv_head_width(self) -> int:
+        """``key_length + value_length`` from the loaded model's metadata, or 0
+        when it does not state both. Several architectures set a head width
+        that is not ``n_embd / n_head`` (Nanbeige4.2, Gemma 3), and the cache
+        is sized by the stated one."""
+        arch = self._architecture()
+        if not arch:
+            return 0
+        k_len = self._meta_int(f"{arch}.attention.key_length")
+        v_len = self._meta_int(f"{arch}.attention.value_length")
+        return k_len + v_len if k_len and v_len else 0
 
     def _decoder_kv_bytes_per_token(self, n_head_kv: int) -> int:
         """f16 KV-cache bytes per token of an encoder-decoder model's decoder
