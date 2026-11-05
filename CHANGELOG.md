@@ -11,7 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.3.3] - 2026-11-04
+## [0.3.3] - 2026-11-05
 
 ### Added
 - **Every model on the Models page can be renamed, given an alias and removed.** Embedding, diffusion, VAE, LoRA, upscaler and other non-chat rows used to show only info; they now have alias, rename and remove, and unload when loaded. Use and reload stay on chat models.
