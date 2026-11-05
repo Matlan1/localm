@@ -2161,6 +2161,10 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
     return dest
 
 
+_DECISION_DETECTION_NOTE = ("[yellow]Detected as a decision model (GGUF metadata). It is not a chat "
+                            "model and is kept out of chat.[/yellow]")
+
+
 def _embedding_detection_note(path) -> str:
     """The console line a pull prints for a GGUF typed as an embedding model:
     names it a reranker when its own metadata marks it as one."""
@@ -2488,6 +2492,9 @@ def _pull_gguf_file(
                 elif _mm.gguf_is_mmproj(dest):
                     console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                     reg_type = "mmproj"
+                elif _mm.gguf_decision_signal(dest):
+                    console.print(_DECISION_DETECTION_NOTE)
+                    reg_type = "decision"
                 elif _mm.gguf_embedding_signal(dest):
                     console.print(_embedding_detection_note(dest))
                     reg_type = "embedding"
@@ -2722,6 +2729,9 @@ def _pull_gguf_file(
             elif _mm.gguf_is_mmproj(base_dir / filename):
                 console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                 reg_type = "mmproj"
+            elif _mm.gguf_decision_signal(base_dir / filename):
+                console.print(_DECISION_DETECTION_NOTE)
+                reg_type = "decision"
             elif _mm.gguf_embedding_signal(base_dir / filename):
                 console.print(_embedding_detection_note(base_dir / filename))
                 reg_type = "embedding"

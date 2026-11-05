@@ -49,11 +49,12 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
   ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner",
-   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"];
+   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "decision", "unknown"];
 
 // Types whose purpose is not obvious from the name: what the model is for, shown
 // under the type pill and in its tooltip.
 const TYPE_HINT_KEYS = {
+  "decision": "models.typeHint.decision",
   "text-encoder": "models.typeHint.textEncoder",
   "vocoder": "models.typeHint.vocoder",
   "planner": "models.typeHint.planner",

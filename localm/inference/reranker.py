@@ -157,6 +157,7 @@ _KIND_WORDS = {
     "textual-inversion": "a textual-inversion embedding",
     "segmentation": "a segmentation model",
     "tts": "a text-to-speech model",
+    "decision": "a decision model",
     "unknown": "a model of unknown type",
 }
 

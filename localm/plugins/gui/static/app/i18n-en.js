@@ -1551,6 +1551,7 @@ export const I18N_EN = {
   "models.tag.missing": "missing",
   "models.title": "Models",
   "models.partOf": "part of {model}",
+  "models.typeHint.decision": "Decision model (answers typed questions with probabilities, not a chat model)",
   "models.typeHint.planner": "Planner (language model used by music models)",
   "models.typeHint.textEncoder": "Text encoder (used by image and video models)",
   "models.typeHint.vocoder": "Vocoder (turns music latents into audio)",

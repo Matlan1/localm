@@ -2268,12 +2268,27 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
     return data_start + max_offset
 
 
+_GGUF_DECISION_KEY_PREFIX = "pplx_decider."
+_GGUF_DECISION_KEY_INFIX = ".decision."
+
+
+def _is_decision_key(key: str) -> bool:
+    """True for a metadata key only a decision model's converter writes: the
+    ``pplx_decider.*`` block of Perplexity's decider, or an
+    ``"<architecture>.decision.*"`` key (``qwen35.decision.type`` of Bespoke
+    Nimble and JEV)."""
+    if key.startswith(_GGUF_DECISION_KEY_PREFIX):
+        return True
+    head, sep, rest = key.partition(".")
+    return bool(head) and sep == "." and ("." + rest).startswith(_GGUF_DECISION_KEY_INFIX)
+
+
 def _gguf_metadata_probe(path: Path) -> dict:
     """Best-effort read of the GGUF header metadata needed for model-role
     detection: ``general.architecture``, ``general.type``, ``adapter.type`` and
     whether any ``*.pooling_type`` key is present. The result carries the keys
     ``architecture``, ``general_type``, ``adapter_type``, ``has_pooling_type``
-    and ``non_causal``; a string key the file does not declare is None. Reads
+    ``has_decision_keys`` and ``non_causal``; a string key the file does not declare is None. Reads
     only a bounded prefix of the file (see
     ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
     tokenizer vocab arrays and tensor data), never the whole model. Returns
@@ -2294,6 +2309,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
     has_pooling_type = False
     pooling_type = None
     has_classifier_labels = False
+    has_decision_keys = False
     non_causal = False
     try:
         if buf[:4] != b"GGUF":
@@ -2312,7 +2328,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
             # pooling_type key was seen), so only the model-parameter keys that
             # precede the tokenizer arrays remain worth reading.
             if (key.startswith("tokenizer.ggml.")
-                    and (has_pooling_type
+                    and (has_pooling_type or has_decision_keys
                          or architecture in _GGUF_EMBEDDING_ARCHITECTURES
                          or architecture in GGUF_TEXT_ENCODER_ARCHITECTURES)):
                 break
@@ -2335,6 +2351,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
                             buf, off)[0]
                 elif key.endswith(".classifier.output_labels"):
                     has_classifier_labels = True
+                elif _is_decision_key(key):
+                    has_decision_keys = True
                 elif key.endswith(".attention.causal") and vtype == _GGUF_TYPE_BOOL:
                     non_causal = not struct.unpack_from("<?", buf, off)[0]
                 off = _gguf_skip_value(buf, off, vtype)
@@ -2348,6 +2366,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
     return {"architecture": architecture, "has_pooling_type": has_pooling_type,
             "pooling_type": pooling_type,
             "has_classifier_labels": has_classifier_labels,
+            "has_decision_keys": has_decision_keys,
             "non_causal": non_causal, "general_type": general_type,
             "adapter_type": adapter_type}
 
@@ -2433,6 +2452,18 @@ def gguf_unusable_reason(path: Path) -> Optional[str]:
     if gguf_general_type(path) == "imatrix":
         return GGUF_IMATRIX_REFUSAL
     return None
+
+
+def gguf_decision_signal(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when *path*'s own GGUF metadata marks it as a decision model: it
+    carries a ``pplx_decider.*`` key or an ``"<architecture>.decision.*"`` key.
+    Such a model answers typed questions with per-option probabilities and has
+    no chat head, although its ``general.architecture`` is a chat one
+    (``qwen35``). *meta*, when given, is an already-computed
+    ``_gguf_metadata_probe(path)`` result."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    return bool(meta.get("has_decision_keys"))
 
 
 def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:

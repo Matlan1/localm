@@ -1427,6 +1427,7 @@
   "models.tag.loaded": "chargé",
   "models.tag.missing": "manquant",
   "models.title": "Modèles",
+  "models.typeHint.decision": "Modèle de décision (répond à des questions typées avec des probabilités, pas un modèle de chat)",
   "models.typeHint.planner": "Planificateur (modèle de langage utilisé par les modèles de musique)",
   "models.typeHint.textEncoder": "Encodeur de texte (utilisé par les modèles d'image et de vidéo)",
   "models.typeHint.vocoder": "Vocodeur (transforme les latents musicaux en audio)",
