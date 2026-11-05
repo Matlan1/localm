@@ -73,15 +73,38 @@ class TestConfig:
 
 
 class TestRopeDefault:
-    def test_the_default_function_is_registered_only_when_missing(self, monkeypatch):
-        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-        monkeypatch.delitem(ROPE_INIT_FUNCTIONS, "default", raising=False)
-        compat.RemoteCodeCompat("m").before_load()
-        assert ROPE_INIT_FUNCTIONS["default"] is compat.default_rope_parameters
+    @pytest.fixture
+    def table(self, monkeypatch):
+        from transformers import modeling_rope_utils
+        isolated = {"linear": object()}
+        monkeypatch.setattr(modeling_rope_utils, "ROPE_INIT_FUNCTIONS", isolated)
+        return isolated
+
+    def test_the_default_function_exists_only_while_the_model_is_built(self, table):
+        with compat.RemoteCodeCompat("m").loading():
+            assert table["default"] is compat.default_rope_parameters
+        assert "default" not in table and "linear" in table
+
+    def test_a_failed_load_still_removes_it(self, table):
+        with pytest.raises(RuntimeError):
+            with compat.RemoteCodeCompat("m").loading():
+                assert "default" in table
+                raise RuntimeError("load failed")
+        assert "default" not in table
+
+    def test_an_existing_default_is_neither_replaced_nor_removed(self, table):
         sentinel = object()
-        monkeypatch.setitem(ROPE_INIT_FUNCTIONS, "default", sentinel)
-        compat.RemoteCodeCompat("m").before_load()
-        assert ROPE_INIT_FUNCTIONS["default"] is sentinel
+        table["default"] = sentinel
+        with compat.RemoteCodeCompat("m").loading():
+            assert table["default"] is sentinel
+        assert table["default"] is sentinel
+
+    def test_the_real_table_is_unchanged_afterwards(self):
+        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+        before = dict(ROPE_INIT_FUNCTIONS)
+        with compat.RemoteCodeCompat("m").loading():
+            pass
+        assert dict(ROPE_INIT_FUNCTIONS) == before
 
     def test_the_default_function_is_unscaled_rotary_embedding(self):
         torch = pytest.importorskip("torch")
@@ -154,6 +177,7 @@ class TestWorkerWiring:
         make = src.index("_hf_remote_compat.for_model(self.model_path, trust_remote_code)")
         config = src.index('load_kwargs["config"] = compat_config')
         loop = src.index("for cls_name in classes:")
+        scope = src.index("compat.loading() if compat is not None")
         after = src.index("compat.after_load(self._model)")
-        assert make < config < loop < after
-        assert "compat.before_load()" in src[make:loop]
+        assert make < config < loop < scope < after
+        assert src.index("from_pretrained(self.model_path, **load_kwargs)") > scope

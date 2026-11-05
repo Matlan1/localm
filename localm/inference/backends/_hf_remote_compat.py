@@ -9,9 +9,11 @@ that closes those, for that ``model_type`` only and only while the owner has
 turned ``hf_trust_remote_code`` on; it returns None otherwise.
 
 Each fix is additive: a value, table entry or keyword the running transformers
-already provides is left as it is. The shim runs in the HF worker process.
+already provides is left as it is, and the rope entry exists only while the model
+is built. The shim runs in the HF worker process.
 """
 
+import contextlib
 import inspect
 import json
 import logging
@@ -86,10 +88,21 @@ class RemoteCodeCompat:
             config.pad_token_id = None
         return config
 
-    def before_load(self) -> None:
-        """Register the ``"default"`` rope function when transformers has none."""
+    @contextlib.contextmanager
+    def loading(self):
+        """While the model is built, ``ROPE_INIT_FUNCTIONS["default"]`` is
+        :func:`default_rope_parameters` when transformers has no such entry. An
+        entry added here is removed on exit, success or failure: a ``"default"``
+        left in the table changes how transformers reads other models' configs."""
         from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-        ROPE_INIT_FUNCTIONS.setdefault("default", default_rope_parameters)
+        added = "default" not in ROPE_INIT_FUNCTIONS
+        if added:
+            ROPE_INIT_FUNCTIONS["default"] = default_rope_parameters
+        try:
+            yield
+        finally:
+            if added:
+                ROPE_INIT_FUNCTIONS.pop("default", None)
 
     def after_load(self, model) -> None:
         """Adapt ``create_causal_mask`` in the module that defines *model*."""

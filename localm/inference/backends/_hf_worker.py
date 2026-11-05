@@ -1852,7 +1852,6 @@ class HFWorker:
             compat_config = compat.config(tr)
             if compat_config is not None:
                 load_kwargs["config"] = compat_config
-            compat.before_load()
         if on_demand_device is not None:
             from localm.inference.backends import _hf_on_demand_experts
             _hf_on_demand_experts.prepare()
@@ -1883,7 +1882,8 @@ class HFWorker:
                 continue
             try:
                 with _filter_docstring_leak(), _suppress_offload_buffer_advisory(), \
-                        _quiet_load_report(on_demand_device is not None):
+                        _quiet_load_report(on_demand_device is not None), \
+                        (compat.loading() if compat is not None else contextlib.nullcontext()):
                     if transformers_classes:
                         model, info = cls.from_pretrained(self.model_path, output_loading_info=True, **load_kwargs)
                         _refuse_missing_weights(info)
