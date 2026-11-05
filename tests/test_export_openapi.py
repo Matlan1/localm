@@ -8,6 +8,7 @@ hand-built schema and with the exported real one.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -90,6 +91,62 @@ def test_export_in_log_mode_closes_the_server_session_log(tmp_path):
 def test_export_leaves_the_callers_home_untouched(exported):
     _, _, home = exported
     assert list(home.iterdir()) == []
+
+
+_INTERNAL_MARKERS = re.compile(
+    r"(?<![A-Za-z0-9])_{1,2}[A-Za-z]"
+    r"|\bdeliberately\b|\bon purpose\b|\bthe fix\b|\bused to\b|\bpreviously\b"
+    r"|\bwhich is why\b|\bwas the defect\b|\bthe trap\b|\bMEASURED\b"
+    r"|#\d+"
+    r"|\b(?:REG|AUDIT|BUG|SEC|ADR|DIST|VOX)(?:-[A-Za-z]+)?-\d+"
+    r"|\bAGENTS\.md\b|\bdev-notes\b|\bpath_formatter\b",
+    re.IGNORECASE)
+
+
+def _internal_text_hits(node, where="$"):
+    """Every (location, marker) where a summary or description in *node* carries
+    a private identifier or a rationale marker."""
+    hits = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("description", "summary") and isinstance(value, str):
+                hits += [(f"{where}.{key}", m.group(0)) for m in _INTERNAL_MARKERS.finditer(value)]
+            else:
+                hits += _internal_text_hits(value, f"{where}.{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            hits += _internal_text_hits(value, f"{where}[{i}]")
+    return hits
+
+
+def test_exported_descriptions_carry_no_private_names_or_design_rationale(exported):
+    _, out, _ = exported
+    schema = json.loads(out.read_text(encoding="utf-8"))
+    assert _internal_text_hits(schema) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Goes through _resolve_unnamed_model_name first.",
+    "This is deliberately not scoped.",
+    "Uses the fix for the handover.",
+    "It used to skip the last model.",
+    "Previously this read the default.",
+    "The duplication was the defect.",
+    "See issue #1234.",
+    "Tracked as AUDIT-CRIT-1 and BUG-9b.",
+    "Calls http_server.path_formatter on the reply.",
+])
+def test_the_description_scan_flags_internal_text(text):
+    schema = {"paths": {"/x": {"get": {"description": text}}}}
+    assert _internal_text_hits(schema), text
+
+
+def test_the_description_scan_accepts_plain_endpoint_text():
+    text = ("Returns ``{available, include_log}`` for the model named in `model`; "
+            "answers 404 for an unknown model. See POST /api/bug-report/send "
+            "and GET /v1/models/{model_id}.")
+    schema = {"paths": {"/x": {"get": {"description": text, "summary": "Get X"}}}}
+    assert _internal_text_hits(schema) == []
 
 
 def test_render_documents_every_exported_operation(exported):

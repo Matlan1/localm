@@ -83,22 +83,17 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/server/shutdown",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_shutdown_ep():
-        """Stop this server cleanly (owner / config-write scope). The model is
-        unloaded before exit. A Settings button calls this."""
+        """Stop this server cleanly (owner / config-write scope). Loaded models
+        are unloaded before the process exits. Returns ``{"stopping": true}``."""
         _request_shutdown(instance_id=getattr(app.state, "instance_id", None))
         return {"stopping": True}
 
     @app.post("/v1/server/restart",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_restart_ep():
-        """Restart this server in place (owner / config-write scope). The model
-        is unloaded first, then the process re-execs the same command line and comes
-        back on the same port - a Settings button calls this, and the GUI's reconnect
-        overlay auto-reconnects when the fresh process is up.
-
-        The port is pinned into the re-exec: without it the new process re-runs
-        pick_port() and can bind elsewhere, leaving the reconnect overlay waiting
-        on a port nothing is listening on."""
+        """Restart this server in place (owner / config-write scope). Loaded
+        models are unloaded first, then the process restarts with the same command
+        line and comes back on the same port. Returns ``{"restarting": true}``."""
         _request_restart(port=getattr(app.state, "instance_port", None),
                          instance_id=getattr(app.state, "instance_id", None))
         return {"restarting": True}
@@ -115,11 +110,9 @@ def register(app: FastAPI, ctx) -> None:
         (its digest). Sending is ``POST /api/bug-report/send`` with that
         filename and digest. A body carrying ``upload`` is refused with 400
         before anything is saved. For a caller other than the local operator
-        the ``path`` field and the saved report text are scrubbed
-        (``http_server.path_formatter``): the report is saved scrubbed, so
+        the ``path`` field and the saved report text are path-scrubbed, so
         ``report_markdown`` and what a later send uploads hold no host path.
-        Owner / config-write scoped and same-origin gated like the other management
-        routes (a report can carry local diagnostics)."""
+        Requires the owner or config-write scope, and a same-origin request."""
         from localm import bugreport
         if body.get("upload"):
             raise HTTPException(
@@ -181,8 +174,8 @@ def register(app: FastAPI, ctx) -> None:
         *body* names a report saved by ``POST /api/bug-report``: ``filename``
         and ``sha256``, the ``report_sha256`` that route returned. The saved
         file is uploaded only when its current text has that digest, so what is
-        sent is the text the user was shown, without its closing edit note
-        (``upload_report`` strips it); the issue title is the report's own H1.
+        sent is the text the user was shown, without its closing edit note;
+        the issue title is the report's own first heading.
         400 for a missing or invalid filename or digest, 404 when the file
         cannot be read, 409 when its text no longer matches the digest. A
         failed upload returns 200 with ``uploaded`` False and a diagnosed
@@ -251,7 +244,7 @@ def register(app: FastAPI, ctx) -> None:
     async def issues_ep():
         """The bug reports this install filed, each looked up by number through
         the proxy. Rows are ``{number, title, state, closed_at, html_url}``; a row
-        whose lookup failed, or that ``filed_status``'s time budget did not reach,
+        whose lookup failed, or that the lookup's time budget did not reach,
         carries ``error`` instead of ``state``. ``persisted`` is False when the
         record is kept in memory only (privacy mode)."""
         from localm import issue_tracker
@@ -280,19 +273,11 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/changelog", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def changelog_ep():
-        """Serve the RELEASED history from CHANGELOG.md so the Settings "Show
-        changelog" button can show it (newest first) in-app, without leaving for
-        GitHub. Read-only, public build content; scoped like its Updates sibling. The
-        path is resolved via updater.repo_root() so it is correct in dev AND in an
-        installed release. Returns {available, version, markdown}, or {available:
-        false} when the file is absent from this build - an honest signal, never a
-        faked empty success.
-
-        The in-progress ``[Unreleased]`` section is REMOVED before serving: it
-        describes changes that are not in the running build. Stripped at this
-        endpoint, the single serving point, so the raw section is not reachable over
-        the API either. Published prereleases (0.1.5rc2 and the like) are NOT
-        stripped."""
+        """The released changelog of this build, newest first. Read-only.
+        Returns ``{available, version, markdown}``, or ``{available: false}`` when
+        the changelog file is absent from this build. The in-progress
+        ``[Unreleased]`` section is removed from ``markdown``; sections of
+        published prereleases are kept. Requires the config-read scope."""
         import localm
         from localm import updater
         try:
@@ -304,8 +289,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/update/releases", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_releases_ep():
-        """The releases a user can choose to install (``updater.list_versions``).
-        Read-only. Returns ``{available, current, releases}``, ``{available:false}``
+        """The releases a user can choose to install. Read-only. Returns ``{available, current, releases}``, ``{available:false}``
         when the updater is not configured, or ``{available:true, error}``."""
         from localm import updater
         from localm.bugreport import LocalmError
@@ -411,20 +395,22 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep(request: Request):
-        """Apply the latest update (download + swap + class step), then restart in
-        place so the new code loads. EXPLICIT only (a button calls this); localm never
-        self-updates on its own. A failed apply rolls back and is surfaced honestly,
-        never as success. The asset is re-derived from the latest release server-side
-        (not taken from the client). The ``backup``, ``runtime_note`` and
-        ``components_note`` fields and
-        an ``error`` text are path-scrubbed (``http_server.path_formatter``) for a
-        caller other than the local operator. A native runtime re-provision the
-        update needs runs during the restart, after the models are unloaded
-        (``updater.apply``'s *defer_runtime*).
+        """Apply the latest update (download, swap, class step), then restart in
+        place so the new code loads. Only an explicit request applies an update;
+        localm never updates itself. A failed apply is rolled back and reported as
+        an error, never as success. The build to install is chosen by the server
+        from the latest release, not taken from the request. The ``backup``,
+        ``runtime_note``, ``components_note`` and ``error`` fields are path-scrubbed
+        for a caller other than the local operator. A native runtime re-provision
+        the update needs runs during the restart, after the models are unloaded.
 
         A JSON body ``{"version": V}`` installs release V instead, older ones
-        included; see ``_apply_selected`` for that path and its optional
-        ``allow_unverified`` and ``sha256`` fields."""
+        included. That form needs an owner (admin) key (403 otherwise) and answers
+        400 for an invalid ``version`` or ``sha256``. A build whose signature does
+        not verify answers ``{applied: false, needs_confirmation: "unverified",
+        version, reason, sha256}`` without installing anything; repeating the
+        request with ``allow_unverified: true`` and that ``sha256`` installs it.
+        The reply of that form is never path-scrubbed."""
         import json as _json
 
         from localm import updater
@@ -478,7 +464,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/update/parts", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_parts_ep(request: Request):
         """Which version each part of the install is at against the installed
-        localm version (``updater_parts.installed_parts``): ``{app,
+        localm version: ``{app,
         install_record, install_record_matches, deps_problems, runtime,
         components, problems, consistent, last_steps}``. Read-only.
         ``problems`` and each ``last_steps`` note are path-scrubbed for a caller
@@ -493,8 +479,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/update/repair", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_repair_ep(request: Request):
-        """Bring every part of the install to the installed localm version
-        (``updater_parts.repair``): the dependencies now, the native runtime and
+        """Bring every part of the install to the installed localm version:
+        the dependencies now, the native runtime and
         the components during the restart that follows. OWNER-only. Returns
         ``{repaired, notes, restarting}``, or ``{repaired: false, error}`` when a
         step failed (the dependencies are put back as they were)."""
@@ -529,9 +515,8 @@ def register(app: FastAPI, ctx) -> None:
         """Whether a rollback is possible and which build it would restore.
         Read-only: it never rolls anything back, and never creates the updates dir.
         Returns ``{available, backup, version, current}``; ``backup`` is
-        path-scrubbed (``http_server.path_formatter``) for a caller other than the
-        local operator. Scoped like its /api/update/check sibling; the POST below
-        is the owner-gated half."""
+        path-scrubbed for a caller other than the local operator. Requires the
+        config-read scope; performing the rollback is ``POST /api/update/rollback``."""
         from localm import updater
         info = await asyncio.to_thread(updater.rollback_info)
         if info.get("backup") is not None:
@@ -542,22 +527,14 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_rollback_ep(request: Request):
         """Restore the previous build from the last update backup, then restart in
-        place so it actually loads. OWNER-only.
-
-        The restart is required, not a convenience: rollback_last() replaces the
-        running install's own source ON DISK, including the localm package, and
-        localm imports lazily throughout, so every subsequent lazy import in this
-        process would load OLD code into a NEW-code process. Re-exec ends that
-        window.
-
-        No update watchdog on this restart, unlike /api/update/apply's: that
-        watchdog's failure action IS a rollback, so arming it here would answer a
-        failed rollback with another one.
-
-        Restores every part the update replaced, the same as the CLI: the files,
-        the venv as it was before the update's dependency step, the native runtime
-        and the components (``updater.rollback_last``). Only open mode or an owner key reaches this route, so its reply (including
-        the ``backup`` path and error texts) is never path-scrubbed."""
+        place so the restored code loads. Needs an owner (admin) key (403
+        otherwise). Restores every part the update replaced, the same as the CLI:
+        the files, the virtual environment as it was before the update's
+        dependency step, the native runtime and the components. The reply,
+        including the ``backup`` path and error texts, is never path-scrubbed.
+        Answers 409 when there is no usable backup or an update or rollback is
+        already running, and 500 when the restore failed partway (the backup is
+        kept)."""
         from localm import updater
         from localm.bugreport import LocalmError
         if not _hs.caller_is_operator(request):

@@ -140,8 +140,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str, request: Request):
-        """Revoke a named key. 409 on a server that must hold a key
-        (``network_bind_needs_key``) when it is the last one."""
+        """Revoke a named key. Answers 409 when the server is reachable from the
+        network, must hold a key, and this is its last one."""
         from localm.auth import removal_leaves_no_key, revoke_key
         from localm.config import ConfigUnreadable
         if (_hs.network_bind_needs_key(request.app)

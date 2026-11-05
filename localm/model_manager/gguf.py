@@ -923,6 +923,7 @@ _GGUF_SCALAR_FORMATS = {
 _GGUF_KV_SHAPE_SUFFIXES = (
     ".block_count",
     ".decoder_block_count",
+    ".num_loops",
     ".embedding_length",
     ".attention.head_count",
     ".attention.head_count_kv",
@@ -1174,6 +1175,10 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
     ``block_count``), with a missing ``attention.head_count_kv`` read as
     ``attention.head_count``, as llama.cpp reads it.
 
+    A looped model (Nanbeige4.2) runs its stack ``<arch>.num_loops`` times
+    (default 1) and llama.cpp keeps one KV entry per loop and layer, so the
+    total is multiplied by it.
+
     Returns 0 - never raises - when the file is not a readable GGUF, or the
     shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
     the caller keeps its previous heuristic."""
@@ -1274,6 +1279,7 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
             total_kv_heads = n_layers * n_head_kv
     if total_kv_heads <= 0:
         return 0                # e.g. a fully recurrent stack: no KV cache
+    total_kv_heads *= _get(".num_loops") or 1
 
     k_len = _get(".attention.key_length")
     v_len = _get(".attention.value_length")
@@ -2068,10 +2074,19 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
     return len(recurrent_layers) * (conv + ssm) * _RECURRENT_STATE_ELEMENT_BYTES
 
 
+_LLAMA_MAX_LAYERS = 512
+
+
 def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     """``(block_count, n_vocab)`` from *path*'s GGUF metadata, or ``None`` when
     either is missing or the header does not parse. ``n_vocab`` is the length
-    of the ``tokenizer.ggml.tokens`` array. Never raises."""
+    of the ``tokenizer.ggml.tokens`` array. Never raises.
+
+    ``block_count`` is llama.cpp's LOGICAL layer count: a looped model
+    (``<arch>.num_loops`` > 1) is expanded to ``block_count * num_loops``
+    layers, each with its own KV entry, and ``llama_model_n_layer`` reports
+    that product after load. A product above llama.cpp's LLAMA_MAX_LAYERS
+    (512) is a load llama.cpp aborts, so it reads as ``None``."""
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"GGUF":
@@ -2098,7 +2113,8 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
                     for _ in range(count):
                         _gguf_read_string_stream(f)
                     continue
-                if key.endswith(".block_count") and vtype in _GGUF_SCALAR_FORMATS:
+                if (key.endswith((".block_count", ".num_loops"))
+                        and vtype in _GGUF_SCALAR_FORMATS):
                     fmt = _GGUF_SCALAR_FORMATS[vtype]
                     (scalars[key],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
                     continue
@@ -2111,6 +2127,11 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     block_count = scalars.get(f"{architecture}.block_count") if architecture else None
     if not isinstance(block_count, int) or block_count <= 0 or n_vocab <= 0:
         return None
+    loops = scalars.get(f"{architecture}.num_loops")
+    if isinstance(loops, int) and loops > 1:
+        block_count *= loops
+        if block_count > _LLAMA_MAX_LAYERS:
+            return None
     return block_count, n_vocab
 
 
@@ -2188,8 +2209,11 @@ def gguf_split_layout(path: Path) -> Optional[dict]:
     ``tensor_bytes`` maps every tensor name to its size in bytes, summed over
     every part of a split GGUF.
 
-    ``block_count`` includes any MTP / nextn layers (llama.cpp's
-    ``n_layer_all``). Sizes are offset deltas, as in
+    ``block_count`` includes any MTP / nextn layers and is multiplied by
+    ``<arch>.num_loops`` for a looped model (llama.cpp's ``n_layer_all``):
+    the loops' extra layers share the first loop's weights, so only
+    ``blk.0`` to ``blk.<physical block_count - 1>`` appear in ``tensor_bytes``.
+    Sizes are offset deltas, as in
     ``_gguf_tensor_offset_entries``. Returns ``None`` - never raises - when
     the metadata or any part's tensor section does not parse, or a part of a
     split model is missing."""

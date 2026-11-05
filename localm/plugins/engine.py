@@ -1988,10 +1988,10 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/install-external",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_external_plugin_engine(body: dict):
-        """Install a THIRD-PARTY plugin from a local directory (the GUI's
-        External plugins card). The HTTP sibling of `localm plugin install
-        <dir>`, using the same manager call. Copy + verify only: the plugin is
-        mounted the next time the plugin list is read."""
+        """Install a third-party plugin from a local directory given as
+        `source`, which must contain a `plugin.toml` (400 otherwise). Equivalent
+        to `localm plugin install <dir>`. The plugin is copied and verified; it
+        becomes available the next time the plugin list is read."""
         from pathlib import Path as _P
         source = (body or {}).get("source", "")
         if not source:
