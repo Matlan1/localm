@@ -57,6 +57,7 @@ from .media_parts import (ACE_STEP, companion_part_of, hf_media_part,
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
+from .gguf import gguf_decision_signal
 from .gguf import gguf_mmproj_modalities
 from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -67,7 +68,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'vocoder', 'planner', 'controlnet', 'textual-inversion', 'segmentation', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'vocoder', 'planner', 'controlnet', 'textual-inversion', 'segmentation', 'decision', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -246,13 +247,14 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "segmentation", "tts"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "tts", "decision"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
 # or (unknown) the type is not known to be a chat model. A 'tts' model stays
 # listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "decision",
+                            "unknown"})
 
 
 def _no_backend_runs_file(path: str) -> bool:
@@ -329,6 +331,8 @@ def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = Fals
     if kind == "tts":
         return msg + (" Use it with 'localm speak' or POST /v1/audio/speech."
                       if _speech_route_available() else " Use it with 'localm speak'.")
+    if kind == "decision":
+        return msg + " It answers typed questions with option probabilities and cannot write replies."
     return msg + " It is a component of image, video or music generation."
 
 
@@ -567,7 +571,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     (``gguf_adapter_kind`` - ``general.type == "adapter"``; an adapter carries
     its base's ``general.architecture``) -> 'lora'; then a vision-projector
     signal (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
-    'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
+    'mmproj'; then a decision-model signal (``gguf_decision_signal`` -
+    ``pplx_decider.*`` or ``<architecture>.decision.*`` keys) -> 'decision'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
     config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
@@ -592,6 +597,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                 return "lora", gguf_metadata
             if gguf_is_mmproj(path, meta=meta):
                 return "mmproj", gguf_metadata
+            if gguf_decision_signal(path, meta=meta):
+                return "decision", gguf_metadata
             if gguf_embedding_signal(path, meta=meta):
                 return "embedding", gguf_metadata
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
