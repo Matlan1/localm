@@ -401,6 +401,7 @@ class TestSizing:
         api = MagicMock()
         api.has_kv_head_api.return_value = True
         api.has_hybrid_api.return_value = False
+        api.has_model_meta_api.return_value = False
         api.llama_model_n_embd.return_value = 4096
         api.llama_model_n_head.return_value = 32
         api.llama_model_n_head_kv.return_value = 8
