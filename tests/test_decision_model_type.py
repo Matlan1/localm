@@ -133,3 +133,32 @@ class TestDecisionModelIsNotAChatModel:
         assert mm.add_local(str(f)) is True
         assert mm.set_model_type("pplx", "llm") is True
         assert mm.load_registry()["pplx"]["model_type"] == "llm"
+
+
+from tests.test_pull_mmproj_autofetch import (  # noqa: E402,F401
+    _wire_download, _wire_repo_listing, fake_registry)
+
+
+class TestPullRegistersADecisionModelAsDecision:
+    def test_a_fresh_download_is_typed_decision(self, fake_registry, monkeypatch, capsys):
+        store, _models_dir = fake_registry
+        _wire_repo_listing(monkeypatch, ["dec.gguf"])
+        _wire_download(monkeypatch, {"dec.gguf": build_gguf("qwen35", PPLX_KEYS)})
+        assert mm._pull_gguf_file("o/r:dec.gguf", None, type_is_auto=True) is True
+        assert store["dec"]["model_type"] == "decision"
+        assert "decision model" in capsys.readouterr().out
+
+    def test_an_already_downloaded_file_is_typed_decision(self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        (models_dir / "dec.gguf").write_bytes(build_gguf("qwen35", NIMBLE_KEYS))
+        _wire_repo_listing(monkeypatch, ["dec.gguf"])
+        _wire_download(monkeypatch, {})
+        assert mm._pull_gguf_file("o/r:dec.gguf", None, type_is_auto=True) is True
+        assert store["dec"]["model_type"] == "decision"
+
+    def test_a_plain_chat_download_is_still_llm(self, fake_registry, monkeypatch):
+        store, _models_dir = fake_registry
+        _wire_repo_listing(monkeypatch, ["chat.gguf"])
+        _wire_download(monkeypatch, {"chat.gguf": build_gguf("qwen35", [])})
+        assert mm._pull_gguf_file("o/r:chat.gguf", None, type_is_auto=True) is True
+        assert store["chat"]["model_type"] == "llm"
