@@ -225,12 +225,16 @@ async function _openLive() {
     await readSSE(r, (payload) => {
       let ev;
       try { ev = JSON.parse(payload); } catch { return; }
-      if (!ac.opened) {
+      if (!ac.opened && ev.type === "stats") {
         ac.opened = true;
         _liveBackoffMs = LIVE_BACKOFF_MIN_MS;
         _stopPolling();
       }
-      _applyLiveFrame(ev);
+      try {
+        _applyLiveFrame(ev);
+      } catch (e) {
+        console.error("localm: could not render a live frame:", e);
+      }
     }, arm);
   } catch (e) {
     why = ac.intentional ? "" : String((e && e.message) || e);

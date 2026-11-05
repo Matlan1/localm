@@ -369,6 +369,8 @@ _VRAM_UNCOVERED_INTERVAL_S = 60.0
 
 _vram_lock = threading.Lock()
 _vram_cond = threading.Condition(_vram_lock)   # notified when a probe lands
+_vram_force_full = False                   # the next probe may not reuse a reading: set by
+                                           # refresh_vram_now, consumed by _refresh_vram
 _vram_claims = 0                           # probes started so far; never reset
 _vram_probe_claim = 0                      # the claim number of the probe now in flight
 _vram_last_claim = 0                       # the claim number of the probe behind _vram_last
@@ -409,8 +411,9 @@ def _reset_vram_probe_cache() -> None:
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
     global _vram_ready, _vram_last_is_seed, _vram_full_at, _vram_devices_shown
-    global _vram_probe_claim, _vram_last_claim
+    global _vram_probe_claim, _vram_last_claim, _vram_force_full
     with _vram_lock:
+        _vram_force_full = False
         _vram_probe_claim = 0
         _vram_last_claim = 0
         _vram_full_at = None
@@ -678,7 +681,7 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
 
     The device list is ``last_known_gpus()``, so a probe any other caller took
     is picked up at once. May raise; :func:`_vram_probe` is the boundary."""
-    global _vram_devices_shown
+    global _vram_devices_shown, _vram_force_full
     from localm import discover
 
     def _full() -> tuple[dict | None, str | None]:
@@ -690,6 +693,8 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
 
     with _vram_lock:
         full_at = _vram_full_at
+        forced = _vram_force_full
+        _vram_force_full = False
     if full_at is None or discover._torch_is_resident():
         return _full()
     age = time.monotonic() - full_at
@@ -700,6 +705,8 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     if age >= limit:
         return _full()
     if fresh is None:
+        if forced:
+            return _full()
         if devices == _vram_devices_shown:
             return None, None
         _vram_devices_shown = devices
@@ -843,7 +850,7 @@ def refresh_vram_now(timeout: float = 3.0) -> bool:
     it lands. Returns True once a probe that began after this call has landed
     (whatever it found), False when *timeout* seconds pass first - the last
     completed reading then stays in place and the probe keeps running."""
-    global _vram_last_at
+    global _vram_last_at, _vram_force_full
     deadline = time.monotonic() + max(0.0, timeout)
     with _vram_lock:
         claimed_before = _vram_claims
@@ -857,6 +864,7 @@ def refresh_vram_now(timeout: float = 3.0) -> bool:
                 return True
             if not _vram_inflight:
                 _vram_last_at = None
+                _vram_force_full = True
         _vram()
         with _vram_cond:
             if landed():

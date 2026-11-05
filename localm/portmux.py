@@ -43,6 +43,7 @@ import re
 import signal
 import sys
 import threading
+import weakref
 from typing import Callable, Optional
 
 from localm.netlisten import create_listen_socket
@@ -101,6 +102,24 @@ def _stop_hook(hook):
         _discard_stop_hook(hook)
 
 
+_servers: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _register_server(server):
+    """Remember uvicorn *server* so :func:`stopping` can see a stop asked of it
+    by Ctrl+C, a signal or :func:`_request_stop`. Returns *server*."""
+    _servers.add(server)
+    return server
+
+
+def stopping() -> bool:
+    """True once a uvicorn server this module is running has been asked to stop. A
+    connection that never ends by itself (an event stream) reads this to end,
+    because uvicorn leaves an in-progress response running until its graceful
+    shutdown period is over."""
+    return any(getattr(s, "should_exit", False) for s in list(_servers))
+
+
 def _track_server(server, serve_task) -> None:
     """Make uvicorn *server* stoppable by _request_stop until *serve_task*
     (its serve() task) is done. A stop requested earlier in the current
@@ -109,6 +128,7 @@ def _track_server(server, serve_task) -> None:
         server.should_exit = True
     _stop_hooks.append(hook)
     serve_task.add_done_callback(lambda _task: _discard_stop_hook(hook))
+    serve_task.add_done_callback(lambda _task: _servers.discard(server))
     if _stop_requested and _active_runs > 0:
         hook()
 
@@ -442,17 +462,21 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
                      "IPv6 only for a :: host", host, port, e)
         _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs)
         return
-    server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
+    server = _register_server(
+        uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs)))
 
     def hook():
         server.should_exit = True
     with _stop_hook(hook):
-        if _stop_requested and _active_runs > 0:
-            hook()
         try:
-            server.run(sockets=[sock])
-        except KeyboardInterrupt:
-            pass
+            if _stop_requested and _active_runs > 0:
+                hook()
+            try:
+                server.run(sockets=[sock])
+            except KeyboardInterrupt:
+                pass
+        finally:
+            _servers.discard(server)
 
 
 def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:
@@ -463,17 +487,21 @@ def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:
     stoppable by _request_stop from any thread while it serves, and nothing is
     served when a stop was already requested in the current run_server() call."""
     from uvicorn.main import STARTUP_FAILURE
-    server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
+    server = _register_server(
+        uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs)))
 
     def hook():
         server.should_exit = True
     with _stop_hook(hook):
-        if _stop_requested and _active_runs > 0:
-            return
         try:
-            server.run()
-        except KeyboardInterrupt:
-            pass
+            if _stop_requested and _active_runs > 0:
+                return
+            try:
+                server.run()
+            except KeyboardInterrupt:
+                pass
+        finally:
+            _servers.discard(server)
     if not server.started:
         sys.exit(STARTUP_FAILURE)
 
@@ -525,7 +553,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT,
     )
-    server = uvicorn.Server(config)
+    server = _register_server(uvicorn.Server(config))
     serve_task = asyncio.ensure_future(server.serve())
     _track_server(server, serve_task)
 
@@ -591,7 +619,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
 
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level=log_level,
                             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT)
-    server = uvicorn.Server(config)
+    server = _register_server(uvicorn.Server(config))
     serve_task = asyncio.ensure_future(server.serve())
     _track_server(server, serve_task)
 

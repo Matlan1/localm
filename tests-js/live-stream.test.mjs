@@ -116,6 +116,7 @@ test("a pushed activity list drives the pill", async () => {
   const p = makePage({ liveHandler: acceptStream });
   p.win.startHwStats(40);
   await waitFor(() => p.streams.length === 1);
+  p.streams[0].push(statsEvent(2));
   p.streams[0].push({
     type: "activity", now: 1000, stalls: [],
     operations: [{ id: "j1", kind: "pull", label: "Model pull a/b", status: "running", pct: 42 }],
@@ -234,4 +235,38 @@ test("a frame that is not JSON is skipped and the next one still renders", async
   p.streams[0].push(statsEvent(4));
   assert.ok(await waitFor(() => /VRAM 4\.0\/16\.0 GB/.test(hw(p.win))));
   assert.equal(p.streams[0].signal.aborted, false);
+});
+
+test("a frame that cannot be rendered is logged and the stream carries on", async () => {
+  const p = makePage({ liveHandler: acceptStream });
+  const errors = [];
+  p.win.console.error = (...a) => errors.push(a.map(String).join(" "));
+  p.win.startHwStats(1000);
+  await waitFor(() => p.streams.length === 1);
+  p.streams[0].push({ type: "stats", data: { cpu: { percent: 5 } } });
+  await waitFor(() => /CPU 5%/.test(hw(p.win)));
+  p.streams[0].push({ type: "activity", now: 1, operations: [], stalls: [null] });
+  assert.ok(await waitFor(() => errors.some((e) => /could not render a live frame/.test(e))),
+    JSON.stringify(errors));
+  p.streams[0].push(statsEvent(6));
+  assert.ok(await waitFor(() => /VRAM 6\.0\/16\.0 GB/.test(hw(p.win))), "the stream stopped rendering");
+  assert.equal(p.streams[0].signal.aborted, false);
+  assert.equal(p.streams.length, 1, "a render error caused a reconnect");
+});
+
+test("an activity frame alone does not turn polling off: the readout still needs its first stats frame", async () => {
+  const p = makePage({ liveHandler: acceptStream });
+  p.win.startHwStats(30);
+  await waitFor(() => p.streams.length === 1);
+  p.streams[0].push({ type: "activity", now: 1, operations: [], stalls: [] });
+  await sleep(120);
+  assert.match(hw(p.win), /VRAM 10\.0\/16\.0 GB/, "the readout went blank before the stream's first stats frame");
+  const polled = p.count("/api/stats");
+  await sleep(120);
+  assert.ok(p.count("/api/stats") > polled, "polling stopped on an activity frame");
+  p.streams[0].push(statsEvent(2));
+  assert.ok(await waitFor(() => /VRAM 2\.0\/16\.0 GB/.test(hw(p.win))));
+  const after = p.count("/api/stats");
+  await sleep(150);
+  assert.equal(p.count("/api/stats"), after, "polling went on after the first stats frame");
 });

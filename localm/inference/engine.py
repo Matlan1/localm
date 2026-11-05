@@ -979,6 +979,7 @@ class Engine:
             with _LOAD_LOCK:
                 if not self._backend.loaded:
                     self._backend.load()
+                    _livefeed.kick("model loaded")
         if getattr(self._backend, "can_embed", True) is False:
             # Only knowable now (HF): the loaded checkpoint is a chat decoder,
             # so the dedicated embedder is substituted, and the substitution is
@@ -1068,6 +1069,7 @@ class Engine:
                     )
                     self._attach_registered_adapters()
                     self._backend.load()
+                    _livefeed.kick("model loaded")
 
         cfg = load_config()
         extra: dict = {"thinking": thinking} if thinking is not None else {}

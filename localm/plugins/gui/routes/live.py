@@ -23,17 +23,19 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import localm.plugins.gui.web as _web
-from localm import livefeed
+from localm import livefeed, portmux
 from localm.executor import get_plugin_executor
 from localm.inference.http_server import _require_auth
 from localm.plugins.gui.routes.jobs import activity_snapshot
 
 FRESH_WAIT_S = 2.5     # longest a forced reading waits for the VRAM probe
 FRESH_BUDGET_S = 3.5   # longest a forced sample takes in all; above FRESH_WAIT_S
+AUTH_RECHECK_S = 5.0   # how often an open stream asks again whether its caller is still allowed
+STOP_POLL_S = 1.0      # how often an open stream looks for a server stop
 
 
 def _frame(event: dict) -> str:
@@ -79,34 +81,52 @@ def register(app: FastAPI, ctx) -> None:
         driver that frees memory late. Activity is pushed when the caller's list
         of operations changes, and every ``livefeed.INTERVAL_S`` seconds while
         the list has a row (running or recently finished) so the ages the client
-        shows, computed against the ``now`` of the latest frame, stay current."""
+        shows, computed against the ``now`` of the latest frame, stay current.
+
+        The stream ends when the server is asked to stop, and when the caller's
+        credential stops being accepted (checked every ``AUTH_RECHECK_S``
+        seconds): authentication at connect time alone would let a revoked key
+        keep reading."""
         async def _stream():
             sub = feed.subscribe()
             loop = asyncio.get_running_loop()
             last_sig = None
             last_activity_at = 0.0
             last_sent = loop.time()
+            last_auth = last_sent
+            woke = True
             try:
                 while True:
-                    if feed.seq != sub.seen_seq and feed.latest is not None:
-                        sub.seen_seq = feed.seq
-                        last_sent = loop.time()
-                        yield _frame({"type": "stats", "data": feed.latest})
-                    payload = activity_snapshot(request, ctx.jobs)
-                    sig = json.dumps(
-                        {"operations": payload["operations"], "stalls": payload["stalls"]},
-                        sort_keys=True, default=str)
-                    now = loop.time()
-                    listed = bool(payload["operations"])
-                    if sig != last_sig or (
-                            listed and now - last_activity_at >= livefeed.INTERVAL_S):
-                        last_sig = sig
-                        last_activity_at = now
-                        last_sent = now
-                        yield _frame({"type": "activity", **payload})
-                    await sub.wait(_web._KEEPALIVE_S)
+                    if portmux.stopping():
+                        return
+                    if loop.time() - last_auth >= AUTH_RECHECK_S:
+                        last_auth = loop.time()
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                get_plugin_executor(), _require_auth, request)
+                        except HTTPException:
+                            return
+                    if woke:
+                        if feed.seq != sub.seen_seq and feed.latest is not None:
+                            sub.seen_seq = feed.seq
+                            last_sent = loop.time()
+                            yield _frame({"type": "stats", "data": feed.latest})
+                        payload = activity_snapshot(request, ctx.jobs)
+                        sig = json.dumps(
+                            {"operations": payload["operations"], "stalls": payload["stalls"]},
+                            sort_keys=True, default=str)
+                        now = loop.time()
+                        listed = bool(payload["operations"])
+                        if sig != last_sig or (
+                                listed and now - last_activity_at >= livefeed.INTERVAL_S):
+                            last_sig = sig
+                            last_activity_at = now
+                            last_sent = now
+                            yield _frame({"type": "activity", **payload})
+                    woke = await sub.wait(min(_web._KEEPALIVE_S, STOP_POLL_S))
                     if loop.time() - last_sent >= _web._KEEPALIVE_S:
                         last_sent = loop.time()
+                        woke = True
                         yield ": keepalive\n\n"
             finally:
                 sub.close()

@@ -407,3 +407,69 @@ def test_releasing_nothing_does_not_kick_the_feed(recorder, monkeypatch):
     assert (embedder.reset_embedder(), reranker.reset_reranker(),
             speech.reset_speech()) == (False, False, False)
     assert recorder.reasons == []
+
+
+def test_a_restarted_sampler_does_not_serve_the_reading_from_before_it_stopped():
+    async def go():
+        s = Sampler(used_gib=10.0)
+        feed = LiveFeed(s, interval_s=60, follow_ups_s=())
+        first = feed.subscribe()
+        assert await until(lambda: feed.latest is not None)
+        first.close()
+        await asyncio.sleep(0)
+        s.truth = 2.0
+        gate = asyncio.Event()
+        inner = s.__call__
+
+        async def slow(fresh):
+            await gate.wait()
+            return await inner(fresh)
+
+        feed._sample = slow
+        second = feed.subscribe()
+        try:
+            await asyncio.sleep(0.05)
+            assert feed.latest is None, "a returning tab was shown the old reading"
+            gate.set()
+            assert await until(lambda: feed.latest is not None and used_gib(feed) == 2.0)
+        finally:
+            second.close()
+
+    run(go())
+
+
+def test_every_direct_backend_load_in_engine_is_followed_by_a_kick():
+    """Engine.load() kicks in its finally block. The two other places that load
+    the backend (the embed path and the chat reload) call it directly and so
+    need a kick of their own."""
+    import ast
+    import inspect
+
+    from localm.inference import engine
+
+    tree = ast.parse(inspect.getsource(engine))
+    bad, seen = [], 0
+
+    def is_backend_load(node):
+        return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and ast.unparse(node.value.func) == "self._backend.load")
+
+    def is_kick(node):
+        return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and ast.unparse(node.value.func) == "_livefeed.kick")
+
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name == "_load_locked":
+            continue
+        for node in ast.walk(fn):
+            for field in ("body", "orelse", "finalbody"):
+                stmts = getattr(node, field, None)
+                if not isinstance(stmts, list):
+                    continue
+                for i, st in enumerate(stmts):
+                    if is_backend_load(st):
+                        seen += 1
+                        if i + 1 >= len(stmts) or not is_kick(stmts[i + 1]):
+                            bad.append((fn.name, st.lineno))
+    assert seen >= 2, "the sentinel found no direct backend loads; it is looking in the wrong place"
+    assert bad == [], f"a direct backend load with no kick after it: {bad}"

@@ -392,6 +392,7 @@ class HFReranker:
                 try:
                     self._backend.unload()
                     self._backend.load()
+                    _livefeed.kick("reranker reloaded")
                 except Exception as e:
                     reason = pathscrub.scrub_paths(str(e))
                     logger.warning("could not reload reranker %s (%s)",

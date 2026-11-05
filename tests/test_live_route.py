@@ -28,7 +28,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from localm import livefeed
+from localm import livefeed, portmux
 from localm import scopes as S
 
 GIB = 1024 ** 3
@@ -98,8 +98,8 @@ class Server:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", 0))
         self.url = f"http://127.0.0.1:{sock.getsockname()[1]}"
-        self.server = uvicorn.Server(uvicorn.Config(
-            app, log_level="warning", lifespan="off", timeout_graceful_shutdown=2))
+        self.server = portmux._register_server(uvicorn.Server(uvicorn.Config(
+            app, log_level="warning", lifespan="off", timeout_graceful_shutdown=3)))
         self.thread = threading.Thread(
             target=lambda: asyncio.run(self.server.serve(sockets=[sock])), daemon=True)
         self.thread.start()
@@ -111,6 +111,7 @@ class Server:
     def stop(self):
         self.server.should_exit = True
         self.thread.join(timeout=10)
+        portmux._servers.discard(self.server)
 
 
 @pytest.fixture
@@ -378,9 +379,10 @@ def test_the_sampler_bounds_nest(app):
     assert live.FRESH_BUDGET_S > sysstats.STATS_REPLY_BUDGET_S
 
 
-def test_the_server_stops_within_its_grace_period_with_a_tab_still_connected(app):
-    """An endless stream must not hold up a stop: the server gives open
-    connections timeout_graceful_shutdown seconds (2 here, 3 in production)."""
+def test_the_server_stops_at_once_with_a_tab_still_connected(app):
+    """uvicorn leaves an in-progress response running for its whole graceful
+    shutdown period (3 s here and in production) and then logs an error, so an
+    endless stream has to end by itself when the server is asked to stop."""
     srv = Server(app)
     r = Reader(srv.url)
     r.start()
@@ -390,6 +392,25 @@ def test_the_server_stops_within_its_grace_period_with_a_tab_still_connected(app
         srv.server.should_exit = True
         srv.thread.join(timeout=15)
         assert not srv.thread.is_alive(), "the server never stopped with a stream open"
-        assert time.monotonic() - t0 < 8
+        assert time.monotonic() - t0 < 2.5, "the stream held the stop for the grace period"
+    finally:
+        r.close(expect_drop=True)
+
+
+def test_a_stream_ends_when_its_key_is_revoked(app, server, monkeypatch):
+    """Authentication at connect time alone would let a revoked key keep
+    reading stats and every unowned job."""
+    from localm import auth
+    from localm.plugins.gui.routes import live
+    monkeypatch.setattr(live, "AUTH_RECHECK_S", 0.2)
+    made = auth.create_key("A", [S.MCP])
+    auth.create_key("B", [S.MCP])   # a second key keeps the server out of open mode
+    r = Reader(server.url, _hdr(made["key"]))
+    r.start()
+    try:
+        assert r.wait_for(lambda: r.frames("stats"))
+        assert auth.revoke_key(made["id"]) is True
+        r.join(timeout=5)
+        assert not r.is_alive(), "the stream stayed open after its key was revoked"
     finally:
         r.close(expect_drop=True)

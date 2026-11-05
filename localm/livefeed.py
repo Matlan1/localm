@@ -152,6 +152,8 @@ class LiveFeed:
             self._loop = asyncio.get_running_loop()
             self._kicked = asyncio.Event()
             self._follow_ups = []
+            self._latest = None
+            self._key = None
             self._task = self._loop.create_task(self._run(), name="localm-live-feed")
         return sub
 

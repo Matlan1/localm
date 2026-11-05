@@ -147,3 +147,49 @@ def test_a_reset_forgets_which_probe_made_the_reading(gpu):
     sysstats._reset_vram_probe_cache()
     assert sysstats._vram_last_claim == 0
     assert sysstats._vram_probe_claim == 0
+
+
+class _Uncovered:
+    """A box where no torch-free source can re-read the devices (Linux AMD or
+    Intel, or a device the Windows counters cannot map): the cheap path has
+    nothing to offer, and only a full probe sees a change."""
+
+    def __init__(self, monkeypatch):
+        from localm import discover
+        self.devices = [{"index": 0, "total": 16 * GIB, "free": 6 * GIB}]
+        self.full_runs = 0
+        monkeypatch.setattr(discover, "last_known_gpus", lambda: self.devices)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(sysstats, "_fresh_device_readings", lambda devices: None)
+        monkeypatch.setattr(sysstats, "_compute_vram", self.compute)
+        monkeypatch.setattr(sysstats, "_vram_full_at", time.monotonic())
+        monkeypatch.setattr(sysstats, "_vram_devices_shown", self.devices)
+        monkeypatch.setattr(sysstats, "_vram_force_full", False)
+
+    def compute(self):
+        self.full_runs += 1
+        return reading(2.0)
+
+
+def test_a_routine_refresh_reuses_the_reading_on_an_uncovered_box(monkeypatch):
+    fake = _Uncovered(monkeypatch)
+    assert sysstats._refresh_vram() == (None, None)
+    assert fake.full_runs == 0
+
+
+def test_a_forced_refresh_takes_the_full_probe_on_an_uncovered_box(monkeypatch):
+    """Without this the forced reading is a no-op that still reports success, and
+    the meter stays at the old figure until the 60 s uncovered interval passes."""
+    fake = _Uncovered(monkeypatch)
+    monkeypatch.setattr(sysstats, "_vram_force_full", True)
+    reading_, status = sysstats._refresh_vram()
+    assert fake.full_runs == 1
+    assert reading_ == reading(2.0)
+    assert sysstats._vram_force_full is False, "the flag outlived the probe it was for"
+
+
+def test_refresh_now_reaches_the_full_probe_on_an_uncovered_box(monkeypatch):
+    fake = _Uncovered(monkeypatch)
+    assert sysstats.refresh_vram_now(5.0) is True
+    assert fake.full_runs == 1
+    assert shown() == 2.0
