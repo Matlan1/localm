@@ -265,8 +265,15 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
+            newer = _release_build_when_stale(target, have, build)
+            if newer:
+                console.print(f"[yellow]This release ships build {newer}; the installed "
+                              f"build is {build}.[/yellow]")
             if (not assume_yes and _sl._interactive() and _net_allowed()
-                    and _sl._confirm("Do you want to re-download/replace them?", default=False)):
+                    and _sl._confirm(
+                        f"Update the runtime to build {newer} now?" if newer
+                        else "Do you want to re-download/replace them?",
+                        default=bool(newer))):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
@@ -330,6 +337,27 @@ def _accept_installed_backend(target: Path, installed: str) -> None:
         _record_backend_choice(target, None)
         console.print(f"[green]Keeping {installed}.[/green] Your earlier choice "
                       f"'{rec['requested']}' is no longer recorded.")
+
+
+def _release_build_when_stale(target: Path, have: Optional[str],
+                              build: Optional[str]) -> Optional[str]:
+    """The build tag this release pins for *have* when the build recorded in
+    *target* differs from it; None when they match, the build is not recorded,
+    the release does not pin one, or the pin cannot be read."""
+    if not have or not build:
+        return None
+    try:
+        from localm.setup_llama.versions import runtime_target, tracks_latest
+        want, source = runtime_target(have, pin=_sl.pinned_tag(),
+                                      tracking=tracks_latest())
+        if have == "amd-rocm":
+            if _sl.rocm_build_is_current(target, build):
+                return None
+        elif want == build:
+            return None
+    except Exception:
+        return None
+    return want if source == "release" and want else None
 
 
 def _print_pending_choice(target: Path) -> None:

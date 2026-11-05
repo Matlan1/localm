@@ -987,6 +987,43 @@ def test_a_running_localm_blocks_uninstall_until_stopped(tmp_path, monkeypatch):
             proc.wait(timeout=20)
 
 
+def test_running_in_folder_lists_then_stops_only_this_folders_programs(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(im, "list_processes", REAL_LIST_PROCESSES)
+    here = _clone(tmp_path / "here")
+    other = _clone(tmp_path / "other")
+    mine, theirs = _spawn_from(here), _spawn_from(other)
+    try:
+        deadline = time.monotonic() + 30
+        found = []
+        while time.monotonic() < deadline and mine.pid not in found:
+            found = [pid for pid, _ in im.running_from([here]) or []]
+            time.sleep(0.2)
+        assert mine.pid in found, found
+
+        assert im.running_in_folder(here) == im.EXIT_RUNNING
+        listed = capsys.readouterr().out
+        assert f"PID {mine.pid} " in listed and f"PID {theirs.pid} " not in listed
+        assert mine.poll() is None
+
+        assert im.running_in_folder(here, stop=True) == 0
+        mine.wait(timeout=20)
+        assert theirs.poll() is None
+        assert im.running_in_folder(here) == 0
+    finally:
+        for proc in (mine, theirs):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=20)
+
+
+def test_running_cli_command_exit_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(im, "list_processes", lambda: [])
+    assert im.main(["running", "--root", str(tmp_path)]) == 0
+    monkeypatch.setattr(im, "list_processes", lambda: None)
+    assert im.main(["running", "--root", str(tmp_path)]) == im.EXIT_CANNOT_LIST
+
+
 # ------------------------------------ CLI --------------------------------- #
 
 def test_cli_dry_run_prints_sections_and_exit_codes(tmp_path, capsys):

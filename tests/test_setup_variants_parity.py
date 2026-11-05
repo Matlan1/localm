@@ -361,7 +361,7 @@ WINDOW_CONTROLS = {
 }
 # Window questions asked by a dialog or a step, not by a control on a page.
 WINDOW_DIALOGS = {"uninstall-confirm", "venv-lockers", "venv-retry", "runtime-failed",
-                  "keep-data", "data-offline"}
+                  "keep-data", "data-offline", "running-localm"}
 # Questions the launcher asks before the window opens.
 LAUNCHER_QUESTIONS = {"tooling-store", "uv-install"}
 
