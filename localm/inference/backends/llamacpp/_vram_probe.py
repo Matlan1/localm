@@ -49,6 +49,14 @@ def main() -> int:
 
     import json
 
+    from localm import updater_runtime
+
+    # While an update is about to replace the runtime, answer without loading it.
+    if updater_runtime.replacing_runtime_now():
+        for _line in sys.stdin:
+            print("ERR an update is replacing the runtime", flush=True)
+        return 0
+
     from localm.inference.backends.llamacpp import _loader
 
     # When load_lib() itself failed, every query below answers ERR, and the

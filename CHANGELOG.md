@@ -11,7 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.3.3] - 2026-11-04
+## [0.3.3] - 2026-11-05
 
 ### Added
 - **Every model on the Models page can be renamed, given an alias and removed.** Embedding, diffusion, VAE, LoRA, upscaler and other non-chat rows used to show only info; they now have alias, rename and remove, and unload when loaded. Use and reload stay on chat models.
@@ -36,6 +36,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
 
 ### Fixed
+- **Updating from 0.3.2 works when localm was started with `localm.exe`, `localm.bat` or the global `localm` command.** In the terminal or in a GUI started that way, the update tried to replace the running `localm.exe`, failed and rolled back. It now leaves that file as it is and says so; it starts the new version the same way. A failed attempt could also delete `localcoder.exe`; this update brings it back. Versions older than 0.3.3 update to 0.3.3 first.
 - **Running setup while LocaLM is open no longer leaves the folder half updated.** Setup now lists the LocaLM programs running from its folder (the app, the launcher, a server) before it changes anything and offers to stop them and go on, or to cancel with nothing changed. Programs of another LocaLM folder are never touched. If the install still fails because a file is in use, the message says to close LocaLM and run setup again, and that your chats, settings and models are untouched.
 - **Setup asks to update an out-of-date llama.cpp runtime, and says so.** When the installed runtime is not the build this release ships, the question names the new build and defaults to updating it; with the current build it keeps its default of leaving the runtime alone.
 - **Update now no longer rolls back because the app itself is using the native runtime.** On installs without PyTorch, the small helper the GPU meter keeps running held the runtime files, so replacing them was refused and the update was undone. The helper is now stopped for the replacement and not started again until it is done; any other program using those files still stops the update, and it is left running.

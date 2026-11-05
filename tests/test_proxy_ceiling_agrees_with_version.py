@@ -65,6 +65,25 @@ def _candidate_tags(ceiling: str) -> list[str]:
     return sorted({f"{b}{s}{n}{d}" for b in bases for s in seps for n in names for d in numbers})
 
 
+def _old_client_ceiling() -> str:
+    m = re.search(r'const OLD_CLIENT_CEILING = "(v[^"]+)";', _worker_source())
+    assert m, "OLD_CLIENT_CEILING not found in worker.js"
+    return m.group(1)
+
+
+@pytest.mark.parametrize("tag", _candidate_tags("v0.3.3"))
+def test_every_tag_the_proxy_offers_older_clients_orders_at_or_below_their_ceiling(tag):
+    ceiling = _old_client_ceiling()
+    if _proxy_offers_legacy(tag, ceiling):
+        assert not _version.is_newer(tag, ceiling), (
+            f"the proxy offers {tag} to clients older than {ceiling}, "
+            f"but localm orders it above {ceiling}")
+
+
+def test_the_ceiling_for_older_clients_is_not_below_the_legacy_ceiling():
+    assert not _version.is_newer(_ceiling(), _old_client_ceiling())
+
+
 def test_the_worker_constants_are_found():
     assert _ceiling().startswith("v")
     assert _js_regex("PRERELEASE_SUFFIX_RE").match("rc1")
