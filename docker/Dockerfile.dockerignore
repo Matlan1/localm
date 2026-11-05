@@ -1,5 +1,6 @@
 *
 !pyproject.toml
+!hatch_build.py
 !VERSION
 !docs/pypi-readme.md
 !localm
