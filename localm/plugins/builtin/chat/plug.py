@@ -160,11 +160,11 @@ def _log_unreadable(p: Path, err: Exception) -> None:
 async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
     """List conversations newest-first.
 
-    Pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
-    folder/n_messages) without the heavy message bodies and data-URI images - the
-    GUI sidebar uses this and lazy-loads each conversation's messages on open via
-    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. With no
-    params, returns the full payload capped at 200 items.
+    Pass ``meta=true`` for a lightweight index (id, title, updated_at, pinned,
+    folder, n_messages) without message bodies or embedded images; fetch a
+    conversation's messages with ``GET /api/conversations/{id}``. ``limit`` and
+    ``offset`` paginate. With no parameters, returns the full payload capped at
+    200 items.
 
     A chat file that cannot be read or parsed is left out of ``conversations``
     and ``total`` and its id is listed in ``unreadable``; a warning naming the
@@ -204,8 +204,8 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
 
 @_router.get("/api/conversations/{conv_id}")
 async def conversation_get(conv_id: str):
-    """The full body of one conversation, lazy-loaded. Path validated by
-    _conv_path; 404 when absent so the client can fall back to its local copy."""
+    """The full body of one conversation. Answers 404 when it does not exist
+    and 403 when chat persistence is off (privacy mode)."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
     path = _conv_path(conv_id)
@@ -403,8 +403,8 @@ async def prompt_delete(name: str):
 
 @_router.post("/api/chat/extract")
 async def chat_extract(req: AttachmentExtractRequest):
-    """A chat or coder attachment -> plain text, entirely in memory, on the
-    plugin pool."""
+    """Extract plain text from a chat or coder attachment. The attachment is
+    processed in memory and nothing is written to disk."""
     from localm.executor import get_plugin_executor
     from localm.rag.attachment import AttachmentError, extract_attachment
     loop = asyncio.get_running_loop()

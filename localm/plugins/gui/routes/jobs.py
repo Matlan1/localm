@@ -56,40 +56,20 @@ def register(app: FastAPI, jobs) -> None:
     async def activity(request: Request):
         """What this server is doing right now, plus what it recently finished.
 
-        Every other way to reach a job needs an id the caller already holds, and
-        that id is handed out exactly once, in the body of the POST that started
-        the job. This is the one route that answers "what is happening" without
-        being told what to look for.
+        Returns ``{now, operations, stalls}``. ``operations`` lists the jobs
+        the caller may see (running and recently finished), without needing a
+        job id. It needs no capability scope beyond authentication, and shows
+        only jobs the caller owns. On a server with no owner key and no
+        keystore (the default), jobs have no owner and every authenticated
+        caller sees all of them.
 
-        NOT under /api/jobs. That prefix belongs to the scheduled-jobs plugin,
-        whose jobs are recurring TASK DEFINITIONS in a persisted store, a
-        different concept in a different id space under a different gate
-        (require_scope("jobs")).
-
-        No capability scope: this returns a strict subset of what the caller may
-        already stream by id. Ownership is enforced with the same job_owner_ok
-        the events and cancel routes use.
-
-        MIND THE DEFAULT CONFIGURATION. With no owner key and no keystore -
-        which is how localm runs out of the box - principal_id() returns None,
-        so every job is unowned and job_owner_ok admits any authenticated
-        caller. That is the correct behaviour for a single-owner local server
-        and it is NOT a filter failure, but it does mean this list is
-        per-principal only on a KEYED server. Nothing downstream may assume
-        otherwise.
-
-        ``now`` is this SERVER's clock at the moment of the reply, and it is
-        here so a client can render an age without inventing one. created_at
-        and finished_at are server epoch seconds; a client computing an age
-        against its OWN clock is wrong by whatever the two clocks disagree by.
-        Compute ages as ``now - created_at``, never against a local clock.
+        ``now`` is the server's clock in epoch seconds at the time of the reply,
+        like ``created_at`` and ``finished_at`` in each row; compute an age as
+        ``now - created_at``, not against the client's own clock.
 
         For a caller other than the local operator every string in a row is
-        path-scrubbed (``path_formatter``).
-
-        ``stalls`` lists the server's recent stalls, oldest first
-        (``localm.inference._stall_watch.StallWatch.records``); [] when the
-        stall watch is not running.
+        path-scrubbed. ``stalls`` lists the server's recent stalls, oldest
+        first, and is empty when stall monitoring is not running.
         """
         rows = jobs.snapshot(visible=lambda owner: job_owner_ok(request, owner))
         show = path_formatter(request)
@@ -100,9 +80,10 @@ def register(app: FastAPI, jobs) -> None:
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
     async def job_events(request: Request, job=Depends(owned_job)):
-        """Stream one job's events as SSE. For a caller other than the local
-        operator every string in an event is path-scrubbed
-        (``path_formatter``)."""
+        """Stream one job's events as server-sent events. Every connection
+        receives the job's full event history, then each new event. For a caller
+        other than the local operator every string in an event is
+        path-scrubbed."""
         show = path_formatter(request)
 
         async def _stream():

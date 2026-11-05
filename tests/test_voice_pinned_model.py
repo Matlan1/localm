@@ -198,3 +198,92 @@ def test_faster_whisper_finds_a_cache_filled_before_the_pin_only_without_a_revis
     with pytest.raises(Exception):  # noqa: B017 - whichever offline-miss error the hub client raises
         utils.download_model("base", cache_dir=str(root), local_files_only=True,
                              revision=PIN_COMMIT)
+
+
+class TestSharedBlobStore:
+    """huggingface_hub 1.x links each repository blob to an entry of a cache-wide
+    store (<cache>/blobs/<xx>/<hash>). The files below are laid out the way the
+    hub lays them out; the discard, the digest check and the prefetch are real."""
+
+    XET = "ab" * 32
+
+    @pytest.fixture(autouse=True)
+    def _symlinks(self, tmp_path):
+        probe = tmp_path / "probe-link"
+        try:
+            probe.symlink_to(tmp_path)
+        except OSError:
+            pytest.skip("this platform cannot create symlinks")
+        probe.unlink()
+
+    def _store_entry(self, xet: str = None) -> Path:
+        xet = xet or self.XET
+        root = voice.stt_cache_dir()
+        store = root / "blobs"
+        (store / xet[:2]).mkdir(parents=True, exist_ok=True)
+        (store / ".huggingface-shared-blobs").write_text("1\n", encoding="utf-8")
+        return store / xet[:2] / xet
+
+    def _lay_shared(self, commit: str, body: bytes, name: str = "base",
+                    xet: str = None) -> Path:
+        """A snapshot whose model.bin reaches the store through the hub's two links."""
+        entry = self._store_entry(xet)
+        if not entry.exists():
+            entry.write_bytes(body)
+            entry.with_name(entry.name + ".refs").write_text("x\n", encoding="utf-8")
+        repo_dir = voice.stt_cache_dir() / f"models--Systran--faster-whisper-{name}"
+        (repo_dir / "blobs").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "snapshots" / commit).mkdir(parents=True, exist_ok=True)
+        etag = f"etag-{commit[:8]}"
+        link = repo_dir / "blobs" / etag
+        if not link.is_symlink():
+            link.symlink_to(Path("..") / ".." / "blobs" / entry.parent.name / entry.name)
+        model_bin = repo_dir / "snapshots" / commit / "model.bin"
+        if not model_bin.is_symlink():
+            model_bin.symlink_to(Path("..") / ".." / "blobs" / etag)
+        (repo_dir / "snapshots" / commit / "config.json").write_text("{}", encoding="utf-8")
+        return repo_dir
+
+    def test_a_damaged_model_bin_is_removed_from_the_shared_store_too(self, pinned_to_body):
+        repo_dir = self._lay_shared(PIN_COMMIT, BODY[:-1] + b"X")
+        entry = self._store_entry()
+        other = self._store_entry("cd" * 32)
+        other.write_bytes(b"another repository's file")
+        assert voice._verify_pinned_model("base", voice.stt_cache_dir()) is not None
+        assert not repo_dir.exists()
+        assert not entry.exists()
+        assert not entry.with_name(entry.name + ".refs").exists()
+        assert other.read_bytes() == b"another repository's file"
+
+    def test_an_intact_model_bin_leaves_the_store_alone(self, pinned_to_body):
+        repo_dir = self._lay_shared(PIN_COMMIT, BODY)
+        assert voice._verify_pinned_model("base", voice.stt_cache_dir()) is None
+        assert repo_dir.exists() and self._store_entry().read_bytes() == BODY
+
+    def test_a_damaged_snapshot_beside_an_older_one_still_clears_the_store(
+            self, pinned_to_body):
+        repo_dir = self._lay_shared(PIN_COMMIT, BODY[:-1] + b"X")
+        older = self._lay_shared(OLD_COMMIT, b"older release bytes", xet="ef" * 32)
+        assert older == repo_dir
+        assert voice._verify_pinned_model("base", voice.stt_cache_dir()) is not None
+        assert not (repo_dir / "snapshots" / PIN_COMMIT).exists()
+        assert not self._store_entry().exists()
+        assert self._store_entry("ef" * 32).read_bytes() == b"older release bytes"
+
+    def test_a_download_after_a_damaged_cache_gets_a_good_file(self, monkeypatch, pinned_to_body):
+        """The fake hub links an existing store entry again instead of fetching it,
+        as huggingface_hub does, so the download is good only if the damaged entry
+        was removed."""
+        self._lay_shared(PIN_COMMIT, BODY[:-1] + b"X")
+        assert voice._verify_pinned_model("base", voice.stt_cache_dir()) is not None
+        fetched = []
+
+        def snapshot_download(repo_id, **kw):
+            fetched.append(kw["revision"])
+            self._lay_shared(kw["revision"], BODY)
+            return "unused"
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+        assert voice.prefetch_stt_model(allow_download=True) == (True, "")
+        assert fetched == [PIN_COMMIT]
+        assert self._store_entry().read_bytes() == BODY
