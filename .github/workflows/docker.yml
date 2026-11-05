@@ -11,8 +11,8 @@ name: docker
 #                      Actions tab; the release itself is never affected.
 #   workflow_dispatch  dry run by default (build + smoke test + tag computation,
 #                      no login, no push). Untick dry_run and run it on the tag
-#                      v<VERSION>, or on a commit that differs from it only in
-#                      docker/ and this file, to publish that release's images again.
+#                      v<VERSION>, or on a commit with that tag's source files, to
+#                      publish that release's images again.
 #
 # Backends: cpu, vulkan, cuda (CUDA 12 line) and cuda13 (CUDA 13 line, Blackwell).
 # Tags: <version> and <version>-<backend> for every release; latest, cpu, vulkan,

@@ -331,24 +331,27 @@ class TestResolveRelease:
         self._git(cwd, "init", "-q")
         (cwd / "docker").mkdir()
         (cwd / "docker" / "Dockerfile").write_text("old\n", encoding="utf-8")
-        (cwd / "code.py").write_text("old\n", encoding="utf-8")
-        self._git(cwd, "add", "VERSION", "docker", "code.py")
+        (cwd / "localm").mkdir()
+        (cwd / "localm" / "code.py").write_text("old\n", encoding="utf-8")
+        (cwd / "tests.py").write_text("old\n", encoding="utf-8")
+        self._git(cwd, "add", "VERSION", "docker", "localm", "tests.py")
         self._git(cwd, "commit", "-qm", "release")
         self._git(cwd, "tag", "v1.2.3")
 
-    def test_dispatch_publishes_from_a_commit_that_changes_only_docker(self, resolve, tmp_path):
+    def test_dispatch_publishes_from_a_commit_with_the_tags_source(self, resolve, tmp_path):
         resolve("pull_request")
         self._repo_with_tag(tmp_path)
         (tmp_path / "docker" / "Dockerfile").write_text("new\n", encoding="utf-8")
+        (tmp_path / "tests.py").write_text("new\n", encoding="utf-8")
         self._git(tmp_path, "commit", "-qam", "fix the image")
         code, _, out = resolve("workflow_dispatch", dry_run="false")
         assert code == 0
         assert out == {"version": "1.2.3", "push": "true", "floating": "true"}
 
-    def test_dispatch_cannot_publish_a_commit_that_changes_anything_else(self, resolve, tmp_path):
+    def test_dispatch_cannot_publish_a_commit_that_changes_the_source(self, resolve, tmp_path):
         resolve("pull_request")
         self._repo_with_tag(tmp_path)
-        (tmp_path / "code.py").write_text("new\n", encoding="utf-8")
+        (tmp_path / "localm" / "code.py").write_text("new\n", encoding="utf-8")
         self._git(tmp_path, "commit", "-qam", "other change")
         code, stdout, out = resolve("workflow_dispatch", dry_run="false")
         assert code == 1

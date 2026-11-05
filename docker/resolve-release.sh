@@ -8,8 +8,8 @@
 #
 #   version   the contents of VERSION
 #   push      true for a published release, and for a dispatch with dry_run false
-#             that runs on the tag v<version> or on a commit that differs from that
-#             tag only in docker/ and .github/workflows/docker.yml
+#             that runs on the tag v<version> or on a commit whose files the image
+#             copies from the project are those of that tag
 #   floating  true when the pushed version is the repository's latest release
 #             (a pre-release never is): then latest, cpu and vulkan move too
 set -eu
@@ -33,10 +33,10 @@ is_latest_release() {
   [ "$latest" = "v$version" ]
 }
 
-only_docker_differs_from_tag() {
+image_source_matches_tag() {
   git rev-parse -q --verify "refs/tags/v$version^{commit}" >/dev/null 2>&1 || return 1
-  git diff --quiet "refs/tags/v$version" HEAD -- . \
-    ':(exclude)docker' ':(exclude).github/workflows/docker.yml'
+  git diff --quiet "refs/tags/v$version" HEAD -- \
+    pyproject.toml hatch_build.py VERSION docs/pypi-readme.md localm runtime
 }
 
 if [ "$EVENT_NAME" = "release" ]; then
@@ -48,8 +48,8 @@ if [ "$EVENT_NAME" = "release" ]; then
     floating=true
   fi
 elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
-  if [ "$REF" != "refs/tags/v$version" ] && ! only_docker_differs_from_tag; then
-    fail "publishing from a dispatch requires the release tag ref refs/tags/v$version, or a commit that differs from it only in docker/, got '$REF'"
+  if [ "$REF" != "refs/tags/v$version" ] && ! image_source_matches_tag; then
+    fail "publishing from a dispatch requires the release tag ref refs/tags/v$version, or a commit with that tag's source files, got '$REF'"
   fi
   push=true
   if is_latest_release; then
