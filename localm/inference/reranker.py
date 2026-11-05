@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+from localm import livefeed as _livefeed
 from localm import pathscrub
 from localm.debuglog import logger
 from localm.inference.backends.base import RerankerHeadMissingError
@@ -391,6 +392,7 @@ class HFReranker:
                 try:
                     self._backend.unload()
                     self._backend.load()
+                    _livefeed.kick("reranker reloaded")
                 except Exception as e:
                     reason = pathscrub.scrub_paths(str(e))
                     logger.warning("could not reload reranker %s (%s)",
@@ -550,6 +552,7 @@ def _get_resident(path: str, purpose: str):
                 raise RerankerUnavailableError(reason) from e
             _RERANKER = loaded
             _RERANKER_KEY = key
+            _livefeed.kick("reranker loaded")
             if purpose == _EMBED:
                 logger.info("embedding model ready: %s (dim=%d)", Path(path).name,
                             getattr(loaded, "dim", 0))
@@ -688,6 +691,8 @@ def reset_reranker(*, force: bool = True) -> bool:
         _LOAD_FAILED.clear()
     if current is not None and busy:
         _stop_busy(current)
+    if current is not None:
+        _livefeed.kick("reranker unloaded")
     return current is not None
 
 

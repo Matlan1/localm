@@ -31,6 +31,18 @@ from localm.inference.http_server import (
 from localm.pathscrub import map_strings
 
 
+def activity_snapshot(request: Request, jobs) -> dict:
+    """The body of GET /api/activity for *request*'s caller: the operations that
+    caller may see (path-scrubbed for a caller other than the local operator),
+    the server's recent stalls and the server's clock."""
+    rows = jobs.snapshot(visible=lambda owner: job_owner_ok(request, owner))
+    show = path_formatter(request)
+    if show is not str:
+        rows = map_strings(rows, show)
+    from localm.inference._stall_watch import recent_stalls
+    return {"now": time.time(), "operations": rows, "stalls": recent_stalls()}
+
+
 def register(app: FastAPI, jobs) -> None:
     """Mount the job SSE + cancel routes over *jobs* (a JobManager).
 
@@ -71,12 +83,7 @@ def register(app: FastAPI, jobs) -> None:
         path-scrubbed. ``stalls`` lists the server's recent stalls, oldest
         first, and is empty when stall monitoring is not running.
         """
-        rows = jobs.snapshot(visible=lambda owner: job_owner_ok(request, owner))
-        show = path_formatter(request)
-        if show is not str:
-            rows = map_strings(rows, show)
-        from localm.inference._stall_watch import recent_stalls
-        return {"now": time.time(), "operations": rows, "stalls": recent_stalls()}
+        return activity_snapshot(request, jobs)
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
     async def job_events(request: Request, job=Depends(owned_job)):
