@@ -74,9 +74,7 @@ def test_corrupt_jsonl_line_skipped(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="localm"):
         s2 = _store(tmp_path)
     assert {r.text for r in s2.all()} == {"good fact one", "good fact two"}
-    # The skip is surfaced (the next save erases the line), never silent. The
-    # blank line is deliberate formatting, not counted.
-    assert "skipped 1 unparseable line" in caplog.text
+    assert "1 unparseable line(s) kept unchanged" in caplog.text
 
 
 def test_non_object_json_line_skipped_with_warning(tmp_path, caplog):
@@ -89,7 +87,45 @@ def test_non_object_json_line_skipped_with_warning(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="localm"):
         s2 = _store(tmp_path)
     assert [r.text for r in s2.all()] == ["keep me"]
-    assert "skipped 1 unparseable line" in caplog.text
+    assert "1 unparseable line(s) kept unchanged" in caplog.text
+
+
+def test_unparseable_lines_survive_a_save(tmp_path):
+    s = _store(tmp_path)
+    s.add(_rec("good fact one"))
+    garbage = ['{"v": 1, "text": 5, "id"', "[1, 2, 3]"]
+    with open(s.path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(garbage) + "\n")
+    s2 = _store(tmp_path)
+    s2.add(_rec("good fact two"))
+    on_disk = s.path.read_text(encoding="utf-8").splitlines()
+    assert all(g in on_disk for g in garbage)
+    assert {r.text for r in _store(tmp_path).all()} == {"good fact one", "good fact two"}
+
+
+def test_clear_also_drops_unparseable_lines(tmp_path):
+    s = _store(tmp_path)
+    s.add(_rec("good fact one"))
+    with open(s.path, "a", encoding="utf-8") as fh:
+        fh.write("secret half-written line\n")
+    s2 = _store(tmp_path)
+    s2.clear()
+    assert "secret half-written line" not in s.path.read_text(encoding="utf-8")
+
+
+def test_a_newer_format_stamp_refuses_the_load_and_names_the_file(tmp_path):
+    from localm.memory.store import FORMAT_VERSION
+    from localm.storeformat import StoreFormatTooNew
+    s = _store(tmp_path)
+    s.add(_rec("good fact one"))
+    before = s.path.read_bytes()
+    with open(s.path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"v": FORMAT_VERSION + 1, "text": "future"}) + "\n")
+    after = s.path.read_bytes()
+    with pytest.raises(StoreFormatTooNew) as exc:
+        _store(tmp_path)
+    assert str(s.path) in str(exc.value)
+    assert s.path.read_bytes() == after != before
 
 
 def test_clean_load_logs_no_skip_warning(tmp_path, caplog):

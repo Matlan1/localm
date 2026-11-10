@@ -10,10 +10,19 @@ instead of dropping it silently.
 
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 from unittest.mock import patch
 
 from localm.plugins.coder.backends.http import HTTPBackend
+
+
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
 
 
 class _Backend:
@@ -43,12 +52,14 @@ def _make_agent(tmp_path: Path, **kwargs):
 
 
 class TestBackendBody:
+    @pytest.mark.usefixtures("open_gate")
     def test_seed_lands_in_the_openai_body(self):
         backend = HTTPBackend("http://x/v1", "m", verify=False)
         body = backend._body([{"role": "user", "content": "hi"}],
                              stream=False, seed=1234)
         assert body["seed"] == 1234
 
+    @pytest.mark.usefixtures("open_gate")
     def test_no_seed_means_no_field(self):
         backend = HTTPBackend("http://x/v1", "m", verify=False)
         body = backend._body([{"role": "user", "content": "hi"}], stream=False)

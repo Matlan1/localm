@@ -85,8 +85,10 @@ with no chat template, as `POST /v1/completions` does. `system`, `template` and
 `think` have nothing to apply to then and are ignored (named in the debug log);
 `images` with `raw: true` is a 400.
 
-Refused with a 400, rather than silently dropped: `suffix`, a request-level
-`template` (without `raw`), and a non-empty `context`. Also a 400: a missing
+Refused with a 400 on `/api/generate`, rather than silently dropped: `suffix`,
+a request-level `template` (without `raw`), and a non-empty `context`
+(`/api/chat` has no such fields and ignores them like any unknown key). Also a
+400: a missing
 `model`, a `format` string other than `"json"`, an `options.stop` that is not a
 string or a list of strings, a `think` that is not a boolean or a string, a
 message with a role other than `system`, `user`, `assistant` or `tool`,

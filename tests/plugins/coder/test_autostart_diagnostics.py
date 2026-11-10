@@ -1,3 +1,4 @@
+import pytest
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """When the coder auto-starts a `localm gui` server and it dies fast (a busy
 --port, or any other quick non-zero exit), the CLI must surface the real reason
@@ -13,6 +14,13 @@ from click.testing import CliRunner
 
 import localm.instances as instances
 import localm.plugins.coder.cli as ccli
+
+
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
 
 
 def _bypass_plugin_gate(monkeypatch):
@@ -186,6 +194,7 @@ class TestWhereAnAutoStartedServersOutputGoes:
         assert seen.get("machine_output") is False
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_a_backend_built_from_url_assumes_a_window_and_a_preset_does_not():
     import click
 

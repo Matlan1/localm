@@ -154,6 +154,21 @@ def test_data_backups_in_the_same_second_never_replace_each_other(env):
     assert (first / "config.json").is_file() and (second / "config.json").is_file()
 
 
+def test_downgrade_backup_covers_keys_sessions_jobs_and_rag(env):
+    home, _inst = env
+    (home / "auth.json").write_text("[]", encoding="utf-8")
+    (home / "auth.kdf.json").write_text("{}", encoding="utf-8")
+    (home / "sessions.json").write_text("[]", encoding="utf-8")
+    (home / "jobs").mkdir()
+    (home / "jobs" / "jobs.json").write_text("{}", encoding="utf-8")
+    (home / "rag" / "coll").mkdir(parents=True)
+    (home / "rag" / "coll" / "chunks.json").write_text("[]", encoding="utf-8")
+    dest = updater._backup_data_for_downgrade("0.2.0")
+    for rel in ("auth.json", "auth.kdf.json", "sessions.json",
+                "jobs/jobs.json", "rag/coll/chunks.json"):
+        assert (dest / rel).is_file(), rel
+
+
 # ------------------------- a selected install ------------------------------
 
 def test_selected_older_version_installs_and_backs_up_data(env):

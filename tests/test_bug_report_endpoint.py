@@ -293,7 +293,7 @@ def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
 
     class _FakeResp:
         status = 201
-        def read(self):
+        def read(self, n=-1):
             return b'{"url": "https://github.com/Matlan1/localm/issues/42"}'
         def __enter__(self):
             return self
