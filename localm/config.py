@@ -1346,8 +1346,10 @@ def _perm_warn(path: Path, why: str) -> None:
 
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
-    Windows icacls - which grants sole full control regardless of *mode*, since
-    ACLs do not encode POSIX bits). Returns True when the tightening is believed
+    Windows icacls - which grants the user full control regardless of *mode*,
+    since ACLs do not encode POSIX bits; inherited entries are dropped, and a
+    file created without inherited entries keeps its default SYSTEM and
+    Administrators ACEs). Returns True when the tightening is believed
     to have happened, False when it did not. No-op on failure - the data dir is
     already user-scoped, so this per-file tightening is defence in depth.
 
@@ -1378,8 +1380,8 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
                 _perm_warn(path, "no USERNAME/USER in the environment")
                 return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
-            # /grant:r replaces any existing grant for this user, so the result
-            # is an explicit, sole full-control ACE.
+            # /grant:r replaces any existing grant for this user, so the user
+            # holds an explicit full-control ACE (SYSTEM and Administrators may remain).
             from localm import sysprog
             icacls = sysprog.find("icacls")
             if not icacls:

@@ -497,3 +497,27 @@ def test_requests_verify_loopback_without_ca_is_false():
     assert tls.requests_verify("https://127.0.0.1:9000/v1") is False
     assert tls.requests_verify("https://localhost:9000/v1") is False
     assert tls.requests_verify("https://[::1]:9000/v1") is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_windows_tls_key_acl_matches_documented_principals(tmp_path):
+    import os
+    import subprocess
+    tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    user = os.environ["USERNAME"].lower()
+    allowed = {"nt authority\\system", "builtin\\administrators"}
+    for name in ("ca.key", "server.key"):
+        out = subprocess.run(
+            ["icacls", str(tls.tls_dir(tmp_path) / name)], capture_output=True,
+            text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+        aces = [ln.strip() for ln in out.splitlines() if "(" in ln and ":" in ln]
+        names = set()
+        for ln in aces:
+            assert "(I)" not in ln, ln
+            if ln.startswith(str(tls.tls_dir(tmp_path) / name)):
+                ln = ln[len(str(tls.tls_dir(tmp_path) / name)):].strip()
+            names.add(ln.rsplit(":", 1)[0].strip().lower())
+        assert any(n.endswith("\\" + user) or n == user for n in names), names
+        assert all(n in allowed or n.endswith("\\" + user) or n == user
+                   for n in names), names
