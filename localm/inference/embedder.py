@@ -480,6 +480,11 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     repo, filename = known
     dest = _embeddings_dir() / filename
     damaged = None
+    if not dest.is_file():
+        registered = _registered_known_file(repo, filename, verify=allow_download is True)
+        if registered:
+            _record_resolve_success(spec)
+            return registered
     if dest.is_file():
         damaged = _pin_mismatch(dest, _EMBEDDING_PINS.get((repo, filename))) \
             if allow_download is True else None
@@ -520,6 +525,7 @@ def configured_model_path() -> Optional[str]:
         dest = _embeddings_dir() / known[1]
         if dest.is_file():
             return str(dest)
+        return _registered_known_file(known[0], known[1])
     return None
 
 
@@ -590,6 +596,45 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _registered_known_file(repo: str, filename: str,
+                           verify: bool = False) -> Optional[str]:
+    """The path of a registered model whose file has the name *filename* of a
+    known embedding model, or None. When the registry recorded a sha256 for the
+    entry it must equal the pinned one; with no recorded digest the file is
+    hashed against the pin only when *verify* is true (the same rule as a
+    present downloaded file). Never raises."""
+    pin = _EMBEDDING_PINS.get((repo, filename))
+    try:
+        from localm.config import load_registry
+        from localm.pathsafe import is_unc_or_device_path
+        reg = load_registry()
+        entries = list(reg.items()) if isinstance(reg, dict) else []
+    except Exception:
+        logger.debug("could not read the registry for %s", filename, exc_info=True)
+        return None
+    for _name, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("path")
+        if not isinstance(raw, str) or not raw or is_unc_or_device_path(raw):
+            continue
+        p = Path(raw)
+        try:
+            if p.name.lower() != filename.lower() or not p.is_file():
+                continue
+        except OSError:
+            continue
+        if pin is not None:
+            recorded = str(entry.get("sha256") or "").lower()
+            if recorded:
+                if recorded != pin[1].lower():
+                    continue
+            elif verify and _pin_mismatch(p, pin) is not None:
+                continue
+        return str(p)
+    return None
 
 
 def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:

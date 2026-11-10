@@ -1702,8 +1702,88 @@ def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
         if isinstance(e, dict):
             e["mmproj"] = resolved
     _mm.update_registry(_mutator)
-    return (f"Recorded this vision projector for '{name}' - future runs of "
+    return (f"Recorded this {_projector_kind(resolved)} for '{name}' - future runs of "
             f"{name} will use it automatically, no --mmproj needed.")
+
+
+def _projector_kind(mmproj_path: str) -> str:
+    """Words for the projector at *mmproj_path*: 'vision projector', 'audio
+    projector', 'vision and audio projector', or plain 'projector' when its
+    modalities cannot be read."""
+    from .gguf import gguf_mmproj_modalities
+    modalities = gguf_mmproj_modalities(Path(mmproj_path)) or {}
+    vision = bool(modalities.get("vision"))
+    audio = bool(modalities.get("audio"))
+    if vision and audio:
+        return "vision and audio projector"
+    if vision:
+        return "vision projector"
+    if audio:
+        return "audio projector"
+    return "projector"
+
+
+def attach_mmproj_after_add(path: str, name: Optional[str],
+                            mmproj_path: str) -> tuple[bool, str]:
+    """:func:`attach_mmproj` for the model `localm add` / `localm pull` just
+    registered from *path*: *name* when given, else the one name registered for
+    that file. ``ok`` False when no single name can be told."""
+    target = name
+    if not target:
+        try:
+            names = find_aliases_by_path(Path(path).expanduser(), _mm.load_registry())
+        except OSError:
+            names = []
+        if len(names) != 1:
+            return False, (f"the registered name of {path} is not unambiguous. Run "
+                           "`localm attach-mmproj NAME FILE` with the name from "
+                           "`localm list`.")
+        target = names[0]
+    return attach_mmproj(target, mmproj_path)
+
+
+def attach_mmproj(name: str, mmproj_path: str) -> tuple[bool, str]:
+    """Record *mmproj_path* as the projector of the registered GGUF model *name*
+    without loading anything, replacing any projector recorded before (the
+    caller asked for this one explicitly).
+
+    Returns ``(ok, message)``; on ``ok`` False nothing was written. Refused
+    when *name* is not registered, is not a single GGUF chat or speech model, or when *mmproj_path* is not an existing local GGUF
+    whose own metadata marks it as a projector."""
+    from localm.pathsafe import is_unc_or_device_path
+
+    from .gguf import gguf_is_mmproj
+    reg = _mm.load_registry()
+    entry = reg.get(name)
+    if not isinstance(entry, dict):
+        return False, f"'{name}' is not a registered model."
+    epath = _entry_path(entry)
+    if epath is None or Path(epath).is_dir() or Path(epath).suffix.lower() != ".gguf":
+        return False, f"'{name}' is not a single GGUF file, so it takes no projector."
+    if entry.get("model_type") not in ("llm", "tts"):
+        return False, (f"'{name}' is registered as {entry.get('model_type')!r}; "
+                       "a projector only applies to a GGUF chat or speech model.")
+    raw = str(mmproj_path)
+    if is_unc_or_device_path(raw):
+        return False, "The projector must be a plain local file."
+    try:
+        projector = Path(raw).expanduser().resolve()
+    except (OSError, ValueError):
+        return False, f"Cannot read the projector path {raw!r}."
+    if not projector.is_file():
+        return False, f"Projector file not found: {projector}"
+    if projector.suffix.lower() != ".gguf" or not gguf_is_mmproj(projector):
+        return False, (f"{projector.name} is not a projector (mmproj) GGUF: its "
+                       "metadata does not mark it as one.")
+    resolved = str(projector)
+
+    def _mutator(r):
+        e = r.get(name)
+        if isinstance(e, dict):
+            e["mmproj"] = resolved
+    _mm.update_registry(_mutator)
+    return True, (f"Attached the {_projector_kind(resolved)} {projector.name} "
+                  f"to '{name}'.")
 
 
 def vision_input_guidance(mmproj_failed: bool = False,
@@ -4309,7 +4389,7 @@ def _rmtree_writable(path: Path) -> None:
         shutil.rmtree(path, onerror=lambda f, p, e: _retry(f, p, e[1]))
 
 
-def remove_model(name: str) -> None:
+def remove_model(name: str) -> bool:
     # escape(): reachable via `POST /api/models/remove`, which spawns
     # `localm rm <model> --yes` and re-pushes its stdout into the GUI
     # job/activity log verbatim - so every print in this function is shown
@@ -4319,7 +4399,7 @@ def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:
         console.print(f"[red]Not found:[/red] {escape(name)}")
-        return
+        return False
 
     epath = _entry_path(reg[name])
     if epath is None:
@@ -4330,7 +4410,7 @@ def remove_model(name: str) -> None:
         # it, a single bad entry could only be cleared by hand-editing the JSON.
         _mm.update_registry(lambda r: _pop_model_entry(r, name))
         console.print(f"[green]✓[/green] Removed corrupt entry [bold]{escape(name)}[/bold]")
-        return
+        return True
 
     path = Path(epath)
 
@@ -4344,7 +4424,7 @@ def remove_model(name: str) -> None:
             f"[dim](file kept - still registered as: "
             f"{', '.join(escape(a) for a in other_aliases)})[/dim]"
         )
-        return
+        return True
 
     # Only delete files that live inside <data dir>/models/ - never touch
     # externally registered paths (Ollama blobs, user model dirs, etc.). This
@@ -4388,6 +4468,7 @@ def remove_model(name: str) -> None:
         console.print("[dim]Unregistered (file not deleted - lives outside <data dir>/models)[/dim]")
     _mm.update_registry(lambda r: _pop_model_entry(r, name))       # atomic RMW
     console.print(f"[green]✓[/green] Removed [bold]{escape(name)}[/bold]")
+    return True
 
 
 
