@@ -161,8 +161,12 @@ def remote_hold_reason(model: str) -> Optional[str]:
     discovery across registries would turn the skip into a false all-clear for
     a file held under a different name elsewhere.
 
-    With no server running at all, ``instances.snapshot`` yields nothing to
-    loop over and this returns None.
+    An ``--isolated`` server is not in that listing; it leaves a hold-check-only
+    marker in the same run dir (``instances.list_hold_markers``), asked the same
+    way.
+
+    With no server running at all, nothing is left to loop over and this
+    returns None.
     """
     from localm import instances
     from localm.bindhost import self_connect_host, url_host
@@ -172,6 +176,7 @@ def remote_hold_reason(model: str) -> Optional[str]:
     # attach token a genuinely open (keyless) instance's middleware requires.
     # The token is used for the request only, never displayed.
     rows = instances.snapshot(home_dir(), include_token=True)
+    rows = rows + instances.list_hold_markers(home_dir())
     for e in rows:
         scheme = e.get("scheme", "http")
         where = (scheme + "://"

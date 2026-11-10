@@ -1050,3 +1050,33 @@ def test_localm_response_headers_are_forwarded_in_both_modes(
     r = client.post(route, json={"model": MODEL, "stream": stream, **body})
     assert r.status_code == 200
     assert r.headers.get("x-localm-test") == "1"
+
+
+def _ghost_engine(client):
+    import localm.inference.http_server as hs
+    ghost = _mock_engine()
+    ghost.display_name = "ghost"
+    hs._engines["ghost"] = ghost
+    return ghost
+
+
+def test_ps_lists_a_resident_engine_whose_name_left_the_registry(client, home):
+    _write_registry(home, {})
+    _ghost_engine(client)
+    names = sorted(m["name"] for m in client.get("/api/ps").json()["models"])
+    assert names == sorted([MODEL, "ghost"])
+
+
+def test_unload_by_name_frees_a_resident_engine_that_left_the_registry(client, home):
+    _write_registry(home, {})
+    ghost = _ghost_engine(client)
+    assert ghost.loaded
+    resp = client.post("/v1/models/unload", params={"model": "ghost"})
+    assert resp.status_code == 200, resp.text
+    assert not ghost.loaded
+
+
+def test_unload_of_a_name_that_is_neither_registered_nor_resident_is_404(client, home):
+    _write_registry(home, {})
+    resp = client.post("/v1/models/unload", params={"model": "nobody"})
+    assert resp.status_code == 404

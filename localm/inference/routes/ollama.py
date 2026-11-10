@@ -239,18 +239,23 @@ def register(app: FastAPI, ctx) -> None:
     @route("/api/ps", methods=["GET"], dependencies=read_models)
     async def ollama_ps():
         from localm.config import load_registry
-        listed = _listed_models(load_registry())
-        loaded = [(name, listed[name], engine)
+        registry = load_registry()
+        listed = _listed_models(registry)
+        loaded = [(name, listed.get(name), engine)
                   for name, engine in list(_hs._engines.items())
-                  if name in listed and engine.loaded]
+                  if engine.loaded and (name in listed or name not in registry)]
 
         def _collect() -> list[dict]:
             out = []
             ttl = _hs._idle_unload_ttl()
             now = time.monotonic()
             for name, entry, engine in loaded:
-                obj = _tag_object(name, entry, _file_facts(entry))
-                obj.pop("modified_at")
+                if entry is None:
+                    obj = {"name": name, "model": name, "size": 0,
+                           "digest": "", "details": {}}
+                else:
+                    obj = _tag_object(name, entry, _file_facts(entry))
+                    obj.pop("modified_at")
                 last = _hs._last_activity_per_model.get(name)
                 obj["expires_at"] = P.expiry_iso(
                     ttl, None if last is None else now - last)
