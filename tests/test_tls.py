@@ -521,3 +521,33 @@ def test_windows_tls_key_acl_matches_documented_principals(tmp_path):
         assert any(n.endswith("\\" + user) or n == user for n in names), names
         assert all(n in allowed or n.endswith("\\" + user) or n == user
                    for n in names), names
+
+
+def test_ca_in_its_renewal_window_is_replaced_with_the_leaf_and_leaf_never_outlives_ca(
+        tmp_path, monkeypatch):
+    tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    old_ca = _load(tls.ca_cert_path(tmp_path))
+    old_leaf = _load(tls._leaf_cert_path(tmp_path))
+    near = old_ca.not_valid_after_utc - timedelta(days=tls._RENEW_MARGIN_DAYS - 1)
+    monkeypatch.setattr(tls, "_now", lambda: near)
+    tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    new_ca = _load(tls.ca_cert_path(tmp_path))
+    new_leaf = _load(tls._leaf_cert_path(tmp_path))
+    assert new_ca.serial_number != old_ca.serial_number
+    assert new_leaf.serial_number != old_leaf.serial_number
+    new_ca.public_key().verify(
+        new_leaf.signature, new_leaf.tbs_certificate_bytes,
+        padding.PKCS1v15(), new_leaf.signature_hash_algorithm)
+
+
+def test_leaf_validity_is_capped_at_the_ca_expiry(tmp_path, monkeypatch):
+    tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    ca = _load(tls.ca_cert_path(tmp_path))
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(
+        tls._ca_key_path(tmp_path).read_bytes(), password=None)
+    monkeypatch.setattr(
+        tls, "_now", lambda: ca.not_valid_after_utc - timedelta(days=100))
+    tls._make_leaf(tmp_path, ca, key, ["localhost"], ["127.0.0.1"])
+    leaf = _load(tls._leaf_cert_path(tmp_path))
+    assert leaf.not_valid_after_utc == ca.not_valid_after_utc
