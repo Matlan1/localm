@@ -134,7 +134,10 @@ def test_interactive_confirm_keeps_shell_gated_under_auto_approve(tmp_path,
         assert r.status_code == 200, r.text
         assert r.json()["interactive_confirm"] is True
         sess = app.state.coder_sessions.get(r.json()["id"])
-        assert set(_SHELL_EXEC_TOOLS) <= set(sess.agent.always_confirm)
+        from localm.plugins.coder.agent.constants import confirm_forced
+        from localm.plugins.coder.tools.registry import TOOL_REGISTRY
+        assert all(confirm_forced(sess.agent.always_confirm, n, TOOL_REGISTRY[n])
+                   for n in _SHELL_EXEC_TOOLS)
 
 
 def test_interactive_confirm_defaults_off_and_adds_nothing(tmp_path, monkeypatch):

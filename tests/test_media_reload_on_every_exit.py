@@ -207,6 +207,60 @@ def test_a_clean_job_reloads_exactly_once(monkeypatch, chat, body):
     assert job.outcomes == ["failed"]
 
 
+class _StatusResp:
+    ok = True
+    status_code = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+@pytest.fixture
+def server_says(monkeypatch):
+    """The unload answer of a server with a given status; records every call."""
+    calls = []
+    state = {"body": {"status": "already_unloaded"}}
+
+    def self_request(method, path, **kw):
+        calls.append((method, path))
+        return _StatusResp(state["body"] if "unload" in path else {})
+
+    monkeypatch.setattr("localm.selfclient.self_request", self_request)
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
+    monkeypatch.setattr("localm.vram.release_other_native_media",
+                        lambda job, s, label: vram.ReleaseResult())
+    monkeypatch.setattr("localm.vram.note_other_vram_holders", lambda job, s, label: None)
+    return calls, state
+
+
+@pytest.mark.parametrize("body", ["image_generate", "image_upscale", "video", "music"])
+def test_nothing_is_reloaded_when_no_chat_model_was_loaded(monkeypatch, server_says, body):
+    calls, state = server_says
+    fn = _BODIES[body](monkeypatch, backend_call=lambda *a, **k: (False, "nope"))
+    job = _Job()
+
+    fn(job)
+
+    assert calls == [("POST", "/models/unload?media=false")], calls
+    assert "No chat model was loaded - VRAM already free." in job.lines
+    assert "Reloading the chat model..." not in job.lines
+
+
+@pytest.mark.parametrize("body", ["image_generate", "image_upscale", "video", "music"])
+def test_the_chat_model_is_reloaded_when_the_unload_freed_one(monkeypatch, server_says, body):
+    calls, state = server_says
+    state["body"] = {"status": "unloaded"}
+    fn = _BODIES[body](monkeypatch, backend_call=lambda *a, **k: (False, "nope"))
+
+    fn(_Job())
+
+    assert calls == [("POST", "/models/unload?media=false"), ("POST", "/models/load")], calls
+
+
 def test_the_outcome_is_recorded_before_the_reload_runs(monkeypatch):
     order = []
     job = _Job()

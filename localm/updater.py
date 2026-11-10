@@ -478,7 +478,8 @@ def _check_selected_version(new_version: str, requested: str) -> None:
 
 
 def _refuse_downgrade(new_version: str) -> None:
-    """Raise unless *new_version* is strictly newer than the running version.
+    """Raise unless *new_version* is strictly newer than the running version,
+    or when the running version cannot be read.
 
     The anti-rollback check: the signature proves authenticity, not freshness, and
     an OLD release's build.zip is still validly signed. This adds freshness."""
@@ -486,6 +487,12 @@ def _refuse_downgrade(new_version: str) -> None:
     current = _version.read_version()
     if not new_version:
         raise LocalmError("the update has no VERSION", reason="cannot confirm it is newer")
+    if not _version._leading_digit(current):
+        raise LocalmError(
+            "cannot read the installed localm version",
+            reason="without it an update cannot be confirmed as newer; choose the "
+                   "version to install (Settings > Updates, or 'localm update "
+                   "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
             f"refusing to 'update' to {new_version}: not newer than the installed {current}",
@@ -883,7 +890,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
     # hops, native cert store first, certifi as fallback. The https-only-redirect
     # guard is http_ssl.HttpsOnlyRedirect, installed by default.
-    from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
+    from localm.http_ssl import RedirectDowngradeRefused, copy_bounded, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with verified_urlopen(req, timeout=timeout) as resp:
@@ -891,11 +898,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+                copy_bounded(resp, f)
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}") from None
     except RedirectDowngradeRefused as e:
@@ -1111,7 +1114,8 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
 # Data dir entries an older build may read without the fields a newer one added,
 # and write back without them.
 _DOWNGRADE_DATA = ("config.json", "registry.json", "checkpoints", "memory", "plugins",
-                   "coder-hook-trust.json")
+                   "coder-hook-trust.json", "auth.json", "auth.kdf.json",
+                   "sessions.json", "jobs", "rag")
 
 
 def _backup_data_for_downgrade(new_version: str) -> Path:
@@ -1636,10 +1640,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             except Exception as e:
                 what = f"could not start {cmd[0]}: {e}" if isinstance(e, OSError) else str(e)
                 _roll_back(f"post-update step crashed: {what}", "the post-update step crashed",
-                           "the post-update step crashed; rolled back", reason=what)
+                           "the post-update step crashed; rolled back",
+                           reason=with_retry_hint(what, target, "update"))
             if rc != 0:
-                _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
-                           "the post-update step failed; rolled back")
+                why = f"{cmd[0]} exited {rc}"
+                _roll_back(why, "the post-update step failed",
+                           "the post-update step failed; rolled back",
+                           reason=with_retry_hint(why, target, "update"))
         if cmd or venv_kept:
             try:
                 updater_components.record_changes(
@@ -1689,6 +1696,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         if not cmd:
             from localm import updater_parts
             updater_parts.note_kept_record(target, previous_version, new_version)
+        from localm import config as _config, mgmt_events
+        mgmt_events.record("update_applied", home=_config.HOME_DIR,
+                           version_from=previous_version, version_to=new_version)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
@@ -1697,6 +1707,24 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept}
+
+
+def retry_hint(root, args: str) -> str:
+    """The sentence that tells the user how to run ``localm <args>`` again through the
+    launcher script in the install at *root* (``localm.bat`` on Windows, ``localm.sh``
+    elsewhere), which starts localm with its Python and holds no program file of the
+    venv. Empty when the install has no such script."""
+    name = "localm.bat" if sys.platform == "win32" else "localm.sh"
+    if not (Path(root) / name).is_file():
+        return ""
+    run = name if sys.platform == "win32" else f"./{name}"
+    return f"To try again, close localm and run {run} {args} in the localm install folder"
+
+
+def with_retry_hint(reason: str, root, args: str) -> str:
+    """*reason* followed by :func:`retry_hint` when there is one."""
+    hint = retry_hint(root, args)
+    return f"{reason}. {hint}" if hint else reason
 
 
 def _require_runnable(cmd, klass: str) -> None:

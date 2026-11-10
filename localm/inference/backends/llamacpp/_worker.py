@@ -447,8 +447,10 @@ class GgufWorker(VramSizingMixin):
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
     ):
-        """Yield text tokens one at a time. With *logprobs* and *logprob_sink*,
+        """Yield text tokens one at a time. *raw_prompt* is passed on to
+        ``LlamaCpp.create_chat_completion`` when set. With *logprobs* and *logprob_sink*,
         each generated token's record is appended to *logprob_sink* before its
         text is yielded (see ``LlamaCpp.create_chat_completion``); a retry
         without the grammar empties it first. The caller (the runner's dispatch
@@ -498,6 +500,8 @@ class GgufWorker(VramSizingMixin):
                 kw["logprob_sink"] = logprob_sink
             if not cache_prompt:
                 kw["cache_prompt"] = False
+            if raw_prompt is not None:
+                kw["raw_prompt"] = raw_prompt
             return kw
 
         def _stream(g: Optional[str]):

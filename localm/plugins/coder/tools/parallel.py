@@ -358,7 +358,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     there is no read-modify-write across the two threads either.
     """
     from ..agent import Agent
-    from .agents import _isolated_verify_cmd, inherited_child_kwargs
+    from .agents import _isolated_verify_cmd, inherit_session_state, inherited_child_kwargs
 
     backend, detail = _child_backend(parent.backend, spec.get("model"))
 
@@ -391,6 +391,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         confirm_handler=_serialised_confirm_handler(parent, spec["name"]),
         verify_cmd=_isolated_verify_cmd(parent, child_cwd),
     ))
+    inherit_session_state(parent, child)
     # Make the child's location introspectable: a caller that reports on a finished
     # child needs to know which worktree and branch its diff belongs to.
     child.worktree_path = outcome.worktree or str(child_cwd)
@@ -463,6 +464,10 @@ def tool_dispatch_parallel(
     """
     if _parent_agent is None:
         return ToolResult.error("dispatch_parallel requires a running parent agent")
+    from .agents import patch_mode_refusal
+    refusal = patch_mode_refusal(_parent_agent, "dispatch_parallel")
+    if refusal is not None:
+        return refusal
 
     specs, err = _normalise_tasks(tasks)
     if err:

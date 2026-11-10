@@ -391,3 +391,141 @@ def test_no_embedding_note_when_the_collection_never_had_vectors(home, docs,
 
     assert result["status"] == "ok", result.get("error")
     assert "no embedding model was available" not in result["output"]
+
+
+# --------------------------------------------------------------------------- #
+#  Per-key rag_roots confinement                                              #
+# --------------------------------------------------------------------------- #
+
+def _keyed_job(key, **kw):
+    from localm.auth import _hash_key
+    return _rag_job(owner=_hash_key(key), **kw)
+
+
+def _set_key_rag_roots(key, roots):
+    from localm import auth
+    records = auth._load_keystore()
+    for r in records:
+        if r.get("hash") == auth._hash_key(key):
+            r["rag_roots"] = auth.norm_rag_roots(roots)
+    auth._save_keystore(records)
+
+
+def test_run_refuses_a_job_whose_key_roots_do_not_cover_the_collection(
+        home, docs, tmp_path):
+    from localm import auth
+    from localm.plugins.builtin.jobs.runner import run_job
+    from localm.rag import Collection
+    other = tmp_path / "other"
+    other.mkdir()
+    key = auth.create_key("confined", ["jobs", "rag"], rag_roots=[str(other)])["key"]
+    _collection_with(home, docs)
+    (docs / "two.txt").write_text("a second paper about gearboxes", encoding="utf-8")
+
+    result = run_job(_keyed_job(key), engine=None)
+
+    assert result["status"] == "error", result
+    assert "not run" in result["error"], result["error"]
+    assert not any(s.endswith("two.txt") for s in Collection("kb").documents())
+
+
+def test_run_resyncs_with_the_key_roots_when_they_cover_the_collection(
+        home, docs):
+    from localm import auth
+    from localm.plugins.builtin.jobs.runner import run_job
+    from localm.rag import Collection
+    key = auth.create_key("covered", ["jobs", "rag"], rag_roots=[str(docs)])["key"]
+    _collection_with(home, docs)
+    (docs / "two.txt").write_text("a second paper about gearboxes", encoding="utf-8")
+
+    result = run_job(_keyed_job(key), engine=None)
+
+    assert result["status"] == "ok", result.get("error")
+    assert any(s.endswith("two.txt") for s in Collection("kb").documents())
+
+
+def test_a_job_whose_key_later_gains_rag_roots_is_skipped(home, docs, tmp_path):
+    from localm import auth
+    from localm.plugins.builtin.jobs.runner import run_job
+    from localm.rag import Collection
+    key = auth.create_key("widened-then-narrowed", ["jobs", "rag"])["key"]
+    _collection_with(home, docs)
+    job = _keyed_job(key)
+    first = run_job(job, engine=None)
+    assert first["status"] == "ok", first.get("error")
+
+    other = tmp_path / "other"
+    other.mkdir()
+    _set_key_rag_roots(key, [str(other)])
+    (docs / "two.txt").write_text("a second paper about gearboxes", encoding="utf-8")
+    second = run_job(job, engine=None)
+
+    assert second["status"] == "error", second
+    assert "not run" in second["error"], second["error"]
+    assert not any(s.endswith("two.txt") for s in Collection("kb").documents())
+
+
+def _jobs_app(home, monkeypatch):
+    from pathlib import Path
+
+    from fastapi import FastAPI
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-xyz")
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    app = FastAPI()
+    PluginManager(app, store_root=store_root,
+                  installed_root=home / "plugins").install("jobs")
+    return app
+
+
+_RAG_JOB_BODY = {"name": "kb-sync", "task_kind": "rag", "collection": "kb",
+                 "schedule_kind": "interval", "schedule": 3600}
+
+
+def test_api_create_refuses_a_confined_key_on_an_out_of_roots_collection(
+        home, docs, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from localm import auth
+    from localm.plugins.builtin.jobs.store import JobStore
+    app = _jobs_app(home, monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    key = auth.create_key("confined", ["jobs", "rag"], rag_roots=[str(other)])["key"]
+    _collection_with(home, docs)
+    with TestClient(app) as client:
+        r = client.post("/api/jobs", json=_RAG_JOB_BODY,
+                        headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 403, r.text
+    assert JobStore().list() == []
+
+
+def test_api_update_refuses_pointing_a_confined_job_at_an_out_of_roots_collection(
+        home, docs, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from localm import auth
+    from localm.rag import Collection
+    app = _jobs_app(home, monkeypatch)
+    key = auth.create_key("confined", ["jobs", "rag"],
+                          rag_roots=[str(tmp_path / "mine")])["key"]
+    (tmp_path / "mine").mkdir()
+    _collection_with(home, docs)
+    Collection("own").create()
+    hdr = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        r = client.post("/api/jobs", json={**_RAG_JOB_BODY, "collection": "own"},
+                        headers=hdr)
+        assert r.status_code == 200, r.text
+        r2 = client.put(f"/api/jobs/{r.json()['id']}", json={"collection": "kb"},
+                        headers=hdr)
+        assert r2.status_code == 403, r2.text
+
+
+def test_api_create_by_the_owner_is_unaffected(home, docs, monkeypatch):
+    from fastapi.testclient import TestClient
+    app = _jobs_app(home, monkeypatch)
+    _collection_with(home, docs)
+    with TestClient(app) as client:
+        r = client.post("/api/jobs", json=_RAG_JOB_BODY,
+                        headers={"Authorization": "Bearer owner-key-xyz"})
+        assert r.status_code == 200, r.text

@@ -98,6 +98,26 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
     return scope.replace("-", "_").isidentifier()
 
 
+def unknown_scope_warnings(scope_list, installed=()) -> list[str]:
+    """Warnings for each scope in *scope_list* that is a bare identifier but
+    neither a kernel/first-party scope nor one of the *installed* plugin scopes.
+    Each names the closest known scope. Such a key grants nothing today and is
+    inherited by any plugin installed later under that name."""
+    import difflib
+    known = all_known_scopes() | set(installed or ())
+    out: list[str] = []
+    for sc in normalize(scope_list or ()):
+        if sc in known or not is_valid_scope(sc):
+            continue
+        close = difflib.get_close_matches(sc, sorted(known), n=1, cutoff=0.6)
+        hint = f"; closest known scope: '{close[0]}'" if close else ""
+        out.append(
+            f"scope '{sc}' is not a localm scope or an installed plugin's scope"
+            f"{hint}. It grants nothing now, and a plugin installed later "
+            f"under that name would inherit it.")
+    return out
+
+
 def grants(held: set[str], required: str) -> bool:
     """Does a key holding *held* scopes satisfy *required*? ADMIN implies every
     scope; coder:full implies the base coder scope, so a coder:full key passes

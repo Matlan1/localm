@@ -740,10 +740,15 @@ def test_unattended_one_shot_gate_covers_the_background_variant():
     assert _SHELL_EXEC_TOOLS == frozenset({"run_shell", "run_shell_background"})
     # The CLI builds its Agent and resolves its config through the runner, so
     # both gates live there.
+    from localm.plugins.coder.agent.constants import EXECUTES_PROJECT_CODE, confirm_forced
+    from localm.plugins.coder.tools.registry import TOOL_REGISTRY
+    for name in _SHELL_EXEC_TOOLS:
+        assert TOOL_REGISTRY[name].executes_project_code is True, name
+        assert confirm_forced({EXECUTES_PROJECT_CODE}, name, TOOL_REGISTRY[name]), name
     src = inspect.getsource(runner)
-    assert "always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)" in src, (
+    assert "always_confirm = set(always_confirm) | {EXECUTES_PROJECT_CODE}" in src, (
         "the R19a unattended gate no longer covers the whole shell-exec family")
-    assert "always_confirm.update(_SHELL_EXEC_TOOLS)" in src, (
+    assert "always_confirm.add(EXECUTES_PROJECT_CODE)" in src, (
         "--interactive-confirm no longer covers the whole shell-exec family")
 
 
@@ -1146,6 +1151,7 @@ def test_a_failed_taskkill_is_reported_and_falls_through(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 128, b"", b'ERROR: The process "1234" not found.'))
     swept = []
@@ -1172,6 +1178,7 @@ def test_a_taskkill_that_SUCCEEDED_is_silent(tmp_path, make_registry, monkeypatc
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run",
                         lambda argv, **kw: _sp.CompletedProcess(argv, 0, b"", b""))
     swept = []
@@ -1200,6 +1207,7 @@ def test_the_benign_taskkill_descendant_race_is_not_flagged_unexplained(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 255, b"",
         b'ERROR: The process with PID 35352 (child process of PID 14540) could '
@@ -1230,6 +1238,7 @@ def test_a_genuinely_different_taskkill_failure_is_still_flagged_unexplained(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 1, b"", b"ERROR: Access is denied."))
 
@@ -1462,6 +1471,7 @@ def test_a_failed_taskkill_after_a_clock_step_is_not_an_identity_mismatch(
     try:
         with job._lock, monkeypatch.context() as m:
             step_the_clock(m, a_forward_step_past_boot())
+            m.setattr("localm.sysprog.find", lambda name: name)
             m.setattr(bg.subprocess, "run", _taskkill_exits_255)
             m.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
             job._terminate(force=False)

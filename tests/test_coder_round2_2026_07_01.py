@@ -13,6 +13,7 @@ from unittest.mock import patch
 def test_effective_mode_coder_reads_project_toml(tmp_path, monkeypatch):
     from localm.audit import effective_mode, SessionMode
     monkeypatch.delenv("LOCALM_MODE", raising=False)
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
     proj = tmp_path / "proj"
     (proj / ".localcoder").mkdir(parents=True)
     (proj / ".localcoder" / "config.toml").write_text('mode = "log"\n', encoding="utf-8")

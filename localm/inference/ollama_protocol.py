@@ -337,6 +337,8 @@ class Plan:
     stream: bool
     want_thinking: bool = False
     ignored_options: list[str] = field(default_factory=list)
+    # True: *body* is a /v1/completions request (``raw: true``), not a chat one.
+    raw: bool = False
 
 
 def _common_fields(req: _Base, resolved_model: str) -> tuple[dict[str, Any], Plan]:
@@ -368,20 +370,23 @@ def plan_chat(req: OllamaChatRequest, resolved_model: str) -> Plan:
 
 def plan_generate(req: OllamaGenerateRequest, resolved_model: str) -> Plan:
     """Translate an ``/api/generate`` request. The caller handles the
-    load/unload idiom (no prompt) before calling this."""
-    if req.raw:
-        raise OllamaError(
-            400, "raw mode (a prompt sent without the chat template) is not "
-                 "supported; omit raw")
+    load/unload idiom (no prompt) before calling this.
+
+    With ``raw: true`` the plan is a ``/v1/completions`` request
+    (``Plan.raw``): the prompt is sent as given, with no chat template, so
+    ``system``, ``template`` and ``think`` have nothing to apply to and are
+    listed in ``Plan.ignored_options``; ``images`` is refused with a 400."""
     if req.suffix:
         raise OllamaError(400, "suffix (fill-in-the-middle) is not supported")
-    if req.template:
-        raise OllamaError(400, "a request-level template is not supported; the "
-                               "model's own chat template is always used")
     if req.context:
         raise OllamaError(400, "context (a token array from an earlier "
                                "response) is not supported; send the conversation "
                                "with /api/chat")
+    if req.raw:
+        return _plan_raw_generate(req, resolved_model)
+    if req.template:
+        raise OllamaError(400, "a request-level template is not supported; the "
+                               "model's own chat template is always used")
     body, plan = _common_fields(req, resolved_model)
     messages: list[dict[str, Any]] = []
     if req.system:
@@ -389,6 +394,28 @@ def plan_generate(req: OllamaGenerateRequest, resolved_model: str) -> Plan:
     messages.append(message_to_openai(OllamaMessage(
         role="user", content=req.prompt or "", images=req.images)))
     body["messages"] = messages
+    return plan
+
+
+def _plan_raw_generate(req: OllamaGenerateRequest, resolved_model: str) -> Plan:
+    """The ``/v1/completions`` plan for an ``/api/generate`` request with
+    ``raw: true``."""
+    if req.images:
+        raise OllamaError(400, "images cannot be sent with raw: true, which sends "
+                               "the prompt as text with no chat template; omit raw "
+                               "to send images")
+    body, plan = _common_fields(req, resolved_model)
+    ignored = []
+    if body.pop("chat_template_kwargs", None) is not None:
+        ignored.append("think")
+    plan.want_thinking = False
+    if req.system:
+        ignored.append("system")
+    if req.template:
+        ignored.append("template")
+    body["prompt"] = req.prompt or ""
+    plan.ignored_options = sorted(plan.ignored_options + ignored)
+    plan.raw = True
     return plan
 
 
@@ -493,14 +520,16 @@ def encode_line(obj: dict[str, Any]) -> bytes:
 
 def completion_to_reply(kind: str, data: dict[str, Any], model: str, *,
                         want_thinking: bool, total_ns: int) -> dict[str, Any]:
-    """A non-streaming OpenAI chat completion as an Ollama reply.
+    """A non-streaming OpenAI chat completion, or text completion (its choice's
+    ``text``), as an Ollama reply.
 
     Raises a 500 :class:`OllamaError` when the generation failed (the chat path
     reports that as ``finish_reason: "error"`` with the error text as content)."""
     choices = data.get("choices") or [{}]
     choice = choices[0] if isinstance(choices[0], dict) else {}
     message = choice.get("message") or {}
-    text = message.get("content") or ""
+    text = (message.get("content") if "message" in choice
+            else choice.get("text")) or ""
     finish = choice.get("finish_reason")
     if finish == "error":
         raise OllamaError(500, text.strip() or "generation failed")
@@ -560,7 +589,8 @@ _ERROR_TEXT_PREFIX = "[inference error"
 async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
                         model: str, want_thinking: bool,
                         started: float) -> AsyncIterator[bytes]:
-    """Translate OpenAI chat-completion chunks into Ollama NDJSON lines.
+    """Translate OpenAI chat-completion chunks, or text-completion chunks (their
+    choice's ``text``), into Ollama NDJSON lines.
 
     Status chunks and the role chunk produce nothing. Reasoning deltas become
     ``thinking`` lines when *want_thinking*. A failed generation ends with one
@@ -583,7 +613,8 @@ async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
             reasoning = delta.get("reasoning_content")
             if reasoning and want_thinking:
                 yield encode_line(reply_object(kind, model, thinking=reasoning))
-            text = delta.get("content")
+            text = (delta.get("content") if "delta" in choice
+                    else choice.get("text"))
             if text:
                 if held is not None:
                     yield encode_line(reply_object(kind, model, content=held))

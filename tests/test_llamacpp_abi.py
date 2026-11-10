@@ -12,17 +12,19 @@ it protects.
 from __future__ import annotations
 
 import ctypes
+import struct
 
 import pytest
 
 from localm.inference.backends.llamacpp import _abi
 from localm.inference.backends.llamacpp._abi import (
-    CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, CONTEXT_PARAMS_V3, MODEL_PARAMS_V1,
+    CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, CONTEXT_PARAMS_V3, CONTEXT_PARAMS_V4,
+    MODEL_PARAMS_V1,
     MODEL_PARAMS_V2, MODEL_PARAMS_V3, AbiMismatch, evaluate, verify_abi,
 )
 from localm.inference.backends.llamacpp._structs import (
     LlamaContextParamsV1, LlamaContextParamsV2, LlamaContextParamsV3,
-    LlamaModelParamsV1, LlamaModelParamsV2, LlamaModelParamsV3,
+    LlamaContextParamsV4, LlamaModelParamsV1, LlamaModelParamsV2, LlamaModelParamsV3,
 )
 
 
@@ -399,6 +401,20 @@ def test_anchor_offsets_match_struct():
     assert LlamaContextParamsV3.samplers.offset == 144
     assert LlamaContextParamsV3.ctx_other.offset == 160
     assert ctypes.sizeof(LlamaContextParamsV3) == ctypes.sizeof(LlamaContextParamsV2)
+    # V4 offsets: moe_cache_cpu_share (a float, padded to 8) inserted after
+    # moe_cache_size, shifting everything from abort_callback on +8 vs V3.
+    assert LlamaContextParamsV4.moe_cache_size.offset == 112
+    assert LlamaContextParamsV4.moe_cache_cpu_share.offset == 120
+    assert LlamaContextParamsV4.moe_cache_cpu_share.size == 4
+    assert LlamaContextParamsV4.abort_callback.offset == 128
+    assert LlamaContextParamsV4.abort_callback_data.offset == 136
+    assert LlamaContextParamsV4.embeddings.offset == 144
+    assert LlamaContextParamsV4.offload_kqv.offset == 145
+    assert LlamaContextParamsV4.kv_unified.offset == 149
+    assert LlamaContextParamsV4.samplers.offset == 152
+    assert LlamaContextParamsV4.n_samplers.offset == 160
+    assert LlamaContextParamsV4.ctx_other.offset == 168
+    assert ctypes.sizeof(LlamaContextParamsV4) == ctypes.sizeof(LlamaContextParamsV2)
     assert LlamaModelParamsV1.split_mode.offset == 20
     assert LlamaModelParamsV1.use_mmap.offset == 65
     assert LlamaModelParamsV1.main_gpu.offset == 24
@@ -954,6 +970,7 @@ def test_context_params_class_and_layout_helpers():
     assert _abi.context_params_class(CONTEXT_PARAMS_V1) is LlamaContextParamsV1
     assert _abi.context_params_class(CONTEXT_PARAMS_V2) is LlamaContextParamsV2
     assert _abi.context_params_class(CONTEXT_PARAMS_V3) is LlamaContextParamsV3
+    assert _abi.context_params_class(CONTEXT_PARAMS_V4) is LlamaContextParamsV4
     assert _abi.context_params_layout(
         _FakeLib(good_model(), good_ctx_v2())) == CONTEXT_PARAMS_V2
 
@@ -1002,6 +1019,12 @@ def good_ctx_v2_real() -> LlamaContextParamsV2:
 
 def good_ctx_v3() -> LlamaContextParamsV3:
     return _real_ctx_defaults(LlamaContextParamsV3)
+
+
+def good_ctx_v4() -> LlamaContextParamsV4:
+    """llama_context_default_params() as upstream b12191 defines it:
+    moe_cache_cpu_share 0.0, every other default as V3."""
+    return _real_ctx_defaults(LlamaContextParamsV4)
 
 
 def _raw(cp) -> bytes:
@@ -1738,3 +1761,71 @@ def test_abi_report_carries_the_probe_notes_a_re_derivation_would_drop():
     assert v.status == "ok"
     assert any("symbol probe alone" in d for d in v.diagnostics), v.diagnostics
     assert _abi._last_verdict is v
+
+
+# --------------------------------------------------------------------------- #
+#  llama_context_params V4 (moe_cache_cpu_share inserted after moe_cache_size
+#  at upstream b12191). The flag block sits at 144 on V4.
+# --------------------------------------------------------------------------- #
+
+def test_detects_ctx_v4_layout():
+    lib = _FakeLib(good_model_v3(), good_ctx_v4())
+    layout, notes, assumed = _abi.detect_context_params_layout(lib)
+    assert (layout, assumed) == (CONTEXT_PARAMS_V4, False), notes
+    v = verify_abi(lib)
+    assert v.status == "ok", v.failures
+    assert v.context_layout == CONTEXT_PARAMS_V4
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v2_real, CONTEXT_PARAMS_V2),
+    (good_ctx_v2, CONTEXT_PARAMS_V2),
+    (good_ctx_v3, CONTEXT_PARAMS_V3),
+    (good_ctx_v4, CONTEXT_PARAMS_V4)])
+def test_ctx_v2_v3_and_v4_default_bytes_fingerprint_apart(builder, want):
+    assert _abi._fingerprint_moe_layout(_raw(builder())) == want
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v3(), builder()))
+    assert (layout, assumed) == (want, False), notes
+
+
+@pytest.mark.parametrize("flag", _TRUE_FLAGS)
+def test_ctx_v4_detection_survives_one_drifted_flag(flag):
+    cp = good_ctx_v4()
+    setattr(cp, flag, False)
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v3(), cp))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V4, False), notes
+
+
+def test_ctx_v4_bytes_bound_as_v3_are_refused():
+    """A V4 runtime read through the V3 class: V3's samplers pointer reads the
+    V4 flag block, so evaluate() must refuse."""
+    as_v3 = _recast(good_ctx_v4(), LlamaContextParamsV3)
+    v = evaluate(good_model_v3(), as_v3)
+    assert v.status == "mismatch"
+    assert any(f.startswith("context_params.samplers") for f in v.failures), \
+        v.failures
+
+
+def test_ctx_v3_bytes_bound_as_v4_are_refused():
+    """The reverse misbind: V4's abort_callback_data reads the V3 flag block."""
+    as_v4 = _recast(good_ctx_v3(), LlamaContextParamsV4)
+    v = evaluate(good_model_v3(), as_v4)
+    assert v.status == "mismatch"
+    assert any(f.startswith("context_params.abort_callback_data")
+               for f in v.failures), v.failures
+
+
+def test_a_ctx_v4_flag_written_lands_on_the_v4_offset():
+    """Setting the flags by name on the V4 class writes the bytes a b12191
+    build reads, not the V3 positions (which are its abort_callback_data)."""
+    cp = LlamaContextParamsV4()
+    cp.offload_kqv = True
+    cp.moe_cache_size = 1 << 30
+    cp.moe_cache_cpu_share = 0.5
+    raw = _raw(cp)
+    assert raw[145] == 1 and raw[137] == 0
+    assert struct.unpack_from("<Q", raw, 112)[0] == 1 << 30
+    assert struct.unpack_from("<f", raw, 120)[0] == 0.5
+    assert struct.unpack_from("<Q", raw, 128)[0] == 0

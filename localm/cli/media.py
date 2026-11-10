@@ -194,6 +194,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode
+    from ..media.comfy_client import localm_v1_base
 
     def say(text: str) -> None:
         console.print(f"[dim]{escape(str(text))}[/dim]")
@@ -212,7 +213,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
         sys.exit(1)
     say(message)
     is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    localm_url = os.environ.get("LOCALM_URL") or None
+    localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
     try:
         ok, message = media_backend.generate(
             s, prompt, out_path,
@@ -358,6 +359,8 @@ def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, durati
 
     from rich.markup import escape
 
+    from ..media.comfy_client import localm_v1_base
+
     suffix = getattr(music_backend._impl(s), "OUTPUT_SUFFIX", ".flac")
     out_path = Path(out) if out else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}{suffix}")
     if out_path.suffix.lower() != suffix:
@@ -376,7 +379,7 @@ def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, durati
         console.print(f"[red]{escape(str(message))}[/red]")
         sys.exit(1)
     say(message)
-    localm_url = os.environ.get("LOCALM_URL") or None
+    localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
     try:
         ok, message = music_backend.generate(
             s, tags, out_path, self_url=localm_url, swap=bool(localm_url),

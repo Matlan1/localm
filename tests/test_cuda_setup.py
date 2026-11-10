@@ -724,6 +724,35 @@ def test_provision_backend_cuda_fetches_build_and_cudart(monkeypatch, tmp_path):
     assert fetched == ["https://b", "https://c"]
 
 
+def test_provision_backend_cuda_writes_the_nvidia_notice_beside_cudart(monkeypatch, tmp_path):
+    """Upstream's cudart-llama-bin-win-cuda-* bundles carry the three NVIDIA
+    DLLs and no license file, so the notice is written beside them."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
+    build = {"name": "llama-cuda-12.4.zip", "browser_download_url": "https://b", "size": 1}
+    cudart = {"name": "cudart-12.4.zip", "browser_download_url": "https://c", "size": 1}
+    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag, line=sl._CUDA_LINE: (build, cudart))
+    monkeypatch.setattr(sl, "_fetch_and_place", lambda url, target, sha256=None: 3)
+    sl._provision_backend("cuda", tmp_path, None, with_cudart=True)
+    assert ((tmp_path / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
+
+
+def test_provision_backend_cuda_without_cudart_writes_no_nvidia_notice(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
+    build = {"name": "llama-cuda-12.4.zip", "browser_download_url": "https://b", "size": 1}
+    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag, line=sl._CUDA_LINE: (build, None))
+    monkeypatch.setattr(sl, "_fetch_and_place", lambda url, target, sha256=None: 3)
+    sl._provision_backend("cuda", tmp_path, None, with_cudart=True)
+    assert not (tmp_path / "LICENSE.nvidia-cuda").exists()
+
+
+def test_write_nvidia_cuda_notice_reports_a_failed_write(tmp_path, capsys):
+    assert sl.write_nvidia_cuda_notice(tmp_path / "missing" / "dir") is False
+    assert "could not write LICENSE.nvidia-cuda" in capsys.readouterr().out
+
+
 def test_provision_backend_cuda_passes_selected_line(monkeypatch, tmp_path):
     """The GPU-architecture-selected line must reach _resolve_cuda_pair, not
     just the module default - proves the plumbing from cuda_line through to

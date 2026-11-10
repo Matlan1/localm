@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
-from localm.plugins.builtin.jobs.store import Job, JobStore
+from localm.plugins.builtin.jobs.store import TASK_KIND_SCOPES, Job, JobStore
 
 # Upper bound on how long the runner blocks its worker thread waiting for the server
 # loop to complete a guarded shared-engine unload. Must stay above unload_one_model's
@@ -65,6 +65,10 @@ def run_job(job: Job, *, engine=None) -> dict:
     started = time.time()
     owned_engine = None
     try:
+        refusal = _creator_refusal(job)
+        if refusal:
+            logger.warning("jobs: job %s was not run: %s", job.id, refusal)
+            raise PermissionError(refusal)
         eng = engine
         if job.task_kind in ("chat", "memory"):
             served = _served_engine(job, engine)
@@ -495,8 +499,13 @@ def _rag_embed_fn():
         emb = get_embedder()
         return emb.embed if emb is not None else None
     except Exception as e:
-        logger.debug("jobs: rag embedder resolution failed (%s); "
-                     "re-syncing lexical-only", e)
+        from localm.inference.load_lease import LoadBusyError
+        if isinstance(e, LoadBusyError):
+            logger.warning("jobs: the embedding model is not loaded yet (%s); "
+                           "re-syncing lexical-only", e)
+        else:
+            logger.debug("jobs: rag embedder resolution failed (%s); "
+                         "re-syncing lexical-only", e)
         return None
 
 
@@ -512,9 +521,12 @@ def _run_rag(job: Job) -> str:
     can itself evict a resident chat model (embedder._maybe_swap_for_embedder ->
     vram.evict_chat_for_embedder), so this must run off the event loop.
 
-    Confinement: the run always passes ``indexing_policy()``, so it never indexes a
-    path an interactive add would refuse, including a root that has since fallen
-    outside the owner's allowed folders. Deletion is non-destructive by design (see
+    Confinement: the run passes the creating key's indexing policy
+    (``indexing_policy(key_roots=...)``: the global policy for the owner and for a
+    key without ``rag_roots``), so it never indexes a path an interactive add by
+    that key would refuse, including a root that has since fallen outside the
+    allowed folders. A job whose creating key has ``rag_roots`` that do not cover
+    the collection raises PermissionError and is not run. Deletion is non-destructive by design (see
     ``Collection.resync``).
 
     Privacy: a collection is explicit user data and is written in every session
@@ -528,6 +540,17 @@ def _run_rag(job: Job) -> str:
     coll = Collection(name)
     if not coll.exists():
         raise RuntimeError(f"no such collection: {name}")
+    key_roots = _creator_rag_roots(job)
+    if key_roots is None:
+        raise PermissionError(
+            "the key that created this job could not be re-confirmed at run "
+            "time, so the job was not run")
+    if key_roots and not Collection.confined_to(name, key_roots):
+        logger.warning("jobs: job %s was not run: its key's RAG folders do not "
+                       "cover collection %s", job.id, name)
+        raise PermissionError(
+            f"the key that created this job is confined to RAG folders that do "
+            f"not cover every document in '{name}', so the job was not run")
     if not coll.roots() and not coll.documents():
         return (f"'{name}' has nothing to re-sync: no indexed folders and no "
                 f"documents. Index a folder first "
@@ -545,7 +568,8 @@ def _run_rag(job: Job) -> str:
                           or DEFAULT_EMBEDDING_MODEL).strip()
     lines: list = []
     try:
-        result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
+        result = coll.resync(embed_fn=embed_fn,
+                             policy=indexing_policy(key_roots=key_roots),
                              model_name=model_name,
                              on_progress=lambda t, **_: lines.append(t))
     except CollectionLockedError as e:
@@ -655,6 +679,55 @@ def _shell_still_authorized(job: Job) -> bool:
         _remember_owner_key_job(job)
         return True
     return key_hash_live(job.owner)
+
+
+def _created_by_owner(job: Job) -> bool:
+    """True for a job with no owner (open mode) or one created by the owner key,
+    stamped or still matching the current owner key (which stamps it)."""
+    if (getattr(job, "owner", None) is None
+            or getattr(job, "owner_is_owner_key", False)):
+        return True
+    from localm.auth import _hash_key, _legacy_owner_identity, get_api_key
+    owner_key = get_api_key()
+    if owner_key and job.owner in (_hash_key(owner_key),
+                                   _legacy_owner_identity(owner_key)):
+        _remember_owner_key_job(job)
+        return True
+    return False
+
+
+def _creator_rag_roots(job: Job) -> Optional[list]:
+    """The creating key's RAG folder allowlist: ``[]`` for an owner or open-mode
+    job and for a key with none, the key's ``rag_roots`` otherwise, or None when
+    the creating key cannot be re-confirmed."""
+    if _created_by_owner(job):
+        return []
+    from localm.auth import rag_roots_for_key_hash
+    return rag_roots_for_key_hash(job.owner)
+
+
+def _creator_refusal(job: Job) -> Optional[str]:
+    """None when *job* may run, else why it must not.
+
+    A job with no owner (open mode) or created by the owner key runs. Any other
+    job needs its creating key to still exist and to hold the scope for the job's
+    task kind; a revoked or expired key, an unreadable keystore, or a key whose
+    scopes were narrowed all refuse the run."""
+    if _created_by_owner(job):
+        return None
+    from localm import scopes as S
+    from localm.auth import scopes_for_key_hash
+    held = scopes_for_key_hash(job.owner)
+    if held is None:
+        return ("the key that created this job could not be re-confirmed at "
+                "run time (it may have been revoked or expired, or - if it was "
+                "the owner key - simply rolled since; run or edit the job as the "
+                "owner to repair it), so the job was not run")
+    required = TASK_KIND_SCOPES.get(job.task_kind)
+    if required is not None and not S.grants(held, required):
+        return (f"the key that created this job no longer holds the "
+                f"{required!r} scope, so the job was not run")
+    return None
 
 
 def _cwd_trusted(job: Job) -> bool:

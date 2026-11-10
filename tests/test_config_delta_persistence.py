@@ -70,7 +70,8 @@ def test_old_full_dump_migrates_on_next_save(config_file, monkeypatch):
     cfg.update_config(lambda c: c.update({"temperature": 0.5}))
 
     stored = _stored(config_file)
-    assert set(stored) == {"max_tokens", "port", "temperature"}
+    assert set(stored) == {"max_tokens", "port", "temperature", "config_version"}
+    assert stored["config_version"] == cfg.CURRENT_CONFIG_VERSION
     assert stored["max_tokens"] == 1024       # kept: provenance was destroyed
     assert stored["port"] == 9999
     assert stored["temperature"] == 0.5

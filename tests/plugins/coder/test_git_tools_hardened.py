@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -90,8 +91,38 @@ def test_argv_and_env_hardening():
     assert "safe.bareRepository=explicit" in argv
     assert argv[argv.index("diff"):] == ["diff", "--no-ext-diff", "--no-textconv", "--stat"]
     assert git_tools.git_argv("status")[-1] == "status"
-    assert git_tools.git_env({"PATH": "x", "GIT_EXTERNAL_DIFF": "y"}) == {
-        "PATH": "x", "GIT_CONFIG_NOSYSTEM": "1"}
+    assert git_tools.git_env({"PATH": "x", "GIT_EXTERNAL_DIFF": "y"}) == {"PATH": "x"}
+
+
+def test_system_line_ending_config_still_applies(tmp_path):
+    """A CRLF file committed under a system-level ``core.autocrlf=true`` (the
+    Git for Windows default) reads as clean through the hardened git."""
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    system_cfg = tmp_path / "gitconfig-system"
+    system_cfg.write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+    env = dict(os.environ, GIT_CONFIG_SYSTEM=str(system_cfg),
+               GIT_CONFIG_GLOBAL=os.devnull)
+    env.pop("GIT_CONFIG_NOSYSTEM", None)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def plain(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=repo, env=env, check=True, capture_output=True, text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    plain("init")
+    (repo / "a.txt").write_bytes(b"one\r\ntwo\r\n")
+    plain("add", "-A")
+    plain("commit", "-m", "base")
+    assert plain("status", "--porcelain").stdout == ""
+    hardened = subprocess.run(
+        git_tools.git_argv("status", "--porcelain"), cwd=repo,
+        env=git_tools.git_env(env), check=True, capture_output=True, text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert hardened.stdout == ""
 
 
 def test_bare_layout_at_project_root_runs_nothing(tmp_path):

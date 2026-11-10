@@ -229,7 +229,7 @@ def test_interactive_confirm_at_creation_reaches_the_same_channel(
     """A session created with auto-approve AND "still confirm shell commands"
     must ASK, not refuse.
 
-    That combination sets always_confirm={run_shell, run_shell_background} while
+    That combination puts EXECUTES_PROJECT_CODE in always_confirm while
     auto_approve is on, and is reachable WITHOUT ever calling the settings route.
     """
     app, proj, owner = _owner(tmp_path, monkeypatch)
@@ -237,7 +237,8 @@ def test_interactive_confirm_at_creation_reaches_the_same_channel(
         sid = _start(client, owner, proj, auto_approve=True,
                      interactive_confirm=True)
         sess = _stub(app, sid)
-        assert "run_shell" in sess.agent.always_confirm
+        from localm.plugins.coder.agent.constants import EXECUTES_PROJECT_CODE
+        assert EXECUTES_PROJECT_CODE in sess.agent.always_confirm
 
         asked = threading.Event()
 

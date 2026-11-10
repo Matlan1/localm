@@ -110,6 +110,9 @@ def register(app: FastAPI, ctx) -> None:
         api_key = body.api_key.strip()
         if not instance_id:
             raise HTTPException(400, "instance_id is required")
+        if not peer_routing.api_key_is_sendable(api_key):
+            raise HTTPException(
+                400, "api_key may hold only printable ASCII characters without spaces")
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
 
         # Verification only. run_in_threadpool_bounded ABANDONS the awaiting
@@ -131,7 +134,7 @@ def register(app: FastAPI, ctx) -> None:
             except peer_routing.PeerCredentialError as e:
                 return None, str(e), None
             except requests.RequestException as e:
-                return None, f"the peer could not be reached ({e})", None
+                return None, f"the peer could not be reached ({type(e).__name__})", None
             try:
                 peer_routing.ensure_peer_keeps_mode(peer, api_key, mode)
             except peer_routing.PeerUnreachable as e:

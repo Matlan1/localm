@@ -296,7 +296,7 @@ def frame_count(seconds: float, fps: int) -> int:
     return min(4 * k + 1, MAX_FRAMES)
 
 
-def _check_size(width: int, height: int) -> Optional[str]:
+def check_size(width: int, height: int) -> Optional[str]:
     if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE) \
             or width % 16 or height % 16:
         return (f"Video size {width}x{height} must be {MIN_SIDE}..{MAX_SIDE} pixels per side "
@@ -354,7 +354,7 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
-        bad = _check_size(int(width), int(height))
+        bad = check_size(int(width), int(height))
         if bad:
             return bad
     if seconds is not None and fps is not None:

@@ -28,6 +28,7 @@ from localm.inference.http_server import create_app
 def _resp(ok=True, payload=None):
     r = MagicMock()
     r.ok = ok
+    r.status_code = 200 if ok else 500
     r.json.return_value = payload if payload is not None else {"status": "unloaded"}
     return r
 
@@ -36,8 +37,8 @@ def test_unload_sends_bearer_and_tls_verify(monkeypatch):
     monkeypatch.setenv("LOCALM_API_KEY", "secret-key")
     captured = {}
 
-    def fake_post(url, headers=None, timeout=None, verify=None):
-        captured.update(url=url, headers=headers or {}, verify=verify)
+    def fake_post(url, headers=None, timeout=None, verify=None, **kw):
+        captured.update(url=url, headers=headers or {}, verify=verify, **kw)
         return _resp(payload={"status": "unloaded", "vram_freed": True,
                               "vram_before_bytes": 1, "vram_after_bytes": 2})
 
@@ -49,6 +50,7 @@ def test_unload_sends_bearer_and_tls_verify(monkeypatch):
     assert captured["headers"].get("Authorization") == "Bearer secret-key"
     # TLS verification must use the install CA bundle, never be disabled.
     assert captured["verify"] == "/ca/bundle.pem"
+    assert captured["allow_redirects"] is False
     assert out and out["status"] == "unloaded"
 
 
@@ -56,7 +58,7 @@ def test_unload_no_key_omits_auth_header(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
-    def fake_post(url, headers=None, timeout=None, verify=None):
+    def fake_post(url, headers=None, timeout=None, verify=None, **kw):
         captured.update(headers=headers or {})
         return _resp()
 
@@ -87,7 +89,7 @@ def test_unload_uses_instance_token_when_no_key_configured(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
-    def fake_post(url, headers=None, timeout=None, verify=None):
+    def fake_post(url, headers=None, timeout=None, verify=None, **kw):
         captured.update(headers=headers or {})
         return _resp()
 
@@ -102,7 +104,7 @@ def test_unload_owner_key_still_wins_over_instance_token(monkeypatch):
     monkeypatch.setenv("LOCALM_API_KEY", "secret-key")
     captured = {}
 
-    def fake_post(url, headers=None, timeout=None, verify=None):
+    def fake_post(url, headers=None, timeout=None, verify=None, **kw):
         captured.update(headers=headers or {})
         return _resp()
 
@@ -180,3 +182,46 @@ class TestUnloadRealHttpOpenMode:
             assert out is None
         finally:
             _shutdown(server, th)
+
+
+def test_unload_does_not_follow_a_redirect(monkeypatch):
+    """A 307 from the unload URL is not followed: the owner key never reaches
+    the redirect target and the unload reports failure."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    monkeypatch.setenv("LOCALM_API_KEY", "secret-key")
+    seen = []
+
+    class Target(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    tport = target.server_address[1]
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{tport}/v1/models/unload")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    redir = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    for srv in (target, redir):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        out = comfy._localm_unload(f"http://127.0.0.1:{redir.server_address[1]}/v1")
+    finally:
+        redir.shutdown()
+        target.shutdown()
+    assert seen == []
+    assert out is None

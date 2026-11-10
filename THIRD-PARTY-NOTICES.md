@@ -58,13 +58,17 @@ committed to this repository; they are provisioned locally by `localm setup-llam
 `setup-llama` copies the upstream `LICENSE` into the runtime `lib/` alongside the
 binaries at provision time (as `LICENSE.llama-cpp`), falling back to a bundled
 MIT notice if the archive omits one, so any installer or release that ships these
-binaries also ships their license text:
+binaries also ships their license text. Any other license file in the archive
+keeps its own name (upstream's Windows archives carry `LICENSE-LLVM-OpenMP`, kept
+as `LICENSE.llvm-openmp`), and an archive placed into the same folder later (the
+CUDA runtime bundle) never replaces a license file already there:
 
 | Component | License |
 |---|---|
 | llama.cpp | MIT (c) 2023-2026 The ggml authors |
 | ggml | MIT (c) 2023-2026 The ggml authors |
 | AMD ROCm runtime libraries (GPU builds) | Permissive (MIT / BSD-style); see AMD's distribution |
+| LLVM OpenMP runtime (`libomp`, upstream Windows builds) | Apache-2.0 WITH LLVM-exception; kept beside it as `LICENSE.llvm-openmp` |
 | libgomp (GCC's OpenMP runtime, Linux; from Debian's `libgomp1` package) | GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1; `setup-llama` writes the notice beside it as `LICENSE.libgomp` |
 
 Two more native runtimes are downloaded from their upstream releases at the
@@ -83,8 +87,12 @@ source. They are downloaded only when the user picks a CUDA build
 NVIDIA's own PyPI packages (`nvidia-cuda-runtime`, `nvidia-cublas` and their
 `-cu12` variants, which declare `LicenseRef-NVIDIA-Proprietary`) on Linux, and
 from the `cudart` bundle of the upstream llama.cpp or stable-diffusion.cpp
-release on Windows. They are not part of this repository, and localm copies the
-library files without a license file; NVIDIA's CUDA license terms apply to them.
+release on Windows (and of llama.cpp on Linux ARM64). They are not part of this repository; NVIDIA's CUDA license
+terms apply to them. On Linux, localm keeps each wheel's own NVIDIA license file
+beside the libraries in the runtime folder, as `LICENSE.<package>` (for example
+`LICENSE.nvidia-cublas-cu12`). The `cudart` bundles carry no license file, so
+localm writes `LICENSE.nvidia-cuda` beside their libraries, naming NVIDIA's CUDA
+license (<https://docs.nvidia.com/cuda/eula/index.html>).
 
 ## Python dependencies (installed from PyPI, not redistributed here)
 

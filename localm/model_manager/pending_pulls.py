@@ -944,7 +944,8 @@ def check_upstream(rec: dict) -> dict:
         try:
             from .pull import _ssrf_resolve_final_url
             final = _ssrf_resolve_final_url(rec["url"])
-            head = netpolicy.pinned_request("HEAD", final, allow_redirects=False, timeout=10)
+            head = netpolicy.pinned_request("HEAD", final, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
             now_size = int(head.headers.get("content-length", 0)) or None
             now_etag = head.headers.get("etag")
             if ((part.get("size") and now_size and part["size"] != now_size)

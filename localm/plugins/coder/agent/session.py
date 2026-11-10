@@ -213,6 +213,8 @@ class _SessionMixin:
         self._rebuild_system_prompt()
         self._warn_injected_file_limits()
         self._init_tool_hooks(cwd)
+        hooks = getattr(self, "_tool_hooks", None)
+        self._project_trust_loaded = bool(hooks is not None and hooks.trusted)
 
     def _migrate_checkpoint(self, old_cwd: Path, new_cwd: Path) -> None:
         """Move this session's own checkpoint file from *old_cwd*'s project
@@ -300,7 +302,7 @@ class _SessionMixin:
 
         - Closes the audit log (``log`` and ``full`` modes).
         - Writes a Markdown transcript to ``.localcoder/sessions/`` in
-          ``full`` mode.
+          ``full`` mode, except for a restricted session.
 
         Returns the path of the Markdown file, or None.
         Called automatically by the CLI's ``finally`` block.
@@ -311,7 +313,7 @@ class _SessionMixin:
             self._audit.close()
             if self.parent is None:
                 unregister_coder_session_mode(self.mode)
-        if self.mode == SessionMode.FULL:
+        if self.mode == SessionMode.FULL and not getattr(self, "restricted", False):
             return self._write_session_markdown()
         return None
 

@@ -81,32 +81,30 @@ def _make_plugin_tool_fn(raw_fn, reg_name: str):
 
 
 def register_plugin_tools() -> tuple[list[str], list[str]]:
-    """Discover installed plugins and register their exported tools.
+    """Register the exported tools of every installed AND enabled plugin, discovered
+    through the plugin engine.
 
     Returns ``(registered_names, warnings)``. Never raises - a broken plugin
     must not break the agent.
     """
-    from localm.plugins.loader import (
-        PluginError, discover_plugins, import_plugin_module,
-    )
+    from localm.plugins.engine import PluginManager, import_tool_module
 
     registered: list[str] = []
     warnings: list[str] = []
 
     try:
-        manifests = discover_plugins()
+        manager = PluginManager(app=None)
+        specs = manager.discover()
+        enabled = manager._enabled_set()
     except Exception as e:                       # discovery must never crash the agent
         return [], [f"Plugin discovery failed: {e}"]
 
-    for manifest in manifests:
-        if not manifest.tool_exports:
+    for manifest in (specs[n] for n in sorted(specs)):
+        if manifest.name not in enabled or not manifest.tool_exports:
             continue
         try:
-            module = import_plugin_module(manifest)
-        except PluginError as e:
-            warnings.append(str(e))
-            continue
-        except Exception as e:                   # defensive - plugin import bugs stay contained
+            module = import_tool_module(manifest)
+        except Exception as e:                   # plugin import bugs stay contained
             warnings.append(f"Plugin {manifest.name!r} failed to import: {e}")
             continue
 

@@ -107,3 +107,12 @@ def find(name: str) -> Optional[str]:
         if _runnable(candidate):
             return candidate
     return find_on_path(name)
+
+
+def require(name: str) -> str:
+    """Like :func:`find`, but raises FileNotFoundError when *name* is in
+    neither place, the error a failed launch of a missing program raises."""
+    found = find(name)
+    if found is None:
+        raise FileNotFoundError(2, "No such file or directory", name)
+    return found

@@ -97,7 +97,7 @@ def search_failure_text(exc: BaseException,
            or getattr(provider, "base_url", "") or "")
     reason = describe_failure(exc, url)
     if getattr(provider, "name", "") == "searxng":
-        return f"The search backend set in Settings > Network failed: {reason}."
+        return f"The search backend set in Settings > Server & network failed: {reason}."
     host = urllib.parse.urlparse(url).hostname or ""
     if not (host and reason.startswith(host)):
         reason = reason[:1].upper() + reason[1:]

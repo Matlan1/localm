@@ -218,6 +218,19 @@ class TestLogDigestRecognizesTheNewMarker:
                       f"[1] user: {SECRET_TURN}"],
         })
 
+    def test_is_content_record_raw_completion_prompt_as_logged(self, monkeypatch):
+        import localm.debuglog as dl
+        from localm.inference.http_server import _log_assembled_prompt
+        logged: list = []
+        monkeypatch.setattr(dl, "debug_content_enabled", lambda: True)
+        monkeypatch.setattr(dl.logger, "debug", lambda msg, *a, **k: logged.append(msg % a))
+        _log_assembled_prompt([{"role": "user", "content": SECRET_TURN}], SECRET_TURN)
+        header, *body = logged[0].split("\n")
+        assert ld.is_content_record({
+            "level": "DEBUG", "logger": "localm",
+            "lines": ["2026-11-10 10:00:00,000 DEBUG   localm: " + header, *body],
+        })
+
     def test_is_content_record_chat_reply(self):
         assert ld.is_content_record({
             "level": "DEBUG", "logger": "localm",

@@ -1980,6 +1980,11 @@ export async function openHooksModal() {
         if (m.trusted_calls) card.appendChild(el("div", "sub", t("coder.hooks.mcpTrustedCalls")));
         body.appendChild(card);
       }
+      for (const line of data.project || []) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row", line));
+        body.appendChild(card);
+      }
       const mcp = servers.length > 0;
       body.appendChild(el("p", "sub", data.trusted
         ? t(mcp ? "coder.hooks.trustedMcp" : "coder.hooks.trusted")

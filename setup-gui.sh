@@ -93,6 +93,14 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
 
+# A headless box (no DISPLAY) has no window to show: say so and point at the
+# console installer, before any question is asked or uv is installed.
+if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
+    echo "      Use the console installer instead:  ./setup.sh"
+    exit 1
+fi
+
 echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
 echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
@@ -147,14 +155,6 @@ fi
 # ---- open the installer window ----------------------------------------------
 # --no-project so uv never resolves this repo as its own project, and an explicit
 # --python so the interpreter is the managed 3.12 the install targets.
-#
-# A headless box (no DISPLAY) has no window to show: say so and point at the
-# console installer rather than failing with a tkinter traceback.
-if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
-    echo "      Use the console installer instead:  ./setup.sh"
-    exit 1
-fi
 
 export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."
