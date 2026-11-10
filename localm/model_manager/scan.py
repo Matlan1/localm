@@ -166,7 +166,12 @@ def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
 
 
 def get_comfy_api_url() -> str:
-    from localm.media.comfy_client import default_api_url
+    """The ComfyUI base URL a model scan asks for ``/object_info``: a
+    per-plugin ``comfy.api_url`` (image, music, video, first set wins) when the
+    managed instance is not active, else :func:`default_api_url`. A
+    link-local or metadata host is replaced by the loopback default
+    (:func:`sanitize_comfy_url`)."""
+    from localm.media.comfy_client import default_api_url, sanitize_comfy_url
     from localm.media.managed_comfy import managed_comfy_active
     cfg = load_config()
     # Same "own means own" rule as get_comfy_workdir() above: a per-plugin/
@@ -177,7 +182,7 @@ def get_comfy_api_url() -> str:
         for p in ("image", "music", "video"):
             api_url = cfg.get("plugins", {}).get(p, {}).get("comfy", {}).get("api_url")
             if api_url:
-                return api_url
+                return sanitize_comfy_url(str(api_url).rstrip("/"))
     return default_api_url()
 
 def _existing_registered_paths(reg: dict) -> set:

@@ -40,6 +40,9 @@ MAX_GPU_SPLIT_INDEX = 127
 # localm/inference/http_server.py, both scanned on relevant requests.
 MAX_CORS_ORIGINS = 500
 
+# Sanity ceiling for allowed_hosts, the same as for cors_origins.
+MAX_ALLOWED_HOSTS = 500
+
 
 class Widget:
     TEXT     = "text"       # free-form single line (urls, names)
@@ -258,9 +261,8 @@ CORE_FIELDS: list = [
                  step=1024, tier=Tier.CONFIG_WRITE),
     SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
                  "always unloads this instance's idle models when a new model needs "
-                 "their VRAM; ask asks first; never keeps them (slower; a manual "
-                 "switch still asks). Another instance's model is always "
-                 "asked about.",
+                 "their VRAM. ask and never keep them (slower), but a manual switch "
+                 "asks. Another instance's model is only unloaded after asking.",
                  group="Engine", applies=Applies.LIVE,
                  options=["always", "ask", "never"], tier=Tier.CONFIG_WRITE),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
@@ -367,7 +369,7 @@ CORE_FIELDS: list = [
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
                  "(same order/length). Blank sizes each card's share from its "
-                 "free VRAM at load time.",
+                 "free VRAM at load time, or equally when free VRAM cannot be read.",
                  group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
     # models" number input in the Live Tuning card (settings-perf.js
@@ -377,9 +379,9 @@ CORE_FIELDS: list = [
     # _validate_one - a Widget.NUMBER field whose default is None derives
     # want_int=False and would store a cap of 2 as 2.0.
     SettingField("max_resident_models", Widget.HIDDEN, "Max resident models",
-                 "How many models may stay loaded at once. Blank lets free-VRAM "
-                 "arithmetic decide (a model loads alongside the others only "
-                 "when it provably fits); 1 forces strict single-resident.",
+                 "Most models kept loaded at once. Blank lets free VRAM decide (a model "
+                 "loads alongside the others only when it provably fits). 1 keeps one "
+                 "model only when Unload other models to make room is always.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a "Pinned models" text input beside the one above
     # (same Live Tuning card, same setupResidencyControls), not the generic
@@ -582,6 +584,12 @@ CORE_FIELDS: list = [
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
+    SettingField("allowed_hosts", Widget.TEXT, "Allowed host names",
+                 "Extra names this server answers to, for a reverse proxy or your own "
+                 "DNS name. Blank = only this machine's own names and addresses; "
+                 'comma-separated list; "*.example.com" covers one level; or "*" for '
+                 "any name, which turns the DNS-rebinding check off.",
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # A rename needs a restart: the name is also written into the HTTPS
     # certificate's SANs, so it is not display-only.
     SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
@@ -591,8 +599,8 @@ CORE_FIELDS: list = [
                  group="Server", applies=Applies.RESTART, tier=Tier.CONFIG_WRITE),
     SettingField("metrics_enabled", Widget.TOGGLE, "Prometheus metrics",
                  "Serve request, token and GPU-memory counters at /metrics for "
-                 "Prometheus. Needs an admin API key; carries no prompts, "
-                 "replies or model names.",
+                 "Prometheus. Once any API key exists it needs an admin key; "
+                 "carries no prompts, replies or model names.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback so "
@@ -769,9 +777,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Until fetched, memory and RAG use lexical search; run 'localm "
-                 "setup-embeddings'. A known key (bge-small-en-v1.5), registered name or "
-                 "GGUF path. A loaded embedder stays until it is unloaded.",
+                 "Fetched on first use; with network access off, enable Allow model "
+                 "downloads and run 'localm setup-embeddings'. Until then memory and RAG "
+                 "search lexically. A known key, registered name or GGUF path.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -1741,6 +1749,8 @@ def _validate_one(key: str, val, field: SettingField, default):
                 f"mdns_name: {val!r} has no usable characters "
                 f"(need ASCII letters, digits, or hyphens)")
         return label
+    if key == "allowed_hosts":
+        return _coerce_allowed_hosts(val)
     if key == "cors_origins":
         # None | "*" | list of origins; a comma string becomes a list so the
         # server's CORS handling (which only honours "*"/list) actually applies.
@@ -1767,6 +1777,39 @@ def _validate_one(key: str, val, field: SettingField, default):
             _refuse_unsafe_path(key, s)
         return s or (None if nullable else "")
     raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+def _coerce_allowed_hosts(val):
+    """None (blank), "*", or a list of normalised host names (see
+    bindhost.normalize_host_name) from a list or a comma-separated string. An
+    entry that is not a host name raises ValueError naming it."""
+    from localm.bindhost import normalize_host_name
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple)):
+        if not all(isinstance(s, str) for s in val):
+            raise ValueError(f"allowed_hosts: expected a list of strings, got {val!r}")
+        entries = [s.strip() for s in val if s.strip()]
+    else:
+        s = str(val).strip()
+        if not s:
+            return None
+        if s == "*":
+            return "*"
+        entries = [p.strip() for p in s.split(",") if p.strip()]
+    if len(entries) > MAX_ALLOWED_HOSTS:
+        raise ValueError(
+            f"allowed_hosts: too many names ({len(entries)}), max {MAX_ALLOWED_HOSTS}")
+    out: list[str] = []
+    for entry in entries:
+        if entry == "*":
+            raise ValueError('allowed_hosts: "*" must be the whole value, not a list entry')
+        norm = normalize_host_name(entry)
+        if norm is None:
+            raise ValueError(f"allowed_hosts: {entry!r} is not a host name or address")
+        if norm not in out:
+            out.append(norm)
+    return out or None
 
 
 # Text-widget settings whose value is a host folder path (or a keyword).
@@ -1972,7 +2015,8 @@ MEDIA_PLUGIN_FIELDS: list = [
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
-               "stable-diffusion.cpp build to use. auto picks the best one for this machine.",
+               "stable-diffusion.cpp build to use. auto uses the best installed build and "
+               "installs the recommended one only when none is installed.",
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
@@ -1996,7 +2040,7 @@ MEDIA_PLUGIN_FIELDS: list = [
                "Optional VAE (registered name or file path).", plugins=_NATIVE,
                admin_only=True),
     MediaField("native_clip_l", ("native", "clip_l"), "", Widget.TEXT,
-               "Native CLIP-L text encoder", "Optional (SD1, SD2, SDXL, FLUX, SD3).", plugins=_IMAGE_ONLY,
+               "Native CLIP-L text encoder", "Optional (SD1, SDXL, FLUX, SD3; for SD2, its OpenCLIP-H encoder).", plugins=_IMAGE_ONLY,
                admin_only=True),
     MediaField("native_clip_g", ("native", "clip_g"), "", Widget.TEXT,
                "Native CLIP-G text encoder", "Optional (SDXL, SD3).", plugins=_IMAGE_ONLY,

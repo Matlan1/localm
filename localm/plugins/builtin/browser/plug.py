@@ -116,8 +116,9 @@ def _enabled() -> bool:
 def _require_enabled() -> None:
     if not _enabled():
         raise HTTPException(
-            409, "Browser automation is switched off. Turn it on in "
-                 "Settings > Network before opening a browser.")
+            409, "Browser automation is switched off. Turn on \"Let the model "
+                 "drive a web browser\" in Settings > Server & network "
+                 "before opening a browser.")
 
 
 def _inline_live_view() -> bool:

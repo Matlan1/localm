@@ -78,6 +78,36 @@ class TestGetComfyWorkdirManagedAwareness:
                          "plugins": {"music": {"comfy": {"api_url": "http://127.0.0.1:8199"}}}})
         assert get_comfy_api_url() == "http://127.0.0.1:8199"
 
+    @pytest.mark.parametrize("url", ["http://169.254.169.254", "http://[fd00:ec2::254]:8188",
+                                     "http://[::ffff:169.254.169.254]:8188"])
+    def test_api_url_plugin_override_to_a_metadata_host_falls_back_to_loopback(
+            self, comfy_home, url):
+        import localm.config as cfg
+        from localm.media.comfy_client import _COMFY_LOOPBACK_DEFAULT
+        cfg.save_config({**cfg.load_config(),
+                         "plugins": {"image": {"comfy": {"api_url": url}}}})
+        assert get_comfy_api_url() == _COMFY_LOOPBACK_DEFAULT
+
+    def test_scan_never_asks_a_metadata_host_for_object_info(self, comfy_home, tmp_path):
+        import localm.config as cfg
+        from localm.media.comfy_client import _COMFY_LOOPBACK_DEFAULT
+        from localm.model_manager import scan
+        cfg.save_config({**cfg.load_config(),
+                         "plugins": {"video": {"comfy": {"api_url": "http://169.254.169.254"}}}})
+        models = tmp_path / "comfy" / "models"
+        models.mkdir(parents=True)
+        asked = []
+        with patch.object(scan, "comfy_object_info",
+                          side_effect=lambda url, *a, **k: asked.append(url)):
+            scan._discover_comfy_files(models)
+        assert asked == [_COMFY_LOOPBACK_DEFAULT]
+
+    def test_api_url_plugin_override_to_a_lan_host_is_kept(self, comfy_home):
+        import localm.config as cfg
+        cfg.save_config({**cfg.load_config(),
+                         "plugins": {"image": {"comfy": {"api_url": "http://192.168.1.5:8188/"}}}})
+        assert get_comfy_api_url() == "http://192.168.1.5:8188"
+
 
 class TestManagedScanFindsRealModels:
     """NEW-MODEL-SCAN-BLIND-TO-MANAGED-MODELS-DIR: get_comfy_workdir() correctly

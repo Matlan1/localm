@@ -306,3 +306,21 @@ def test_a_habitual_yes_at_the_menu_entry_question_takes_the_default(tmp_path, a
     result, apps = _run_menu_entry(tmp_path, answer=answer)
     assert "  (y taken as [1])" in result.stdout.splitlines()
     assert _exec_line(apps).endswith("/localm-launcher.sh")
+
+
+# ------------------------ PATH after the uv install ------------------------ #
+
+def _uv_path_block() -> str:
+    return _block('  if [ -n "${UV_INSTALL_DIR:-}" ]; then\n', "\n  fi\n")
+
+
+def test_portable_uv_install_leaves_local_bin_off_path(tmp_path):
+    out = _run('HOME=/h\nPATH=/usr/bin:/bin\nUV_INSTALL_DIR=/clone/.uv\n' + _uv_path_block()
+               + '\necho "PATH=$PATH"\n', tmp_path).stdout
+    assert out.splitlines()[-1] == "PATH=/clone/.uv:/usr/bin:/bin"
+
+
+def test_shared_uv_install_adds_the_installer_folders_to_path(tmp_path):
+    out = _run('HOME=/h\nPATH=/usr/bin:/bin\nunset UV_INSTALL_DIR\n' + _uv_path_block()
+               + '\necho "PATH=$PATH"\n', tmp_path).stdout
+    assert out.splitlines()[-1] == "PATH=/h/.local/bin:/h/.cargo/bin:/usr/bin:/bin"

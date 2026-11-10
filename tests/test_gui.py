@@ -4168,6 +4168,7 @@ class TestDiscoverEndpoints:
             r = client.get("/api/discover/search?source=civitai")
         assert r.status_code == 403
         assert "Network access is off" in r.json()["detail"]
+        assert "Settings > Server & network" in r.json()["detail"]
 
     def test_civitai_no_valid_type_is_422(self, gui_app, monkeypatch):
         """civitai_search itself refuses an empty resolved type list (ModelSourceError,

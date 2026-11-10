@@ -280,6 +280,29 @@ def _needs_owner_key_restamp(job: Job, request: Request) -> bool:
     return principal_id(request) == job.owner
 
 
+def _check_rag_job_confinement(task_kind, collection, request: Request) -> None:
+    """403 when *request*'s key has its own ``rag_roots`` and the existing
+    collection a ``rag`` job names holds documents from outside them. A no-op
+    for another task kind, no collection, a caller without ``rag_roots``, an
+    invalid name (refused by ``Job``) and a collection that does not exist."""
+    name = (collection or "").strip()
+    if task_kind != "rag" or not name:
+        return
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
+    if not key_roots:
+        return
+    from localm.rag import Collection
+    try:
+        coll = Collection(name, load=False)
+    except ValueError:
+        return
+    if coll.exists() and not Collection.confined_to(name, key_roots):
+        raise HTTPException(
+            403, "This key's RAG access is confined to specific folders, and "
+            "this collection includes documents from outside them.")
+
+
 def _store() -> JobStore:
     return JobStore()
 
@@ -360,6 +383,7 @@ async def create_job(req: JobCreate, request: Request):
             "'jobs'.")
     _check_model_name(req.model)
     _check_cwd(req.cwd)
+    _check_rag_job_confinement(req.task_kind, req.collection, request)
     # Shape checked above; AUTHORITY checked here. A caller not allowed to choose a
     # directory gets the project root instead, and sees it in the response.
     req_cwd = _effective_cwd(req.cwd, request)
@@ -418,6 +442,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
     # PUT is the second write path into `model` (and `cwd`) and needs the same
     # gates as POST, or the create-time checks are simply routed around with an
     # update.
+    if "task_kind" in changes or "collection" in changes:
+        _check_rag_job_confinement(changes.get("task_kind", job.task_kind),
+                                   changes.get("collection", job.collection),
+                                   request)
     if "model" in changes:
         _check_model_name(changes["model"])
     if "cwd" in changes:

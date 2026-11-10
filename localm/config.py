@@ -14,6 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import mgmt_events
+
 
 _warned_unconfigured_home = False
 _warned_unreadable_home_cfg: set = set()
@@ -805,6 +807,7 @@ DEFAULT_CONFIG: dict = {
     "tls_cert": "",
     "tls_key": "",
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    "allowed_hosts": None,    # None = own names only; list of host names; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
     # False (default) = open in local/dev mode on loopback.
@@ -1346,8 +1349,10 @@ def _perm_warn(path: Path, why: str) -> None:
 
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
-    Windows icacls - which grants sole full control regardless of *mode*, since
-    ACLs do not encode POSIX bits). Returns True when the tightening is believed
+    Windows icacls - which grants the user full control regardless of *mode*,
+    since ACLs do not encode POSIX bits; inherited entries are dropped, and a
+    file created without inherited entries keeps its default SYSTEM and
+    Administrators ACEs). Returns True when the tightening is believed
     to have happened, False when it did not. No-op on failure - the data dir is
     already user-scoped, so this per-file tightening is defence in depth.
 
@@ -1378,8 +1383,8 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
                 _perm_warn(path, "no USERNAME/USER in the environment")
                 return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
-            # /grant:r replaces any existing grant for this user, so the result
-            # is an explicit, sole full-control ACE.
+            # /grant:r replaces any existing grant for this user, so the user
+            # holds an explicit full-control ACE (SYSTEM and Administrators may remain).
             from localm import sysprog
             icacls = sysprog.find("icacls")
             if not icacls:
@@ -1813,6 +1818,140 @@ def _drop_stray_credentials(stored: dict) -> None:
                   "Settings instead.", file=sys.stderr)
 
 
+CONFIG_VERSION_KEY = "config_version"
+
+# Stored keys that are legitimate although DEFAULT_CONFIG does not list them.
+_EXTRA_KNOWN_CONFIG_KEYS = frozenset({CONFIG_VERSION_KEY, "plugins_first_use_done"})
+
+_warned_unknown_stored_keys: set = set()
+_warned_newer_config_version: set = set()
+
+
+def _config_rename(old: tuple, new: tuple, value_map: Optional[Callable] = None) -> dict:
+    return {"kind": "rename", "old": old, "new": new, "value_map": value_map}
+
+
+def _config_remove(old: tuple) -> dict:
+    return {"kind": "remove", "old": old}
+
+
+def _map_remote_image_value(value):
+    mapped = coerce_remote_image_mode(value)
+    return value if mapped is None else mapped
+
+
+# Ordered migration steps; step N (1-based) takes a stored config from version
+# N-1 to N. Append only; never reorder or edit a released step. A step is a
+# rename (key path -> key path, optional value map) or a removal. A key path is
+# a tuple of keys, so a nested key is addressed as ("plugins", "x", "key").
+_CONFIG_STEPS: tuple = (
+    _config_rename(("gui_proxy_remote_images",), ("gui_proxy_remote_images",),
+                   _map_remote_image_value),
+)
+CURRENT_CONFIG_VERSION = len(_CONFIG_STEPS)
+
+
+def _stored_config_version(stored: dict) -> int:
+    """The ``config_version`` in *stored*; 0 when absent or not a plain
+    non-negative integer."""
+    raw = stored.get(CONFIG_VERSION_KEY, 0)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return 0
+    return raw
+
+
+def _config_path_parent(root: dict, path: tuple):
+    node = root
+    for part in path[:-1]:
+        node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return None
+    return node
+
+
+def _apply_config_step(stored: dict, step: dict) -> None:
+    old = step["old"]
+    src = _config_path_parent(stored, old)
+    if src is None or old[-1] not in src:
+        return
+    value = src.pop(old[-1])
+    if step["kind"] == "remove":
+        return
+    new = step["new"]
+    value_map = step["value_map"]
+    if value_map is not None:
+        value = value_map(value)
+    node = stored
+    for part in new[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = node[part] = {}
+        node = child
+    node.setdefault(new[-1], value)
+
+
+def _apply_config_migrations(stored: dict) -> None:
+    """Bring *stored* (the persisted delta) in place up to
+    ``CURRENT_CONFIG_VERSION`` by applying the steps above its
+    ``config_version``, then stamp the version. A stored version newer than this
+    build is left untouched and warned about once per process. An empty *stored*
+    is left empty."""
+    if not stored:
+        return
+    version = _stored_config_version(stored)
+    if version > CURRENT_CONFIG_VERSION:
+        if version not in _warned_newer_config_version:
+            _warned_newer_config_version.add(version)
+            _logger().warning(
+                "%s has config_version %d, newer than this build understands (%d); "
+                "it is read as is and not rewritten.",
+                CONFIG_FILE.name, version, CURRENT_CONFIG_VERSION)
+        return
+    for step in _CONFIG_STEPS[version:]:
+        _apply_config_step(stored, step)
+    stored[CONFIG_VERSION_KEY] = CURRENT_CONFIG_VERSION
+
+
+def _config_needs_migration(stored) -> bool:
+    """True when a migration step would change *stored*'s settings. A file that
+    only lacks the version stamp is not rewritten on load; the stamp is written
+    with the next save."""
+    if not (isinstance(stored, dict) and stored
+            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION):
+        return False
+    migrated = copy.deepcopy(stored)
+    _apply_config_migrations(migrated)
+    migrated.pop(CONFIG_VERSION_KEY, None)
+    original = {k: v for k, v in stored.items() if k != CONFIG_VERSION_KEY}
+    return migrated != original
+
+
+def _warn_unknown_stored_keys(stored: dict) -> None:
+    """One WARNING per process per stored top-level key that DEFAULT_CONFIG does
+    not define. Names the key, never the value; the key stays in the file."""
+    for key in sorted(k for k in stored if isinstance(k, str)):
+        if key in DEFAULT_CONFIG or key in _EXTRA_KNOWN_CONFIG_KEYS:
+            continue
+        if key in _warned_unknown_stored_keys:
+            continue
+        _warned_unknown_stored_keys.add(key)
+        _logger().warning(
+            "%s holds the key %.80r, which this build does not use; its value is "
+            "ignored and the key is kept in the file.", CONFIG_FILE.name, key)
+
+
+def _persist_migrated_config() -> None:
+    """Rewrite config.json in the migrated form under the store lock. A failure
+    is logged and leaves the file as it was; the in-memory config is already
+    migrated."""
+    try:
+        update_config(lambda _cfg: None)
+    except Exception as e:
+        _logger().warning("%s could not be rewritten after its settings were "
+                          "migrated (%s); it is migrated again on the next load.",
+                          CONFIG_FILE.name, e)
+
+
 def _merge_stored_config(cfg: dict, stored) -> None:
     """Overlay the persisted config delta *stored* onto *cfg* (the defaults),
     without any model-source credential key (see _drop_stray_credentials).
@@ -1825,6 +1964,8 @@ def _merge_stored_config(cfg: dict, stored) -> None:
     ``{}``. stderr, not the logger (see _detect_home)."""
     if isinstance(stored, dict):
         _drop_stray_credentials(stored)
+        _apply_config_migrations(stored)
+        _warn_unknown_stored_keys(stored)
         cfg.update(stored)
         return
     key = str(CONFIG_FILE)
@@ -1850,7 +1991,10 @@ def load_config_checked() -> tuple:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored, read_ok = _read_json_checked(CONFIG_FILE, {})
+    needs_migration = read_ok and _config_needs_migration(stored)
     _merge_stored_config(cfg, stored)
+    if needs_migration:
+        _persist_migrated_config()
     # gui_proxy_remote_images is off/ask/on but config.json may hold a boolean.
     # There is no migration step: this normalises on every read, so a stored
     # `true` reads as "on" for the route, the schema, the CLI and the bug report
@@ -1928,7 +2072,25 @@ def save_config(cfg: dict) -> None:
     exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
-        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
+        delta = _user_delta(cfg)
+        previous = _read_json(CONFIG_FILE, {})
+        _atomic_write_json(CONFIG_FILE, delta)
+    _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
+
+
+def _changed_config_keys(before: dict, after: dict) -> list:
+    """Names of the top-level keys whose value differs between *before* and *after*."""
+    return sorted(k for k in set(before) | set(after) if before.get(k, _MISSING) != after.get(k, _MISSING))
+
+
+_MISSING = object()
+
+
+def _record_config_saved(before: dict, after: dict) -> None:
+    """Record a config save in the management log (key NAMES only); nothing when no key changed."""
+    changed = _changed_config_keys(before, after)
+    if changed:
+        mgmt_events.record("config_saved", home=HOME_DIR, keys=changed)
 
 
 # update_config()/update_registry() are read-modify-write: read the file, let a
@@ -2438,12 +2600,14 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
                 f"defaults; refused. Fix or remove {CONFIG_FILE.name} (the "
                 f"{CONFIG_FILE.name}.bak next to it may hold a good copy).")
         _merge_stored_config(cfg, stored)
+        before = copy.deepcopy(cfg)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()
         _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
-        return cfg
+    _record_config_saved(before, cfg)
+    return cfg
 
 
 def load_registry() -> dict:
