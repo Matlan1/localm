@@ -506,8 +506,7 @@ CORE_FIELDS: list = [
                  "Add the chat style note",
                  "In this app's chat and in localm run, add a short note to the "
                  "system prompt asking the model to answer directly and to speak of "
-                 "itself as \"I\". Requests from other programs through the API "
-                 "never get it.",
+                 "itself as \"I\". API requests from other programs never get it.",
                  group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.
