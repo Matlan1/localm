@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import unittest
+import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import json
@@ -333,3 +334,81 @@ def test_the_tool_passes_its_cancel_check_to_comfyui(tmp_path):
                return_value=(True, "Image saved to x")) as gen:
         tool_generate_image(tmp_path, "p", "out.png", _cancel=stop)
     assert gen.call_args.kwargs.get("cancel_check") is stop
+
+
+def _gate_agent(tmp_path, **attrs):
+    from localm.plugins.coder.agent import Agent
+    from localm.audit import NullAuditLog
+
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    backend.last_usage = {}
+    with patch("localm.plugins.coder.agent.make_audit_log", return_value=NullAuditLog()), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+         patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
+        mock_pm.build.return_value.file_count.return_value = 0
+        agent = Agent(backend=backend, cwd=tmp_path)
+    for name, value in attrs.items():
+        setattr(agent, name, value)
+    return agent
+
+
+def _run_gated_image_call(agent, tmp_path):
+    """Run generate_image over an existing project file; returns (result,
+    whether the tool function ran). The file must survive every refusal."""
+    from localm.plugins.coder.parser import ToolCall
+    from localm.plugins.coder import tools as T
+
+    target = tmp_path / "logo.png"
+    target.write_bytes(b"the project's own logo")
+    ran = []
+
+    def spy(cwd, **kwargs):
+        ran.append(kwargs)
+        target.write_bytes(b"replaced")
+        return T.ToolResult.success("ok")
+
+    call = ToolCall(name="generate_image",
+                    args={"prompt": "p", "output_path": "logo.png"},
+                    raw="", start=0, end=0)
+    with patch.object(T.TOOL_REGISTRY["generate_image"], "fn", spy):
+        result = agent._execute_tool(call, interactive=False)
+    if not ran:
+        assert target.read_bytes() == b"the project's own logo"
+    return result, bool(ran)
+
+
+def test_generate_image_asks_like_write_file(tmp_path):
+    """generate_image writes a project file, so it takes write_file's gate:
+    without auto_approve and with nobody to ask, the call is refused."""
+    from localm.plugins.coder import tools as T
+    assert T.TOOL_REGISTRY["generate_image"].destructive \
+        is T.TOOL_REGISTRY["write_file"].destructive is True
+    result, ran = _run_gated_image_call(_gate_agent(tmp_path, auto_approve=False), tmp_path)
+    assert not ran
+    assert not result.ok
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_generate_image_follows_the_confirm_answer(tmp_path, answer):
+    asked = []
+
+    def handler(call):
+        asked.append(call.name)
+        return answer
+
+    agent = _gate_agent(tmp_path, auto_approve=False, confirm_handler=handler)
+    result, ran = _run_gated_image_call(agent, tmp_path)
+    assert asked == ["generate_image"]
+    assert ran is answer
+    assert result.ok is answer
+
+
+@pytest.mark.parametrize("mode", ["patch_mode", "dry_run"])
+def test_generate_image_does_not_write_in_patch_or_dry_run_mode(tmp_path, mode):
+    result, ran = _run_gated_image_call(_gate_agent(tmp_path, **{mode: True}), tmp_path)
+    assert not ran
+    if mode == "patch_mode":
+        assert not result.ok
+        assert "patch-mode" in result.output
+

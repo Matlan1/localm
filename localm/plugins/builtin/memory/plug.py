@@ -185,7 +185,12 @@ def _embed_fn():
         return emb.embed if emb is not None else None
     except Exception as e:
         from localm.debuglog import logger
-        logger.debug("memory _embed_fn resolution failed: %s", e)
+        from localm.inference.load_lease import LoadBusyError
+        if isinstance(e, LoadBusyError):
+            logger.warning("memory: the embedding model is not loaded yet (%s); "
+                           "this pass runs lexical-only", e)
+        else:
+            logger.debug("memory _embed_fn resolution failed: %s", e)
         return None
 
 

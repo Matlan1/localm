@@ -10,7 +10,7 @@ codebook-0 token for every frame with the sampler chain llama.cpp's
 ``llama-tts`` uses, and drives the helper one frame at a time so a caller can
 report progress and stop between frames.
 
-Four generation interfaces are bound: the legacy one (builds exporting
+Five generation interfaces are bound: the legacy one (builds exporting
 ``mtmd_gen_inp_default`` but not ``mtmd_gen_state_init``), the state one (builds
 exporting ``mtmd_gen_state_init``, whose helper input starts with a ``stream``
 flag and whose ``mtmd_gen_audio_process`` takes a generation state), the
@@ -18,9 +18,13 @@ state_v2 one (builds also exporting ``mtmd_helper_gen_audio_next_is_text``,
 whose helper input adds ``n_past``, ``out_mode`` and ``voice`` and whose
 generation input adds the code repetition penalty) and the state_v3 one (builds
 also exporting ``mtmd_gen_audio_voice_name``, whose helper input drops
-``voice`` and whose ``mtmd_gen_audio_info`` adds ``n_voices``). An mtmd
-exporting none of the four markers lays the input struct out differently and is
-refused with :class:`SpeechUnavailable`.
+``voice`` and whose ``mtmd_gen_audio_info`` adds ``n_voices``) and the state_v4
+one (the state_v3 exports, with a ``temp`` field inserted before ``seed`` in the
+helper input; told apart from state_v3 by where
+``mtmd_helper_gen_audio_inp_default`` puts its default seed). An mtmd exporting
+none of the four markers lays the input struct out differently and is refused
+with :class:`SpeechUnavailable`, as is a state_v3-marker mtmd whose default
+helper input matches neither the state_v3 nor the state_v4 layout.
 
 Runs inside the isolated speech worker (``localm/inference/_speech_runner.py``),
 never in the server process.
@@ -222,6 +226,38 @@ class _HelperInputV3(ctypes.Structure):
                 ("out_type", ctypes.c_int)]
 
 
+class _HelperInputV4(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the state_v4 interface: the state_v3
+    input with ``temp`` (the audio frame temperature: below 0 the model's
+    default, 0 greedy) before ``seed``. A zeroed input holds 0 there, so every
+    request sets it to :data:`_HELPER_TEMP_MODEL_DEFAULT`."""
+    _fields_ = [("stream", ctypes.c_bool),
+                ("seq_id", ctypes.c_int32),
+                ("prompt", ctypes.c_char_p),
+                ("prompt_len", ctypes.c_size_t),
+                ("n_past", ctypes.c_int32),
+                ("out_mode", ctypes.c_int),
+                ("speaker_ref", ctypes.c_void_p),
+                ("lang", ctypes.c_char_p),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("out_type", ctypes.c_int)]
+
+
+# The helper input's temp for "use the model's default temperature".
+_HELPER_TEMP_MODEL_DEFAULT = -1.0
+
+
+class _HelperInputProbe(ctypes.Structure):
+    """A buffer larger than every ``mtmd_helper_gen_audio_inp`` layout, the
+    return type ``mtmd_helper_gen_audio_inp_default`` is read through before a
+    layout is chosen. The struct is returned through a caller-allocated buffer
+    on every 64-bit ABI localm targets, so a larger buffer is safe."""
+    _fields_ = [("b", ctypes.c_uint8 * 128)]
+
+
 class _GenInpLegacy(ctypes.Structure):
     """``mtmd_gen_inp`` of the stateless interface."""
     _fields_ = [("type", ctypes.c_int),
@@ -318,14 +354,17 @@ _FloatPtr = ctypes.POINTER(ctypes.c_float)
 # seed), "state_v2" (the state interface with the structs of llama.cpp
 # b11941: n_past, out_mode and voice in the helper input, the repetition
 # penalty pair in the generation input) and "state_v3" (the structs of llama.cpp
-# b12061: no voice in the helper input, n_voices in mtmd_gen_audio_info). A
-# library has the first interface in _INTERFACE_MARKERS whose marker it exports;
-# the v2 and v3 markers are functions added by the same upstream changes as the
-# struct fields.
+# b12061: no voice in the helper input, n_voices in mtmd_gen_audio_info) and
+# "state_v4" (the structs of llama.cpp b12219: temp before seed in the helper
+# input). A library has the first interface in _INTERFACE_MARKERS whose marker
+# it exports; the v2 and v3 markers are functions added by the same upstream
+# changes as the struct fields. state_v4 added no function, so a state_v3-marker
+# library is state_v3 or state_v4 by _helper_input_interface.
 INTERFACE_LEGACY = "legacy"
 INTERFACE_STATE = "state"
 INTERFACE_STATE_V2 = "state_v2"
 INTERFACE_STATE_V3 = "state_v3"
+INTERFACE_STATE_V4 = "state_v4"
 _STATE_V3_MARKER = "mtmd_gen_audio_voice_name"
 _STATE_V2_MARKER = "mtmd_helper_gen_audio_next_is_text"
 _STATE_MARKER = "mtmd_gen_state_init"
@@ -363,6 +402,20 @@ _INTERFACE_STRUCTS = {
         "mtmd_gen_out": _GenOut,
         "mtmd_gen_state_params": _GenStateParams,
     },
+    INTERFACE_STATE_V4: {
+        "mtmd_gen_audio_info": _GenAudioInfoV3,
+        "mtmd_helper_gen_audio_inp": _HelperInputV4,
+        "mtmd_gen_inp": _GenInpV2,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
+}
+
+# Where each layout of the state_v3 family keeps the seed, whose upstream
+# default is UINT32_MAX (random).
+_HELPER_SEED_OFFSETS = {
+    INTERFACE_STATE_V3: _HelperInputV3.seed.offset,
+    INTERFACE_STATE_V4: _HelperInputV4.seed.offset,
 }
 
 
@@ -402,6 +455,13 @@ _INTERFACE_SIGNATURES = {
         **_state_signatures(_HelperInputV3, _GenInpV2, _GenAudioInfoV3),
         "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
         "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
+        "mtmd_helper_gen_audio_inp_default": (_HelperInputV3, []),
+    },
+    INTERFACE_STATE_V4: {
+        **_state_signatures(_HelperInputV4, _GenInpV2, _GenAudioInfoV3),
+        "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
+        "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
+        "mtmd_helper_gen_audio_inp_default": (_HelperInputV4, []),
     },
 }
 
@@ -430,7 +490,8 @@ class GenerationApi:
     the library's shared attributes that other bindings set.
 
     :attr:`interface` is :data:`INTERFACE_LEGACY`, :data:`INTERFACE_STATE`,
-    :data:`INTERFACE_STATE_V2` or :data:`INTERFACE_STATE_V3`;
+    :data:`INTERFACE_STATE_V2`, :data:`INTERFACE_STATE_V3` or
+    :data:`INTERFACE_STATE_V4`;
     :attr:`helper_input` is the
     ``mtmd_helper_gen_audio_inp`` structure of that interface. The
     ``mtmd_gen_state_*`` functions are bound on the state interfaces only."""
@@ -457,6 +518,36 @@ class GenerationApi:
     mtmd_helper_gen_audio_get_output: Any
     mtmd_helper_gen_audio_next_is_text: Any
     mtmd_gen_audio_voice_name: Any
+    mtmd_helper_gen_audio_inp_default: Any
+
+
+def _helper_input_interface(m) -> str:
+    """:data:`INTERFACE_STATE_V3` or :data:`INTERFACE_STATE_V4` for the mtmd
+    library *m*, which exports the state_v3 marker: the layout whose seed
+    offset holds UINT32_MAX in the bytes ``mtmd_helper_gen_audio_inp_default``
+    returns (the state_v4 ``temp`` default, -1.0, and the state_v3
+    ``out_type`` default, WAV, both differ from it).
+
+    Raises :class:`SpeechUnavailable` when *m* lacks that function, or when
+    the default seed is at neither offset or at both."""
+    try:
+        fn = m["mtmd_helper_gen_audio_inp_default"]
+    except (AttributeError, KeyError) as e:
+        raise SpeechUnavailable(
+            f"The installed llama.cpp runtime lacks a speech generation "
+            f"function ({e}). Install the runtime localm pins with "
+            "'localm setup-llama'.") from e
+    fn.restype = _HelperInputProbe
+    fn.argtypes = []
+    raw = bytes(fn().b)
+    hits = [interface for interface, off in _HELPER_SEED_OFFSETS.items()
+            if struct.unpack_from("<I", raw, off)[0] == _UINT32_MAX]
+    if len(hits) != 1:
+        raise SpeechUnavailable(
+            "The installed llama.cpp runtime's speech generation input has a "
+            "layout localm does not recognise. Install the runtime localm pins "
+            "with 'localm setup-llama'.")
+    return hits[0]
 
 
 _bind_lock = threading.Lock()
@@ -465,14 +556,16 @@ _bound: dict[int, tuple] = {}
 
 def bind_generation_api(m) -> GenerationApi:
     """The speech generation functions of the loaded mtmd library *m*, bound
-    for the interface it exports: state_v3 when it exports
+    for the interface it exports: state_v3 or state_v4 (see
+    :func:`_helper_input_interface`) when it exports
     ``mtmd_gen_audio_voice_name``, else state_v2 when it exports
     ``mtmd_helper_gen_audio_next_is_text``, else state when it exports
     ``mtmd_gen_state_init``, else legacy when it exports
     ``mtmd_gen_inp_default``.
 
-    Raises :class:`SpeechUnavailable` when *m* exports no marker or lacks a
-    function of its interface."""
+    Raises :class:`SpeechUnavailable` when *m* exports no marker, lacks a
+    function of its interface, or exports the state_v3 marker with a helper
+    input layout that is neither state_v3 nor state_v4."""
     with _bind_lock:
         cached = _bound.get(id(m))
         if cached is not None and cached[0] is m:
@@ -490,6 +583,8 @@ def bind_generation_api(m) -> GenerationApi:
                 "The installed llama.cpp runtime predates the speech generation "
                 "interface localm supports. Install the runtime localm pins with "
                 "'localm setup-llama'.")
+        if interface == INTERFACE_STATE_V3:
+            interface = _helper_input_interface(m)
         ns = GenerationApi()
         ns.interface = interface
         ns.helper_input = _INTERFACE_STRUCTS[interface]["mtmd_helper_gen_audio_inp"]
@@ -882,6 +977,8 @@ class SpeechSynthesizer:
                                  lang=(lang or "").encode("ascii"), top_k=sp.top_k,
                                  top_p=projector_top_p(sp.top_p),
                                  seed=seed, out_type=_OUTTYPE_WAV)
+            if hasattr(inp, "temp"):
+                inp.temp = _HELPER_TEMP_MODEL_DEFAULT
             if m.mtmd_helper_gen_audio_set_input(helper, ctypes.byref(inp)) != 0:
                 raise SpeechStageFailed("the speech prompt could not be prepared")
             if bitmap is not None:

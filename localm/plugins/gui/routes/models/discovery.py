@@ -58,8 +58,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if e.off:
                 raise HTTPException(
                     _discover_status(e),
-                    "Network access is off. Turn it on, or allow downloads "
-                    "only, in Settings → Network.") from e
+                    "Network access is off. Turn it on, or allow model "
+                    "downloads while network access is off, in Settings > "
+                    "Server & network.") from e
             raise HTTPException(_discover_status(e), str(e)) from e
 
     async def _vram_total():

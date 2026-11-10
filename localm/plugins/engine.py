@@ -639,6 +639,14 @@ class PluginHost:
             c.setdefault("plugins", {})[key] = value
         update_config(_mutate)
 
+    def set_global_config(self, request: Any, key: str, value: Any) -> None:
+        """Write global config *key* with the owner tier of the settings schema
+        applied to the caller of *request*. Raises ``PermissionError`` for an
+        owner-only key and a non-owner caller, ``ValueError`` for an unknown key
+        or a value the schema rejects."""
+        from localm.config_write import set_global_config_key
+        set_global_config_key(key, value, is_owner=self.caller_is_owner(request))
+
     def caller_is_owner(self, request: Any) -> bool:
         """True when the caller of *request* is the owner: open mode (no key
         configured anywhere) or an ADMIN/owner key or session. False for a
@@ -1001,8 +1009,11 @@ class PluginManager:
         return out
 
     def _enabled_set(self) -> set:
+        """Names enabled in config["plugins_enabled"], plus every protected
+        plugin (chat), which is always enabled and never stored there."""
         from localm.config import load_config
-        return set(load_config().get("plugins_enabled", []))
+        from localm.plugins import catalog as _cat
+        return set(load_config().get("plugins_enabled", [])) | set(_cat.protected())
 
     def _set_enabled(self, name: str, on: bool) -> None:
         """Add/remove *name* in config["plugins_enabled"] atomically (read-modify-
@@ -1609,6 +1620,19 @@ class PluginManager:
             raise
         self._invoke_hook(name, "on_install")        # optional lifecycle hook
         self._set_enabled(name, True)
+        self._record_event("plugin_installed", name)
+
+    def _record_event(self, kind: str, name: str) -> None:
+        """Append a plugin install or uninstall to the management log; never raises."""
+        from localm import mgmt_events
+        from localm.config import home_dir
+        spec = self._specs.get(name)
+        version = getattr(spec, "version", None)
+        field = "version_to" if kind == "plugin_installed" else "version_from"
+        try:
+            mgmt_events.record(kind, home=home_dir(), plugin=name, **{field: version})
+        except Exception as e:
+            _log.warning("could not record the %s event for plugin %s: %s", kind, name, e)
 
     def install_external(self, source: Path, *, force: bool = False):
         """Install a THIRD-PARTY plugin from an arbitrary source directory: copy it
@@ -1624,6 +1648,7 @@ class PluginManager:
             raise
         self._invoke_hook(name, "on_install")        # optional lifecycle hook
         self._set_enabled(name, True)
+        self._record_event("plugin_installed", name)
         return spec0
 
     def set_installed_from_dir(self, source: Path, *, force: bool = False,
@@ -1913,6 +1938,8 @@ class PluginManager:
                 "plugin %s: uninstall disabled and unloaded it, but its data "
                 "could not be fully deleted; reporting a degraded result "
                 "rather than a bare success", name)
+        if existed and removed:
+            self._record_event("plugin_uninstalled", name)
         return existed and removed and data_deleted
 
     def _delete_plugin_data(self, spec: PluginSpec) -> bool:

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Two concurrent ``POST /api/rag/embedding`` confirms must not start TWO
-``embed-setup`` jobs. When they do, the second waits - silently, with no timeout
-and no error - on the embedder's bare ``_LOAD_LOCK``/``_LOCK`` acquires, and both
-jobs sit at "Loading and testing the model..." indefinitely while unrelated reads
-time out.
+``embed-setup`` jobs. When they do, the second waits - silently, with no
+progress of its own - on the embedder's ``_LOAD_LOCK``/``_LOCK`` acquires, and
+both jobs sit at "Loading and testing the model..." while unrelated reads time
+out.
 
 The second one is refused with 409 at the door, the same shape every sibling long
 job on this server uses (runtime-update, comfy-setup, comfy-update, doctor).

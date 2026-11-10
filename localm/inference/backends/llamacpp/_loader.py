@@ -606,7 +606,7 @@ def load_lib() -> ctypes.CDLL:
             "  localm setup-llama --backend vulkan --force   (any GPU, no vendor toolkit)\n"
             "  localm setup-llama --backend cpu --force       (no GPU)\n"
             "  localm setup-llama --backend cuda --force      (NVIDIA)\n"
-            "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
+            "  localm setup-llama --backend amd-rocm --force  (AMD gfx103X, Windows)"
         ) from e
 
     # Ensure the ggml compute backends are registered before any model loads.
