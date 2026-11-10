@@ -392,14 +392,24 @@ def unregister():
 
 Scope and limits:
 
-- The chain runs for **every** `/v1/chat/completions` and `/v1/completions`
-  client (the GUI, raw API callers, and the coder agent pointed at localm); a
-  `/v1/completions` prompt reaches the hooks as a single user message. It does
-  **not** run on any other path that produces a reply: the in-process
-  `localm run` REPL (it calls the engine directly), a turn forwarded to a peer
-  (the peer runs its own hooks, this host's do not), jobs, the MCP chat tool,
-  the coder agent's own engine calls, background generation, and the
-  Ollama-compatible routes. Only the two HTTP handlers above run the chain.
+- The chain runs for **every** `/v1/chat/completions` client (the GUI, raw API
+  callers, and the coder agent pointed at localm), and for the routes that
+  answer through that handler (`/v1/messages`, `/v1/responses`, Ollama
+  `/api/chat` and `/api/generate`). On `/v1/completions` (and Ollama
+  `/api/generate` with `raw: true`) only `stream` and `outlet` run: the raw
+  prompt reaches the model as sent, with no `inlet`. It does **not** run on any
+  other path that produces a reply: the in-process `localm run` REPL (it calls
+  the engine directly), a turn forwarded to a peer (the peer runs its own hooks,
+  this host's do not), jobs, the MCP chat tool, the coder agent's own engine
+  calls and background generation.
+- A hook can tell localm's own chat from other callers by
+  `ctx.state["client_id"]`: the GUI chat and `localm run` send
+  `X-Client-Id: chat`, the coder sends `coder`, and an API client usually sends
+  nothing. The built-in chat plugin's two inlets (a style note asking the model
+  to answer directly and to speak of itself as "I", and the `<think>` note for
+  reasoning models) apply only to `chat`; an API caller's messages reach the
+  model unchanged. The `chat_style_note` setting (Settings > Chat) turns the
+  style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing

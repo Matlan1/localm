@@ -278,9 +278,13 @@ class ExllamaWorker:
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         grammar: Optional[str] = None,
+        raw_prompt: Optional[str] = None,
         **_unused,
     ) -> Iterator[str]:
-        """Yield the reply's text pieces. Sets :attr:`last_finish_reason` to
+        """Yield the reply's text pieces; with *raw_prompt*, the continuation of
+        that text tokenised as given with the tokenizer's own special tokens and
+        no chat template (*messages* and *thinking* are then not read). Sets
+        :attr:`last_finish_reason` to
         "length" when ``max_tokens`` ran out and "stop" otherwise, a cancel
         through *cancel_event* included. Raises ContextCapacityExceededError
         when the prompt leaves no room in the cache."""
@@ -298,10 +302,19 @@ class ExllamaWorker:
         if self._runtime is None:
             raise RuntimeError("Model not loaded - call load() first")
         self.last_finish_reason = "stop"
-        template_messages = _template_messages(messages)
-        text, prompt, kwargs = self._render(template_messages, thinking)
-        input_ids = _tokenize_prompt(self._tokenizer, template_messages, text, "cpu",
-                                     template_kwargs=kwargs, prompt=prompt)["input_ids"]
+        if raw_prompt is not None:
+            input_ids = self._loaded_tokenizer()(
+                raw_prompt, return_tensors="pt", add_special_tokens=True)["input_ids"]
+            if int(input_ids.shape[-1]) == 0:
+                from localm.inference.backends.base import (
+                    EMPTY_RAW_PROMPT_MESSAGE, UnsupportedInputError)
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
+        else:
+            template_messages = _template_messages(messages)
+            text, prompt, kwargs = self._render(template_messages, thinking)
+            input_ids = _tokenize_prompt(self._tokenizer, template_messages, text, "cpu",
+                                         template_kwargs=kwargs,
+                                         prompt=prompt)["input_ids"]
         n_prompt = int(input_ids.shape[-1])
         room = self.cache_tokens - n_prompt
         if room < 1:

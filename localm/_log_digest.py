@@ -96,6 +96,9 @@ _CONTENT_MARKER_RES = (
     # message(s)):\n%s" - the count is on the header line, the messages ride
     # in as continuation lines below it.
     re.compile(r"assembled chat prompt \(\d+ message\(s\)\):\s*$"),
+    # The same function's raw /v1/completions form: "raw completion prompt (%d
+    # character(s), no chat template):\n%s".
+    re.compile(r"raw completion prompt \(\d+ character\(s\), no chat template\):\s*$"),
     # http_server.py's _log_chat_reply(): "chat completion reply (finish_reason=%s):\n%s".
     re.compile(r"chat completion reply \(finish_reason=\S+\):\s*$"),
     # memory/plug.py's consolidation prompt and response logs.

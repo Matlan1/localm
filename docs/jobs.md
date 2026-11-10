@@ -66,6 +66,15 @@ localm job enable <job_id>
 localm job remove <job_id>      # delete the job and its stored results
 ```
 
+`localm job run` runs the job inside the localm server already running for this
+data folder and directory (it sends the owner key, or the server's instance
+token in open mode, like `localm unload`). A chat or memory job then uses the
+model the server has loaded, a coder job runs in the server, and a knowledge
+re-sync runs there too. If another job is already running in the server, the
+command says so and exits 1 instead of loading a second model. With no server
+running, the job runs in the terminal's own process and a chat or memory job
+loads its model there.
+
 `localm job add` options:
 
 | Option | Meaning |
@@ -112,7 +121,7 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. A `localm job run` from a terminal is a separate process: a chat or memory job loads its model there, beside whatever the server has loaded. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
