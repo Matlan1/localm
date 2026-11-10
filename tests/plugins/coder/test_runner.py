@@ -26,6 +26,13 @@ from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
 from localm.plugins.coder.audit import SessionMode
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 class _Scripted:
     """One canned reply per chat() call, repeating the last."""
 

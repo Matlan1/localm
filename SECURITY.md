@@ -185,8 +185,8 @@ localm process's own permissions rather than a sandbox:
   narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
   scope is restricted - read plus confined file edits within the scope, no shell. A
   restricted session starts none of the project's MCP servers, plugin tools or
-  skills, and cannot create or change anything inside a `.localcoder` directory,
-  which configures later coder sessions.
+  skills, and cannot create or change anything inside a `.localcoder` directory
+  or a `LOCALCODER.md` file, which configure later coder sessions.
 - **`browser`** lets its holder open and drive a real, automated browser on
   this machine - directly through the Browser page and its `/api/browser/*`
   routes, and, for a key that also holds `coder:full`, through the coding
@@ -258,6 +258,17 @@ localm process's own permissions rather than a sandbox:
 These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
 holder that capability on your machine, so only issue keys to - or expose the GUI to -
 clients you trust.
+
+**A project folder you open with the coder is untrusted until you trust it.** A
+repository's `.localcoder` folder can declare tool hooks, MCP servers,
+`auto_approve`, a `verify` command, a `model`, a `mode` that records more than
+yours, instructions (`system.md`), memory (`memory.md`) and skills. None of
+these is used until you trust the project at the prompt (or with `--trust-hooks`,
+`/hooks trust` or the GUI's hooks dialog), and the trust is for the folder as
+it was shown: changing any of those files asks again. A run nobody watches (the
+MCP `run_coder_task` tool, a scheduled job) never takes `auto_approve` from the
+project. `LOCALCODER.md` at the project root is read without that prompt, as
+project notes, and a skill whose file or folder is a link is refused.
 
 ## Model trust boundaries
 
