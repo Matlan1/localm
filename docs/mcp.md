@@ -31,7 +31,7 @@ always present; several are conditional (marked below).
 | `remove_model` | Remove a model and delete its file if under the models dir | **destructive** |
 | `run_doctor` | Run `localm doctor` and return the report | read-only |
 | `list_plugins` | List engine plugins and whether each is active | read-only |
-| `install_plugin` | Install and enable an engine plugin | |
+| `install_plugin` | Install and enable an engine plugin; `with_deps` defaults to the `auto_install_plugin_deps` setting | |
 | `enable_plugin` | Enable an installed plugin | |
 | `disable_plugin` | Disable an installed plugin | |
 | `uninstall_plugin` | Uninstall a plugin (and its data with `delete_data`) | **destructive** |
@@ -72,8 +72,12 @@ localm mcp --no-images       # do not expose generate_image
 localm mcp --no-coder        # do not expose run_coder_task
 localm mcp --no-memory       # do not expose memory_recall even if the memory plugin is active
 localm mcp --memory-write    # also expose memory_append (needs --no-memory to be absent)
+localm mcp --coder-shell     # let run_coder_task auto-approve shell commands (yes=true or a project's auto_approve); off by default
+localm mcp --coder-root DIR  # only let run_coder_task work in DIR or below
 localm mcp --share-loaded-models  # use a model another localm instance already has loaded
 ```
+
+`run_coder_task` writes files in the folder it is given, but its shell calls are denied unless you start the server with `--coder-shell`; the client's `yes` argument and a project's `auto_approve` only take effect with that flag. `--coder-root` limits which folders a client can name.
 
 The model loads on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.
 
