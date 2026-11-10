@@ -250,13 +250,25 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         builtin=builtin,
         protected=first_party and bool(p.get("protected", False)),
         default_enabled=first_party and bool(p.get("default_enabled", False)),
-        entry=str(p.get("entry", "")),
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
+        entry=str(p.get("entry", "")),
         tool_exports=list(exports),
         path=str(plugin_dir),
     )
+
+
+def _entry_module_file(base: Path, mod_name: str) -> Optional[Path]:
+    """The file of module *mod_name* inside plugin dir *base*: ``<mod>.py`` or
+    ``<mod>/__init__.py``; a dotted name is followed into sub-packages only when
+    every part is an identifier."""
+    candidates = [base / f"{mod_name}.py", base / mod_name / "__init__.py"]
+    parts = mod_name.split(".")
+    if len(parts) > 1 and all(p.isidentifier() for p in parts):
+        nested = base.joinpath(*parts)
+        candidates += [nested.with_name(nested.name + ".py"), nested / "__init__.py"]
+    return next((c for c in candidates if c.is_file()), None)
 
 
 def _import_module(spec: PluginSpec):
@@ -267,13 +279,9 @@ def _import_module(spec: PluginSpec):
     mod_name, _, attr = entry.partition(":")
     attr = attr or "register"
     base = Path(spec.path)
-    mod_file = base / f"{mod_name}.py"
-    if not mod_file.is_file():
-        pkg = base / mod_name / "__init__.py"
-        if pkg.is_file():
-            mod_file = pkg
-        else:
-            raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
+    mod_file = _entry_module_file(base, mod_name)
+    if mod_file is None:
+        raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     # Drop modules cached from a PRIOR load of this plugin: the top-level name
     # and its submodules (e.g. <uniq>.backend), so every module loads from the
@@ -320,13 +328,12 @@ def import_tool_module(spec: PluginSpec):
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     mod_name = entry.partition(":")[0]
     base = Path(spec.path)
-    want = base / f"{mod_name}.py"
-    if not want.is_file():
-        want = base / mod_name / "__init__.py"
+    want = _entry_module_file(base, mod_name)
     cached = sys.modules.get(uniq)
     cached_file = getattr(cached, "__file__", None)
     try:
-        if cached is not None and cached_file and Path(cached_file).samefile(want):
+        if (cached is not None and cached_file and want is not None
+                and Path(cached_file).samefile(want)):
             return cached
     except OSError:
         pass
@@ -1017,6 +1024,8 @@ class PluginManager:
                     pass
 
         for name in sorted(self._specs):           # _specs == installed (on disk)
+            if self._specs[name].tools_only:
+                continue                           # coder tool plugin: nothing to load
             if name in enabled and name not in self._loaded:
                 self._safe_load(self._specs[name])
                 if name in self._loaded:
@@ -1036,7 +1045,7 @@ class PluginManager:
         loaded = []
         for name in sorted(self._specs):
             spec = self._specs[name]
-            if (name not in enabled or name in self._loaded
+            if (name not in enabled or name in self._loaded or spec.tools_only
                     or "inference-backend" not in (spec.capabilities or [])):
                 continue
             self._safe_load(spec)
@@ -1059,7 +1068,8 @@ class PluginManager:
         enabled = self._enabled_set()
         loaded = []
         for name in sorted(self._specs):
-            if name in enabled and name not in self._loaded and name not in self._errors:
+            if (name in enabled and name not in self._loaded and name not in self._errors
+                    and not self._specs[name].tools_only):
                 self._safe_load(self._specs[name])
                 if name in self._loaded:
                     loaded.append(name)
@@ -1117,6 +1127,13 @@ class PluginManager:
             self._errors[spec.name] = f"load failed: {e}"
 
     def _load(self, spec: PluginSpec) -> None:
+        """Import *spec*'s module, call its register(host) and record it as
+        loaded. A tools-only manifest (``entry`` and no ``register``) is left
+        unloaded with no error. Raises when the module or its register callable
+        is missing, or register() raises."""
+        if spec.tools_only:
+            self._errors.pop(spec.name, None)
+            return
         module, attr, uniq = _import_module(spec)
         register = getattr(module, attr, None)
         if not callable(register):

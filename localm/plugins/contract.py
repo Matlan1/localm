@@ -169,6 +169,12 @@ class PluginSpec:
         if not self.scope:
             self.scope = self.name
 
+    @property
+    def tools_only(self) -> bool:
+        """True when the manifest declares ``entry`` and no ``register``: the
+        coder's tool loader owns it and the engine has nothing to load."""
+        return bool(self.entry) and not self.register_entry
+
     def compatible(self) -> bool:
         """True when this plugin targets an api_version the engine supports."""
         return self.api_version == API_VERSION

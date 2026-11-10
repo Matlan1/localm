@@ -339,8 +339,16 @@ mode cannot be resolved. Operational lines (requests, timings, native metadata,
 stack traces) are unaffected. In `log`/`full` mode, `--debug` still records raw
 model output as before, since those modes already persist your sessions.
 
-This holds when the server's own mode (or `chat_mode` / `coder_mode` in its
-config) is privacy. A privacy choice made only for one session (`--mode privacy`
-on `localm run` or the coder) that is answered by a server running in `log` or
-`full` mode keeps that session out of the server's audit log and transcript, but
-not out of that server's debug log.
+The guarantee follows each chat, not only the server. A privacy-mode session
+that attaches to a server running in `log` or `full` mode with the debug log on
+(`localm run MODEL --mode privacy`, or a coder session in privacy mode) has
+none of its messages, replies or raw model output written to that server's
+debug log, and memory treats it as privacy mode (nothing stored, and nothing
+recalled unless you opted into read-only recall in privacy mode).
+While such a request is being answered, the debug log holds back the content
+of every other chat on that server as well.
+
+The browser plugin's log lines (a request it refused, a request that failed,
+a window it replaced) name the host only; the full address (path and query
+string) is logged only when the debug log is on and no session is in privacy
+mode.
