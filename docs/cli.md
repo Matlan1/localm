@@ -18,7 +18,10 @@ localm setup-llama [opts]        # provision native llama.cpp binaries
 localm setup-music [opts]        # install native music generation (ACE-Step 1.5 through KoboldCpp)
 localm setup-sdcpp [opts]        # install the native image runtime (stable-diffusion.cpp)
 localm setup-browser [opts]      # download Chromium for the automated browser
+localm --version                 # print the installed version
 ```
+
+`-h` works as `--help` on every command.
 
 `--debug` on `gui`, `serve`, and `run` writes a log to `<data dir>/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons). Outside privacy mode it also writes the raw model output, before marker scrubbing, to that log; the reply you see is always scrubbed.
 
@@ -221,11 +224,11 @@ localm pull civitai:<versionId>:<fileId>     # a specific file within that versi
 Content flagged as depicting a minor is always excluded, regardless of
 `--nsfw`. `--mmproj` and an explicit destination directory do not apply to a
 CivitAI pull: the downloaded file is verified against CivitAI's own checksum
-and placed automatically in the active ComfyUI's matching `models/<type>`
+and, when a ComfyUI is set up, placed automatically in its matching `models/<type>`
 folder (checkpoints, loras, embeddings, vae, controlnet, or upscale_models) -
 the managed ComfyUI's folder if one is active, otherwise your configured
-`comfy_workdir`. With neither configured, the pull fails outright rather than
-falling back to localm's own models folder.
+`comfy_workdir`. With neither configured, the file goes into localm's own
+models folder (`<data dir>/models`).
 
 Versions of one CivitAI model often share a filename. A file already in that
 folder is reused only when it is shown to be the requested version's: its
@@ -532,7 +535,7 @@ collection route - can be confined to specific folders with `localm key
 create NAME --scope rag --rag-root DIR` (repeatable) - see
 [API keys](#api-keys) and [docs/rag.md](rag.md#per-key-folder-scoping).
 
-Enable the rag plugin to use Knowledge; PDF parsing is built in. See [docs/rag.md](rag.md) for retrieval design.
+The `localm rag` commands work on their own; enable the rag plugin for the Knowledge page and for grounding chat replies in a collection. PDF parsing is built in. See [docs/rag.md](rag.md) for retrieval design.
 
 ---
 
@@ -599,10 +602,10 @@ localm config port 8650
 localm config confirm_remove false
 localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
 localm config autoprune_missing_models true
-localm config language de                        # interface language: en (default) or de
+localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -653,8 +656,8 @@ RAM with every layer on the GPU, before it moves any whole layer to the CPU
 expert data each generated token reads from RAM, which bounds the speed:
 
 ```
-  gpu layers auto: every layer on the GPU, with the routed experts of 18/48 layers in system RAM (Mixture-of-Experts) - ...
-  moe speed: each generated token reads about 0.41 GB of expert weights from system RAM, ...
+  moe placement: every layer on the GPU; the routed experts of 18 of 48 layers stay in system RAM (Mixture-of-Experts) - ...
+  moe speed: 18 of 48 layers keep their experts in system RAM; ...
 ```
 
 `n_cpu_moe` sets it yourself: the expert weights of the first N layers stay in
@@ -823,7 +826,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `bench-spec`, `gui`) complete only the command name, not the model.
+In bash/zsh/fish, model names complete for the MODEL argument of the model commands and for the `--model` option of `rerank`, `speak` and `coder` (not for `job add --model`, `mcp -m` or `setup-embeddings --model`). In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `bench-spec`, `gui`) complete only the command name, not the model.
 
 ---
 
@@ -863,7 +866,7 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, on `install`, `enable` and `setup`, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs on its next start; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). On Linux with an NVIDIA GPU the store also offers the opt-in `exllama` (EXL2 and EXL3 models); `plugin setup --all` leaves it out, so install it by name. Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, on `install`, `enable` and `setup`, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs on its next start; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](plugins.md) for the full authoring contract.
 
@@ -1201,6 +1204,8 @@ localm mcp --memory-write     # also expose memory_append (off by default; both 
 localm mcp -m mymodel         # default model for chat/embed tools (default: LOCALM_MODEL env, else first registered)
 localm mcp --share-loaded-models   # answer chat with a model another localm instance here has loaded, instead of loading a second copy
 ```
+
+`localm mcp` refuses to serve (exit 1) until the mcp plugin is installed and enabled (`localm plugin install mcp`); `--print-config` works without it.
 
 Exposes your local models and localm management (chat, model and plugin management, diagnostics, and more) to Claude Desktop and other MCP clients, with tool annotations so a client can confirm destructive calls. See [docs/mcp.md](mcp.md) for the full tool list and both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
 

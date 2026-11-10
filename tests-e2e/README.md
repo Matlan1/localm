@@ -24,7 +24,8 @@ npm run test:e2e
 ```
 
 `tests-e2e/serve.mjs` builds a throwaway `LOCALM_HOME`, installs the user-facing
-plugins into it, then starts `localm gui --no-model` on a fixed port - in that
+plugins into it, then starts `localm gui --no-browser` on a fixed port (the fresh home has no model, so
+the GUI opens without one) - in that
 order, so the server never binds before its plugin routes exist. Playwright starts
 that launcher, waits for it, and tree-kills only that child on exit (it never
 adopts or kills a server it did not start). The Python that runs localm is this
@@ -40,8 +41,12 @@ clone and in a git worktree); set `LOCALM_E2E_PYTHON` to force a specific one.
 - **Corrupt storage:** with both JSON-backed `localStorage` keys poisoned before
   any script runs, the app still boots and surfaces a warning (never a blank shell).
 
-Both assertions are proven to fail when their bug is reintroduced, so a green run
-means something.
+Both assertions (`boot-and-click.spec.mjs`) are proven to fail when their bug is
+reintroduced, so a green run means something.
+
+The other spec files cover deep links, the artifact preview sandbox, the remote-image
+proxy, coder toolbar reachability, card row selection and the Settings media layout;
+each file's header says what it asserts.
 
 ## Run it when
 
