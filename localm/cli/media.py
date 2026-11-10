@@ -11,6 +11,7 @@ def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
     import os as _os
     import subprocess as _sp
+
     from rich.markup import escape
     try:
         if sys.platform == "win32":
@@ -64,9 +65,12 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
 
     *retry* is a zero-arg callable that re-runs the exact same generation and returns
     its own ``(ok, message)``."""
-    from ..media.comfy_client import (enable_func_shim_once,
-                                       is_known_comfy_func_regression,
-                                       restart_comfy, spawned_pid)
+    from ..media.comfy_client import (
+        enable_func_shim_once,
+        is_known_comfy_func_regression,
+        restart_comfy,
+        spawned_pid,
+    )
     if not is_known_comfy_func_regression(message):
         return False, message
     if not _is_interactive():
@@ -78,9 +82,11 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
         "ComfyUI install and self-expires once ComfyUI ships its own fix.")
     # Alongside the fix-this-run shim, offer localm's own managed, patched
     # ComfyUI - once only, and only while the user has no managed instance.
-    from ..media.comfy_client import (managed_comfy_setup_offer_message,
-                                      mark_managed_comfy_setup_offered,
-                                      should_offer_managed_comfy_setup)
+    from ..media.comfy_client import (
+        managed_comfy_setup_offer_message,
+        mark_managed_comfy_setup_offered,
+        should_offer_managed_comfy_setup,
+    )
     if should_offer_managed_comfy_setup(message):
         console.print("[cyan]" + managed_comfy_setup_offer_message() + "[/cyan]")
         mark_managed_comfy_setup_offered()
@@ -170,13 +176,14 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode
+    from ..media.comfy_client import localm_v1_base
     from ..plugins import media_config
 
     def say(text: str) -> None:
         console.print(f"[dim]{escape(str(text))}[/dim]")
 
     is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    localm_url = os.environ.get("LOCALM_URL") or None
+    localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
 
     def run():
         return media_config.generate_media(

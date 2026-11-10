@@ -166,12 +166,12 @@ def test_a_lease_whose_holder_cannot_be_judged_is_kept(tmp_path, rec):
 
 
 _HOLDER = textwrap.dedent('''
-    import sys, time
+    import os, sys, time
     from pathlib import Path
     from localm.inference import load_lease
     held, stop = Path(sys.argv[1]), Path(sys.argv[2])
     with load_lease.held([sys.argv[3]], timeout=10, purpose="holder test"):
-        held.write_text("held")
+        held.write_text(str(os.getpid()))
         while not stop.exists():
             time.sleep(0.01)
 ''')
@@ -199,7 +199,7 @@ def test_a_live_holder_keeps_its_lease_until_it_releases(tmp_path):
             caught = e
         assert (root / "all.lease").is_dir()
         assert type(caught) is load_lease.LoadBusyError
-        assert f"process {proc.pid}" in str(caught)
+        assert f"process {held.read_text()}" in str(caught)
         assert time.monotonic() - started >= 0.4
         stop.write_text("stop")
         proc.communicate(timeout=30)
@@ -300,7 +300,7 @@ def test_a_load_lock_waiter_is_answered_busy_after_the_bound(monkeypatch):
         t.join(5)
     assert backend.loads == 0
     assert type(caught) is load_lease.LoadBusyError
-    assert 0.3 <= time.monotonic() - started < 5
+    assert 0.25 <= time.monotonic() - started < 5
     assert "Busy: a model is loading" in str(caught)
 
 

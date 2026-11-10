@@ -24,6 +24,7 @@ import math
 import os
 import shutil
 import time
+from typing import Optional
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -85,6 +86,29 @@ def _video_path(name: str) -> Path:
     return confined_file(_video_dir(), name, "clip")
 
 
+async def _require_native_size(width: int, height: int) -> None:
+    """A 400 for a size the native backend refuses, before a job exists. Other
+    backends keep their own checks."""
+    from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+
+    def _check() -> Optional[str]:
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Video")
+        if s.get("backend") != "native":
+            return None
+        from .backends import native
+        return native.check_size(int(width), int(height))
+    try:
+        bad = await run_in_threadpool_bounded(_check, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the video backend settings timed out: {e}") from e
+    if bad:
+        raise HTTPException(400, bad)
+
+
 @_router.post("/api/video")
 async def video(req: VideoRequest, request: Request):
     if not req.prompt.strip():
@@ -99,6 +123,8 @@ async def video(req: VideoRequest, request: Request):
         raise HTTPException(400, "Height must be between 16 and 4096")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
+    if req.width is not None and req.height is not None:
+        await _require_native_size(req.width, req.height)
     from localm.debuglog import logger
     logger.info("video: %d-char prompt (seconds=%g)", len(req.prompt), req.seconds)
     input_image = None
