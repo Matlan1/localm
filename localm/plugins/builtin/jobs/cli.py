@@ -240,10 +240,11 @@ def _run_on_server(job_id: str, url: str, entry: dict):
 
     from localm import tls
     from localm.auth import resolve_bearer_headers
+    from localm.loopback_http import local_request
 
     headers = resolve_bearer_headers(entry.get("token"))
     try:
-        resp = requests.post(f"{url}/api/jobs/{quote(job_id, safe='')}/run",
+        resp = local_request("POST", f"{url}/api/jobs/{quote(job_id, safe='')}/run",
                              headers=headers, timeout=(10, None),
                              verify=tls.requests_verify(url))
     except requests.ConnectionError as e:
@@ -258,7 +259,7 @@ def _run_on_server(job_id: str, url: str, entry: dict):
     detail = ""
     try:
         body = resp.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         body = None
     if isinstance(body, dict):
         detail = str(body.get("detail") or "")

@@ -142,6 +142,7 @@ def memhome(tmp_path, monkeypatch):
     monkeypatch.setattr(plug, "_home", lambda: tmp_path)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
     sdir = tmp_path / "sessions"
     sdir.mkdir()
     rows = [{"type": "user", "data": {"content":

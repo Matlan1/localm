@@ -76,6 +76,14 @@ def test_disabled_plugin_is_not_reachable_through_the_lookup(home, monkeypatch):
     assert lookup.plugin_api("memory", "plug") is memory_plug
 
 
+def test_the_protected_chat_plugin_is_reachable_once_provisioned(home):
+    with pytest.raises(lookup.PluginUnavailable):
+        lookup.plugin_api("chat", "plug")
+    _manager().discover()
+    assert "chat" not in _enabled()
+    assert lookup.plugin_api("chat", "plug").rename_notes
+
+
 def test_not_installed_plugin_is_not_reachable_through_the_lookup(home):
     assert not (plugins_dir() / "memory").exists()
     with pytest.raises(lookup.PluginUnavailable):

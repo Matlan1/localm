@@ -283,6 +283,15 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 
 `--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `<data dir>/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
 
+To pair a model with a projector (mmproj) GGUF that is already on disk, such as the speech stages file of a text-to-speech model or a vision projector in a folder that holds several, name it when adding the model or attach it to a model that is already registered:
+
+```bash
+localm add D:\models\tts-model.gguf --mmproj D:\models\mmproj-tts-model.gguf
+localm attach-mmproj mymodel D:\models\mmproj-model-f16.gguf
+```
+
+`attach-mmproj` records the projector without loading the model and replaces any projector recorded before. It applies only to a single-file GGUF chat or speech model, and the projector must be a local GGUF whose own metadata marks it as a projector; otherwise nothing is written and it exits 1.
+
 ### Packages a model's own code needs
 
 A Hugging Face model with `hf_trust_remote_code` on runs Python from its own folder, and that code can import a package localm does not include. localm refuses such a model when you add it and before a load starts, and names the package. When it is one localm can add on this machine (timm, open_clip, torchaudio, and flash-linear-attention on Linux), add it here or with **install packages** on the Models page:

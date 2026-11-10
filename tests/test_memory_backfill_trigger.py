@@ -43,6 +43,7 @@ def mem_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_MODE", "log")            # writes/persist allowed
     # Reset module state between tests (module-level, not per-test).
     plug._sweep_running = False
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
     return tmp_path, plug
 
 

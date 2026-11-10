@@ -625,7 +625,7 @@ def _restore_backup(target: Path, backup: Path) -> bool:
     """Clear *target* and move the kept runtime in *backup* back into it.
     Returns False when a file could not be removed or moved back."""
     if target.is_dir() and _locked_after_stopping_own_probes(
-            target, lambda: _clear_target(target)):
+            target, lambda: _sl._clear_target(target)):
         return False
     target.mkdir(parents=True, exist_ok=True)
     ok = True

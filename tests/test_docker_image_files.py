@@ -483,7 +483,8 @@ class TestWorkflow:
         wf = _workflow()
         triggers = wf[True] if True in wf else wf["on"]
         assert triggers["pull_request"]["paths"] == ["docker/**", ".github/workflows/docker.yml",
-                                           "pyproject.toml", "hatch_build.py"]
+                                           "pyproject.toml", "hatch_build.py",
+                                           "LICENSE", "THIRD-PARTY-NOTICES.md"]
         assert triggers["release"]["types"] == ["published"]
         assert triggers["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
         assert wf["jobs"]["publish"]["if"] == "github.event_name != 'pull_request'"

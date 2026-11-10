@@ -772,11 +772,11 @@ def test_powershell_reporter_outcome_when_actually_executed(tmp_path, monkeypatc
 
 _CANARY = "ZQXCHATCANARY4711"
 _LOG_WITH_CONTENT = (
+    "2026-07-13 15:24:48,000 ERROR   localm.server: request failed: boom\n"
     "2026-07-13 15:24:49,000 WARNING localm.engine: model load slow on device 0\n"
     "2026-07-13 15:24:50,000 DEBUG   localm: raw model output:\n"
     f"my bank pin is {_CANARY}\n"
     f"second line of the reply {_CANARY}\n"
-    "2026-07-13 15:24:51,000 ERROR   localm.server: request failed: boom\n"
 )
 
 
@@ -837,6 +837,8 @@ _MARKER_SAMPLES = (
     "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory embed_one failed for 'x': y",
     '2026-07-13 15:24:50,000 DEBUG   localm.jobs: jobs web tool: web_search {"q": "x"}',
     "2026-07-13 15:24:50,000 DEBUG   localm: assembled chat prompt (3 message(s)):",
+    "2026-07-13 15:24:50,000 DEBUG   localm: raw completion prompt (42 character(s), "
+    "no chat template):",
     "2026-07-13 15:24:50,000 DEBUG   localm: chat completion reply (finish_reason=stop):",
     "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory consolidate prompt:",
     "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory auto-consolidate response:",

@@ -79,6 +79,8 @@ class TestBackendRecordsAppliedSplit:
             if kw.get("return_status") else [{"index": 0}, {"index": 1}])
         monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque",
                             lambda: False)
+        # No per-GPU placement plan: the configured split applies as written.
+        monkeypatch.setattr(GgufBackend, "_plan_gpu_placement", lambda self: None)
 
     def test_auto_split_recorded_with_normalized_shares(
             self, tmp_path, monkeypatch):
