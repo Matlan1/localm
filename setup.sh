@@ -555,13 +555,14 @@ if [ "$uv_present" != 1 ]; then
   fi
   rm -rf "$UVTMP"
   rmdir ./.localm-setup-tmp 2>/dev/null || true
-  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
-  # was set above; the installer edits a shell profile, not this running shell, so
-  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
-  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
-  # treat that as the current directory).
+  # uv lands in UV_INSTALL_DIR when that was set above, else in ~/.local/bin
+  # (older builds used ~/.cargo/bin); the installer edits a shell profile, not
+  # this running shell, so add where it landed to PATH for the rest of setup.
+  # With UV_INSTALL_DIR set, ~/.local/bin is not added: the global-command step
+  # reads PATH to tell whether that directory still has to go into a shell
+  # profile. See test_portable_uv_install_leaves_local_bin_off_path.
   if [ -n "${UV_INSTALL_DIR:-}" ]; then
-    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    export PATH="$UV_INSTALL_DIR:$PATH"
   else
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   fi
