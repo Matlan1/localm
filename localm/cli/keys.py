@@ -336,11 +336,15 @@ def key_list():
     """List named, scope-limited keys (metadata only - never the secret)."""
     from localm import auth
     keys = auth.list_keys()
-    if not keys and not auth.keystore_readable():
-        raise click.ClickException(
-            f"{auth.keystore_file().name} exists but could not be read as a JSON "
-            f"list, so its keys cannot be listed. Fix or remove it (deleting it "
-            f"resets to no scoped keys).")
+    if not auth.keystore_readable():
+        name = auth.keystore_file().name
+        if not keys:
+            raise click.ClickException(
+                f"{name} exists but could not be read as a JSON list of key "
+                f"records, so its keys cannot be listed. Fix or remove it "
+                f"(deleting it resets to no scoped keys).")
+        console.print(f"[yellow]Warning: {name} holds entries that are not key "
+                      f"records; they are skipped below. Fix or remove them.[/yellow]")
     if not keys:
         console.print("[dim]No named keys. Mint one:  "
                       "localm key create <name> --scope <scope>[/dim]")
