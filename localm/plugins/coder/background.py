@@ -1136,7 +1136,7 @@ def terminate_all_for_exit() -> int:
     registry nothing has used yet. Call this from the server's own exit
     paths (``os._exit``/``os.execv``): both bypass the ``atexit`` hook
     ``JobRegistry`` registers, the same reason
-    ``localm.plugins.gui.jobs.terminate_children_for_exit`` exists for the
+    ``localm.jobmanager.terminate_children_for_exit`` exists for the
     GUI's own background jobs. Never raises."""
     with _registry_lock:
         reg = _registry

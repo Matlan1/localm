@@ -20,6 +20,13 @@ from localm.plugins.coder.backends.http import (
 from localm.plugins.coder.doctor import FAIL, INFO, OK, SKIP, WARN, Check
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 def _serve(status: int, body: dict | None):
     """A real loopback HTTP server answering every GET with *status*/*body*."""
     payload = json.dumps(body or {}).encode()

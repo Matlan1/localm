@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from fastapi import HTTPException
 
 if TYPE_CHECKING:
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
 
 
 @dataclass(frozen=True)

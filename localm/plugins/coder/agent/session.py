@@ -213,6 +213,8 @@ class _SessionMixin:
         self._rebuild_system_prompt()
         self._warn_injected_file_limits()
         self._init_tool_hooks(cwd)
+        hooks = getattr(self, "_tool_hooks", None)
+        self._project_trust_loaded = bool(hooks is not None and hooks.trusted)
 
     def _migrate_checkpoint(self, old_cwd: Path, new_cwd: Path) -> None:
         """Move this session's own checkpoint file from *old_cwd*'s project

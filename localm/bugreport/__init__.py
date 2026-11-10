@@ -56,7 +56,7 @@ from localm.bugreport.errors import (
     LocalmError, RateLimitedError,
 )
 from localm.bugreport.scrub import (
-    _scrub_home, _scrub_url_creds, _QUERY_SECRET_RE, _HEADER_SECRET_RE, _JSON_SECRET_RE,
+    _scrub_home, _scrub_url_creds, _QUERY_SECRET_RE, _HEADER_SECRET_RE, _AUTH_HEADER_RE, _JSON_SECRET_RE,
     _scrub_query_and_header_secrets, _BEARER_RE, _APIKEY_RE, _scrub_secrets,
 )
 from localm.bugreport.diagnostics import (
@@ -110,7 +110,7 @@ _crash_trace_instance_id = None   # which instance_id currently owns _crash_trac
 _armed_instance_id = None   # instance_id of the last arm_crash_guard() in THIS process
 
 __all__ = [
-    "_all_crash_markers", "_all_crash_stopping_records", "_APIKEY_RE",
+    "_all_crash_markers", "_all_crash_stopping_records", "_APIKEY_RE", "_AUTH_HEADER_RE",
     "_app_state_lines", "arm_crash_guard", "_armed_instance_id", "armed_instance_id",
     "_BEARER_RE", "build_report", "stdin_is_interactive", "check_and_report_prior_crash",
     "_classify_prior_death", "_classify_url_error", "clear_crash_marker",

@@ -97,8 +97,11 @@ another model.
 
 With `--share-loaded-models`, a model another localm instance on this machine
 (a `localm gui` or `localm serve`) already has loaded is used through that
-instance instead of loading a second copy into VRAM. The match is by model
-file, not by name. An instance of the same install is reached with this
+instance instead of loading a second copy into VRAM. It finds instances of this OS user that listen on a
+loopback address on a port from 8642 to 8741 (or 11434) and were not started
+with `--isolated`. The match is by model file (same path, same checksum, or
+same file name and size); the name is used only when one side reports no file
+details. An instance of the same install is reached with this
 install's own credential; an instance of another install only when it has no
 API key set. It is used only while it confirms it records a chat no more
 than this machine's chat persistence allows (the more private of Session
@@ -277,8 +280,9 @@ a server's tools the same way based on this one setting.
 
 - **untrusted (default)**: every tool the server offers - including a
   read-only one like a search or query tool - is registered as destructive,
-  so each call is gated by a confirmation prompt. You review each call and
-  decide to allow or skip.
+  so each call is gated by a confirmation prompt, under `--yes` and GUI
+  auto-approve too; a run that cannot ask denies the call. You review each call
+  and decide to allow or skip.
 - **trusted**: every tool from that server runs without prompts. Use this only
   for servers you trust completely (e.g. internal tools you wrote, well-known
   open-source projects with security track records) - a single tool call you

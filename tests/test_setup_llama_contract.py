@@ -268,8 +268,9 @@ class World:
 
     def release(self, repo: str, tag: str, assets: list) -> dict:
         """Publish *assets* ``[(name, body, digest)]`` under a release listing.
-        *digest* is "ok" (the body's real sha256), None (no digest field), or a
-        literal digest string. Returns ``{name: download_url}``."""
+        *digest* is "ok" (the body's real sha256, which also becomes the pin of a
+        pinned asset name), None (no digest field), or a literal digest string.
+        Returns ``{name: download_url}``."""
         listing, urls = [], {}
         for name, body, digest in assets:
             url = self.serve(f"https://github.com/{repo}/releases/download/{tag}/{name}", body)
@@ -277,6 +278,9 @@ class World:
             entry = {"name": name, "browser_download_url": url, "size": len(body)}
             if digest == "ok":
                 entry["digest"] = "sha256:" + _sha(body)
+                for table in (sl._PINNED_FALLBACK_SHA256, pins._CUDA_LINUX_PINNED_SHA256):
+                    if name in table:
+                        self.mp.setitem(table, name, _sha(body))
             elif digest:
                 entry["digest"] = digest
             listing.append(entry)
@@ -1235,6 +1239,7 @@ def _download_failure(world, **kw):
 def test_a_digest_mismatch_is_refused(world):
     bad = "sha256:" + "0" * 64
     body = _zip(WIN_VULKAN)
+    world.mp.setitem(sl._PINNED_FALLBACK_SHA256, f"llama-{PIN}-bin-win-vulkan-x64.zip", "0" * 64)
     r, url, _ = _download_failure(world, digest=bad, body=body)
     _in_order(r.text, f"Downloading {url}",
               f"Provisioning vulkan failed: download sha256 does not match the expected pin "
@@ -1244,6 +1249,7 @@ def test_a_digest_mismatch_is_refused(world):
 
 def test_an_html_block_page_is_diagnosed_as_a_filtered_download(world):
     page = b"<!DOCTYPE html><html><body>Blocked by proxy</body></html>"
+    world.mp.setitem(sl._PINNED_FALLBACK_SHA256, f"llama-{PIN}-bin-win-vulkan-x64.zip", _sha(page))
     world.seed_target(".gitignore")
     url = world.serve(f"https://github.com/{UPSTREAM}/releases/download/{PIN}/"
                       f"llama-{PIN}-bin-win-vulkan-x64.zip", page, "text/html; charset=utf-8")

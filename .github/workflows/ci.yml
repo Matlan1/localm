@@ -60,14 +60,17 @@ on:
     # localm/inference/backends/llamacpp/** and localm/setup_llama/** +
     # workflow_dispatch. NOT on every push.
     #
-    # A push that touches the native llama.cpp binding runs the ABI-drift
-    # check on that commit instead of at the next weekly schedule run.
+    # A push to master that touches the native llama.cpp binding runs the
+    # ABI-drift check on that commit instead of at the next weekly schedule
+    # run. Pushes to other branches never trigger it.
     #
     # Scoped to trigger ONLY the abi-check job below (see its `if:`), not the
     # full lint+hygiene+tests matrix - that stays manual/scheduled per the
     # policy above, so this does not reintroduce the push-run cost the top
     # comment describes. Exactly these two paths; nothing else in the repo
     # triggers a run through this block.
+    branches:
+      - master
     paths:
       - "localm/inference/backends/llamacpp/**"
       - "localm/setup_llama/**"

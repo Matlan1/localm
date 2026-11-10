@@ -613,10 +613,14 @@ class _LoopMixin:
         # Set by Agent (core.py) through _ExecutionMixin.
         def _hooks_may_ask(self, calls) -> bool: ...
 
+        def _verify_refusal(self, label: str, interactive: bool) -> str | None: ...
+
         # Set by Agent (core.py) through _ContextMixin.
         def _note_typed_request(self, text) -> None: ...
 
         def report_deferred_mcp(self, interactive: bool) -> None: ...
+
+        def apply_project_trust(self, interactive: bool = False) -> bool: ...
 
         @property
         def disabled_tools(self) -> frozenset: ...
@@ -655,6 +659,8 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
+        if getattr(self, "parent", None) is None:
+            self._untrusted_in_context = False
         if record_request and getattr(self, "parent", None) is None:
             self._note_typed_request(task)
             self._record_typed_request(task)
@@ -694,6 +700,7 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        self._untrusted_in_context = False
         if record_request:
             self._note_typed_request(user_input)
             self._record_typed_request(user_input)
@@ -765,6 +772,7 @@ class _LoopMixin:
         # (the GUI or another session may have trusted them since); while they
         # stay untrusted the session says so once.
         if self.parent is None:
+            self.apply_project_trust(interactive)
             self.start_deferred_mcp()
             self.report_deferred_mcp(interactive)
         # Live attribute lookup, so a patched agent.parse_tool_calls / confirm /
@@ -1730,6 +1738,15 @@ class _LoopMixin:
         from .. import verify as _verify
         cmd = self.verify_cmd
         label = _verify.command_text(cmd)
+        refusal = self._verify_refusal(label, interactive)
+        if refusal is not None:
+            st.verify_settled = True
+            self._last_verify_state = "inconclusive"
+            msg = (f"verification not run: `{label}` runs code the project "
+                   f"controls and {refusal} - nothing was actually verified")
+            self._emit("info", text=msg)
+            _agent.print_warning(msg)
+            return None
         self._emit("info", text=f"verification: running `{label}`")
         if interactive:
             print_info(f"(verification: running `{label}`)")
@@ -1840,6 +1857,10 @@ class _LoopMixin:
     def _result_block(self, call, result) -> str:
         """The <tool_result> XML for a finished tool call, provenance-tagged.
 
+        A result that :func:`provenance.taints_session` names sets
+        ``_untrusted_in_context`` on this agent and every agent above it, which
+        re-arms confirmation until each one's next user message.
+
         Results from untrusted (network / MCP) tools are re-framed as
         data-not-instructions with a hardened boundary (provenance.py); trusted
         tools keep the plain frame. The outer <tool_result> tag is preserved
@@ -1847,9 +1868,14 @@ class _LoopMixin:
         unaffected. When the feature is off, every result uses the plain frame.
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
+        from ..provenance import build_result_block, is_untrusted_tool, taints_session
+        if taints_session(call.name, TOOL_REGISTRY.get(call.name), result):
+            agent = self
+            while agent is not None:
+                agent._untrusted_in_context = True
+                agent = getattr(agent, "parent", None)
         if not getattr(self, "_untrusted_provenance", True):
             return result.to_xml(call.name)
-        from ..provenance import build_result_block, is_untrusted_tool
         untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name), result)
         return build_result_block(call.name, result, untrusted)
 

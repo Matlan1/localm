@@ -331,7 +331,7 @@ def test_pull_comfy_source_route_offloads_settings_dns_lookup(
     _set_hostname_comfy_config(tmp_path)
     calls = _sink_probe(monkeypatch)
     started = []
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli",
                         lambda self, kind, cli_args, **kw: started.append(cli_args)
                         or type("Job", (), {"id": "job-test"})())
 
