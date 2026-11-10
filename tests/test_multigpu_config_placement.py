@@ -47,10 +47,12 @@ def _box(gpus, registry, *, status=discover.GPU_PROBE_OK, last=True, calls=None)
         yield reg
 
 
-def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None, **box):
+def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None, sized=True,
+          **box):
     """Run the backend's real ``_load_native`` on a torch box with *cfg* as the
     config and return the params handed to the worker. *box* goes to
-    :func:`_box`."""
+    :func:`_box`. With *sized* False the GPU layer count is left unset, so
+    ``_load_native`` sizes the load itself and plans the GPU placement."""
     captured = {}
 
     def _fake_spawn(self_runner, params, cancel_event=None, timeout=None,
@@ -69,7 +71,7 @@ def _load(b, gpus, registry, cfg, *, ctx_max=4096, registry_reads=None, **box):
             mock.patch("localm.inference.backends.llamacpp._runner."
                        "ModelRunner.spawn_and_load", _fake_spawn), \
             mock.patch("localm.model_meta.store_n_layers"):
-        b.effective_gpu_layers = 99
+        b.effective_gpu_layers = 99 if sized else None
         b._load_native()
     if registry_reads is not None:
         registry_reads.append(reg.call_count)

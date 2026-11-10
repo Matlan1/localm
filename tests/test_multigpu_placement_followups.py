@@ -485,7 +485,7 @@ class TestUnmatchedGpusKeepTheDefaultSplit:
         with caplog.at_level("WARNING", logger="localm"), \
                 mock.patch.object(discover, "gguf_split_devices",
                                   return_value=([], "the device names do not match")):
-            params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+            params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg, sized=False)
         assert params["gpu_split_ratios"] == {}
         assert _worker_writes(params, cfg, gpus) == (
             discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
@@ -495,5 +495,5 @@ class TestUnmatchedGpusKeepTheDefaultSplit:
         gpus = _torch_readings((20.0, False), (20.0, False))
         cfg = _config(gpu_split_indices=[0, 1], gpu_split_ratios=[3.0, 1.0],
                       main_gpu_index=None)
-        params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+        params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg, sized=False)
         assert params["gpu_split_ratios"] != {}

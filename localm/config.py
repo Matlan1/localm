@@ -1771,8 +1771,11 @@ def save_config(cfg: dict) -> None:
 
 
 def _changed_config_keys(before: dict, after: dict) -> list:
-    """Names of the top-level keys whose value differs between *before* and *after*."""
-    return sorted(k for k in set(before) | set(after) if before.get(k, _MISSING) != after.get(k, _MISSING))
+    """Names of the top-level keys whose value differs between *before* and
+    *after*, leaving out the ``config_version`` stamp."""
+    return sorted(k for k in set(before) | set(after)
+                  if k != CONFIG_VERSION_KEY
+                  and before.get(k, _MISSING) != after.get(k, _MISSING))
 
 
 _MISSING = object()

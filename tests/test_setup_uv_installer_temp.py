@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,8 +95,10 @@ def _pinned_copy(name: str, clone: Path, releases: Path, stub: bytes, *, bat: bo
     served from *releases*."""
     sha = hashlib.sha256(stub).hexdigest()
     text = (ROOT / name).read_bytes().decode("utf-8")
-    version = "0.13.6"
+    versions = re.findall(r'^\s*set "UV_INSTALLER_VERSION=([^"]+)"', text, re.M)
     if bat:
+        assert len(versions) == 1, f"{name}: the installer version pin moved"
+        version = versions[0]
         pin_line = 'set "UV_INSTALLER_SHA256='
         new_pin = f'set "UV_INSTALLER_SHA256={sha}"'
         assert text.count(_HOST) == 1

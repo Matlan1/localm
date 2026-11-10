@@ -83,14 +83,19 @@ def installed_from_store(plugin_dir: Path) -> bool:
 
 def is_available(name: str) -> bool:
     """True when first-party plugin *name* ships with this build, is installed
-    from the store in the data dir's plugins folder, and is enabled."""
+    from the store in the data dir's plugins folder, and is enabled. A
+    protected plugin (chat) is always enabled and is never listed in
+    ``plugins_enabled``."""
     if bundled_dir(name) is None:
         return False
     from localm.config import load_config
+    from localm.plugins import catalog
     from localm.plugins.loader import plugins_dir
     try:
         if not installed_from_store(plugins_dir() / name):
             return False
+        if name in catalog.protected():
+            return True
         enabled = load_config().get("plugins_enabled", [])
     except OSError:
         return False

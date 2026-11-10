@@ -48,7 +48,7 @@ def test_message_only_renders_not_stated_not_a_duplicate(cli_runner):
 def test_no_flags_no_tty_refuses_without_writing_a_file(cli_runner):
     from localm.cli import main
     result = cli_runner.invoke(main, ["bug-report"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "Describe the problem first" in result.output
     reports_dir = cfg.HOME_DIR / "bug-reports"
     assert not reports_dir.is_dir() or not list(reports_dir.glob("bug-*.md"))
