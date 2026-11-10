@@ -88,6 +88,26 @@ cannot be forced open the way a CLI bind can. It degrades LOUDLY to loopback
 instead of exiting: a browser-only user with no terminal would otherwise be
 locked out of a server that refuses to start, with no way back in.
 
+### Host header check (DNS rebinding)
+
+A running server answers only to its own names. Every request, WebSocket
+upgrades included, must carry a `Host` header naming `localhost`, a `*.localhost` name or
+a loopback address; on a network bind also any IP address, this machine's own
+host name (short and fully qualified, and `<hostname>.local`), the mDNS name,
+its Tailscale names and the names in the TLS certificate. Names listed in the
+owner-only `allowed_hosts` setting or the comma-separated `LOCALM_ALLOWED_HOSTS`
+environment variable are accepted on every bind (`*.example.com` covers one
+label, `"*"` turns the check off). Anything else, and a missing, repeated or
+malformed `Host`, gets `400` (a WebSocket upgrade `403`) before any route, CORS
+reply or static file. The port is not compared. When a request names a host the
+current list refuses and the list is at least 30 seconds old, the list is built
+again (settings, environment and `tailscale status` re-read), so a Tailscale
+name that comes up after localm started is accepted without a restart. The name
+`host.docker.internal` is never accepted unless it is listed. This stops DNS rebinding: a page on an attacker's
+domain whose DNS answer is switched to `127.0.0.1` is same-origin to the browser,
+so without this check it would also pass the same-origin checks below and, with
+no key set, the keyless inference API.
+
 ### State-changing endpoints
 
 Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) is **same-origin
@@ -452,8 +472,8 @@ and search snippets are untrusted input to the model, and
   the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
   the moment they exist, then restricted to the current user: `chmod` on
-  POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
-  dropped) on Windows. Both are best-effort - a failure is logged as a
+  POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
+  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
   applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
@@ -569,6 +589,10 @@ the same signing keys described above, and/or a plain SHA256 digest - useful if
 you obtained the zip some other way than the recommended `git clone` install. The
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
+
+## Management log
+
+`logs/management.jsonl` in the data folder is an append-only record of management events, written in every session mode including privacy mode: key created or revoked (key id only), refused login (loopback or not), update applied (versions), settings saved (setting names only) and plugin installed or removed. It carries no key, setting value or conversation content. It is capped at 1 MB with one rotated file, and a failed write is logged as a warning without failing the operation recorded.
 
 ## Verifying a release
 

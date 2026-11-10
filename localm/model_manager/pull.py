@@ -1057,6 +1057,7 @@ def pull_model(
     dest_dir: Optional[Path] = None,
     register: bool = True,
     type_is_hint: bool = False,
+    allow_local: bool = True,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -1078,6 +1079,10 @@ def pull_model(
     result's badge), not the user's choice: the entry is registered with it, and
     the registry sync may still correct it. Without it an explicit *model_type*
     is recorded as ``type_user_set``.
+
+    *allow_local* False treats *model_spec* as a remote spec even when it names
+    an existing file or folder, so nothing on this machine is registered, copied
+    or moved.
     """
     spec = _mm.resolve_spec(model_spec)
     type_is_auto = (model_type == "auto")
@@ -1099,7 +1104,8 @@ def pull_model(
     from rich.markup import escape
     try:
         local = Path(model_spec).expanduser()
-        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
+        is_local_path = (allow_local and local.exists()
+                         and (local.is_absolute() or local.is_file()))
     except OSError:
         is_local_path = False
     if is_local_path:

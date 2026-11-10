@@ -87,6 +87,26 @@ def test_a_value_the_schema_rejects_is_not_stored(home):
     assert _stored(key) == before
 
 
+def _host():
+    from localm.plugins.contract import PluginSpec
+    from localm.plugins.engine import PluginHost
+    return PluginHost(None, None, PluginSpec(name="probe"))
+
+
+def test_the_host_method_applies_the_owner_tier_to_the_requests_caller(
+        home, monkeypatch):
+    from localm.inference import http_server as hs
+    host = _host()
+    before = _stored("embedding_model")
+    monkeypatch.setattr(hs, "caller_is_operator", lambda request: False)
+    with pytest.raises(PermissionError):
+        host.set_global_config(object(), "embedding_model", "bge-small-en-v1.5")
+    assert _stored("embedding_model") == before
+    monkeypatch.setattr(hs, "caller_is_operator", lambda request: True)
+    host.set_global_config(object(), "embedding_model", "bge-small-en-v1.5")
+    assert _stored("embedding_model") == "bge-small-en-v1.5"
+
+
 def _update_config_uses(source: str) -> list:
     """Line numbers where *source* imports, names or calls ``update_config``."""
     hits = []
