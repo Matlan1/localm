@@ -353,10 +353,11 @@ _ROUTE_PREFIXES = ("/api/", "/v1/")
 def _mounted_paths(route) -> list:
     """The URL paths *route* serves. An included router (FastAPI keeps it lazy
     and path-less) is expanded into the effective paths of its routes."""
-    contexts: Any = getattr(route, "effective_route_contexts", None)
-    if callable(contexts):
+    accessor = getattr(route, "effective_route_contexts", None)
+    if callable(accessor):
         out = []
-        for ctx in contexts():
+        contexts: Any = accessor()
+        for ctx in contexts:
             starlette_route = getattr(ctx, "starlette_route", None)
             target = starlette_route if starlette_route is not None else ctx
             out.append(str(getattr(target, "path", "")))
