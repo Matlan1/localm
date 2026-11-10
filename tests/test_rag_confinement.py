@@ -1842,24 +1842,24 @@ class TestRagWriteRoutesKeyScopedRoots:
 
 
 class TestRagRepairRouteFolderPolicy:
+    def _deny(self, folder):
+        from localm.config import load_config, save_config
+        cfg = load_config()
+        cfg["rag_indexing_mode"] = "blacklist"
+        cfg["rag_denied_roots"] = [str(folder)]
+        save_config(cfg)
+
     def test_repair_skips_a_source_the_folder_policy_now_refuses(
             self, tmp_path, monkeypatch):
-        granted = tmp_path / "granted"
-        granted.mkdir()
-        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
-                                          rag_roots=[str(granted)])
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch)
         owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
         docs_dir = home / "docs"
         docs_dir.mkdir()
         with TestClient(app) as client:
             doc = _index_via(client, app, owner_hdr, "kb", docs_dir)
-            from localm.config import load_config, save_config
-            cfg = load_config()
-            cfg["rag_indexing_mode"] = "blacklist"
-            cfg["rag_denied_roots"] = [str(docs_dir)]
-            save_config(cfg)
+            self._deny(docs_dir)
             r = client.post("/api/rag/collections/kb/repair", json={},
-                            headers=owner_hdr)
+                            headers=hdr)
             assert r.status_code == 200, r.text
             job = _await_job(app, r.json()["job_id"])
             texts = [e.get("text", "") for e in job._history]
@@ -1868,20 +1868,32 @@ class TestRagRepairRouteFolderPolicy:
 
     def test_repair_reindexes_a_source_the_policy_allows(
             self, tmp_path, monkeypatch):
-        granted = tmp_path / "granted"
-        granted.mkdir()
-        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
-                                          rag_roots=[str(granted)])
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch)
         owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
         docs_dir = home / "docs"
         docs_dir.mkdir()
         with TestClient(app) as client:
             _index_via(client, app, owner_hdr, "kb", docs_dir)
             r = client.post("/api/rag/collections/kb/repair", json={},
-                            headers=owner_hdr)
+                            headers=hdr)
             assert r.status_code == 200, r.text
             job = _await_job(app, r.json()["job_id"])
             assert job.status == "done", job.status
+            texts = [e.get("text", "") for e in job._history]
+            assert any(t.startswith("repaired: 1 re-indexed") for t in texts), texts
+
+    def test_owner_repair_keeps_the_floor_only_rule(self, tmp_path, monkeypatch):
+        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch)
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        docs_dir = home / "docs"
+        docs_dir.mkdir()
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", docs_dir)
+            self._deny(docs_dir)
+            r = client.post("/api/rag/collections/kb/repair", json={},
+                            headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
             texts = [e.get("text", "") for e in job._history]
             assert any(t.startswith("repaired: 1 re-indexed") for t in texts), texts
 

@@ -1080,14 +1080,18 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
     what it can rebuild and the job log names how many upload-only documents were
     left untouched.
 
-    Every recorded source is re-checked against the caller's indexing policy
-    (the folder policy, or the key's own rag_roots), the same one ``/add``
-    applies; a refused source is skipped with a job line naming the reason.
+    For any caller but the owner, every recorded source is re-checked against
+    that caller's indexing policy (the folder policy, or the key's own
+    rag_roots), the same one ``/add`` applies; a refused source is skipped with
+    a job line naming the reason. The owner's repair keeps the hard floor only,
+    as ``localm rag repair`` does.
     """
     coll = await _get_collection_off_loop(name)
     key_roots = _require_rag_confinement(name, request)
     from localm.rag.store import indexing_policy
-    policy = indexing_policy(key_roots=key_roots)
+    import localm.inference.http_server as _hs
+    policy = (None if _hs.caller_is_operator(request)
+              else indexing_policy(key_roots=key_roots))
     docs = coll.documents()
     if not docs:
         detail = (f"'{name}' index is corrupt and has no indexed documents to "
@@ -1140,7 +1144,7 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
         sources = []
         for src in repairable:
             reason = floor_refusal(src, allow_net)
-            if not reason:
+            if not reason and policy is not None:
                 try:
                     confine_index_path(src, policy)
                 except ConfinementError as e:
