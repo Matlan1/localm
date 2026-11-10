@@ -40,6 +40,16 @@ class _Stub:
         yield "Done."
 
 
+def _enable(name: str) -> None:
+    """Enable the installed plugin *name* in config.json, as `localm plugin
+    enable` does."""
+    from localm.config import update_config
+
+    def _add(cfg: dict) -> None:
+        cfg["plugins_enabled"] = sorted(set(cfg.get("plugins_enabled", [])) | {name})
+    update_config(_add)
+
+
 def _agent(cwd, **kw):
     from localm.plugins.coder.agent import Agent
     with patch("localm.plugins.coder.agent.ProjectMap") as PM, \
@@ -183,6 +193,10 @@ class TestRestrictedSessionLoadsNoExternalCode:
         project = tmp_path / "proj"
         project.mkdir()
         try:
+            _agent(project, restricted=False)
+            assert not marker.exists(), "an installed but disabled plugin was imported"
+            assert reg_name not in TOOL_REGISTRY
+            _enable(name)
             _agent(project, restricted=True)
             assert not marker.exists(), "a restricted session imported a plugin module"
             assert reg_name not in TOOL_REGISTRY
@@ -244,6 +258,7 @@ class TestToolsRegisteredLaterStayDenied:
             "---\nname: demo\ndescription: d\n---\nSECRET BODY\n", encoding="utf-8")
         reg_name = f"plugin_{name}_tool_ping"
         project = tmp_path / "proj"
+        _enable(name)
         try:
             with patch.dict(TOOL_REGISTRY, {}, clear=False):
                 TOOL_REGISTRY.pop("list_skills", None)
