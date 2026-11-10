@@ -531,7 +531,7 @@ def main(
         sys.exit(2 if ci else 1)
     finally:
         # Flush patch output before closing
-        if patch_mode and agent._patch_chunks:
+        if patch_mode and agent.has_patch():
             patch_content = agent.flush_patch()
             if patch_mode == "-":
                 sys.stdout.write(patch_content)

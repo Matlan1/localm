@@ -180,13 +180,38 @@ def test_generate_builds_system_then_user_message():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("raw", True), ("suffix", "tail"), ("template", "{{ .Prompt }}"),
-    ("context", [1, 2, 3])])
+    ("suffix", "tail"), ("template", "{{ .Prompt }}"), ("context", [1, 2, 3])])
 def test_generate_refuses_what_it_cannot_honour(field, value):
     req = P.OllamaGenerateRequest(model="m", prompt="p", **{field: value})
     with pytest.raises(P.OllamaError) as exc:
         P.plan_generate(req, "m")
     assert exc.value.status == 400
+
+
+def test_raw_generate_plans_a_text_completion():
+    plan = P.plan_generate(P.OllamaGenerateRequest(
+        model="m", prompt="Once upon a time", raw=True, system="s", template="t",
+        think=True, options={"num_predict": 5, "stop": ["\n"]}), "m")
+    assert plan.raw is True and plan.want_thinking is False
+    assert plan.body["prompt"] == "Once upon a time"
+    assert "messages" not in plan.body and "chat_template_kwargs" not in plan.body
+    assert plan.body["max_tokens"] == 5 and plan.body["stop"] == ["\n"]
+    assert {"system", "template", "think"} <= set(plan.ignored_options)
+
+
+def test_raw_generate_refuses_images():
+    with pytest.raises(P.OllamaError) as exc:
+        P.plan_generate(P.OllamaGenerateRequest(
+            model="m", prompt="p", raw=True, images=["iVBORw0KGgo="]), "m")
+    assert exc.value.status == 400
+
+
+def test_completion_replies_translate_from_the_choice_text():
+    reply = P.completion_to_reply("generate", {
+        "choices": [{"text": " world", "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+        "m", want_thinking=False, total_ns=1)
+    assert reply["response"] == " world" and reply["done"] is True
 
 
 def test_generate_accepts_the_empty_forms_of_those_fields():

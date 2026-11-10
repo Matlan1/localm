@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import difflib
 import glob as _glob
+import io
 import json
 import os
 import os.path as _os_path
@@ -175,7 +176,8 @@ def _truncation_note(text: str, first_line: int, total_lines: int) -> str:
             f"offset={first}, limit=<lines>), or grep for what you need]")
 
 
-def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> ToolResult:
+def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0,
+                   _overlay=None) -> ToolResult:
     """Read a file. *offset* (1-based start line) and *limit* (max lines)
     slice big files so a truncated first read can be followed by targeted
     reads of the middle instead of re-fetching the whole file."""
@@ -183,14 +185,18 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
         p = _confine(cwd, path)
     except PermissionError as e:
         return ToolResult.error(str(e))
-    if not p.exists():
-        return ToolResult.error(f"File not found: {p}")
-    if not p.is_file():
-        return ToolResult.error(f"Not a file: {p}")
-    try:
-        raw = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return ToolResult.error(str(e))
+    overlaid = _overlay.current(p) if _overlay is not None else None
+    if overlaid is None:
+        if not p.exists():
+            return ToolResult.error(f"File not found: {p}")
+        if not p.is_file():
+            return ToolResult.error(f"Not a file: {p}")
+        try:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return ToolResult.error(str(e))
+    else:
+        raw = overlaid
 
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
 
@@ -1122,7 +1128,8 @@ def _is_probably_binary(fp: Path) -> bool:
         return False   # unreadable is reported separately, not as "binary"
 
 
-def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
+def _grep_file_hits(fp: Path, rx, context: int, cap: int,
+                    text: Optional[str] = None) -> tuple[list, int]:
     """Stream *fp* one line at a time and collect matches.
 
     Returns ``(hits, total)``: up to *cap* hits as
@@ -1138,7 +1145,8 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
     pending: list = []   # [lineno, window, hit_offset, wanted_len] - awaiting trailing context
     hits:    list = []
     total = 0
-    with fp.open("r", encoding="utf-8", errors="replace") as fh:
+    with (io.StringIO(text) if text is not None
+          else fp.open("r", encoding="utf-8", errors="replace")) as fh:
         for lineno, raw in enumerate(fh, 1):
             # Text mode is universal-newline, so CR LF and a lone CR arrive already
             # translated; stripping the trailing newline is the whole job.
@@ -1176,7 +1184,7 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
 def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
               context: int = 2, max_per_file: Optional[int] = None,
               max_output_lines: Optional[int] = None,
-              max_file_bytes: Optional[int] = None) -> ToolResult:
+              max_file_bytes: Optional[int] = None, _overlay=None) -> ToolResult:
     """Search file contents with a regex pattern (pure Python, no external tools).
 
     Files are streamed line by line rather than read whole, and three classes of
@@ -1263,6 +1271,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
             skipped_binary += 1
             continue
         files.append(fp)
+    if _overlay is not None:
+        files.extend(f for f in _overlay.new_files(base, file_glob)
+                     if not any(part in prune_dirs for part in f.parts[base_depth:-1]))
 
     results = []
     total_hits = 0
@@ -1270,7 +1281,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     unreadable = []  # files we could not read, surfaced below so coverage stays honest
     for file_idx, fp in enumerate(files):
         try:
-            hits, hit_total = _grep_file_hits(fp, rx, context, per_file_cap)
+            hits, hit_total = _grep_file_hits(
+                fp, rx, context, per_file_cap,
+                text=_overlay.current(fp) if _overlay is not None else None)
         except (_ModelRegexTooSlow, _ModelRegexTooExpensive) as e:
             # Ordered before the generic handler below, which would otherwise catch
             # MemoryError and file it as an unreadable file. A pattern too slow or too
@@ -1370,6 +1383,7 @@ def tool_search_replace(
     glob: str = "**/*",
     dry_run: bool = False,
     _restricted: bool = False,
+    _overlay=None,
 ) -> ToolResult:
     """
     Search for *pattern* across files and replace all matches.
@@ -1412,6 +1426,8 @@ def tool_search_replace(
         p for p in cwd.glob(glob)
         if p.is_file() and p.resolve().is_relative_to(cwd_resolved)
     )
+    if _overlay is not None:
+        candidates = sorted({*candidates, *_overlay.new_files(cwd, glob)})
     changes: list[tuple[Path, Path, str, int, bytes]] = []  # (abs, rel, new_text, count, old_bytes)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
     locked: list[str] = []      # matching files a restricted session may not change
@@ -1435,7 +1451,7 @@ def tool_search_replace(
                 guarded.append(str(fp))
             continue
         try:
-            if size_cap > 0 and fp.stat().st_size > size_cap:
+            if size_cap > 0 and fp.exists() and fp.stat().st_size > size_cap:
                 try:
                     oversized.append(str(fp.relative_to(cwd)))
                 except ValueError:
@@ -1447,8 +1463,13 @@ def tool_search_replace(
             # universal-newline translation on) is what the regex substitution runs
             # against. diffutil.compute_search_replace_diff normalises old_bytes the
             # same way.
-            old_bytes = fp.read_bytes()
-            text = fp.read_text(encoding="utf-8", errors="replace")
+            overlaid = _overlay.current(fp) if _overlay is not None else None
+            if overlaid is None:
+                old_bytes = fp.read_bytes()
+                text = fp.read_text(encoding="utf-8", errors="replace")
+            else:
+                old_bytes = overlaid.encode("utf-8")
+                text = overlaid
         except Exception:
             # Record the skip rather than silencing it.
             try:
@@ -1474,7 +1495,7 @@ def tool_search_replace(
                 or unwritable_file_name(fp.name)
                 or unwritable_file_name(fp.resolve().name)
                 or inside_unwritable_dir(cwd_resolved, fp.resolve(), redirects)
-                or has_other_hard_link(fp.resolve())):
+                or (fp.exists() and has_other_hard_link(fp.resolve()))):
             locked.append(str(rel))
             continue
         changes.append((fp, rel, new_text, len(matches), old_bytes))

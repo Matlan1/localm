@@ -6,6 +6,7 @@ confirm prompt, scope resolution, and the per-write project map update. Mixed in
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -24,8 +25,8 @@ from ..display import (
     tool_call_text,
 )
 from ..diffutil import (
-    compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
-    read_old_content, read_old_content_checked, resolve_new_content,
+    compute_multifile_diff,
+    read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
 from .. import data_guard, shell_guard
@@ -37,7 +38,8 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_MODE_REFUSED_TOOLS, _PROJECT_MAP_TOOLS,
+    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_MODE_REFUSED_TOOLS,
+    _PATCH_OVERLAY_READ_TOOLS, _PROJECT_MAP_TOOLS,
     _RESTRICTED_PATH_WRITE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
@@ -58,6 +60,8 @@ _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each
 
 if TYPE_CHECKING:
     from localm.audit import AuditLogT
+
+    from ..patch_overlay import PatchOverlay
 
 
 def _executed_forms(tool: str, command: str) -> list[str]:
@@ -125,6 +129,9 @@ class _ExecutionMixin:
         always_confirm: set
         confirm_handler: Any
         _project_map: Any
+        patch_mode: bool
+        _patch_overlay: PatchOverlay
+        _patch_chunks: list[str]
 
         @property
         def auto_approve(self) -> bool: ...
@@ -557,7 +564,6 @@ class _ExecutionMixin:
             chunk = self._patch_mode_intercept(call)
             duration_s = time.monotonic() - t_start
             if chunk is not None:
-                self._patch_chunks.append(chunk)
                 # Name the files the DIFF covers, not every path the call
                 # mentioned: a file whose edit produced no change is not captured.
                 # search_replace has no pre-known targets (its files are discovered
@@ -912,6 +918,10 @@ class _ExecutionMixin:
         # cannot win.
         if call.name == "search_replace" or call.name in DIAGNOSED_TOOLS:
             args["_restricted"] = self.restricted
+        # In patch mode the read tools see the session's captured writes; outside
+        # it they get None.
+        if call.name in _PATCH_OVERLAY_READ_TOOLS:
+            args["_overlay"] = self._patch_overlay if self.patch_mode else None
         # The interaction tools prompt this session's user (tools/interact.py).
         # Injected after the copy, so a model-supplied "_session" or
         # "_interactive" cannot win.
@@ -1306,28 +1316,86 @@ class _ExecutionMixin:
 
     def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
         """
-        Compute a unified diff for a write/edit/patch call without touching disk.
+        Capture a write/edit/patch call into the session overlay without
+        touching disk.
 
-        Returns the diff string, or None if the diff cannot be computed.
+        Returns the diff this call alone contributed (used to name the files it
+        covered), or None when the call changes nothing or cannot be captured.
+        The patch handed to the user is built from the overlay, one diff per
+        file, so repeated edits of one file stay applicable.
         """
-        # edit_files spans several files, so it has no single old_content: without
-        # this branch compute_tool_diff returns None and the intercept reports
-        # "cannot be captured".
+        overlay = self._patch_overlay
         if call.name == "edit_files":
-            return compute_multifile_diff(self.cwd, call.args.get("edits"))
-        # search_replace's targets are a glob + regex sweep, not a `path` arg, so
-        # there is no old_content to read ahead of time. It gets its own helper,
-        # which runs the real sweep via dry_run rather than touching disk.
+            return self._capture_edit_files(call.args.get("edits"))
         if call.name == "search_replace":
-            return compute_search_replace_diff(
+            from ..tools.files import tool_search_replace
+            result = tool_search_replace(
                 self.cwd, call.args.get("pattern", ""),
                 call.args.get("replacement", ""),
                 call.args.get("glob", "**/*"),
-                restricted=self.restricted,
-            )
+                dry_run=True, _restricted=self.restricted, _overlay=overlay)
+            if not result.ok or not result.changes:
+                return None
+            return self._capture_changes(
+                [(rel, new_text) for rel, _old, new_text in result.changes])
         path_arg = call.args.get("path", "")
-        old_text = read_old_content(self.cwd, path_arg)
-        return compute_tool_diff(call.name, call.args, old_text)
+        old_text = overlay.read(path_arg)
+        if call.name == "patch_file":
+            diff = call.args.get("diff", "")
+            if not diff:
+                return None
+            from .._patch import apply_diff, PatchError
+            try:
+                new_text = apply_diff(old_text, diff)
+            except PatchError:
+                self._patch_chunks.append(diff)
+                return diff
+        else:
+            new_text = resolve_new_content(call.name, call.args, old_text)
+        if new_text is None or new_text == old_text:
+            return None
+        return self._capture_changes([(path_arg, new_text)])
+
+    def _capture_edit_files(self, edits: object) -> Optional[str]:
+        """Capture an ``edit_files`` batch: every edit composes onto the overlay
+        content of its file, and one unmatched edit rejects the whole batch,
+        like the real tool."""
+        if not isinstance(edits, list) or not edits:
+            return None
+        texts: dict[str, str] = {}
+        paths: dict[str, str] = {}
+        for item in edits:
+            if not isinstance(item, dict):
+                return None
+            path_arg = str(item.get("path") or "")
+            old_str = str(item.get("old") or "")
+            new_str = str(item.get("new") or "")
+            if not path_arg or not old_str:
+                return None
+            key = str((self.cwd / path_arg).resolve())
+            if key not in texts:
+                texts[key] = self._patch_overlay.read(path_arg)
+                paths[key] = path_arg
+            if old_str not in texts[key]:
+                return None
+            texts[key] = texts[key].replace(old_str, new_str, 1)
+        return self._capture_changes([(paths[k], t) for k, t in texts.items()])
+
+    def _capture_changes(self, changes: list) -> Optional[str]:
+        """Record ``(path, new_text)`` pairs in the overlay. Returns the diff
+        this call added, or None when no file differs from what a tool sees now."""
+        overlay = self._patch_overlay
+        chunks = []
+        for path_arg, new_text in changes:
+            path_arg = str(path_arg)
+            current = overlay.read(path_arg)
+            if current == new_text:
+                continue
+            chunks.append("".join(difflib.unified_diff(
+                current.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                fromfile=f"a/{path_arg}", tofile=f"b/{path_arg}")))
+            overlay.record(path_arg, new_text)
+        return "".join(chunks) or None
 
     def current_patch(self) -> str:
         """The accumulated unified diff so far, WITHOUT clearing the buffer.
@@ -1335,7 +1403,8 @@ class _ExecutionMixin:
         For readers that only want to LOOK: a GUI "show me the patch" request, a
         status poll, a preview. :meth:`flush_patch` clears the buffer.
         """
-        return "\n".join(c for c in self._patch_chunks if c)
+        return self._patch_overlay.diff() + "\n".join(
+            c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
         """Is there anything in the patch buffer? Cheap, and exactly equivalent
@@ -1344,7 +1413,7 @@ class _ExecutionMixin:
         ``CoderSession.info()`` needs only the boolean and is called once per
         session by the session-list route.
         """
-        return any(c for c in self._patch_chunks)
+        return self._patch_overlay.has_changes() or any(c for c in self._patch_chunks)
 
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
         """
@@ -1354,6 +1423,7 @@ class _ExecutionMixin:
         """
         content = self.current_patch()
         self._patch_chunks.clear()
+        self._patch_overlay.clear()
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(content, encoding="utf-8")

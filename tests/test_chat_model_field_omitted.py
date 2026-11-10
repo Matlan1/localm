@@ -29,6 +29,7 @@ class FakeEngine:
         self._loaded = False
         self.active_requests = 0
         self.supports_images = False
+        self.supports_raw_prompt = True
         self.model_path = f"Z:/models/{display_name}.gguf"
 
     @property
