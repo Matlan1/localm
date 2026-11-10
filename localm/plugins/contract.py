@@ -183,8 +183,15 @@ class PluginSpec:
 @runtime_checkable
 class Host(Protocol):
     """The API the engine hands a plugin at register() time. The plugin attaches
-    itself through this object and never imports the app or global config
-    directly."""
+    itself through this object.
+
+    What is enforced: a plugin module may not call ``update_config`` (a test
+    fails the build), so a plugin writes its own settings block through
+    :meth:`save_plugin_config` and any other global config key through
+    :meth:`set_global_config`, which applies the settings schema's owner tier to
+    the request's caller. What is not enforced: a plugin can still import and
+    read ``localm.config`` or the HTTP server module; reading is not restricted.
+    """
 
     api_version: int
 
@@ -198,6 +205,12 @@ class Host(Protocol):
     # refused. name is optional and defaults to the plugin's own.
     def plugin_config(self, name: Optional[str] = ...) -> dict: ...
     def save_plugin_config(self, name: Optional[str] = ..., cfg: Optional[dict] = ...) -> None: ...
+    def set_global_config(self, request: Any, key: str, value: Any) -> None:
+        """Write the global config key *key*. A key the settings schema reserves
+        for the owner (an owner-tier or engine-managed key) raises
+        ``PermissionError`` unless the caller of *request* is the owner; an
+        unknown key or a value the schema rejects raises ``ValueError``."""
+        ...
     def caller_is_owner(self, request: Any) -> bool:
         """True when the caller of *request* (a route's ``Request``) is the
         owner: open mode, or an ADMIN/owner key or session."""
