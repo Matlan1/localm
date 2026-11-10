@@ -24,6 +24,12 @@ from localm.plugins.builtin.video.backends import native
 
 
 @pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+@pytest.fixture(autouse=True)
 def _reference_box(monkeypatch):
     from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
     pin_rx6900xt(monkeypatch)

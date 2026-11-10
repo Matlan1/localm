@@ -97,10 +97,10 @@ async def _require_native_size(width: int, height: int) -> None:
     def _check() -> Optional[str]:
         from localm.media import backend_choice
         s = backend_choice.refine_auto(_backend.settings(load_config()), "Video")
-        if s.get("backend") != "native":
+        check_size = getattr(_backend._impl(s), "check_size", None)
+        if check_size is None:
             return None
-        from .backends import native
-        return native.check_size(int(width), int(height))
+        return check_size(int(width), int(height))
     try:
         bad = await run_in_threadpool_bounded(_check, timeout=20.0)
     except ThreadCallTimeout as e:

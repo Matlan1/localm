@@ -43,6 +43,12 @@ BRACKET_STYLE_TEXT = "render[bold red] failed"
 
 
 @pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+@pytest.fixture(autouse=True)
 def _wide_console(monkeypatch):
     """Widen the console for every test in this module.
 
