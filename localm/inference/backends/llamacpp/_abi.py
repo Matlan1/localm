@@ -267,7 +267,7 @@ class AbiVerdict:
     diagnostics: list[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
     layout: str = ""                                       # MODEL_PARAMS_V1 / _V2 / _V3
-    context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2 / _V3
+    context_layout: str = ""                                # CONTEXT_PARAMS_V1 .. _V4
 
     @property
     def ok(self) -> bool:
@@ -813,11 +813,14 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
       refuses. Not always: bytes whose -1 run is longer than the four
       checked fields (a build whose ctx_type is itself -1) put both
       candidate windows inside one run, and every reading then satisfies
-      evaluate(). A V2/V3 misbind reads the flag block at a NULL-default
-      pointer (abort_callback_data or samplers) and refuses. Bytes in the V2
-      family whose flag block cannot tell V2 from V3 (all four
-      true-by-default flags read false) satisfy evaluate() under either
-      class, so an undecided V2/V3 split is itself a refusal.
+      evaluate(). A V2/V3 or V3/V4 misbind reads the flag block at a
+      NULL-default pointer (abort_callback_data or samplers) and refuses. V4
+      bytes read through the V2 class put V2's three NULL-default pointers on
+      zero V4 fields and satisfy evaluate(); the flag-block fingerprint never
+      picks V2 for V4 bytes. Bytes in the V2 family whose flag block cannot
+      tell the layouts apart (all four true-by-default flags read false)
+      satisfy evaluate() under more than one class, so an undecided split is
+      itself a refusal.
 
     * ``model_params`` - the second layer buys NOTHING. evaluate()'s
       model_params checks are RANGE checks over fields whose plausible
