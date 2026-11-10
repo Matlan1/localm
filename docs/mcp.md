@@ -273,8 +273,9 @@ a server's tools the same way based on this one setting.
 
 - **untrusted (default)**: every tool the server offers - including a
   read-only one like a search or query tool - is registered as destructive,
-  so each call is gated by a confirmation prompt. You review each call and
-  decide to allow or skip.
+  so each call is gated by a confirmation prompt, under `--yes` and GUI
+  auto-approve too; a run that cannot ask denies the call. You review each call
+  and decide to allow or skip.
 - **trusted**: every tool from that server runs without prompts. Use this only
   for servers you trust completely (e.g. internal tools you wrote, well-known
   open-source projects with security track records) - a single tool call you

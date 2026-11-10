@@ -368,14 +368,15 @@ def main(
     # confirmation unless --yes was passed, and a non-interactive run cannot
     # confirm, so the gate in execution.py fails CLOSED.
     if task and not yes:
-        # build_agent adds run_shell and run_shell_background to always_confirm
-        # for this case.
+        # build_agent adds EXECUTES_PROJECT_CODE to always_confirm for this case.
         print_warning(
-            "Unattended one-shot: run_shell is code execution and the web tools "
-            "egress data. run_shell and run_shell_background now require --yes "
-            "(else they are denied this run); network tools still obey net_mode "
-            "(off/ask/allow). Pass --yes to auto-approve, or run interactively to "
-            "confirm each call.", to_stderr=True)
+            "Unattended one-shot: run_shell, run_tests and untrusted MCP tools run "
+            "code and the web tools egress data. Tools that run code now require "
+            "--yes (else they are denied this run), and so does any file write, "
+            "push or network call after the run has read untrusted content; "
+            "network tools still obey net_mode (off/ask/allow). Pass --yes to "
+            "auto-approve, or run interactively to confirm each call.",
+            to_stderr=True)
 
     # ------------------------------------------------------------------ #
     #  Create agent

@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **The coder asks before every tool that runs code, not only before `run_shell`.** `run_tests`, the verification command and an untrusted MCP server's tools now follow the same rule as the shell tools: an unattended `localm coder "TASK"` (and `run_coder_task`) without `--yes` denies them, `--interactive-confirm` asks before each, and an untrusted MCP server's tools ask before every call even under `--yes`. After the agent reads a web page, a search result, MCP output or a skill, file writes, pushes, network calls and code-running tools ask again until your next message. `git_push` refuses a remote or branch that begins with `-` and is refused when `net_mode` is `off`, and sub-agents are not started in patch mode, where their edits would bypass the patch.
+
 ### Changed
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.

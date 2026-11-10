@@ -22,8 +22,9 @@ from unittest.mock import patch
 import pytest
 
 from localm.plugins.coder import runner
-from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
+from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS, confirm_forced
 from localm.plugins.coder.audit import SessionMode
+from localm.plugins.coder.tools.registry import TOOL_REGISTRY
 
 
 class _Scripted:
@@ -151,7 +152,7 @@ class TestResolveTaskConfig:
         assert cfg.model == "m"
         assert cfg.max_turns == 2
         assert cfg.session_mode == SessionMode.FULL
-        assert set(_SHELL_EXEC_TOOLS) <= set(cfg.always_confirm)
+        assert all(confirm_forced(cfg.always_confirm, n, TOOL_REGISTRY[n]) for n in _SHELL_EXEC_TOOLS)
 
     def test_explicit_max_tokens_argument_is_marked_explicit(self, home, project):
         cfg = runner.resolve_task_config(project, max_tokens=999)
@@ -179,7 +180,8 @@ class TestBuildAgent:
     def test_unattended_task_confirm_gates_the_shell_tools(self, home, project):
         agent = _build(_Scripted(["done"]), project, "do it", auto_approve=False)
         try:
-            assert set(_SHELL_EXEC_TOOLS) <= set(agent.always_confirm)
+            assert all(confirm_forced(agent.always_confirm, n, TOOL_REGISTRY[n])
+                       for n in _SHELL_EXEC_TOOLS)
             assert agent.auto_approve is True
         finally:
             agent.close()
@@ -187,14 +189,16 @@ class TestBuildAgent:
     def test_yes_leaves_the_shell_tools_unconfirmed(self, home, project):
         agent = _build(_Scripted(["done"]), project, "do it", auto_approve=True)
         try:
-            assert not (set(_SHELL_EXEC_TOOLS) & set(agent.always_confirm))
+            assert not any(confirm_forced(agent.always_confirm, n, TOOL_REGISTRY[n])
+                           for n in _SHELL_EXEC_TOOLS)
         finally:
             agent.close()
 
     def test_interactive_session_is_not_gated(self, home, project):
         agent = _build(_Scripted(["done"]), project, "", auto_approve=False)
         try:
-            assert not (set(_SHELL_EXEC_TOOLS) & set(agent.always_confirm))
+            assert not any(confirm_forced(agent.always_confirm, n, TOOL_REGISTRY[n])
+                           for n in _SHELL_EXEC_TOOLS)
             assert agent.auto_approve is False
         finally:
             agent.close()
