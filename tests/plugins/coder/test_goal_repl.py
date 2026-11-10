@@ -23,6 +23,13 @@ import pytest
 from localm.plugins.coder.audit import SessionMode
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 class _Stub:
     model_id = "m"
     native_tools = False

@@ -45,7 +45,7 @@ from localm import scopes
 from localm.browser import discovery, provision
 from localm.browser import session as bsession
 from localm.inference.http_server import caller_grants, principal_id
-from localm.plugins.gui.jobs import FRAME_EVENT
+from localm.jobmanager import FRAME_EVENT
 
 _router = APIRouter()
 

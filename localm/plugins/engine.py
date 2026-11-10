@@ -251,6 +251,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
+        entry=str(p.get("entry", "")),
         tool_exports=list(exports),
         path=str(plugin_dir),
     )
@@ -652,7 +653,7 @@ def _store_root() -> Optional[Path]:
 class PluginManager:
     """Discovers INSTALLED plugins (in the installed folder) and loads / unloads /
     enables / disables them at runtime on *app*; installs plugins by copying them
-    from the bundled store (or their GitHub repo) into the installed folder.
+    from the bundled store into the installed folder.
 
     Two locations: the STORE (bundled shelf, ``store_root``, read only on install)
     and the INSTALLED folder (``installed_root``, the ONLY place discovery/loading
@@ -939,6 +940,8 @@ class PluginManager:
                     pass
 
         for name in sorted(self._specs):           # _specs == installed (on disk)
+            if self._specs[name].tools_only:
+                continue                           # coder tool plugin: nothing to load
             if name in enabled and name not in self._loaded:
                 self._safe_load(self._specs[name])
                 if name in self._loaded:
@@ -958,7 +961,7 @@ class PluginManager:
         loaded = []
         for name in sorted(self._specs):
             spec = self._specs[name]
-            if (name not in enabled or name in self._loaded
+            if (name not in enabled or name in self._loaded or spec.tools_only
                     or "inference-backend" not in (spec.capabilities or [])):
                 continue
             self._safe_load(spec)
@@ -981,7 +984,8 @@ class PluginManager:
         enabled = self._enabled_set()
         loaded = []
         for name in sorted(self._specs):
-            if name in enabled and name not in self._loaded and name not in self._errors:
+            if (name in enabled and name not in self._loaded and name not in self._errors
+                    and not self._specs[name].tools_only):
                 self._safe_load(self._specs[name])
                 if name in self._loaded:
                     loaded.append(name)
@@ -1039,6 +1043,13 @@ class PluginManager:
             self._errors[spec.name] = f"load failed: {e}"
 
     def _load(self, spec: PluginSpec) -> None:
+        """Import *spec*'s module, call its register(host) and record it as
+        loaded. A tools-only manifest (``entry`` and no ``register``) is left
+        unloaded with no error. Raises when the module or its register callable
+        is missing, or register() raises."""
+        if spec.tools_only:
+            self._errors.pop(spec.name, None)
+            return
         module, attr, uniq = _import_module(spec)
         register = getattr(module, attr, None)
         if not callable(register):
@@ -1160,9 +1171,10 @@ class PluginManager:
             return False
 
     def _provision_from_store(self, name: str) -> bool:
-        """Copy the plugin from the bundled store into the installed folder (or,
-        if missing from the store, fetch it from its GitHub repo). No-op if it is
-        already installed. Raises KeyError when no source exists.
+        """Copy the plugin from the bundled store into the installed folder. No-op
+        if it is already installed. Raises NotImplementedError when the plugin is
+        missing from the store but its catalog entry has a repo URL (not fetched),
+        and KeyError when no source exists.
 
         A directory already present at the destination with no manifest (an
         interrupted or partial previous install) is replaced rather than
@@ -1489,7 +1501,7 @@ class PluginManager:
 
     # ---- public lifecycle (install/uninstall = store<->installed) -----------
     def install(self, name: str) -> None:
-        """Install a plugin: copy it from the bundled store (or its GitHub repo)
+        """Install a plugin: copy it from the bundled store
         into the installed folder, then load + enable it on the live app. Rolls
         back the copy if it does not load. KeyError if no such plugin exists."""
         copied = self._provision_from_store(name)    # may raise KeyError
@@ -1527,8 +1539,8 @@ class PluginManager:
         directory WITHOUT mounting routes (the app-free sibling of
         ``install_external``, mirroring ``set_installed_state``): validate the
         manifest, copy it into the installed folder, and enable it. Rolls back a
-        copy that does not parse. A running GUI server loads it on its next
-        start. Returns the parsed PluginSpec."""
+        copy that does not parse. A running server loads it the next time
+        its plugin list is read. Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name)
@@ -2089,7 +2101,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     # Background-job registry, registered at KERNEL level so a headless
     # ``localm serve`` has one too. Every consumer reads app.state.jobs PER
     # REQUEST, so registration order inside attach_engine does not matter.
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     from localm.plugins.gui.routes import jobs as _job_routes
     app.state.jobs = JobManager()
     _job_routes.register(app, app.state.jobs)

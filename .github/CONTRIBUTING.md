@@ -26,8 +26,13 @@ Setup creates a private `.venv` in the clone. Add the contributor tooling (ruff,
 xdist, coverage) to it:
 
 ```bash
-uv pip install -p .venv -e ".[dev]"
+./.uv/uv pip install -p .venv -e ".[dev]"      # Linux / macOS
+.uv\uv.exe pip install -p .venv -e ".[dev]"    # Windows
 ```
+
+Those paths are where setup's default (Portable) answer puts uv; if you chose Shared, plain
+`uv` works. Then activate the venv (`source .venv/bin/activate`, or `.venv\Scripts\activate`
+on Windows) so `pytest`, `ruff` and `basedpyright` below resolve to it.
 
 localm provisions its own Python (3.12), so the Python on your PATH does not matter.
 The other extras and the manual `uv` path are described in the [README](../README.md#install).

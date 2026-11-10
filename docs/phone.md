@@ -82,7 +82,8 @@ port-forwarding, no domain, and no certificate wrangling is
 1. Install Tailscale on the machine running localm **and** on your phone; sign in
    to the same account on both. They are now on one private network.
 2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set). localm detects your
-   Tailscale node name and Tailscale IP, covers both in its certificate, and prints
+   Tailscale node name, puts it in its certificate (the `100.x.y.z` address is
+   covered only where the hostname resolves to it, so prefer the name), and prints
    the reachable URL - so it serves HTTPS there too, by name.
 3. Open the machine's Tailscale address on the phone. localm prints the **name**,
    e.g. `https://mybox.tailnet.ts.net:8642/` (Tailscale MagicDNS resolves it on any
