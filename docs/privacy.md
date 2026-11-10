@@ -221,7 +221,7 @@ trace and the bug report follow the toggle at once.
 
 ## 3. Bug reports: what's redacted, and what needs your OK
 
-Filing a bug report - Settings > Report a problem in the GUI, `localm
+Filing a bug report - Settings > System > Report a bug in the GUI, `localm
 bug-report` at a terminal, or the standalone `report-issue.bat` /
 `report-issue.sh` (repo root) that works even when localm cannot start at
 all - is one of the deliberate actions above, but it is worth its own
@@ -317,7 +317,8 @@ policy](network.md) instead.
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
 - **What it sends, and what it does not.** A bare GET request identifying itself
-  as `localm`, plus a shared-secret header if one is configured. The query string
+  as `localm`, plus a shared-secret header (the one localm ships with, or the
+  `update_token` you configure). The query string
   carries your installed localm version (`client=<version>`, which the update
   server uses to decide which release to offer) and, if you opted into
   prereleases, `channel=prerelease`. It does **not** send chat content, settings

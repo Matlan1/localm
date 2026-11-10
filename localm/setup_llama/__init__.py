@@ -137,6 +137,8 @@ from localm.setup_llama.cuda import (
     _pypi_wheel_url_and_sha, _fetch_pypi_runtime_lib, _fetch_cuda_runtime_libs,
     _cuda_setup_dialogue, STAGED_NOTE, IMAGE_TAG_FOR_LINE, CUDA_CHECK_FAILED,
     record_staged_cuda, staged_cuda_line, check_staged_cuda_runtime, cuda_container_check,
+    NVIDIA_CUDA_LICENSE, NVIDIA_CUDA_LICENSE_NOTICE, _copy_wheel_license,
+    write_nvidia_cuda_notice,
 )
 from localm.setup_llama.native_deps import (
     _LIBGOMP_SONAME, _LIBGOMP_DEB_URL, _LIBGOMP_DEB_SHA256, _LIBGOMP_DEB_MIN_BYTES,
@@ -192,6 +194,8 @@ __all__ = [
     "_EXC_HEADER_RE", "_exit_provisioning_busy", "_exit_runtime_in_use",
     "_extract_archive", "_extract_libgomp_from_deb", "_fetch_and_place",
     "_fetch_cuda_runtime_libs", "_fetch_pypi_runtime_lib", "_fetch_verified",
+    "NVIDIA_CUDA_LICENSE", "NVIDIA_CUDA_LICENSE_NOTICE", "_copy_wheel_license",
+    "write_nvidia_cuda_notice",
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
     "_interactive", "_confirm", "_choose",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
