@@ -195,8 +195,8 @@ GPU needs and, if it is too old, says so and installs Vulkan only if you agree
 asks whether to continue with CUDA; a non-interactive run (`--yes`, the Settings
 page) installs CUDA as asked and lets the load test decide.
 
-**On Linux**, `--backend cuda` is self-contained the same way: upstream
-llama.cpp does not publish a Linux CUDA binary itself, so setup fetches one
+**On Linux**, `--backend cuda` is self-contained the same way: on x86_64
+setup fetches the CUDA build
 from an actively-maintained third-party builder, plus the CUDA runtime
 libraries (cudart, cuBLAS) as separate small downloads - again, no CUDA
 Toolkit install needed, and the same Blackwell-aware asset-line pick applies.
@@ -454,9 +454,9 @@ uv pip install -p .venv torch torchvision --torch-backend=xpu
 uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 
 # AMD on Windows, RX 6000 / RDNA2 (gfx103X) - localm's bundled self-contained build.
-# `-e ".[gpu]"` is an editable install and needs a source checkout to point at;
-# for `pip install localm` use the non-editable equivalent instead:
-#   pip install --upgrade "localm[gpu]"
+# Needs a source checkout: the wheels come from AMD's package index, which only
+# the checkout's uv configuration names (a plain `pip install "localm[gpu]"`
+# cannot find them).
 uv pip install -p .venv -e ".[gpu]"
 
 # AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels

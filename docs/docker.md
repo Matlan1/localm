@@ -113,7 +113,7 @@ volumes:
 | Path | Contents |
 |---|---|
 | `/data` (volume, `LOCALM_HOME`) | models, settings, the API key (`auth.key`), TLS certificates (`tls/`), logs |
-| `/opt/localm`, `/opt/venv` | localm (extras `coder`, `monitor`, `rag`) and its uv-managed Python 3.12; part of the image |
+| `/opt/localm`, `/opt/venv`, `/opt/python` | localm (extras `coder`, `monitor`, `rag`) and its uv-managed Python 3.12; part of the image |
 
 The server runs as user `localm` (uid 10001). A named volume is owned by that user
 automatically. For a bind mount, make the directory writable by uid 10001
