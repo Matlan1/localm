@@ -252,8 +252,8 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
 
     ``generate`` takes the extra keyword ``privacy`` (default False), which is
     not passed to the backend. When the backend declares
-    ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a file at
-    *out_path*, ``generate`` strips
+    ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a non-empty
+    file at *out_path*, ``generate`` strips
     the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
     ``video``) once, here. A failed strip appends the WARNING to the message;
     with ``privacy`` it instead deletes the file and returns
@@ -285,7 +285,7 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
         impl = resolve(s)
         ok, message = impl.generate(s, prompt, out_path, *args, **kwargs)
         if (not ok or not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
-                or not Path(out_path).exists()):
+                or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
             return ok, message
         from localm.media.output_metadata import strip_output
         result = strip_output(output_kind, Path(out_path))
@@ -321,7 +321,8 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
     *backend* is the plugin's ``backend`` module and *s* its resolved settings
     (``prepare_for_job``). Returns ``(ok, message, path)`` where *path* is
     *out_path* with the backend's ``OUTPUT_SUFFIX`` when it declares one.
-    *on_progress* receives every status line. A backend that cannot honour the
+    *on_progress* receives every status line and is handed to the backend as
+    given (not passed when None). A backend that cannot honour the
     request, or is given ``steps`` / ``clip_skip`` without the matching
     capability, returns ``(False, <reason>, path)`` before anything is loaded."""
 
@@ -347,14 +348,15 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
     refused = refusal(s=s, **kwargs) if refusal is not None else None
     if refused:
         return False, refused, path
-    ok, message = backend.ensure_available(s, on_progress=say)
+    progress = {} if on_progress is None else {"on_progress": on_progress}
+    ok, message = backend.ensure_available(s, **progress)
     if not ok:
         return False, message, path
     say(message)
     try:
         if before_generate is not None:
             before_generate()
-        ok, message = backend.generate(s, prompt, path, on_progress=say, **kwargs)
+        ok, message = backend.generate(s, prompt, path, **progress, **kwargs)
         return ok, message, path
     finally:
         backend.free_vram(s)

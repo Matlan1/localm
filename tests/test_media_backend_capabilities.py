@@ -149,6 +149,40 @@ def test_a_successful_generation_that_left_no_file_is_not_a_strip_failure(tmp_pa
         True, "generated")
 
 
+def test_an_empty_output_file_has_nothing_to_strip(tmp_path):
+    facade, _calls = _facade(b"")
+    out = tmp_path / "out.png"
+    assert facade.generate({"backend": "comfy"}, "p", out, privacy=True) == (
+        True, "generated")
+    assert out.exists()
+
+
+def test_generate_media_hands_the_callers_progress_function_to_the_backend(
+        monkeypatch, tmp_path):
+    from localm.plugins.builtin.music import backend
+    seen = {}
+
+    def progress(text):
+        pass
+
+    def ensure(s, on_progress=None):
+        seen["ensure"] = on_progress
+        return True, "ready"
+
+    def generate(s, tags, out_path, **kwargs):
+        seen["generate"] = kwargs.get("on_progress")
+        return True, "done"
+
+    monkeypatch.setattr(backend._COMFY_REF, "ensure_available", ensure)
+    monkeypatch.setattr(backend._COMFY_REF, "free_vram", lambda s: True)
+    monkeypatch.setattr(backend._COMFY_REF, "generate", generate)
+    monkeypatch.setattr(backend._COMFY_REF, "EMBEDS_OUTPUT_METADATA", False)
+    media_config.generate_media(backend, {"backend": "comfy"}, "t",
+                                tmp_path / "t.flac", on_progress=progress,
+                                write_sidecar=True)
+    assert seen == {"ensure": progress, "generate": progress}
+
+
 def test_the_strip_runs_exactly_once_per_generation(tmp_path, monkeypatch):
     seen = []
     real = output_metadata.strip_output
