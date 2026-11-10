@@ -155,3 +155,35 @@ def test_failed_login_records_loopback_flag_and_not_the_presented_key(home):
     evs = _events(home)
     assert [e["kind"] for e in evs] == ["login_failed", "login_failed"]
     assert all(isinstance(e["loopback"], bool) for e in evs)
+
+
+SECRET_VALUE = "super-secret-value-should-never-be-logged"
+
+
+def test_update_config_records_the_changed_key_names_never_the_values(home):
+    cfg.update_config(lambda c: c.update(hf_token=SECRET_VALUE, max_tokens=777))
+    raw = (home / "logs" / "management.jsonl").read_text(encoding="utf-8")
+    assert SECRET_VALUE not in raw and "777" not in raw
+    (ev,) = _events(home)
+    assert ev["kind"] == "config_saved"
+    assert ev["keys"] == ["hf_token", "max_tokens"]
+
+
+def test_save_config_records_only_what_changed(home):
+    cfg.save_config({**cfg.load_config(), "max_tokens": 555})
+    assert [e["keys"] for e in _events(home)] == [["max_tokens"]]
+    cfg.save_config({**cfg.load_config(), "max_tokens": 555})
+    assert len(_events(home)) == 1
+    cfg.save_config({**cfg.load_config(), "max_tokens": 556, "hf_token": SECRET_VALUE})
+    assert _events(home)[-1]["keys"] == ["hf_token", "max_tokens"]
+
+
+def test_config_save_that_changes_nothing_writes_no_event(home):
+    cfg.update_config(lambda c: None)
+    assert _events(home) == []
+
+
+@pytest.mark.parametrize("mode", ["privacy", "full"])
+def test_config_saved_is_written_in_every_session_mode(home, mode):
+    cfg.update_config(lambda c: c.update(mode=mode))
+    assert [e["kind"] for e in _events(home)] == ["config_saved"]
