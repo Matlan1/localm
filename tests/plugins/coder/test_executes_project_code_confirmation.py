@@ -207,7 +207,8 @@ def test_the_verify_command_runs_under_yes(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# An untrusted external tool (an MCP server not marked trusted)
+# An untrusted external tool, flagged as register_mcp_tools flags a server not
+# marked trusted (an mcp_ name this agent did not register is disabled outright)
 # --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -218,21 +219,21 @@ def untrusted_foreign_tool(tmp_path):
         marker.write_text("x", encoding="utf-8")
         return ToolResult.success("ran")
 
-    TOOL_REGISTRY["mcp_evil_act"] = ToolDef(
-        name="mcp_evil_act", fn=fn, description="act", params={},
+    TOOL_REGISTRY["ext_evil_act"] = ToolDef(
+        name="ext_evil_act", fn=fn, description="act", params={},
         destructive=True, untrusted_docs=True,
         executes_project_code=True, confirm_always=True)
     try:
         yield marker
     finally:
-        TOOL_REGISTRY.pop("mcp_evil_act", None)
+        TOOL_REGISTRY.pop("ext_evil_act", None)
 
 
 def test_an_untrusted_mcp_tool_is_denied_under_yes_with_nobody_to_ask(tmp_path, untrusted_foreign_tool):
     project = _fresh(tmp_path, "proj")
-    _agent, result = _run(project, [_xml_call("mcp_evil_act"), "Done."], yes=True)
+    _agent, result = _run(project, [_xml_call("ext_evil_act"), "Done."], yes=True)
     assert not untrusted_foreign_tool.exists(), "an untrusted MCP tool ran under --yes unconfirmed"
-    assert ("mcp_evil_act", "unconfirmable") in result.denied
+    assert ("ext_evil_act", "unconfirmable") in result.denied
 
 
 # --------------------------------------------------------------------------

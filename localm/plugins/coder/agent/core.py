@@ -192,6 +192,11 @@ class Agent(
         self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
+        # Set when a tool result put untrusted content into this context; while
+        # set (and taint_rearms_confirm), destructive, network and code-running
+        # tools ask again. Cleared by the next user message.
+        self._untrusted_in_context = False
+        self.taint_rearms_confirm = True
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
         cap_backend_session_mode(backend, mode)
