@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **The browser voice (Kokoro) uses transformers.js 4.3.2 (from 4.3.1).** Its speech runtime and voices are unchanged.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
