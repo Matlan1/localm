@@ -1318,7 +1318,7 @@
   "models.pull.sha256Placeholder": "sha256 (opcional)",
   "models.pull.sha256Title": "SHA256 esperado. Se comprueba con el archivo descargado (o local); se rechaza si no coincide. No es compatible con un repo completo de HuggingFace ni con una carpeta local - ambos son muchos archivos sin un único hash.",
   "models.pull.shortcutPlaceholder": "Atajos seleccionados…",
-  "models.pull.shortcutTitle": "Modelos pequeños seleccionados que funcionan incluso con el acceso a la red desactivado - elige una cuantización probada y rellena los campos de abajo",
+  "models.pull.shortcutTitle": "Modelos pequeños seleccionados - elige una cuantización probada y rellena los campos de abajo. La lista aparece incluso con el acceso a la red desactivado; la descarga en sí necesita acceso a la red o el permiso de descarga de modelos.",
   "models.pull.specNoDash": "Una especificación de modelo no puede empezar por '-'. Usa owner/repo, owner/repo:file.gguf o una URL https.",
   "models.pull.specPlaceholder": "owner/repo:file.gguf  ·  https://…  ·  una carpeta local o ruta .gguf",
   "models.pull.stalled": "no llegan datos",
