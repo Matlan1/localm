@@ -23,7 +23,10 @@ import sys
 import threading
 import tomllib
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
                                      KNOWN_SURFACE_KEYS,
@@ -2034,8 +2037,8 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     from localm import scopes
     from localm.inference.http_server import require_scope
 
-    global _server_manager_attached, Request
-    Request = _Request
+    global _server_manager_attached
+    globals()["Request"] = _Request
     with _backend_manager_lock:
         _server_manager_attached = True
     manager = PluginManager(app, inference_engine=inference_engine)
