@@ -2015,8 +2015,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
-               "stable-diffusion.cpp build to use. auto uses the best installed build and "
-               "installs the recommended one only when none is installed.",
+               "stable-diffusion.cpp build to use. auto installs the recommended build for "
+               "this machine, keeps an installed GPU build, and uses the CPU build only "
+               "when no GPU build can be installed or loaded.",
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",

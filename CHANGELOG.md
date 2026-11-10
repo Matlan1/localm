@@ -108,6 +108,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The coder no longer leaves the started server's output log in the temp folder.** When the coder starts a server itself without a terminal, the temporary file that captures the server's output is now deleted once the coder attaches (the server keeps running), after an early exit has been reported, and after a failed attach in privacy mode unless keep diagnostics is on.
 - **A tool call the model writes no longer reaches the debug log in privacy mode.** When a lazy grammar triggered on a tool call whose text had a line ending in a single quote (for example `name = 'Alice'`), the lines of the call after that one went to the console, the activity log and, in privacy mode with the debug log on, the debug log file. The whole generated text of the trigger record is now left out.
 - **A plain update is refused when localm cannot read its own installed version.** Without that version nothing can be confirmed as newer, so an older signed build could have been accepted. `localm update --to <version>` still installs a version you name.
+- **Native images and video on `auto` move off the CPU build.** With only the CPU build of stable-diffusion.cpp installed, a generation on `auto` now installs the build recommended for your GPU instead of staying on the CPU; when that download fails or is refused, it keeps the CPU build and says so.
 
 ## [0.3.3] - 2026-11-05
 

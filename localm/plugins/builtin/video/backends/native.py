@@ -187,11 +187,7 @@ def _runtime_choice(s: dict) -> str:
 
 
 def _ensure_runtime(s: dict, say) -> sd_runtime.Runtime:
-    choice = _runtime_choice(s)
-    rt = sd_runtime.resolve(choice)
-    if rt is not None:
-        return rt
-    return sd_runtime.provision(choice, on_progress=say)
+    return sd_runtime.ensure(_runtime_choice(s), on_progress=say)
 
 
 def _pyav_problem() -> Optional[str]:

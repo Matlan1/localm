@@ -2227,7 +2227,7 @@
   "settings.field.media.nativeLm.label": "Planificateur natif",
   "settings.field.media.nativeModel.help": "Nom enregistré ou chemin de fichier : un checkpoint complet ou un modèle de diffusion (encodeurs et VAE des champs natifs, sinon de vos modèles enregistrés). Vide utilise le modèle recommandé une fois téléchargé.",
   "settings.field.media.nativeModel.label": "Modèle natif",
-  "settings.field.media.nativeRuntime.help": "Build de stable-diffusion.cpp à utiliser. auto utilise le meilleur build installé et n'installe le build recommandé que si aucun n'est installé.",
+  "settings.field.media.nativeRuntime.help": "Build de stable-diffusion.cpp à utiliser. auto installe le build recommandé pour cette machine, garde un build GPU installé et n'utilise le build CPU que si aucun build GPU ne peut être installé ou chargé.",
   "settings.field.media.nativeRuntime.label": "Runtime natif",
   "settings.field.media.nativeSampleMethod.help": "p. ex. euler, euler_a, dpm++2m, lcm. Vide = la valeur par défaut du modèle.",
   "settings.field.media.nativeSampleMethod.label": "Sampler natif",
