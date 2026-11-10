@@ -545,8 +545,8 @@ if ! uv_is_pinned; then
   # The installer script and everything Astral's installer downloads stay in
   # ./.localm-setup-tmp/uv-installer.<pid>.
   UVTMP="$STMP/uv-installer.$$"
-  if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
-      && IPATH="$(installer_path "$UVTMP")"; then
+  if mkdir -p "$UVTMP/tmp" && IPATH="$(installer_path "$UVTMP")" \
+      && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
     PATH="$IPATH" TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
     jr abandon "$UVSTEP"

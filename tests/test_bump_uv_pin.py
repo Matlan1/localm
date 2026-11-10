@@ -191,6 +191,10 @@ def test_no_file_outside_the_five_pins_uv_from_a_release_download(bump):
             pinning.append(rel)
     assert "localm/uv_tool.py" in pinning, "the updater's uv download moved"
     pinning.remove("localm/uv_tool.py")
+    assert "installer/gui.py" in pinning, "the setup window's uv download moved"
+    gui_text = (_ROOT / "installer" / "gui.py").read_text(encoding="utf-8")
+    assert "read_pin(ROOT)" in gui_text, "the setup window must take the uv pin from the setup scripts"
+    pinning.remove("installer/gui.py")
     assert sorted(pinning) == sorted(SITE_PATHS)
 
 

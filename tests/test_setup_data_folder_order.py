@@ -95,7 +95,7 @@ def test_the_window_prepares_the_data_folder_before_provisioning(tmp_path, monke
 
     (tmp_path / ".venv").mkdir()
     monkeypatch.setattr(gui, "_run", fake_run)
-    monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
     monkeypatch.setattr(gui, "make_shortcut", lambda plan, emit: "")
     monkeypatch.setattr(gui, "torch_spec_for", lambda b: ("", ""))
     monkeypatch.setattr(gui, "_query", lambda args: "")
@@ -122,7 +122,7 @@ def test_the_window_records_the_shortcut_and_command_before_the_plugins(tmp_path
 
     (tmp_path / ".venv").mkdir()
     monkeypatch.setattr(gui, "_run", fake_run)
-    monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
     monkeypatch.setattr(gui, "make_shortcut", lambda plan, emit: str(lnk))
     monkeypatch.setattr(gui, "torch_spec_for", lambda b: ("", ""))
     monkeypatch.setattr(gui, "_query",
