@@ -109,7 +109,7 @@ def _file_line_urls(line: str) -> tuple:
     URL is reduced to its transport; ``file:`` URLs are local and left out."""
     toks = line.split()
     nested = None
-    for i, t in enumerate(toks):
+    for i in range(len(toks)):
         v = _option_value(toks, i, _REQ_OPTIONS)
         if v is not None:
             nested = v
