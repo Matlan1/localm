@@ -143,7 +143,8 @@ or replies.
 asyncio task list on demand, independent of the watchdog. It needs full host
 filesystem access - the owner key, or a key explicitly granted it - and in open
 mode (no key configured) it additionally requires the per-process shell token
-the loopback GUI shell holds, because open mode grants every caller host access
+the loopback GUI shell holds (or this instance's attach token, which only a
+local process running as you can read), because open mode grants every caller host access
 and so would otherwise leave this unauthenticated. Directory prefixes in the
 returned frames (your data directory, the install location, the Python
 environment) are redacted; the file, line and function are kept.
@@ -158,7 +159,9 @@ model name or a model path, in any session mode. It writes nothing to disk.
 
 `localm gui --debug` (or `LOCALM_DEBUG=1`) writes a debug log under
 `<data dir>/logs/`, captures native llama.cpp stderr (model metadata/timings), and
-logs each request (method, path, status, timing - never request bodies). It does
+logs each request (method, path, status, timing - never request bodies; for a
+refused or failed request the server's reason is logged too, which can name a
+file you attached or a site that was contacted). It does
 NOT record your chat content in privacy mode (see the guarantee below).
 
 ### GUI error messages
@@ -220,12 +223,15 @@ localm will not start at all on a pip install, file an
 [Issue](https://github.com/Matlan1/localm/issues) directly instead, since
 `localm bug-report` itself needs a working localm to run.
 
-**You always see the full report before anything is sent, and sending needs
-your explicit OK.** In the GUI, "Send to maintainer" saves the report and
+**In the GUI and the standalone reporter you see the full report before
+anything is sent, and sending needs your explicit OK.** `localm bug-report`
+saves the report and prints its path so you can open or edit it; it is sent
+only when you choose to send it at the prompt, or at once when you pass
+`--send` (no prompt, also without a terminal). In the GUI, "Send to maintainer" saves the report and
 shows its whole text; nothing is uploaded until you press "Send this
 report", and what is uploaded is that saved text, apart from its closing
 note about editing the report, which is left out. The standalone reporter
-and `localm bug-report` preview the same text at a terminal prompt - and when
+previews the same text at a terminal prompt - and when
 there is no terminal to prompt (piped/redirected stdin, or run
 non-interactively), every standalone reporter (Python, PowerShell, and the
 `report-issue.sh` curl fallback used when there is no Python) treats that
@@ -296,11 +302,13 @@ policy](network.md) instead.
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
 - **What it sends, and what it does not.** A bare GET request identifying itself
-  as `localm`, plus a shared-secret header if one is configured. The request path
-  names the release channel (stable, or prerelease if you opted in). It does
-  **not** send your installed version or chat content - the comparison to the
-  latest release happens locally, on your machine. What it does expose to
-  the update server is your IP address, the time you checked, and the fact that
+  as `localm`, plus a shared-secret header if one is configured. The query string
+  carries your installed localm version (`client=<version>`, which the update
+  server uses to decide which release to offer) and, if you opted into
+  prereleases, `channel=prerelease`. It does **not** send chat content, settings
+  or an identifier of your install - the comparison to the latest release
+  happens locally, on your machine. What it does expose to the update server is
+  your IP address, the time you checked, your localm version, and the fact that
   a localm install checked in.
 - **It obeys `net_mode`.** The update check reads the network mode you set
   (`localm/netpolicy.py`) and is blocked when it is `off`, failing honestly

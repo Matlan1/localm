@@ -162,8 +162,8 @@ localm config net_search_url http://192.168.1.10:8080
 
 An instance on your LAN or on this machine needs no other setting when
 `net_search_url` names it by its IP address, `localhost`, a name without a dot,
-or a name ending in `.local`, `.lan`, `.internal`, `.home.arpa` or
-`.localdomain`: the search then reaches the loopback or private address of
+or a name ending in `.local`, `.lan`, `.internal`, `.home.arpa`,
+`.localdomain` or `.localhost`: the search then reaches the loopback or private address of
 exactly that origin (the same scheme, host and port), and nothing else. A public
 host name gets no exemption, so a public instance that resolved to a private
 address is still refused. A page the model fetches, even one on that instance,
@@ -274,8 +274,8 @@ coding agent's shell access, so you can grant one without the other.
 - **Privacy mode is orthogonal.** Privacy controls what localm writes to
   *disk*; it cannot make network requests untraceable. Any request leaves DNS
   lookups and traffic visible to your network and the remote server. If a
-  conversation must stay fully local, keep web access off - that is why the
-  chat toggle is per-conversation and off by default.
+  conversation must stay fully local, turn the Web access toggle off (it is on
+  by default under `ask` and `allow`) or set `net_mode off`.
 
 Treat this policy as governing the paths named in the sections above it (chat
 and coder web access, HuggingFace search and pulls, the browser plugin), not

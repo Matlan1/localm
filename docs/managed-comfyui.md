@@ -83,7 +83,7 @@ To go back to your own ComfyUI without removing the managed one, set
 `comfy_target` to `user`. Either way, your own ComfyUI's settings (`comfy_workdir`
 and friends) and the managed instance are independent - switching between them
 never loses either one's configuration. Also in the GUI under **Settings ->
-Media**, and takes effect on the next server start.
+Media**; it applies to the next generation.
 
 The managed instance runs on its own loopback port (`http://127.0.0.1:8189`), one
 above ComfyUI's default `8188`, so it and your own ComfyUI can run at the same

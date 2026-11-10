@@ -103,9 +103,10 @@ What this means in practice:
 - **Expires on your next message.** The restriction is scoped to the current
   user request; sending a new message to the agent clears it (a fresh
   `use_skill` call re-arms it if the new turn loads a skill again).
-- **`list_skills` and `use_skill` are always exempt**, restriction or not - the
-  model must still be able to discover and read a skill's files even while
-  confined to it.
+- **`list_skills`, `use_skill`, `search_tools`, `ask_user` and the plan-mode
+  switches (`enter_plan_mode`, `exit_plan_mode`) are always exempt**, restriction
+  or not - the model must still be able to discover and read a skill's files,
+  look up tool docs and ask you a question even while confined to it.
 - **A spawned sub-agent inherits the restriction.** If the coder can delegate to
   a child agent (`spawn_agent`), the child starts with the same narrowed tool
   set the parent had when it was spawned, so a skill cannot escape its own

@@ -1,18 +1,20 @@
 # localm proxy (bug reports + issues + updates)
 
-A tiny [Cloudflare Worker](https://workers.cloudflare.com/) that gives 1-2
-private-repo testers three account-less surfaces, each backed by a **server-side**
+A tiny [Cloudflare Worker](https://workers.cloudflare.com/) that gives
+localm users three account-less surfaces, each backed by a **server-side**
 GitHub token - **without** a GitHub account and **without** shipping any token in
 the app:
 
 - **Report** a bug -> files a GitHub issue (`POST /`).
-- **Track** issues -> lists open/closed issues (`GET /issues`).
+- **Track** the reports this install filed -> one issue's state
+  (`GET /issues?number=N`; the Worker also serves a list at `GET /issues`,
+  which the app does not use).
 - **Update** -> latest release + streams the build zip (`GET /update`,
   `GET /update/download`).
 
 The **issue token** (Issues:write) cannot read code; the **separate update token**
 (Contents:read) cannot write. The shared secret gates the routes and is **required**
-for the update routes (they serve private builds).
+for the update routes (they serve release builds).
 
 ## Why a proxy instead of a token in the app
 
@@ -25,8 +27,7 @@ still read **every** issue and spam the repo. So the token lives here, server-si
 - The token can only file issues through this rate-limitable endpoint, and you
   rotate it here without re-shipping the app.
 
-This keeps the repo private and the testers account-less, which a baked-in token
-cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
+This keeps users account-less, which a baked-in token cannot do safely.
 
 ## Deploy (one time)
 
@@ -39,7 +40,7 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
 2. **Create a fine-grained GitHub PAT** at
    <https://github.com/settings/personal-access-tokens/new>:
    - Resource owner: your account; Repository access: **Only select repositories ->
-     your private repo** (e.g. `Matlan1/localm`).
+     the target repo** (e.g. `Matlan1/localm`).
    - Permissions: **Issues -> Read and write** (that is all; it cannot read code).
    - Copy the token (starts with `github_pat_...`).
 
@@ -97,8 +98,10 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
   Installed clones keep sending these, so a change to a reporter's structure must keep
   the Worker accepting the old one. Anything else gets a 422 and is not filed; each one
   is counted by a `report held: not built by localm` line in the Workers logs.
-- Add a Cloudflare **Rate limiting rule** (dashboard -> your Worker -> Security ->
-  Rate limiting) capping requests per IP if you want a hard ceiling.
+- Issue creation is rate limited per client IP by the `RATE_LIMIT` binding in
+  `wrangler.toml` (20 reports per 60 s). A limited request gets
+  `429 { error, retry_after }`. Change the limit in `wrangler.toml`, not the
+  dashboard, so `wrangler deploy` keeps it.
 - Issues are created by the token's identity (with the GitHub App below, the app's
   bot account); you can label/triage/close as usual.
 
@@ -135,9 +138,13 @@ the app surfaces honestly (a failed action is never reported as success).
 POST /                      { "title", "body" }   -> 201 { ok, url, number }
                                422 { error, filed: false } when the body is not a
                                report built by localm (not filed, not echoed)
+                               429 { error, retry_after } when the client IP is
+                               rate limited
 GET  /issues[?state=all|open|closed][&per_page=N] -> 200 { ok, issues: [...] }
 GET  /issues?number=N                             -> 200 { ok, issue }
-GET  /update                -> 200 { ok, version, notes, published_at, asset:{id,name,size} }
+GET  /update[?client=V][&channel=prerelease]
+                            -> 200 { ok, version, name, notes, published_at, prerelease,
+                                     asset:{id,name,size}, signature }
                                (version null when there are no releases yet)
 GET  /update/releases       -> 200 { ok, releases: [{ version, name, published_at,
                                prerelease, notes, asset, signed }] }   (newest first)
@@ -163,20 +170,9 @@ The updater offers a build when the latest **GitHub Release** tag is newer than 
 running `VERSION`, and verifies the shipped `.sig` (a signature envelope from 0.3.1 on;
 the 0.3.0 `.sig` is a bare signature for 0.2.0 clients) against the
 key set pinned in `localm/updater.py`, or a newer one an earlier update installed, before
-applying. The ONE real release procedure is
-[`scripts/make_release.py`](../../scripts/make_release.py) (see
-[`RELEASE.md`](../../RELEASE.md)): it assembles `build.zip` from
-`release-manifest.toml` (never a plain `git archive` of the whole tracked tree),
-signs it with the Ed25519 release key, and gates `--publish` on a clean/pinned
-commit, a live functional-verification record, and a green CI run before creating
-the GitHub Release. There is no other supported way to cut a release; do not hand-
-roll one.
-
-```
-export LOCALM_SIGNING_KEY=/path/to/update_signing_key.pem   # kept OUT of the repo
-python scripts/make_release.py              # build + sign -> dist/
-python scripts/make_release.py --publish    # + gh release create (after the gates pass)
-```
+applying. Releases are built, signed with the Ed25519 release key and published
+by the maintainer's release tooling, which is not part of this repository.
+`scripts/verify_release.py` checks a published build.
 
 Testers' apps see it on their next check (a quiet startup check + a manual button);
 applying is always their explicit action.

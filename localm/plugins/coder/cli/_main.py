@@ -90,7 +90,8 @@ def _complete_model(ctx, param, incomplete):
 @click.argument("task", default="", required=False, metavar="[TASK]")
 @click.option("-m", "--model",      default=None,  envvar="LOCALCODER_MODEL",
               shell_complete=_complete_model,
-              help="Model name (must be registered in localm).")
+              help="Model name: a registered localm model, or the remote model id "
+                   "with --online, --anthropic or --url.")
 @click.option("--pin-model", "pin_model", is_flag=True,
               help="Always answer with --model. Without it, a request --model "
                    "cannot serve (structured tool calls, a longer conversation "
