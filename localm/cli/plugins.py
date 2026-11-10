@@ -108,20 +108,32 @@ def _resolve_with_deps(flag) -> bool:
 @click.option("--with-deps/--no-deps", "with_deps", default=None,
               help="Also install the plugin's pip extras on this machine "
                    "(default: the auto_install_plugin_deps setting).")
-def plugin_install_engine(target, force, with_deps):
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Do not ask for confirmation when installing from a directory.")
+def plugin_install_engine(target, force, with_deps, assume_yes):
     """Install a plugin and enable it.
 
     TARGET is either a first-party plugin NAME from the bundled store
     (e.g. ``localm plugin install coder``) or a path to a DIRECTORY containing a
     plugin.toml (a third-party plugin). A first-party plugin's pip extras are
     installed for you unless you pass --no-deps (or turn the setting off).
+
+    Third-party plugins run unsandboxed in-process, so install only code you
+    trust; installing from a directory asks for confirmation first.
     """
     from rich.markup import escape
+
+    from localm.plugins.contract import UNSANDBOXED_NOTICE
 
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     src = Path(target)
     if src.is_dir() and (src / "plugin.toml").is_file():
+        console.print(f"[yellow]{escape(UNSANDBOXED_NOTICE)}[/yellow]")
+        if not assume_yes and not click.confirm(
+                f"Install the plugin in {src} ?", default=False):
+            console.print("[red]Not installed.[/red]")
+            sys.exit(1)
         try:
             spec = mgr.set_installed_from_dir(src, force=force)
         except ValueError as e:

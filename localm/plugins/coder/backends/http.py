@@ -227,6 +227,17 @@ class HTTPBackend(BaseLLMBackend):
         Capabilities the answering model must have, e.g. ``("tool_use",)``,
         sent to a localm server with every request. Ignored by any other
         server.
+    gate_mode:
+        The session's resolved mode, for the off-machine gate. None resolves
+        the ambient coder mode.
+    user_typed_remote:
+        True when the user typed the flag naming this destination, which
+        lets privacy mode proceed (the network policy still applies).
+    trusted_peer:
+        True for a peer localm the owner registered; skips the gate.
+
+    A non-loopback *base_url* is checked by ``remotegate`` and the network
+    policy before the backend exists; a refusal raises.
 
     Every request to a localm server carries ``context_reserve``
     (``AGENT_CONTEXT_RESERVE``), the context window an agent session needs;
@@ -272,8 +283,15 @@ class HTTPBackend(BaseLLMBackend):
         pinned: bool = False,
         model_pinned: bool = True,
         required_capabilities=None,
+        gate_mode: Optional[str] = None,
+        user_typed_remote: bool = False,
+        trusted_peer: bool = False,
         **extra_params,
     ) -> None:
+        if not trusted_peer:
+            from localm import remotegate
+            remotegate.require_off_machine_allowed(
+                base_url, session_mode=gate_mode, user_typed=user_typed_remote)
         self._base_url     = base_url.rstrip("/")
         self._model        = model
         self._api_key      = api_key
@@ -1067,6 +1085,7 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 
 
 def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:
+    """OpenAI backend. Subject to the off-machine gate (see HTTPBackend)."""
     key = os.environ.get("OPENAI_API_KEY", "")
     return HTTPBackend(OPENAI_BASE_URL, model, api_key=key, native_tools=True, **kw)
 

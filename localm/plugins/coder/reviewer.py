@@ -244,12 +244,20 @@ def _policy_refusal(url: str):
     return None
 
 
+def _gate_mode(mode) -> str:
+    """The mode string the off-machine gate takes; "privacy" when *mode* cannot
+    be read."""
+    value = getattr(mode, "value", mode)
+    return value if isinstance(value, str) else "privacy"
+
+
 def _is_privacy(mode) -> bool:
+    """True when the off-machine gate refuses a model off this machine for *mode*."""
+    from localm import remotegate
     try:
-        from localm.audit import SessionMode
-        return mode == SessionMode.PRIVACY
+        return not remotegate.remote_allowed_for_mode(_gate_mode(mode))
     except Exception:
-        return False
+        return True
 
 
 def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = False):
@@ -345,10 +353,12 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
                     "reviewing with the local model instead.")
                 return _local_same_model()
             if low == "openai":
-                b = make_openai_backend(model=rmodel or "gpt-4o", pinned=True)
+                b = make_openai_backend(model=rmodel or "gpt-4o", pinned=True,
+                                        gate_mode=_gate_mode(mode))
             else:
                 b = make_anthropic_backend(model=rmodel or "claude-opus-4-5",
-                                           pinned=True)
+                                           pinned=True,
+                                           gate_mode=_gate_mode(mode))
             return Reviewer(b, heterogeneous=True)
 
         if low.startswith("http://") or low.startswith("https://"):
@@ -376,7 +386,7 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
             from .backends.http import HTTPBackend
             return Reviewer(
                 HTTPBackend(base_url=target, model=rmodel or same_model_default,
-                            pinned=leaves),
+                            pinned=leaves, gate_mode=_gate_mode(mode)),
                 heterogeneous=True)
     except Exception as e:
         print_warning(f"reviewer backend setup failed ({e}); "

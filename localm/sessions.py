@@ -69,8 +69,8 @@ def _hash(sid: str) -> str:
 
 def _load() -> list:
     """Load the store as a list of records, using the mtime cache. A missing store
-    is an empty list; a present-but-corrupt/unreadable one raises so callers can
-    fail CLOSED (lookup treats a load failure as 'no valid session')."""
+    is an empty list; a present-but-corrupt/unreadable one, or one that does not
+    hold a JSON list, raises so callers can fail CLOSED (lookup treats a load failure as 'no valid session')."""
     path = sessions_file()
     try:
         st = path.stat()
@@ -87,7 +87,9 @@ def _load() -> list:
         data = json.loads(path.read_text(encoding="utf-8"))  # ValueError on corrupt
     except RecursionError as e:
         raise ValueError("sessions file is nested too deeply") from e
-    records = data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        raise ValueError(f"{path} does not hold a list of sessions")
+    records = data
     _CACHE["mtime"] = key
     _CACHE["records"] = records
     return records
