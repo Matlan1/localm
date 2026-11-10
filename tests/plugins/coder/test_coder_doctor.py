@@ -425,3 +425,21 @@ def test_mcp_server_that_never_answers_fails_within_the_init_timeout(
     assert time.monotonic() - started < 10
     assert [c.status for c in got] == [FAIL]
     assert got[0].name == "mcp:hung"
+
+
+def test_git_check_does_not_start_the_repos_fsmonitor(tmp_path):
+    from pathlib import Path
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    marker = tmp_path / "ran.txt"
+    hook = tmp_path / "hook.py"
+    hook.write_text(
+        f"open({str(marker)!r}, 'w').write('x')\n", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "trunk")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    cmd = f'"{Path(sys.executable).as_posix()}" "{hook.as_posix()}"'
+    _git(repo, "config", "core.fsmonitor", cmd)
+    c = doctor.check_git(repo)
+    assert not marker.exists()
+    assert c.status in (OK, INFO)
+    assert "trunk" in c.detail
