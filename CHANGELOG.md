@@ -62,6 +62,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A peer instance can no longer redirect localm's requests to it.** Forwarding a chat to a peer and checking a peer's API key now treat a redirect answer as a failed peer instead of following it and re-sending the conversation to the address it names. Requests localm makes to its own server never follow a redirect either.
 - **Update and runtime downloads no longer pass localm's own credentials to another host.** When a download is redirected to a different host (the update zip goes to the release CDN), only basic headers are sent on; the update token is not. Downloads and metadata reads are also capped in size.
 - **Outbound requests check the network policy themselves.** The shared pinned request helper now runs the policy check and does not follow redirects unless a caller asks for it.
+- **A model search no longer fails when the RAM reading breaks.** When psutil is installed but cannot start on this system, the Hugging Face search on the Models page answered with a server error. It now returns its results without the "too big for video memory and RAM together" mark, and the log says why the RAM could not be read.
 
 ## [0.3.3] - 2026-11-05
 
