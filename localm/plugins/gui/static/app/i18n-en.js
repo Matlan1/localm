@@ -57,6 +57,7 @@ export const I18N_EN = {
   // ---- Shared (helpers.js) ----
   "common.advancedFold.setCount": "{n} set",
   "common.artifact.title": "Artifact ({lang})",
+  "common.artifact.navigated": "This artifact tried to load another page, so the canvas was closed. Use Re-render to show it again.",
   "common.codeBlock.canvas": "canvas",
   "common.codeBlock.canvasTitle": "Render this {lang} in a sandboxed canvas",
   "common.codeBlock.copied": "copied",
