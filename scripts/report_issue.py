@@ -119,7 +119,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 #  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
@@ -146,16 +146,22 @@ _QUERY_SECRET_RE = re.compile(
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
-    r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+)
+# An Authorization value under any scheme. Byte-identical to _AUTH_HEADER_RE
+# in localm/bugreport/scrub.py.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization\s*:\s*)"
+    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?"
+    r"|(?:[A-Za-z][A-Za-z0-9_-]*[ \t]+)?[^\s,]+(?:,[ \t]*[^\s,]+)*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
 # _JSON_SECRET_RE in localm/bugreport/scrub.py.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
-    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
-    r"|access[_-]?token|signature)"
-    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature|authorization)"
+    r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
@@ -369,6 +375,7 @@ def scrub(text: str) -> str:
     # Credential-named query params, header lines and JSON keys.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
     # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)

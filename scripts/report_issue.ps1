@@ -63,11 +63,13 @@ function Scrub([string]$t) {
   # in localm/bugreport/scrub.py; the three-branch reasoning is documented there. Applied
   # in the same order as scripts/report_issue.py, so all three reporters agree.
   $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`\"''\)\]\}]{0,4}(?:[\s&#]|$))(?:\"[^\"\r\n]*\"?|''[^''\r\n]*''?|[^&\s#\"''\)\]\}]*)', '${1}<redacted>')
-  $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+', '${1}<redacted>')
+  # An Authorization value under any scheme, .NET port of _AUTH_HEADER_RE.
+  $t = [regex]::Replace($t, '(?i)(authorization\s*:\s*)(?:"[^"\r\n]*"?|''[^''\r\n]*''?|(?:[A-Za-z][A-Za-z0-9_-]*[ \t]+)?[^\s,]+(?:,[ \t]*[^\s,]+)*)', '${1}<redacted>')
   # Credential-named JSON object keys ("api_key": "..."), .NET port of _JSON_SECRET_RE.
-  $t = [regex]::Replace($t, '(?i)(["''](?:(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig))["'']\s*:\s*)(?!\s*["'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["'']?\s*(?:[,}\]]|$))(?:"[^"\r\n]*"?|''[^''\r\n]*''?|[^,}\]\s]*)', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)(["''](?:(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|authorization)|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig))["'']\s*:\s*)(?!\s*["'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["'']?\s*(?:[,}\]]|$))(?:"[^"\r\n]*"?|''[^''\r\n]*''?|[^,}\]\s]*)', '${1}<redacted>')
   # Bearer tokens and OpenAI-style / localm API keys.
-  $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
   # Tokens that contain an email address, except the maintainer's ($email: ASCII, case-insensitive,
   # %40 read as @, edge single quotes and trailing periods set aside). Same pattern as _EMAIL_RE in localm/bugreport/scrub.py.
