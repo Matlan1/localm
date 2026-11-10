@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import localm.inference.http_server as _hs
+from localm import scopes
 from localm.inference import responses_protocol as R
 from localm.inference.ollama_protocol import iter_sse_json
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
@@ -68,7 +69,7 @@ STORE = R.ResponseStore()
 
 
 def register(app: FastAPI, ctx) -> None:
-    _require_auth = _hs._require_auth
+    _require_chat = _hs.require_scope(scopes.CHAT)
 
     async def _error_text(inner: Response) -> str:
         body_iterator = getattr(inner, "body_iterator", None)
@@ -138,5 +139,5 @@ def register(app: FastAPI, ctx) -> None:
         return JSONResponse(final, headers=headers)
 
     app.router.add_api_route("/v1/responses", create_response, methods=["POST"],
-                             dependencies=[Depends(_require_auth)],
+                             dependencies=[Depends(_require_chat)],
                              route_class_override=ResponsesRoute)

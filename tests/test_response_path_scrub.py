@@ -330,3 +330,38 @@ class TestInputImageAcceptsTheScrubbedForm:
             check_input_image(raw)
         assert raw in str(e.value)
         assert str(home) not in str(e.value)
+
+
+_MOVES = [
+    ("image", "/api/imagine", "_images_dir", "m.png"),
+    ("music", "/api/music", "_music_dir", "m.flac"),
+    ("video", "/api/video", "_video_dir", "m.mp4"),
+]
+
+
+@pytest.mark.parametrize("plugin,prefix,dir_fn,fname", _MOVES)
+def test_gallery_move_conflict_message_has_no_host_path_for_a_scoped_key(
+        home, tmp_path, plugin, prefix, dir_fn, fname):
+    import importlib
+    app = _gui_app(tmp_path, plugin)
+    mod = importlib.import_module(f"localm.plugins.builtin.{plugin}.plug")
+    gallery = getattr(mod, dir_fn)()
+    gallery.mkdir(parents=True, exist_ok=True)
+    (gallery / fname).write_bytes(b"x")
+    dest = home / "uploads" / "moved"
+    dest.mkdir(parents=True)
+    (dest / fname).write_bytes(b"already here")
+    scoped, admin = _key([plugin]), _key(["admin"])
+    with TestClient(app) as c:
+        mine = c.post(f"{prefix}/file/{fname}/move", headers=_h(scoped),
+                      json={"dest": str(dest)})
+        full = c.post(f"{prefix}/file/{fname}/move", headers=_h(admin),
+                      json={"dest": str(dest)})
+    assert mine.status_code == 409, mine.text
+    detail = mine.json()["detail"]
+    assert detail.startswith("Already exists: "), detail
+    _assert_scrubbed(detail[len("Already exists: "):], home, tmp_path)
+    assert detail.endswith(fname)
+    assert full.status_code == 409, full.text
+    assert full.json()["detail"] == f"Already exists: {dest / fname}"
+    assert (gallery / fname).is_file()
