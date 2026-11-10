@@ -491,9 +491,14 @@ def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fa
                                                        answer, complaint):
     from localm.media import comfy_client
     calls = []
-    monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
-                        calls.append((url, token, media)) or answer)
+
+    def _unload(url, token=None, media=True, on_failure=None, label="media"):
+        calls.append((url, token, media))
+        if answer is None:
+            on_failure(comfy_client.unload_failed_notice("HTTP 403", label))
+        return answer
+
+    monkeypatch.setattr(comfy_client, "_localm_unload", _unload)
     lines = []
     ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
                                self_url="http://127.0.0.1:9/v1", instance_token="tok",
@@ -520,7 +525,7 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     monkeypatch.setattr(server, "stop", lambda: True)
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
+                        lambda url, token=None, media=True, **kw:
                         calls.append(url) or {"status": "unloaded"})
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
     from localm.cli import main

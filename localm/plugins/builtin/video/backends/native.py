@@ -641,8 +641,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
         say("Freeing VRAM: unloading the chat model...")
-        if _localm_unload(self_url, instance_token, media=False) is None:
-            say("Could not unload the chat model - the video model may run low on VRAM.")
+        _localm_unload(self_url, instance_token, media=False, on_failure=say, label="video")
     relay = _event_relay(say, on_preview, cancel_check)
     runner = shared.runner
     if seed is None or seed < 0:

@@ -1671,15 +1671,15 @@ def _rename_on_running_server(old_name: str, new_name: str):
     server kept its loaded engine keyed under the OLD name, so the server would
     serve a model the registry no longer lists.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -1688,7 +1688,8 @@ def _rename_on_running_server(old_name: str, new_name: str):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
     try:
         resp = requests.post(f"{url}/v1/models/rename", headers=headers,
                              params={"model": old_name, "new_name": new_name},
@@ -2272,15 +2273,15 @@ def unload_cmd(model, force):
     set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
     requires one.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -2293,12 +2294,12 @@ def unload_cmd(model, force):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    # Owner key (env, else persisted auth.key) wins; else the discovered
-    # instance's own attach token (0600 per-instance registry file), which the
-    # open-mode management gate accepts in place of a key. The token is only
-    # available when the server was found via discovery; an explicit LOCALM_URL
-    # override has no registry entry to read one from.
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    # Owner key (env, else persisted auth.key) wins; else the instance's own
+    # attach token (0600 per-instance registry file), which the open-mode
+    # management gate accepts in place of a key: the discovered entry's, or for
+    # a LOCALM_URL override the registry entry at exactly that address.
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
 
     try:
         params = {}

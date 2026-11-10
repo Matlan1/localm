@@ -135,7 +135,8 @@ class TestGenerateVideo:
                 "a red fox running", tmp_path / "out.mp4",
                 localm_url="http://127.0.0.1:9/v1", instance_token="tok-abc")
         assert ok, msg
-        unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+        unload_spy.assert_called_once()
+        assert unload_spy.call_args.args == ("http://127.0.0.1:9/v1", "tok-abc")
 
     def test_happy_path_saves_clip_and_sidecar(self, tmp_path):
         ok, msg, captured = self._run(tmp_path, seconds=5.0, fps=24, seed=42)
