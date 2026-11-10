@@ -674,7 +674,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest, request: Request,
-                         response: Optional[Response] = None):
+                         response: Response = None):  # pyright: ignore[reportArgumentType]
         # An empty model means "no preference": resolved below to the configured
         # embedder when one exists, otherwise through the general get_engine()
         # resolution. Refused only when there is nothing to fall back to.
