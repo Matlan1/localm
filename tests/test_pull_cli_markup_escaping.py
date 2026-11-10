@@ -371,6 +371,9 @@ class TestPullHfSnapshotTagInjection:
             def model_info(self, repo_id, files_metadata=True):
                 raise RuntimeError("offline")
 
+            def list_repo_files(self, repo_id, **kw):
+                return []
+
         monkeypatch.setattr(huggingface_hub, "HfApi", _EmptyHfApi)
 
         payload = _tag_injection_payload("bold cyan")

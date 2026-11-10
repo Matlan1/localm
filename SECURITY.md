@@ -296,7 +296,10 @@ project notes, and a skill whose file or folder is a link is refused.
   alternate-data-stream), matches an 8.3 short-name alias for an unrelated
   file you already have, names a reserved Windows device, or ends in a dot or
   space (which Windows silently strips). This applies to `localm pull`, the
-  same-repo vision-projector auto-attach, and `--mmproj`.
+  same-repo vision-projector auto-attach, and `--mmproj`. A full-repository
+  pull checks every file name (each folder in it too) against the
+  repository's file list before anything is downloaded, and is refused when
+  that list cannot be read.
 - **Routing a chat request to a model loaded on another localm instance on
   this machine** verifies the target before forwarding anything: accepting a
   peer offer (Models page, when another running instance already has the
@@ -304,8 +307,12 @@ project notes, and a skill whose file or folder is a link is refused.
   key for an instance that has none, before anything is stored, and every request
   after that is only ever forwarded to a target confirmed to resolve to
   loopback over plain HTTP or HTTPS - a forged or LAN-facing offer cannot
-  redirect your requests off this machine. The peer's key lives in this
-  process's memory only; it is never written to disk or logged.
+  redirect your requests off this machine. A redirect answer from the peer is
+  never followed, for a forwarded request, a check of the peer, a routed job
+  or the MCP server using a model another instance has loaded. A key holding
+  anything but printable ASCII without spaces is refused without being sent or
+  echoed. The peer's key lives in this process's memory only; it is never
+  written to disk or logged.
 
 ## Outbound network policy
 
@@ -324,9 +331,12 @@ this section states the security properties and, more importantly, their edges.
 - **What it does not cover.** Several outbound paths deliberately do not use
   it, including bug-report upload and requests to your ComfyUI instance.
   ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
-  that targets a link-local / cloud-metadata address is refused
-  (CHK-COMFY-APIURL), and the connection itself refuses any HTTP redirect
-  outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
+  (or a media plugin's own `comfy.api_url`, the model scan included) that
+  targets a link-local / cloud-metadata address is refused
+  (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, fd00:ec2::/32, and a
+  link-local IPv4 address in IPv4-mapped, IPv4-compatible, NAT64
+  (64:ff9b::/96) or 6to4 form, which the search backend refuses too. The
+  connection itself refuses any HTTP redirect outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
   steer the request elsewhere. Loopback and LAN are both
   normal, unchecked ComfyUI deployments - treat the policy as governing the
   paths named above, not as a blanket statement about every socket localm

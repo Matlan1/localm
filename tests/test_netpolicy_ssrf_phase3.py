@@ -154,3 +154,45 @@ def test_is_link_local_host_via_dns_resolution(monkeypatch):
         "socket.getaddrinfo",
         lambda host, port, *a, **k: [(2, 1, 6, "", ("169.254.1.1", 0))])
     assert is_link_local_host("metadata.internal") is True
+
+
+_METADATA_V6_FORMS = [
+    "fd00:ec2::254",            # AWS IMDS over IPv6
+    "::ffff:169.254.169.254",   # IPv4-mapped
+    "::a9fe:a9fe",              # IPv4-compatible
+    "64:ff9b::a9fe:a9fe",       # NAT64 well-known prefix
+    "2002:a9fe:a9fe::1",        # 6to4
+    "fe80::1",                  # IPv6 link-local (control)
+]
+
+
+@pytest.mark.parametrize("host", _METADATA_V6_FORMS)
+def test_is_link_local_host_catches_metadata_outside_169_254(monkeypatch, host):
+    _no_dns(monkeypatch)
+    assert is_link_local_host(host) is True
+
+
+@pytest.mark.parametrize("host", ["::1", "fd12::1", "64:ff9b::7f00:1", "2002:c0a8:105::1",
+                                  "::ffff:192.168.1.5", "2606:4700::1111"])
+def test_is_link_local_host_leaves_other_ipv6_addresses_alone(monkeypatch, host):
+    _no_dns(monkeypatch)
+    assert is_link_local_host(host) is False
+
+
+@pytest.mark.parametrize("host", _METADATA_V6_FORMS + ["169.254.169.254"])
+def test_search_backend_and_comfy_guard_refuse_the_same_metadata_addresses(host):
+    import ipaddress
+
+    from localm import netpolicy
+    ip = ipaddress.ip_address(host)
+    assert netpolicy.is_link_local_or_metadata_ip(ip) is True
+    assert netpolicy._search_backend_address_ok(ip) is False
+
+
+@pytest.mark.parametrize("url", ["http://[fd00:ec2::254]:8188",
+                                 "http://[64:ff9b::a9fe:a9fe]:8188",
+                                 "http://[::ffff:169.254.169.254]:8188"])
+def test_comfy_url_guard_refuses_ipv6_metadata_forms(monkeypatch, url):
+    _no_dns(monkeypatch)
+    from localm.media import comfy_client
+    assert comfy_client.sanitize_comfy_url(url) == comfy_client._COMFY_LOOPBACK_DEFAULT
