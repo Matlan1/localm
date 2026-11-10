@@ -44,6 +44,8 @@ A plugin installed or enabled from the terminal while a server is running is
 mounted the next time the GUI reads the plugin list (reload the page);
 toggling a plugin while the server runs (via the GUI Plugins page or the
 `/api/plugins/{name}/...` routes) mounts/unmounts it without a restart.
+A plugin disabled or uninstalled from the terminal stays loaded in a running
+server until that server restarts.
 
 ### Upgrades: refreshing a stale installed copy
 
