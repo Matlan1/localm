@@ -5,9 +5,12 @@ the llama/ggml libraries, the ROCm BLAS kernel data, and the license text.
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
+
+from localm.debuglog import logger
 
 import localm.setup_llama as _sl
 
@@ -235,28 +238,71 @@ SOFTWARE.
 
 _LICENSE_NAME_PREFIXES = ("license", "licence", "copying", "notice")
 
+# The name of llama.cpp's own MIT license text in a runtime folder.
+LLAMA_CPP_LICENSE = "LICENSE.llama-cpp"
+
+_LICENSE_TEXT_SUFFIXES = (".txt", ".md", ".rst")
+
+
+def _license_dest_name(name: str) -> str:
+    """The name an upstream license file *name* gets in the runtime folder: a
+    bare ``LICENSE`` / ``COPYING`` (any case, optionally ``.txt``/``.md``/``.rst``)
+    is llama.cpp's own and becomes :data:`LLAMA_CPP_LICENSE`; a qualified one
+    keeps its qualifier (``LICENSE-LLVM-OpenMP`` -> ``LICENSE.llvm-openmp``).
+    ``NOTICE`` files become ``NOTICE.llama-cpp`` / ``NOTICE.<qualifier>``."""
+    low = name.lower()
+    kind = "NOTICE" if low.startswith("notice") else "LICENSE"
+    for prefix in _LICENSE_NAME_PREFIXES:
+        if low.startswith(prefix):
+            low = low[len(prefix):]
+            break
+    for suffix in _LICENSE_TEXT_SUFFIXES:
+        if low.endswith(suffix):
+            low = low[:-len(suffix)]
+            break
+    qualifier = re.sub(r"[^a-z0-9]+", "-", low).strip("-")
+    return f"{kind}.{qualifier or 'llama-cpp'}"
+
+
+def _place_license_file(src: Path, target: Path, base: str) -> bool:
+    """Copy *src* into *target* as *base*, or as ``<base>.1``, ``<base>.2`` ...
+    when that name already holds a different text. A name that already holds the
+    same bytes is left as it is. An existing file is never overwritten. Returns
+    True when *src*'s text is in *target* afterwards. Raises ``OSError``."""
+    data = src.read_bytes()
+    i = 0
+    while True:
+        dest = target / (base if i == 0 else f"{base}.{i}")
+        if not dest.exists():
+            shutil.copy2(src, dest)
+            return True
+        if dest.is_file() and dest.read_bytes() == data:
+            return True
+        i += 1
+
 
 def _copy_license_files(src_dir: Path, target: Path) -> int:
-    """Copy upstream license/notice files from *src_dir* into *target* so the MIT
-    text travels with the binaries. Falls back to a bundled llama.cpp/ggml MIT
-    notice when the archive ships none. Returns the number of files written."""
-    found = [f for f in sorted(src_dir.rglob("*"))
-             if _safe_is_file(f)
-             and any(f.name.lower().startswith(k) for k in _LICENSE_NAME_PREFIXES)]
-    if found:
-        written = 0
-        for i, f in enumerate(found):
-            dest = target / ("LICENSE.llama-cpp" if i == 0
-                             else f"LICENSE.llama-cpp.{i}")
-            try:
-                shutil.copy2(f, dest)
+    """Copy the license and notice files of *src_dir* into *target*, each under
+    the name :func:`_license_dest_name` gives it, without overwriting a license
+    file already in *target* (one placed by an earlier archive into the same
+    folder). Then writes the bundled llama.cpp/ggml MIT notice as
+    :data:`LLAMA_CPP_LICENSE` when *target* has no such file. Returns the number
+    of files written."""
+    found = sorted((f for f in src_dir.rglob("*")
+                    if _safe_is_file(f)
+                    and any(f.name.lower().startswith(k) for k in _LICENSE_NAME_PREFIXES)),
+                   key=lambda f: (len(f.relative_to(src_dir).parts), str(f)))
+    written = 0
+    for f in found:
+        try:
+            if _place_license_file(f, target, _license_dest_name(f.name)):
                 written += 1
-            except OSError:
-                pass
-        if written:
-            return written
-    (target / "LICENSE.llama-cpp").write_text(_LLAMA_CPP_MIT_NOTICE, encoding="utf-8")
-    return 1
+        except OSError as e:
+            logger.warning("could not copy the license file %s into %s: %s", f, target, e)
+    if not (target / LLAMA_CPP_LICENSE).exists():
+        (target / LLAMA_CPP_LICENSE).write_text(_LLAMA_CPP_MIT_NOTICE, encoding="utf-8")
+        written += 1
+    return written
 
 
 def _safe_is_file(f: Path) -> bool:

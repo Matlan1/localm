@@ -170,6 +170,8 @@ def _install_overlay(target: Path) -> Optional[str]:
                 if src.is_file() and not dst.exists():
                     omp.append(dst)
                     shutil.copy2(src, dst)
+            if omp:
+                omp.extend(_copy_openmp_license(ex, target))
         loaded, detail = _sl._native_loads_ok()
         if not loaded:
             _restore(original, backup, omp)
@@ -191,10 +193,28 @@ def _install_overlay(target: Path) -> Optional[str]:
     return winner.name
 
 
+_OPENMP_LICENSE = "LICENSE-LLVM-OpenMP"
+
+
+def _copy_openmp_license(extracted: Path, target: Path) -> list[Path]:
+    """Copy the LLVM OpenMP license of the archive extracted at *extracted* into
+    *target* under the name ``_license_dest_name`` gives it, when *target* has no
+    file of that name. Returns the paths written (none when the archive has no
+    such license or the name is taken). Raises ``OSError``."""
+    found = sorted(p for p in extracted.rglob(_OPENMP_LICENSE) if p.is_file())
+    if not found:
+        return []
+    dst = target / _sl._license_dest_name(_OPENMP_LICENSE)
+    if dst.exists():
+        return []
+    shutil.copy2(found[0], dst)
+    return [dst]
+
+
 def _restore(original: Path, backup: Path, omp: list[Path]) -> None:
     """Put the amd-rocm build's own ggml-cpu.dll back from *backup* (when one
-    was made) and remove the OpenMP runtime files in *omp* (the ones the
-    overlay copied) and the overlay marker."""
+    was made) and remove the OpenMP runtime files and license in *omp* (the
+    ones the overlay copied) and the overlay marker."""
     if not backup.is_file():
         return
     os.replace(backup, original)
