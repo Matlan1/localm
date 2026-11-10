@@ -44,6 +44,7 @@ def mem_home(tmp_path, monkeypatch):
     # Reset module state between tests (module-level, not per-test).
     plug._sweep_running = False
     monkeypatch.setattr(plug, "_stop", plug._threading.Event())
+    monkeypatch.setattr(plug, "_maybe_auto_consolidate", lambda *a, **k: None)
     return tmp_path, plug
 
 
