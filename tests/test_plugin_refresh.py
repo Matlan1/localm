@@ -195,11 +195,11 @@ def test_a_changed_store_takes_effect_on_reload_without_a_refresh(env):
     with TestClient(app) as c:
         assert c.get("/api/rel2/val").json()["val"] == 1
 
-    _valued_plugin(store, "rel2", 2)            # ship a newer store version
+    _valued_plugin(store, "rel2", 222)          # ship a newer store version
     mgr.disable("rel2")
     mgr.enable("rel2")
     with TestClient(app) as c:
-        assert c.get("/api/rel2/val").json()["val"] == 2
+        assert c.get("/api/rel2/val").json()["val"] == 222
 
 
 def test_unload_purges_submodules_from_sys_modules(env):

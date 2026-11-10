@@ -15,6 +15,14 @@ from localm.plugins.mcpserver.server import (
     build_tools,
 )
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 # A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so
 # even a total failure of the fix cannot dial a real host.
 _UNC = r"\\192.0.2.1\share"
