@@ -437,9 +437,9 @@ support, surfacing an error rather than crashing.
 
 **Capability scopes.** Every plugin declares a capability scope, and the HTTP
 routes it mounts are gated to that scope and must sit under `/api/` or `/v1/`.
-The scope gates those routes only: a third-party plugin is Python code running
-unsandboxed in the server process, so install only code you trust. Chat
-hooks are transforms, not controls (see [plugins.md](plugins.md)).
+The scope gates those routes only. Third-party plugins run unsandboxed
+in-process, so install only code you trust. Chat hooks are transforms, not
+controls (see [plugins.md](plugins.md)).
 
 See [plugins.md](plugins.md) for the full authoring guide. A broken plugin
 warns and is skipped, never crashing the host.
