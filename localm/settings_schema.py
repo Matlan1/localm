@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 # Sanity ceiling for a gpu_split_indices entry: an index above it is a config
@@ -96,6 +96,14 @@ _BACKGROUND_ERROR_PREVIEW_LEN = 200
 _USER_NAME_MAX_LEN = 64
 
 
+class Tier:
+    """Who may write a setting: OWNER = an ADMIN caller only; CONFIG_WRITE = any
+    key holding the config:write scope."""
+    OWNER = "owner"
+    CONFIG_WRITE = "config-write"
+    ALL = frozenset({OWNER, CONFIG_WRITE})
+
+
 @dataclass
 class SettingField:
     key: str
@@ -115,10 +123,11 @@ class SettingField:
     legacy_bool: Optional[tuple] = None
     applies: str = Applies.LIVE
     secret: bool = False
-    # Owner-only: a non-ADMIN caller may neither SEE this field in the schema nor
-    # WRITE it via PATCH /v1/config (it widens a trust boundary). Distinct from
-    # `owner` above, which only records the plugin section a setting belongs to.
-    admin_only: bool = False
+    # Privilege tier, required on every field (Tier.OWNER or Tier.CONFIG_WRITE).
+    # Tier.OWNER: a non-ADMIN caller may neither SEE this field in the schema nor
+    # WRITE it via PATCH /v1/config. Distinct from `owner` above, which only
+    # records the plugin section a setting belongs to.
+    tier: str = field(kw_only=True)
     # Engine/plugin STATE, not a setting: validate_update has no schema for what
     # is INSIDE it and stores what it is given VERBATIM (the container tail of
     # the HIDDEN branch in _validate_one). Its real write surface lives elsewhere
@@ -132,6 +141,16 @@ class SettingField:
     # An external link shown under the field's help text, as (url, label). Opens
     # in the caller's own browser tab (target=_blank), never embedded in-app.
     link: Optional[tuple] = None
+
+    @property
+    def admin_only(self) -> bool:
+        """True when only an owner (ADMIN) caller may see or set this field."""
+        return self.tier == Tier.OWNER
+
+    def __post_init__(self):
+        if self.tier not in Tier.ALL:
+            raise ValueError(f"{self.key}: tier must be one of {sorted(Tier.ALL)}, "
+                             f"got {self.tier!r}")
 
     def to_json(self) -> dict:
         d = {
@@ -168,7 +187,7 @@ CORE_FIELDS: list = [
                  "Folder holding llama.dll / ggml libraries. Blank uses the "
                  "bundled runtime (auto-detected path shown); set it to point at "
                  "a custom build.",
-                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.OWNER),
     # HIDDEN: both are written by `localm setup-llama` (--tag / --rollback) and
     # read back by doctor and the bug reporter. There is no settings-form widget
     # for them because setting one WITHOUT re-provisioning leaves the config and
@@ -183,7 +202,7 @@ CORE_FIELDS: list = [
                  "Release tag setup-llama installs (e.g. 'b10355'). Blank uses "
                  "the build localm confirmed; 'latest' tracks upstream's newest, "
                  "untested. Set with `localm setup-llama --tag`, not here.",
-                 group="Engine", applies=Applies.LIVE, admin_only=True),
+                 group="Engine", applies=Applies.LIVE, tier=Tier.OWNER),
     # NOT engine_managed: that flag means PLUGIN STATE specifically (`plugins`,
     # `plugins_enabled`). The two flags are DISJOINT gates - admin_only also
     # hides a value from a non-owner, engine_managed only refuses the write - so
@@ -191,7 +210,7 @@ CORE_FIELDS: list = [
     SettingField("llama_runtime_history", Widget.HIDDEN, "Runtime build history",
                  "Builds provisioned on this machine, newest last. Recorded by "
                  "setup-llama so `--rollback` knows what to return to.",
-                 group="Engine", admin_only=True),
+                 group="Engine", tier=Tier.OWNER),
     # Help text in this schema names another setting rather than placing it
     # ("below", "above"): .settings-fields is a TWO-COLUMN grid (style.css), so
     # the next field renders to the RIGHT, not below.
@@ -203,21 +222,21 @@ CORE_FIELDS: list = [
                  "to Context window (max), or to the free-VRAM ceiling while Auto-size "
                  "context from VRAM is on.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=512, max=1048576,
-                 step=512),
+                 step=512, tier=Tier.CONFIG_WRITE),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
                  "Largest the window may grow to while Auto-size context from VRAM is "
                  "off (0 = unlimited). With it on, only 0 matters: it lifts the "
                  "65536-token auto cap. Bigger needs more VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
-                 step=512),
+                 step=512, tier=Tier.CONFIG_WRITE),
     SettingField("n_ctx_grow", Widget.NUMBER, "Context growth step",
                  "When the window fills, it expands by this many tokens at a time.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=256, max=1048576,
-                 step=256),
+                 step=256, tier=Tier.CONFIG_WRITE),
     SettingField("ctx_auto", Widget.TOGGLE, "Auto-size context from VRAM",
                  "Pick the context ceiling from free GPU memory at load time "
                  "instead of the fixed Context window (max).",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     # Label carries "(next load)" because the Live tuning card in the SAME nav
     # group has its own "GPU layers (running model)" (index.html) - two controls
     # of the same name, one persisted and one immediate, and the settings search
@@ -225,90 +244,90 @@ CORE_FIELDS: list = [
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers (next load)",
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999, tier=Tier.CONFIG_WRITE),
     SettingField("n_cpu_moe", Widget.NUMBER, "MoE expert layers on CPU",
                  "MoE models only. Keeps this many layers' expert weights in system RAM, not "
                  "VRAM. 0 is automatic: with auto-sized GPU layers, only as many as "
                  "needed, before a whole layer moves to the CPU.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999, tier=Tier.CONFIG_WRITE),
     SettingField("ctx_reserve", Widget.NUMBER, "Context window (minimum)",
                  "Every load keeps a window of at least this many tokens usable. "
                  "MoE models keep more experts in system RAM to hold it on the GPU; "
                  "the coding agent asks for 32768.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
-                 step=1024),
+                 step=1024, tier=Tier.CONFIG_WRITE),
     SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
                  "always unloads this instance's idle models when a new model needs "
                  "their VRAM. ask and never keep them (slower), but a manual switch "
                  "asks. Another instance's model is only unloaded after asking.",
                  group="Engine", applies=Applies.LIVE,
-                 options=["always", "ask", "never"]),
+                 options=["always", "ask", "never"], tier=Tier.CONFIG_WRITE),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
                  "MoE models only. VRAM that keeps the most used experts of the layers whose "
                  "experts stay in system RAM. Used when those experts are not memory-mapped; set "
                  "aside for any model with experts. 0 is off.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=262144),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=262144, tier=Tier.CONFIG_WRITE),
     SettingField("use_mmap", Widget.SELECT, "Memory-map model files",
                  "auto runs from disk-backed memory when the model may not fit in "
                  "available RAM, and warns when CPU layers will run at disk speed. on "
                  "forces it; off reads the whole model into memory first.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["auto", "on", "off"]),
+                 options=["auto", "on", "off"], tier=Tier.CONFIG_WRITE),
     SettingField("kv_cache_type", Widget.SELECT, "KV cache type",
                  "f16 is the default. q8_0 stores the KV cache in about half the "
                  "memory, so about 1.9x the context fits in VRAM, with slightly "
                  "slower decoding. q8_0 needs flash attention.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["f16", "q8_0"]),
+                 options=["f16", "q8_0"], tier=Tier.CONFIG_WRITE),
     SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",
                  "When GPU layers is left at 99 (all), fit as many as free VRAM "
                  "allows at load: an oversized model runs some layers on CPU and "
                  "still loads instead of being refused. An explicit value is kept.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
                  "Speculative drafting on MTP/next-n-head models. Applies only "
                  "while Speculative drafting is Inherit. Off by default: speeds "
                  "some models up, slows others. Run `localm bench-mtp <model>` "
                  "to check yours.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     SettingField("mtp_draft_tokens", Widget.NUMBER, "MTP draft tokens",
                  "Tokens MTP proposes per step when it is on. More pays off "
                  "when most drafts are accepted; `localm bench-mtp <model> "
                  "--draft-tokens N` measures it.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3, tier=Tier.CONFIG_WRITE),
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
                  "Where drafts come from: mtp (the model's MTP head), ngram "
                  "(repeats of earlier text), draft (a smaller model, Draft "
                  "model) or off. Inherit follows the MTP toggle. Check: `localm "
                  "bench-spec <model>`.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["", "off", "mtp", "ngram", "draft"]),
+                 options=["", "off", "mtp", "ngram", "draft"], tier=Tier.CONFIG_WRITE),
     SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",
                  "Most tokens one n-gram or draft-model step proposes. Blank "
                  "uses 8; a draft model picks a shorter length when its measured "
                  "costs pay better. Models with recurrent layers use at most 4.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16, tier=Tier.CONFIG_WRITE),
     SettingField("spec_draft_model", Widget.TEXT, "Draft model",
                  "For Speculative drafting = draft: a smaller model with the same "
                  "vocabulary, by name or GGUF path. `localm spec-drafts <model>` "
                  "lists the ones you have.",
-                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.OWNER),
     SettingField("parallel_slots", Widget.SELECT, "Parallel requests",
                  "How many chat requests one GGUF model answers at once; they share "
                  "its context window. auto uses 4 (fewer for a recurrent model short "
                  "of VRAM). Speculative drafting forces 1.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["auto"] + [str(n) for n in range(1, 17)]),
+                 options=["auto"] + [str(n) for n in range(1, 17)], tier=Tier.CONFIG_WRITE),
     SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
                  "Denoising steps per reply for diffusion language models "
                  "(Dream, LLaDA, RND1). More steps: better text, slower reply. "
                  "Blank uses 128, or the reply length when shorter.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096, tier=Tier.CONFIG_WRITE),
     SettingField("diffusion_max_tokens", Widget.NUMBER, "Diffusion reply length",
                  "Tokens a diffusion language model writes per reply. It fills the whole "
                  "length every time, so longer is slower. Limited by Max tokens per "
                  "reply and by the room the prompt leaves (2048 at most).",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096, tier=Tier.CONFIG_WRITE),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
@@ -316,7 +335,7 @@ CORE_FIELDS: list = [
                  "Lowering this risks a native crash or GPU driver hang, not just "
                  "a slower load: it is VRAM the loader genuinely needs for the KV "
                  "cache and llama.cpp's scratch buffers.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=256, step=128),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=256, step=128, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a dedicated Main GPU selector in the Live Tuning card
     # (populated from GET /api/gpus), not the generic settings form - a plain
     # number box would not show device names/VRAM. Still accepted by PATCH
@@ -326,7 +345,7 @@ CORE_FIELDS: list = [
                  "localm's own ComfyUI. A GGUF chat model spreads over every GPU unless "
                  "Split across GPUs names some. Blank lets each choose.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
-                 max=MAX_GPU_SPLIT_INDEX),
+                 max=MAX_GPU_SPLIT_INDEX, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
     # GPU selector (populated from GET /api/gpus), not the generic settings
     # form - same reasoning as main_gpu_index above. Still accepted by PATCH
@@ -338,7 +357,7 @@ CORE_FIELDS: list = [
                  "Device indices a model may use: 2+ split it across them, 1 keeps "
                  "a GGUF chat model on that card only. Blank still spreads a model "
                  "over every GPU by free VRAM.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a ratio-weight input beside each checked device in
     # the "Split across GPUs" row (settings-perf.js renderGpuSplitRatioRow),
     # not the generic settings form - same reasoning as gpu_split_indices
@@ -348,7 +367,7 @@ CORE_FIELDS: list = [
                  "Optional relative weight per device in Split across GPUs "
                  "(same order/length). Blank sizes each card's share from its "
                  "free VRAM at load time, or equally when free VRAM cannot be read.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
     # models" number input in the Live Tuning card (settings-perf.js
     # setupResidencyControls), not the generic settings form. Still accepted
@@ -360,7 +379,7 @@ CORE_FIELDS: list = [
                  "Most models kept loaded at once. Blank lets free VRAM decide (a model "
                  "loads alongside the others only when it provably fits). 1 keeps one "
                  "model only when Unload other models to make room is always.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=1),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a "Pinned models" text input beside the one above
     # (same Live Tuning card, same setupResidencyControls), not the generic
     # settings form - a plain comma-separated field, no picker, since a pin
@@ -371,26 +390,26 @@ CORE_FIELDS: list = [
                  "Model names that are never evicted to make room for another. "
                  "Pinning only protects an already-loaded model; it never loads "
                  "one. Blank pins nothing.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
                  "off = never switch; image = only for media your model can't read; "
                  "ask = offer one; loaded = loaded models only; auto = any "
                  "installed model; eager = also if unchecked. Pinned chats never "
                  "switch.",
                  group="Models",
-                 options=["off", "image", "ask", "loaded", "auto", "eager"]),
+                 options=["off", "image", "ask", "loaded", "auto", "eager"], tier=Tier.CONFIG_WRITE),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "
                  "it automatically.",
-                 group="Engine", min=0, step=30),
+                 group="Engine", min=0, step=30, tier=Tier.CONFIG_WRITE),
     # The five timeout fields below share one sentence shape, so the panel reads
     # as one family and a difference between two of them stays visible.
     SettingField("gguf_load_timeout_s", Widget.NUMBER, "GGUF load timeout (s)",
                  "How long a GGUF model load may run in its isolated worker "
                  "before it is treated as hung and cancelled. Raise it only for a "
                  "huge model on slow storage.",
-                 group="Timeouts", min=10, step=60),
+                 group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     # The label names the format, like the other load/first-token timeouts: a
     # bare "First-token timeout" reads on screen as the global one. The timer
     # covers reading the whole prompt rather than emitting one token, so on CPU,
@@ -402,25 +421,25 @@ CORE_FIELDS: list = [
                  "model is treated as hung. It covers reading your whole prompt, "
                  "so on CPU or with a long prompt this can legitimately take "
                  "minutes.",
-                 group="Timeouts", min=10, step=60),
+                 group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_load_timeout_s", Widget.NUMBER,
                  "HuggingFace load timeout (s)",
                  "How long a HuggingFace-format model load may run in its isolated "
                  "worker before it is treated as hung and cancelled. Raise it only "
                  "for a huge model on slow storage.",
-                 group="Timeouts", min=10, step=60),
+                 group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_first_token_timeout_s", Widget.NUMBER,
                  "HuggingFace first-token timeout (s)",
                  "How long a HuggingFace-format model's reply may take to produce "
                  "its first token before it is treated as hung. It covers reading "
                  "your whole prompt, so it is generous by default.",
-                 group="Timeouts", min=10, step=60),
+                 group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_embed_timeout_s", Widget.NUMBER,
                  "HuggingFace embed timeout (s)",
                  "How long a HuggingFace-format model's embedding or rerank call may run "
                  "in its isolated worker before it is treated as hung. Raise it if you "
                  "regularly embed large batches.",
-                 group="Timeouts", min=10, step=60),
+                 group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     # The cap is low because a HuggingFace embed runs one text at a time with no
     # batching, so request cost is linear in the batch size.
     SettingField("hf_embed_max_texts", Widget.NUMBER,
@@ -428,18 +447,18 @@ CORE_FIELDS: list = [
                  "Most texts accepted in one /v1/embeddings request against a "
                  "HuggingFace-format model. Most of these embed one text at a time with "
                  "no batching, so a large request is slow.",
-                 group="Timeouts", min=1, step=1),
+                 group="Timeouts", min=1, step=1, tier=Tier.CONFIG_WRITE),
     SettingField("hf_embed_max_chars", Widget.NUMBER,
                  "HuggingFace embed batch cap (characters)",
                  "Maximum total characters, summed across every text, "
                  "accepted in one /v1/embeddings request against a "
                  "HuggingFace-format model.",
-                 group="Timeouts", min=1, step=1000),
+                 group="Timeouts", min=1, step=1000, tier=Tier.CONFIG_WRITE),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Folder levels `localm add <dir>` and the models-folder scan search for "
                  "GGUF files and HuggingFace model folders. The models-folder scan "
                  "always searches at least 2 levels.",
-                 group="Models", min=1, max=10, step=1),
+                 group="Models", min=1, max=10, step=1, tier=Tier.CONFIG_WRITE),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
     # conversation; a blank field there inherits the value here. So this section is
@@ -448,46 +467,46 @@ CORE_FIELDS: list = [
                  "The system prompt every new chat starts with. A chat's own System "
                  "prompt field overrides this per conversation; leave that blank to "
                  "use this. Empty = no default system prompt.",
-                 group="Chat", owner="chat"),
+                 group="Chat", owner="chat", tier=Tier.CONFIG_WRITE),
     SettingField("temperature", Widget.NUMBER, "Temperature",
                  "Randomness of replies. Lower is more focused; higher is more "
                  "varied and creative.",
-                 group="Chat", owner="chat", min=0, max=2, step=0.05),
+                 group="Chat", owner="chat", min=0, max=2, step=0.05, tier=Tier.CONFIG_WRITE),
     SettingField("top_p", Widget.NUMBER, "Top-p (nucleus sampling)",
                  "Consider only the top tokens whose probabilities sum to this "
                  "fraction. 1.0 turns it off.",
-                 group="Chat", owner="chat", min=0, max=1, step=0.05),
+                 group="Chat", owner="chat", min=0, max=1, step=0.05, tier=Tier.CONFIG_WRITE),
     SettingField("top_k", Widget.NUMBER, "Top-k",
                  "Consider only the k most likely tokens at each step. 0 turns it off.",
-                 group="Chat", owner="chat", min=0, step=1),
+                 group="Chat", owner="chat", min=0, step=1, tier=Tier.CONFIG_WRITE),
     SettingField("repeat_penalty", Widget.NUMBER, "Repeat penalty",
                  "How strongly to discourage reusing tokens. 1.0 is no penalty; "
                  "higher reduces loops.",
-                 group="Chat", owner="chat", min=0, step=0.05),
+                 group="Chat", owner="chat", min=0, step=0.05, tier=Tier.CONFIG_WRITE),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
                  "Upper limit on tokens per reply, a runaway guard not a target. "
                  "Thinking models need plenty of room. 0 = unlimited.",
-                 group="Chat", owner="chat", min=0, step=1),
+                 group="Chat", owner="chat", min=0, step=1, tier=Tier.CONFIG_WRITE),
     SettingField("chat_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain chat tool calls",
                  "Once the model starts a <tool_call> (the web search/fetch tool), "
                  "force it to be valid tool-call JSON (lazy GBNF grammar; local "
                  "grammar-capable backends only). Free text and thinking are "
                  "unaffected.",
-                 group="Chat", owner="chat", applies=Applies.LIVE),
+                 group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     SettingField("chat_web_max_lookups", Widget.NUMBER,
                  "Web lookups per message",
                  "With web access on, the most searches and page reads the model "
                  "may run for one message. They also stop when it repeats a search "
                  "or page, or two in a row find nothing new. 0 = no limit.",
                  group="Chat", owner="chat", min=0, max=100, step=1,
-                 applies=Applies.LIVE),
+                 applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.
     SettingField("user_avatar", Widget.HIDDEN, "Your icon",
                  "An emoji or a small uploaded image shown next to your own "
                  "messages. Blank shows nothing.",
-                 group="Chat", owner="chat", applies=Applies.LIVE),
+                 group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered beside user_avatar in the same Avatars panel, not a
     # generic text box - see settings.js buildAvatarsSection. A general display
     # name (not avatar-specific): it also doubles as the future per-user name
@@ -495,21 +514,21 @@ CORE_FIELDS: list = [
     SettingField("user_name", Widget.HIDDEN, "Your name",
                  "Shown next to your messages instead of \"You\". Blank keeps "
                  "the default.",
-                 group="Chat", owner="chat", applies=Applies.LIVE),
+                 group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     SettingField("model_avatar_default", Widget.HIDDEN, "Model icon",
                  "An emoji or a small uploaded image shown next to every "
                  "model's replies. Blank falls back to a generated monogram.",
-                 group="Chat", owner="chat", applies=Applies.LIVE),
+                 group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     SettingField("model_avatar_overrides", Widget.HIDDEN, "Per-model icons",
                  "Override the model icon for one specific model. Falls back "
                  "to the Model icon default, then the monogram, when unset.",
-                 group="Chat", owner="chat", applies=Applies.LIVE),
+                 group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
                  "Port the API/GUI server binds to (default 8642). If it is busy, localm "
                  "uses the first free port in 8642-8741. Applies after a full stop and "
                  "start; Restart server keeps the current port.",
-                 group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
+                 group="Server", applies=Applies.RESTART, min=1, max=65535, step=1, tier=Tier.CONFIG_WRITE),
     # admin_only: this decides WHICH NETWORK can reach the server at all - the
     # widest reach-widening key in the Server group, same trust boundary class
     # as cors_origins (browser origins) and net_allow_private (outbound reach).
@@ -528,7 +547,7 @@ CORE_FIELDS: list = [
                  "only (127.0.0.1). 0.0.0.0 = every interface, so phones on "
                  "your network reach it; set an API key first or it stays on "
                  "loopback.",
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # admin_only, all three: turning TLS off sends the API key over the network
     # in cleartext, and the cert/key pair decides what the server presents to
     # every client - transport-trust decisions are the owner's, never a
@@ -539,16 +558,16 @@ CORE_FIELDS: list = [
                  "custom pair). Off = plain HTTP, so the API key crosses the "
                  "network readable by anyone on it. Loopback is always plain "
                  "HTTP.",
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("tls_cert", Widget.PATH, "Custom TLS certificate (PEM)",
                  "Use this certificate instead of localm's built-in one; blank "
                  "= built-in. Needs the matching private key. If the pair "
                  "cannot be loaded, localm warns and falls back to its "
                  "built-in certificate.",
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("tls_key", Widget.PATH, "Custom TLS private key (PEM)",
                  "Private key for the custom TLS certificate.",
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # admin_only: this names WHICH BROWSER ORIGINS may call the authenticated
     # API - it widens a trust boundary exactly like net_allow_private (network
     # reach) and the rag_* keys (filesystem reach) do. "*" additionally opts the
@@ -561,24 +580,24 @@ CORE_FIELDS: list = [
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # A rename needs a restart: the name is also written into the HTTPS
     # certificate's SANs, so it is not display-only.
     SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
                  "The name other devices use to reach this server on your LAN: "
                  "<name>.local, so there is no IP to type. Letters, digits and "
                  "hyphens only.",
-                 group="Server", applies=Applies.RESTART),
+                 group="Server", applies=Applies.RESTART, tier=Tier.CONFIG_WRITE),
     SettingField("metrics_enabled", Widget.TOGGLE, "Prometheus metrics",
                  "Serve request, token and GPU-memory counters at /metrics for "
                  "Prometheus. Once any API key exists it needs an admin key; "
                  "carries no prompts, replies or model names.",
-                 group="Server", applies=Applies.RESTART, admin_only=True),
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback so "
                  "devices can reach localm by name. Off = no <name>.local; use the IP "
                  "address or a Tailscale name. Loopback binds never advertise.",
-                 group="Server", applies=Applies.RESTART),
+                 group="Server", applies=Applies.RESTART, tier=Tier.CONFIG_WRITE),
     # ---- Security ----
     # admin_only: defense in depth on a LATENT fail-closed control, not an active
     # bypass. Both readers sit behind an any_key_configured() check in
@@ -593,7 +612,7 @@ CORE_FIELDS: list = [
                  "Fail closed: if every API key is later removed, refuse requests "
                  "instead of running open. Can be turned on only while a key exists. "
                  "Exposing localm on a network needs a strong key either way.",
-                 group="Security", admin_only=True),
+                 group="Security", tier=Tier.OWNER),
     # admin_only: turning this ON lets a downloaded model directory run its own
     # bundled Python inside the localm process, which is arbitrary code execution
     # as the server user. Only an owner may make that call, never a config:write
@@ -606,7 +625,7 @@ CORE_FIELDS: list = [
                  "model folder run its own Python when loading. Off by default: "
                  "such a model runs on transformers' own support, if any. Turn on "
                  "only for a trusted source.",
-                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.OWNER),
     # admin_only: matches rag_allowed_roots/rag_denied_roots (same "which host
     # locations may localm touch" trust boundary). ON by default, so a mapped
     # network drive keeps working exactly like a local folder; turning it off is
@@ -619,28 +638,28 @@ CORE_FIELDS: list = [
                  "treat a mapped network drive (e.g. Z:\\) as a normal local "
                  "folder. Off refuses them, for keeping localm confined to "
                  "local disks.",
-                 group="Security", admin_only=True),
+                 group="Security", tier=Tier.OWNER),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
     # form control. Accepted by PATCH /v1/config so the launcher stays in sync.
     SettingField("logo_style", Widget.HIDDEN, "Logo style",
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
-                 group="General"),
+                 group="General", tier=Tier.CONFIG_WRITE),
     # HIDDEN: chosen with the language picker in the GUI (Settings -> Appearance),
     # which names each language in its own language, not a form control whose
     # own label would be in a language the reader may not have.
     SettingField("language", Widget.HIDDEN, "Interface language",
                  "Language the web GUI is shown in. Anything not translated "
                  "yet stays in English.",
-                 group="General"),
+                 group="General", tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by the Settings -> System -> Appearance card's own
     # upload/preview/clear controls, not a generic form control - same reasoning
     # as logo_style right above.
     SettingField("chat_background", Widget.HIDDEN, "Chat background",
                  "A background image shown behind your chat messages. Blank "
                  "shows none.",
-                 group="General", applies=Applies.LIVE),
+                 group="General", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
     # OFF means the project list is NOT WRITTEN, never "written but hidden" -
     # see plugins/coder/projects.py, whose privacy-mode refusal is NOT covered
     # by this setting and is not configurable at all.
@@ -648,7 +667,7 @@ CORE_FIELDS: list = [
                  "Remember projects you have coded in",
                  "Keeps a list of project folders so past sessions are easy to "
                  "reach. Privacy-mode sessions are never listed.",
-                 group="Coder"),
+                 group="Coder", tier=Tier.CONFIG_WRITE),
     # Capped: an unbounded list is both a scrolling wall and a growing
     # disclosure surface.
     SettingField("coder_projects_remembered", Widget.NUMBER,
@@ -656,28 +675,28 @@ CORE_FIELDS: list = [
                  "How many recent project folders that list shows and keeps. A lower "
                  "number shortens the list at once; 0 shows none and stops adding "
                  "folders.",
-                 group="Coder", min=0, step=5),
+                 group="Coder", min=0, step=5, tier=Tier.CONFIG_WRITE),
     SettingField("coder_rail_side", Widget.SELECT, "Coder session list side",
                  "Which side the coder's session list sits on. right "
                  "(default) or left.",
-                 group="Coder", options=["right", "left"]),
+                 group="Coder", options=["right", "left"], tier=Tier.CONFIG_WRITE),
     SettingField("desktop_window_mode", Widget.SELECT, "Default window mode",
                  "How `localm gui` opens when the standalone-window extra "
                  "(localm[desktop]) is installed. auto (default): the app "
                  "window when available, else a browser tab. browser: always "
                  "a browser tab.",
-                 group="Desktop", options=["auto", "browser"]),
+                 group="Desktop", options=["auto", "browser"], tier=Tier.CONFIG_WRITE),
     SettingField("temp_location", Widget.TEXT, "Temporary files",
                  "Where temporary files go: auto (default; the data folder "
                  "for a self-contained install, else the system temp "
                  "folder), data, system, or an absolute folder path.",
-                 group="General", applies=Applies.RESTART),
+                 group="General", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",
                  "Only for the standalone app window (localm[desktop]). Off (default): "
                  "closing hides it and the server keeps running; use Stop to quit. On: "
                  "closing stops the server. An attached window just closes.",
-                 group="Desktop"),
+                 group="Desktop", tier=Tier.CONFIG_WRITE),
     # ---- Privacy ----
     # admin_only, all three: they decide WHETHER LOCALM WRITES THE USER'S
     # CONTENT TO DISK, so only an owner may turn privacy off and start
@@ -689,7 +708,7 @@ CORE_FIELDS: list = [
                  "What localm saves: privacy = nothing written automatically; log = a "
                  "JSONL audit trail; full = log plus Markdown transcripts of chat, "
                  "server and coder sessions (coder ones in the project).",
-                 group="Privacy", options=_PRIVACY, admin_only=True),
+                 group="Privacy", options=_PRIVACY, tier=Tier.OWNER),
     # Both children name the parent setting rather than pointing at a position:
     # in the two-column grid the parent sits to the LEFT, not above.
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
@@ -697,18 +716,18 @@ CORE_FIELDS: list = [
                  "records of chat is only ever made more private by it. Blank "
                  "inherits whatever Session persistence is set to.",
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
-                 admin_only=True),
+                 tier=Tier.OWNER),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
                  "Overrides Session persistence for the coder, unless the project's "
                  ".localcoder/config.toml sets a mode. An open session keeps its mode. "
                  "The server's own record only gets more private. Blank inherits.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
-                 admin_only=True),
+                 tier=Tier.OWNER),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
                  "Recall the durable facts localm has learned about you and add them to "
                  "the system prompt each chat turn. Off = keep the facts, but stop "
                  "recalling them and saving \"remember that\" requests.",
-                 group="Memory", owner="memory"),
+                 group="Memory", owner="memory", tier=Tier.CONFIG_WRITE),
     # No privacy exception here: consolidation WRITES, and privacy mode's
     # contract is that nothing is written automatically, so unlike recall it can
     # never be opted back in.
@@ -716,26 +735,26 @@ CORE_FIELDS: list = [
                  "After a chat turn, distil durable facts from the conversation into "
                  "memory, so it grows with no manual step. Needs Memory recall on. "
                  "Always blocked in privacy mode. Off, it grows only on demand.",
-                 group="Memory", owner="memory"),
+                 group="Memory", owner="memory", tier=Tier.CONFIG_WRITE),
     SettingField("memory_recall_in_privacy", Widget.TOGGLE,
                  "Allow memory recall in privacy mode",
                  "Privacy mode normally turns memory off entirely. Turn this on to "
                  "still READ existing memories in privacy mode; writing new ones "
                  "stays off, so no new trace is created.",
-                 group="Memory", owner="memory"),
+                 group="Memory", owner="memory", tier=Tier.OWNER),
     # These two labels must read on their own: a settings SEARCH match renders
     # outside its section, with no parent label to complete the sentence.
     SettingField("memory_recall_in_privacy_chat", Widget.TOGGLE,
                  "Privacy-mode recall: chat",
                  "With Allow memory recall in privacy mode on, recall chat memory "
                  "during privacy-mode chats (read-only).",
-                 group="Memory", owner="memory"),
+                 group="Memory", owner="memory", tier=Tier.OWNER),
     SettingField("memory_recall_in_privacy_coder", Widget.TOGGLE,
                  "Privacy-mode recall: coder",
                  "With Allow memory recall in privacy mode on, recall the coder's "
                  "past-session lessons during privacy-mode coder sessions "
                  "(read-only).",
-                 group="Memory", owner="memory"),
+                 group="Memory", owner="memory", tier=Tier.OWNER),
     # Privacy mode's contract is that nothing is written automatically, and the
     # crash/hang diagnostics a bug report needs are part of what it suppresses.
     # This toggle is the opt-in that writes them anyway.
@@ -744,7 +763,7 @@ CORE_FIELDS: list = [
                  "Writes crash and hang diagnostics (stack traces, a debug log) even in "
                  "privacy mode, never chat content. Debug log, crash guard and stall "
                  "watchdog change from the next server start, the rest at once.",
-                 group="Diagnostics", admin_only=True, applies=Applies.RESTART),
+                 group="Diagnostics", tier=Tier.OWNER, applies=Applies.RESTART),
     # ---- Models ----
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
@@ -769,7 +788,7 @@ CORE_FIELDS: list = [
                  # update_config) and carries its own owner check; without that
                  # check, this flag alone does not close the rag path. The re-embed
                  # endpoint only READS this value to label a job.
-                 group="Embeddings", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Embeddings", applies=Applies.NEXT_LOAD, tier=Tier.OWNER),
     # Changing this makes existing collections and memory vectors stop matching.
     # mean suits bge/nomic and matches everything already indexed; a
     # decoder-based embedder (Qwen3-Embedding, gte-Qwen2) is trained for
@@ -780,7 +799,7 @@ CORE_FIELDS: list = [
                  "re-index after. A loaded embedder keeps the old value until unloaded. "
                  "mean suits bge/nomic; a decoder-based one needs last or auto.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
-                 options=_EMBEDDING_POOLING),
+                 options=_EMBEDDING_POOLING, tier=Tier.CONFIG_WRITE),
     # Blank is not simply "use the GPU": a large embedder sharing one card with a
     # loaded chat model oversubscribes VRAM and slows the chat model down, so
     # automatic falls back to CPU rather than competing.
@@ -789,18 +808,18 @@ CORE_FIELDS: list = [
                  "when that is not 99, else full offload when free VRAM holds it, "
                  "otherwise CPU. 0 forces CPU; 99 forces full offload.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
-                 min=0, max=999, step=1),
+                 min=0, max=999, step=1, tier=Tier.CONFIG_WRITE),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "
                  "files on disk.",
-                 group="Models"),
+                 group="Models", tier=Tier.CONFIG_WRITE),
     SettingField("autoprune_missing_models", Widget.TOGGLE,
                  "Auto-remove entries for missing files",
                  "When a model file in the models folder has gone, delete its "
                  "registry entry automatically instead of flagging it as missing. "
                  "Models added from other folders are only flagged.",
-                 group="Models"),
+                 group="Models", tier=Tier.CONFIG_WRITE),
     # Neither key is in DEFAULT_CONFIG: validate_update() rejects any key not
     # there, so a caller that ever skips the interception below gets a loud 400
     # instead of a silent write into config.json. PATCH /v1/config and `localm
@@ -812,13 +831,13 @@ CORE_FIELDS: list = [
                  "Optional: raises rate limits and unlocks gated models. Blank uses HF_TOKEN, "
                  "else anonymous access; a saved huggingface-cli login then covers downloads "
                  "only, not model search and its file lists.",
-                 group="Models", admin_only=True, secret=True,
+                 group="Models", tier=Tier.OWNER, secret=True,
                  link=("https://huggingface.co/settings/tokens", "Get a token")),
     SettingField("civitai_api_key", Widget.SECRET, "CivitAI API key",
                  "Optional: raises rate limits and unlocks gated/login-required "
                  "CivitAI models. Blank = anonymous access. Falls back to the "
                  "CIVITAI_API_KEY environment variable.",
-                 group="Models", admin_only=True, secret=True,
+                 group="Models", tier=Tier.OWNER, secret=True,
                  link=("https://civitai.com/user/account",
                        "Get a key (Account, then API Keys)")),
     # ---- Plugins ----
@@ -826,7 +845,7 @@ CORE_FIELDS: list = [
                  "Suggest installing a plugin for its command",
                  "When a command belongs to a known but inactive plugin, suggest "
                  "installing it instead of reporting an unknown command.",
-                 group="Plugins"),
+                 group="Plugins", tier=Tier.CONFIG_WRITE),
     # Only the LOCAL operator can trigger this - a remote client never causes a
     # server-side install (the install path is gated on the local principal).
     SettingField("auto_install_plugin_deps", Widget.TOGGLE,
@@ -834,11 +853,11 @@ CORE_FIELDS: list = [
                  "When you install or enable a plugin that needs extra Python packages, "
                  "install them automatically on this machine. Skipped on a network bind "
                  "and by `localm plugin install <folder>`.",
-                 group="Plugins"),
+                 group="Plugins", tier=Tier.CONFIG_WRITE),
     SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
                  "Names of enabled engine plugins. Managed by the Plugins page "
                  "and `localm plugin enable/disable`, not edited here.",
-                 group="Plugins", engine_managed=True),
+                 group="Plugins", engine_managed=True, tier=Tier.CONFIG_WRITE),
     # ---- Bug-report upload (deployment config) ----
     # HIDDEN: the maintainer sets these in config.json when preparing a tester
     # build (see tools/bugreport-proxy/). Not rendered in the form, so a tester on
@@ -855,19 +874,19 @@ CORE_FIELDS: list = [
     SettingField("bugreport_upload_url", Widget.HIDDEN, "Bug-report upload URL",
                  "Endpoint the in-app 'Send to maintainer' button POSTs the report "
                  "to (the bug-report proxy). Blank = no upload channel.",
-                 group="Bug reports", admin_only=True),
+                 group="Bug reports", tier=Tier.OWNER),
     SettingField("bugreport_upload_token", Widget.HIDDEN, "Bug-report upload token",
                  "Optional shared secret the proxy may require, sent as a header. "
                  "Set in config.json, not here.",
-                 group="Bug reports", admin_only=True),
+                 group="Bug reports", tier=Tier.OWNER),
     SettingField("update_url", Widget.HIDDEN, "Update endpoint URL",
                  "Override for the updater's Worker base (defaults to the bug-report "
                  "URL when blank). Set in config.json, not here.",
-                 group="Updates", admin_only=True),
+                 group="Updates", tier=Tier.OWNER),
     SettingField("update_token", Widget.HIDDEN, "Update endpoint token",
                  "Override shared secret for the updater (defaults to the bug-report "
                  "token when blank). Set in config.json, not here.",
-                 group="Updates", admin_only=True),
+                 group="Updates", tier=Tier.OWNER),
     # admin_only: this decides WHICH BUILDS the updater will suggest installing on
     # this machine - the same "widens trust reach" reasoning as update_url/
     # update_token/bugreport_upload_url right above (all admin_only in this same
@@ -881,7 +900,7 @@ CORE_FIELDS: list = [
                  "Also offer release-candidate builds when checking for updates. "
                  "A prerelease is signed and verified like a stable release but is "
                  "less field-tested. Turn on only to help test rc builds.",
-                 group="Updates", admin_only=True),
+                 group="Updates", tier=Tier.OWNER),
     # admin_only: this EXEMPTS the update channel from net_mode - the same
     # "widens network reach" reasoning as update_url/update_token/
     # bugreport_upload_url and update_allow_prerelease right above (all
@@ -896,51 +915,51 @@ CORE_FIELDS: list = [
                  "The update check normally obeys Network access, so setting that "
                  "to Off also turns off update checks. Turn this on to let the "
                  "update channel through regardless.",
-                 group="Updates", admin_only=True),
+                 group="Updates", tier=Tier.OWNER),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
-                 group="Plugins", engine_managed=True),
+                 group="Plugins", engine_managed=True, tier=Tier.CONFIG_WRITE),
     SettingField("key_presets", Widget.HIDDEN, "Key presets",
                  "Quick-select scope bundles for the Keys & devices manager. "
                  "Edited there, not in this form.",
-                 group="Security"),
+                 group="Security", tier=Tier.CONFIG_WRITE),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
                  "Coder approval timeout (s)",
                  "Seconds a coder approval card waits for an answer before it is "
                  "auto-rejected and the agent moves on (0 = wait forever).",
-                 group="Coder", owner="coder", min=0, step=10),
+                 group="Coder", owner="coder", min=0, step=10, tier=Tier.CONFIG_WRITE),
     SettingField("coder_index_timeout", Widget.NUMBER,
                  "Coder project-scan timeout (s)",
                  "Wall-clock cap on the coder's startup project-map scan (0 = no time "
                  "limit). The scan also stops after 20,000 files whatever this is, so "
                  "raising it helps only with a slow walk, not a large one.",
-                 group="Coder", owner="coder", min=0, step=5),
+                 group="Coder", owner="coder", min=0, step=5, tier=Tier.CONFIG_WRITE),
     SettingField("coder_grep_max_per_file", Widget.NUMBER,
                  "Coder grep matches per file",
                  "Default for how many matches the coder's grep shows per file before it "
                  "summarises the rest (0 = show all); the model can change it per "
                  "search. Matches beyond the cap are still counted and reported.",
-                 group="Coder", owner="coder", min=0, step=5),
+                 group="Coder", owner="coder", min=0, step=5, tier=Tier.CONFIG_WRITE),
     SettingField("coder_grep_max_output_lines", Widget.NUMBER,
                  "Coder grep output lines",
                  "Default for how many output lines the coder's grep produces before it "
                  "stops and reports how many files it did not reach (0 = no cap); the "
                  "model can change it per search.",
-                 group="Coder", owner="coder", min=0, step=50),
+                 group="Coder", owner="coder", min=0, step=50, tier=Tier.CONFIG_WRITE),
     SettingField("coder_grep_max_file_bytes", Widget.NUMBER,
                  "Coder grep file size cap (bytes)",
                  "Files larger than this are skipped by the coder's grep and "
                  "search_replace (0 = no cap) and the skip is reported; the model can "
                  "raise it for one grep. Keeps a multi-MB log from swamping a search.",
-                 group="Coder", owner="coder", min=0, step=1048576),
+                 group="Coder", owner="coder", min=0, step=1048576, tier=Tier.CONFIG_WRITE),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls",
                  "Once the model starts a <tool_call>, force valid tool-call JSON (local "
                  "grammar-capable backends only). If the model keeps answering with no "
                  "call, one retry allows only thinking and a call.",
-                 group="Coder", owner="coder"),
+                 group="Coder", owner="coder", tier=Tier.CONFIG_WRITE),
     # Recall is free; the write half is skipped in privacy mode and for shared
     # keys. Episodes are stored under the localm data dir, never inside the
     # project, and are managed with `localcoder --episodes` /
@@ -950,7 +969,7 @@ CORE_FIELDS: list = [
                  "Recall lessons from past sessions on a project and distil each "
                  "finished session into a new one (one extra model call if it changed "
                  "files or failed). Applies to new sessions.",
-                 group="Coder", owner="coder"),
+                 group="Coder", owner="coder", tier=Tier.CONFIG_WRITE),
     # admin_only: an INJECTION-HARDENING control, so a non-owner turning it off
     # would re-open the indirect-prompt-injection boundary for the OWNER's coder.
     # The mechanism is marking tool results as DATA rather than instructions; it
@@ -960,7 +979,7 @@ CORE_FIELDS: list = [
                  "Marks coder tool results from the web, web search and external MCP "
                  "servers as untrusted data, so a fetched page cannot inject commands. "
                  "Leave on unless you have a reason. Applies to new sessions.",
-                 group="Coder", owner="coder", admin_only=True),
+                 group="Coder", owner="coder", tier=Tier.OWNER),
     SettingField("coder_review", Widget.TOGGLE,
                  "Review changes before finishing",
                  "Before the coder declares a task done, a reviewer model reads the "
@@ -971,7 +990,7 @@ CORE_FIELDS: list = [
                  # boundary. coder_reviewer / coder_reviewer_model ARE owner-only,
                  # because they choose WHICH backend or model file reviews (a URL
                  # or a path).
-                 group="Coder", owner="coder"),
+                 group="Coder", owner="coder", tier=Tier.CONFIG_WRITE),
     # 'local' is heterogeneous and private but adds CPU latency (the model is
     # set via coder_reviewer_model); an http(s) URL is a second
     # OpenAI-compatible endpoint, e.g. a second local server. A network reviewer
@@ -982,7 +1001,7 @@ CORE_FIELDS: list = [
                  "Sends your diff off-machine (network policy applies) unless blank, "
                  "local or a loopback URL. blank = the agent's own model; local = "
                  "Reviewer model name, on CPU; openai; anthropic; or a URL.",
-                 group="Coder", owner="coder", admin_only=True),
+                 group="Coder", owner="coder", tier=Tier.OWNER),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its
     # ARGUMENT writable would be a half-fix. registry.py falls through to
     # Path(name), accepting any existing GGUF / HF dir, so this is not
@@ -993,7 +1012,7 @@ CORE_FIELDS: list = [
                  "The reviewer's model. Required for local (an installed model name or "
                  "a GGUF path). For openai, anthropic or a URL, blank uses the "
                  "provider's default or the agent's own model name.",
-                 group="Coder", owner="coder", admin_only=True),
+                 group="Coder", owner="coder", tier=Tier.OWNER),
     # ---- Knowledge (RAG plugin) ----
     # All three are OWNER-ONLY: they define which host folders document indexing
     # may read (a filesystem-read boundary). Credential folders (.ssh, .aws, ...)
@@ -1002,19 +1021,19 @@ CORE_FIELDS: list = [
                  "Which folders the server may index (`localm rag add` in a terminal is "
                  "not bound). whitelist = home, the working directory and Allowed "
                  "folders. blacklist = all but Denied folders. Credentials never.",
-                 group="Knowledge", owner="rag", admin_only=True,
+                 group="Knowledge", owner="rag", tier=Tier.OWNER,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",
                  "Folders that may be indexed in whitelist mode, in addition to "
                  "your home folder and the working directory. When you pick a "
                  "folder outside this list, localm offers to add it here and "
                  "continue.",
-                 group="Knowledge", owner="rag", admin_only=True),
+                 group="Knowledge", owner="rag", tier=Tier.OWNER),
     SettingField("rag_denied_roots", Widget.PATHLIST, "Denied folders",
                  "Folders the server and scheduled jobs never index in blacklist mode "
                  "(everything else is allowed). Ignored in whitelist mode. `localm rag "
                  "add` in a terminal is not bound by this.",
-                 group="Knowledge", owner="rag", admin_only=True),
+                 group="Knowledge", owner="rag", tier=Tier.OWNER),
     # Narrow by construction: format tagging from the extension and content is
     # already free, so the LLM is asked only about an unknown extension it cannot
     # tell structurally, and only while a chat model happens to be loaded.
@@ -1022,26 +1041,26 @@ CORE_FIELDS: list = [
                  "Let the local LLM guess the format of a file whose extension it "
                  "does not recognise, when a chat model is loaded. Off, those files "
                  "are tagged plain text.",
-                 group="Knowledge", owner="rag"),
+                 group="Knowledge", owner="rag", tier=Tier.CONFIG_WRITE),
     SettingField("rag_rerank", Widget.TOGGLE, "Rerank Knowledge results",
                  "Re-score the best matches with a reranker model before they are "
                  "added to a chat. Needs a reranker model installed; without one "
                  "retrieval is unchanged.",
-                 group="Knowledge", owner="rag"),
+                 group="Knowledge", owner="rag", tier=Tier.CONFIG_WRITE),
     SettingField("rag_rerank_model", Widget.TEXT, "Reranker model",
                  "Name of the installed reranker used for Knowledge results. Blank uses "
                  "the reranker when only one is installed; with several, nothing is "
                  "reranked until you name one.",
-                 group="Knowledge", owner="rag"),
+                 group="Knowledge", owner="rag", tier=Tier.CONFIG_WRITE),
     SettingField("rag_rerank_candidates", Widget.NUMBER, "Reranker candidates",
                  "How many of the best matches the reranker re-scores. More finds "
                  "answers ranked lower, and takes proportionally longer per question.",
-                 group="Knowledge", owner="rag", min=5, max=100, step=5),
+                 group="Knowledge", owner="rag", min=5, max=100, step=5, tier=Tier.CONFIG_WRITE),
     SettingField("rag_rerank_min_score", Widget.NUMBER, "Reranker minimum score",
                  "The reranker score an excerpt needs to reach a chat, in that "
                  "reranker's own scale (Qwen3: 0 to 1; bge: a logit). Blank uses "
                  "the measured value, or the relevance floor for other rerankers.",
-                 group="Knowledge", owner="rag", step=0.05),
+                 group="Knowledge", owner="rag", step=0.05, tier=Tier.CONFIG_WRITE),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     # These three are the CORE twins of the admin_only MediaFields (see
     # MEDIA_PLUGIN_FIELDS below). The write gate reads CORE_FIELDS only -
@@ -1059,22 +1078,22 @@ CORE_FIELDS: list = [
                  "Your ComfyUI install folder. localm runs it from here and "
                  "auto-detects a launcher inside. While ComfyUI to use is own and "
                  "localm's own ComfyUI is installed, it is not started from here.",
-                 group="Media", owner="image", admin_only=True),
+                 group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
                  "auto-detects one inside the ComfyUI folder. Not used while ComfyUI to "
                  "use is own and localm's own ComfyUI is installed.",
-                 group="Media", owner="image", admin_only=True),
+                 group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
                  "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
                  "http://127.0.0.1:8188. Not used while ComfyUI to use is own and "
                  "localm's own ComfyUI is installed.",
-                 group="Media", owner="image", admin_only=True),
+                 group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
                  "Seconds to wait for ComfyUI after launching. A ZLUDA/ROCm cold "
                  "start can take minutes.",
-                 group="Media", owner="image", min=30, step=30),
+                 group="Media", owner="image", min=30, step=30, tier=Tier.CONFIG_WRITE),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
                  "Your ComfyUI's output folder, for removing its copy (the toggle, or "
                  "privacy mode). Blank uses the output folder inside the ComfyUI folder. "
@@ -1082,18 +1101,18 @@ CORE_FIELDS: list = [
                  # admin_only: names a host folder this process deletes from when
                  # comfy_delete_outputs is on, and a scoped key never receives a
                  # host path.
-                 group="Media", owner="image", admin_only=True),
+                 group="Media", owner="image", tier=Tier.OWNER),
     SettingField("comfy_delete_outputs", Widget.TOGGLE,
                  "Remove ComfyUI's copy after generating",
                  "Delete ComfyUI's own copy and history entry once localm has "
                  "saved its own. Off by default (keep them); privacy mode forces "
                  "it on.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     SettingField("comfy_fast_dequant", Widget.TOGGLE,
                  "Fast GGUF dequant (fp16)",
                  "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit. "
                  "float32 is the usual cause of very slow gen on smaller cards.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     # The flag is passed by appending --disable-auto-launch to the launcher, so
     # it needs a launcher that FORWARDS args to main.py. The stock run_*.bat and
     # a plain `python main.py` do; a launcher that drops its args ignores the
@@ -1102,7 +1121,7 @@ CORE_FIELDS: list = [
                  "Suppress ComfyUI's web page on launch",
                  "When localm starts ComfyUI for you, keep it headless instead of "
                  "letting it open its own browser tab. Off by default.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     # Reactive fix for an upstream ComfyUI core regression that crashes native
     # ACE-Step audio with "'function' object has no attribute
     # '__func__'". When on, a ComfyUI that localm STARTS gets an in-memory
@@ -1114,7 +1133,7 @@ CORE_FIELDS: list = [
                  "Work around a known ComfyUI crash in native ACE-Step audio. Off by "
                  "default. Patches only a ComfyUI that localm starts, from its next "
                  "start, in memory - nothing is written into your install.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     # Per-component placement needs a ComfyUI that offers the multigpu
     # Select*Device nodes - localm's own managed ComfyUI has them, and an older
     # ComfyUI of your own declines cleanly and says why. It does NOT split one
@@ -1128,18 +1147,18 @@ CORE_FIELDS: list = [
                  "EXPERIMENTAL, off by default. When Split across GPUs names two or more "
                  "GPUs, put the text encoder and VAE on a second card. Single-GPU setups "
                  "are unaffected. Needs a recent ComfyUI.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "
                  "gen. Turn off when making many in a row.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
                  "auto = keep chat loaded if the other model fits alongside; always = "
                  "always unload chat; never = keep chat hot. Also used when the "
                  "embedding or speech model needs room.",
                  group="Media", owner="image",
-                 options=["auto", "always", "never"]),
+                 options=["auto", "always", "never"], tier=Tier.CONFIG_WRITE),
     # 'own' is INERT until `localm comfy setup` has been run. The user's own
     # ComfyUI is never modified either way, and neither install's settings are
     # lost by switching back and forth.
@@ -1147,7 +1166,7 @@ CORE_FIELDS: list = [
                  "own = localm's own managed ComfyUI, installed under the localm "
                  "data folder by 'localm comfy setup'. user = always your own "
                  "ComfyUI install, even when a managed one exists.",
-                 group="Media", owner="image", options=["own", "user"]),
+                 group="Media", owner="image", options=["own", "user"], tier=Tier.CONFIG_WRITE),
     # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
     # field (MEDIA_PLUGIN_FIELDS "float_type"): the music/video backends read
     # the plugin block's value, else this key. Options must stay identical to
@@ -1161,7 +1180,7 @@ CORE_FIELDS: list = [
                  "setting (ComfyUI only). default keeps the workflow's value; no "
                  "effect on a workflow that loads a full checkpoint or a GGUF model.",
                  group="Media", owner="image",
-                 options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]),
+                 options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], tier=Tier.CONFIG_WRITE),
     # ---- Network (web plugin) ----
     # "ask" prompts only a BROWSER-initiated request. A non-browser API or MCP
     # client holding the web scope is NOT prompted and its requests proceed. The
@@ -1171,22 +1190,19 @@ CORE_FIELDS: list = [
                  "Model-initiated web access: off = refused (model downloads too, "
                  "unless allowed); ask = chat and coder ask first, jobs and API "
                  "clients do not; allow = no prompt. The SSRF guard applies in every mode.",
-                 group="Network", owner="web", options=["off", "ask", "allow"]),
+                 group="Network", owner="web", options=["off", "ask", "allow"], tier=Tier.OWNER),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains localm may reach, model requests and model downloads alike. "
                  "Empty = any. e.g. example.com (also covers *.example.com). A list "
                  "must also name the hosts you pull models from.",
-                 group="Network", owner="web"),
-    # admin_only: net_deny is the SUPPRESSIVE half of the domain policy and is
-    # stored verbatim, so without the gate a non-owner could CLEAR it
-    # (validate_update accepts {"net_deny": []}) and un-block every host the
-    # owner blocked. NOT symmetric with net_allow, which stays non-admin (pinned
-    # by test_net_allow_private_is_admin_only): net_allow only names PUBLIC
-    # hosts and _check_public_address() still constrains it.
+                 group="Network", owner="web", tier=Tier.OWNER),
+    # Owner-only: net_deny is the suppressive half of the domain policy and is
+    # stored verbatim, so a non-owner could clear it and un-block every host
+    # the owner blocked.
     SettingField("net_deny", Widget.LIST, "Denied domains",
                  "Domains always refused, even when listed in Allowed domains "
                  "(deny wins). Empty = none.",
-                 group="Network", owner="web", admin_only=True),
+                 group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",
                  "Permit requests to localhost and private IP ranges. Off by "
@@ -1196,7 +1212,7 @@ CORE_FIELDS: list = [
                  # keys widen a filesystem one - a non-owner config:write key must not
                  # be able to set it (else it could reach loopback/metadata via any
                  # model-initiated fetch). See routes/config.py admin_only gate.
-                 group="Network", owner="web", admin_only=True),
+                 group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_model_downloads", Widget.TOGGLE,
                  "Allow model downloads while network access is off",
                  "Lets a model pull, HuggingFace search, or vision-projector/voice/"
@@ -1205,7 +1221,7 @@ CORE_FIELDS: list = [
                  # admin_only: same reasoning as net_allow_private - this loosens a
                  # network-policy floor, so a non-owner config:write key must not be
                  # able to set it.
-                 group="Network", owner="web", admin_only=True),
+                 group="Network", owner="web", tier=Tier.OWNER),
     # admin_only: this names WHERE every web search is sent, so without the gate
     # a non-owner could re-point the search channel at a host it controls and
     # receive the owner's queries - the same "where does data go" boundary that
@@ -1214,7 +1230,7 @@ CORE_FIELDS: list = [
                  "A SearXNG instance for web search; when set, searches use "
                  "only this service. Blank uses the built-in search: DuckDuckGo, "
                  "then Brave Search when DuckDuckGo fails (no key needed).",
-                 group="Network", owner="web", admin_only=True),
+                 group="Network", owner="web", tier=Tier.OWNER),
     # owner="core", not "web": this is the GUI's own renderer, so it must stay
     # visible on an install with no web plugin. admin_only for the same reason
     # net_search_url is - it decides whether rendering a reply causes an outbound
@@ -1253,46 +1269,46 @@ CORE_FIELDS: list = [
                  # route treats open mode as operator
                  # (caller_is_operator), so admin_only hides this from a SCOPED key, not
                  # from the ordinary single-user GUI.
-                 group="Network", admin_only=True),
+                 group="Network", tier=Tier.OWNER),
     # ---- Browser automation (plugin) ----
     SettingField("browser_enabled", Widget.TOGGLE,
                  "Let the model drive a web browser",
                  "Off by default. A key must also hold the browser capability. The "
                  "browser reaches only what the network policy already allows. A coder "
                  "session already open keeps the value it started with.",
-                 group="Network", owner="browser", admin_only=True),
+                 group="Network", owner="browser", tier=Tier.OWNER),
     SettingField("browser_engine", Widget.SELECT, "Browser to drive",
                  "'bundled' runs the browser localm downloads. 'system' runs a "
                  "Chrome, Chromium, Edge or Brave already installed here. "
                  "Either way it starts with a fresh, empty profile: none of "
                  "your logins carry over.",
-                 group="Network", owner="browser", admin_only=True,
+                 group="Network", owner="browser", tier=Tier.OWNER,
                  options=["bundled", "system"]),
     SettingField("browser_headless", Widget.TOGGLE, "Run the browser hidden",
                  "On by default. Off opens a visible window; the live view "
                  "works either way.",
-                 group="Network", owner="browser"),
+                 group="Network", owner="browser", tier=Tier.CONFIG_WRITE),
     SettingField("browser_custom_domain_rules", Widget.TOGGLE,
                  "Use browser-specific domain rules",
                  "Off by default, so the browser follows the same allowed and "
                  "denied domains as everything else. On adds the browser allowed "
                  "and denied domain lists, which can only narrow that further, "
                  "never widen it.",
-                 group="Network", owner="browser", admin_only=True),
+                 group="Network", owner="browser", tier=Tier.OWNER),
     SettingField("browser_allow", Widget.LIST, "Browser allowed domains",
                  "Only used when browser-specific rules are on. Empty = any "
                  "the main policy already allows.",
-                 group="Network", owner="browser", admin_only=True),
+                 group="Network", owner="browser", tier=Tier.OWNER),
     SettingField("browser_deny", Widget.LIST, "Browser denied domains",
                  "Only used when browser-specific rules are on. Refused on top "
                  "of the main deny list.",
-                 group="Network", owner="browser", admin_only=True),
+                 group="Network", owner="browser", tier=Tier.OWNER),
     SettingField("browser_inline_live_view", Widget.TOGGLE,
                  "Show the agent's browser inline in the coder session",
                  "Off by default. On mirrors the Browser tab's live view inside the "
                  "coder session that triggered it, in addition to the tab. Checked once "
                  "per session, at its first browser tool call.",
-                 group="Coder", owner="browser"),
+                 group="Coder", owner="browser", tier=Tier.CONFIG_WRITE),
     # ---- Preview (GUI renderer, core) ----
     # owner="core": the artifact canvas is the GUI's own renderer and stays
     # visible on an install with no plugin beyond chat.
@@ -1301,22 +1317,22 @@ CORE_FIELDS: list = [
                  "Adds a canvas button to a self-contained HTML or SVG block "
                  "in a reply, rendering it in a sandboxed frame with no "
                  "network access and no access to this app. On by default.",
-                 group="Chat", admin_only=True),
+                 group="Chat", tier=Tier.OWNER),
     SettingField("gui_preview_owner_only", Widget.TOGGLE,
                  "Restrict the preview canvas to owner sessions",
                  "Offers the canvas button only to the owner, not to other "
                  "API keys. The reply text itself is unchanged either way.",
-                 group="Chat", admin_only=True),
+                 group="Chat", tier=Tier.OWNER),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
                  "Whisper model size for the microphone button. Larger is more "
                  "accurate but slower and uses more memory.",
                  group="Voice", owner="voice",
-                 options=["tiny", "base", "small", "medium"]),
+                 options=["tiny", "base", "small", "medium"], tier=Tier.CONFIG_WRITE),
     SettingField("voice_stt_language", Widget.TEXT, "Speech-to-text language",
                  "Force a language for transcription, e.g. en or de. Blank "
                  "auto-detects from the audio.",
-                 group="Voice", owner="voice"),
+                 group="Voice", owner="voice", tier=Tier.CONFIG_WRITE),
 ]
 
 
@@ -1746,10 +1762,14 @@ def _validate_one(key: str, val, field: SettingField, default):
         return _to_str_list(key, s)
     if isinstance(val, str):
         s = val.strip()
-        if s and widget in (Widget.FOLDER, Widget.PATH):
+        if s and (widget in (Widget.FOLDER, Widget.PATH) or key in HOST_PATH_KEYS):
             _refuse_unsafe_path(key, s)
         return s or (None if nullable else "")
     raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+# Text-widget settings whose value is a host folder path (or a keyword).
+HOST_PATH_KEYS = frozenset({"temp_location"})
 
 
 def _refuse_unsafe_path(key: str, path: str) -> None:

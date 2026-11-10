@@ -18,6 +18,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Python package installs follow the network policy.** Plugin dependency installs, the managed ComfyUI's package installs and the PyTorch step of an update are refused under `net_mode = off` unless `net_allow_model_downloads` is on; an update's own dependency step also runs with `update_ignore_net_policy`. A refused update changes nothing.
 - **The llama.cpp runtime is checked against the checksums built into localm.** For the release localm pins, the built-in SHA-256 is used even when the release listing is reachable, and a listing that reports a different digest is refused.
 - **A saved update key set is verified every time it is read.** `updates/trust.json` is trusted only when it is signed, step by step from the built-in keys, by the recovery keys of the set before it; the sets in between are kept in `updates/trust-chain.json`. A file that does not verify stops updates with an error naming it.
+- **Installing a plugin from a server folder is checked before the folder is touched.** The plugin install request now refuses a network path (such as `\\host\share`) outright, and needs a key with host filesystem access or a server bound to this machine only. `localm plugin install <folder>` and the plugin page now say plainly that third-party plugins run unsandboxed in the server process, so only code you trust should be installed; the command asks you to confirm (`--yes` skips the question).
+- **A plugin that is turned off no longer contributes coder tools.** The coder agent now loads tool exports only from plugins that are installed and enabled, through the same loader as the rest of the plugin system.
+- **A third-party plugin cannot protect itself from removal, claim a reserved scope, or mount a page outside `/api/` and `/v1/`.** `protected` and `default_enabled` in a third-party manifest are ignored, scope checks run every time plugins are discovered (not only at install), and a plugin route outside those two prefixes is refused.
+- **Chat hooks are documented as transforms, not controls.** The plugin guide now lists every path that skips them and no longer suggests them for redaction.
 
 ### Changed
 - **The browser voice (Kokoro) uses transformers.js 4.3.2 (from 4.3.1).** Its speech runtime and voices are unchanged.
@@ -26,6 +30,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The shared store lock no longer gives up on a slow writer or waits on a dead one.** The lock behind config, registry, API keys, saved credentials and sessions now asks whether the process holding it is still running: a holder that is running keeps the lock however long its write takes, a holder that has exited is replaced at once, and a write that finds its lock taken over stops without writing. Setting the API key now takes the same lock.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
+
+### Security
+- **Settings that name a folder or the network are owner-only, and a key can only mint scopes it holds.** `temp_location`, `net_mode`, `net_allow` and the privacy-mode memory recall settings can no longer be changed by a non-owner `config:write` key, and `temp_location` refuses a network (UNC) or device path. A `keys:admin` key that is not the owner may only create keys with scopes it holds itself. Creating a key with a scope no plugin owns now warns and names the closest known scope.
 
 ### Fixed
 - **Setting up a second copy of localm on Linux or macOS no longer takes over the first copy's global `localm` command.** When `~/.local/bin/localm` already points at another copy (or is any other file), setup leaves it as it is and says so, and uninstalling the second copy no longer removes it.

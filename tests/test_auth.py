@@ -451,7 +451,7 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
     from localm.inference.http_server import create_app
 
     # The owner mints a keys:admin-only key (the attacker principal).
-    attacker = auth.create_key("ka", [S.KEYS_ADMIN], allow_privileged=True)
+    attacker = auth.create_key("ka", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {attacker['key']}"}
@@ -481,7 +481,7 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
     from localm import scopes as S
     from localm.inference.http_server import create_app
 
-    manager = auth.create_key("mgr", [S.KEYS_ADMIN], allow_privileged=True)
+    manager = auth.create_key("mgr", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {manager['key']}"}
@@ -523,7 +523,7 @@ def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
     from localm import scopes as S
     from localm.inference.http_server import create_app
 
-    manager = auth.create_key("mgr", [S.KEYS_ADMIN], allow_privileged=True)
+    manager = auth.create_key("mgr", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {manager['key']}"}

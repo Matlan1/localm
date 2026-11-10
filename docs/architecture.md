@@ -434,11 +434,10 @@ sees: the dataclasses `Surface` and `PluginSpec` (manifest shape),
 `ModelRoleDescriptor`, `InferenceBackendDescriptor` and `PluginSettingField`, and the `Host` protocol (the
 API the engine hands to `register`). The host exposes `mount_router`,
 `mount_static`, `add_settings`, `register_tab`, `plugin_config`,
-`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `register_model_role`,
+`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `track`, `register_model_role`,
 `register_inference_backend`, `register_chat_hook` and the caller checks
-`caller_is_owner`, `caller_principal` and `caller_owns`; `has_scope` and `require_scope` are declared but raise
-`NotImplementedError`, and the concrete `PluginHost` adds `driving_engine` and
-`on_startup`. `catalog.py` holds the static first-party catalog.
+`caller_is_owner`, `caller_principal` and `caller_owns`; the concrete `PluginHost` adds
+`driving_engine` and `on_startup`. `catalog.py` holds the static first-party catalog.
 
 **Lifecycle.** `PluginManager` discovers installed plugins, then
 `load_enabled` mounts each active plugin at runtime through `PluginHost`
@@ -451,9 +450,11 @@ happen at runtime without restarting the server.
 targets; the engine refuses to load a plugin whose `api_version` it does not
 support, surfacing an error rather than crashing.
 
-**Capability scopes.** Every plugin declares a capability scope, and its
-HTTP routes are gated to that scope, so a plugin cannot reach beyond the
-permissions it asked for.
+**Capability scopes.** Every plugin declares a capability scope, and the HTTP
+routes it mounts are gated to that scope and must sit under `/api/` or `/v1/`.
+The scope gates those routes only. Third-party plugins run unsandboxed
+in-process, so install only code you trust. Chat hooks are transforms, not
+controls (see [plugins.md](plugins.md)).
 
 See [plugins.md](plugins.md) for the full authoring guide. A broken plugin
 warns and is skipped, never crashing the host.
