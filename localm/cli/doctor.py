@@ -110,6 +110,7 @@ def _check_gpu_driver() -> bool:
     return value feeds ``smi_or_torch_gpu`` only, and the real verdict comes
     from _check_gpu_verdict's device probe."""
     import subprocess
+    from localm import sysprog
     from localm.debuglog import logger as _dbg
     from rich.markup import escape
     for cmd, label in [
@@ -119,7 +120,8 @@ def _check_gpu_driver() -> bool:
          "AMD ROCm"),
     ]:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sysprog.require(cmd[0]), *cmd[1:]],
+                               capture_output=True, text=True, timeout=5)
         except FileNotFoundError:
             continue          # not installed
         except Exception as e:

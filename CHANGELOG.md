@@ -15,6 +15,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
+- **An AMD graphics card localm does not recognise no longer gets the RX 6000 ROCm download on Windows.** Only RX 6000 (gfx103X) cards get that build; other AMD cards use HIP when the ROCm toolkit is installed and Vulkan otherwise. The error shown when a runtime fails to load no longer names a single card family.
+- **localm now starts `taskkill` and `nvidia-smi` by their full system path** instead of searching the current folder and PATH.
 - **The Ouro Thinking models now generate.** They loaded but stopped on the first reply with `'int' object has no attribute 'shape'`, because their cache code expected a different argument from the transformers localm uses. localm now bridges that for Ouro models, and Ouro-1.4B, 2.6B and both Thinking variants answer.
 - **A damaged Whisper speech model can be downloaded again.** When the speech model file in localm's cache fails its check, localm now removes it completely, including the copy Hugging Face keeps in its shared store, so the next download fetches a good file instead of failing the same check every time.
 - **Ouro models (ByteDance Ouro-1.4B, 2.6B and their Thinking variants) load and answer.** Their bundled code was written for an older transformers and failed to load on the one localm uses (`'OuroConfig' object has no attribute 'pad_token_id'`). With `hf_trust_remote_code` on, localm now bridges the three differences for these models only; models without bundled code, other bundled-code models and the default (off) setting are unchanged.

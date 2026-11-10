@@ -471,8 +471,9 @@ def _kill_tree(proc) -> None:
     except Exception:
         pass
     if sys.platform == "win32":
+        from localm import sysprog as _sysprog
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            subprocess.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(proc.pid)],
                            capture_output=True, timeout=10)
         except Exception:
             pass
