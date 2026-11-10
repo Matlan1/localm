@@ -23,6 +23,14 @@ from localm.plugins.builtin.video import plug as video_plug
 from localm.plugins.builtin.music import plug as music_plug
 
 
+@pytest.fixture(autouse=True)
+def _comfy_backend(monkeypatch):
+    """The routes resolve the ComfyUI backend, whatever this machine would pick
+    for "auto", so only the request bounds under test can refuse."""
+    monkeypatch.setattr("localm.media.backend_choice.refine_auto",
+                        lambda s, kind: {**s, "backend": "comfy"})
+
+
 def _fake_request():
     request = MagicMock()
     request.app.state.jobs = None  # forces a 503 past any bound check that passes
