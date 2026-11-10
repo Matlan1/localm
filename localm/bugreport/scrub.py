@@ -82,7 +82,7 @@ _QUERY_SECRET_RE = re.compile(
     #    short generic names.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)"
+    r")[ \t]*=[ \t]*(?![ \t]))"
     # A value that CANNOT be a secret is left alone: a short list of literals no
     # credential is ever equal to, so ``LOCALM_REQUIRE_AUTH=1``,
     # ``require_auth=true``, ``digital_signature=True`` and ``has_token=false``
@@ -122,7 +122,8 @@ _HEADER_SECRET_RE = re.compile(
 # (``b'...'``), goes whole (to the closing quote, or to the end of the line
 # when there is none) and the text after the closing quote is kept; so does a
 # ``[...]`` array. Any other value is an optional scheme word, one credential,
-# and every further ``name=value`` parameter after a comma (Digest and
+# and every further ``name=value`` parameter (spaces allowed around ``=``)
+# after a comma (Digest and
 # AWS4-HMAC-SHA256 carry several, with quoted values, plain or backslash-
 # escaped, that may hold spaces); text after that is kept. One of the scheme
 # words Bearer, Basic, Digest, Negotiate, NTLM, Token or ApiKey alone on its
@@ -140,9 +141,9 @@ _AUTH_HEADER_RE = re.compile(
     r"|\[[^\]\r\n]*\]?"
     r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
     r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
-    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
     r"|[^\s,]+)"
-    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 
 
@@ -206,7 +207,7 @@ def _scrub_query_and_header_secrets(text: str) -> str:
 # A word followed by ``:`` or by ``=`` and a value is a credential NAME
 # (``Bearer\nX-Api-Key: ...``, ``scheme=bearer api_key=...``) and is left for
 # the by-name patterns, which run after this one.
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|[ \t]*=[ \t]*[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 
 
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")

@@ -306,6 +306,34 @@ def test_scrub_secrets_redacts_escaped_digest_params_and_a_lone_token_scheme(tex
     assert bugreport._scrub_secrets(out) == out
 
 
+@pytest.mark.parametrize("text, canary", [
+    ('Authorization: Digest username = "u", realm = "Restricted Area", nonce = "CANARYEQ1", '
+     'cnonce = "CANARYEQ2", response = "CANARYEQ3"', "CANARYEQ"),
+    ('Authorization: Digest username="u",response = "CANARYEQ4"', "CANARYEQ4"),
+    ("password = hunter2CANARYEQ5", "CANARYEQ5"),
+    ("OPENAI_API_KEY = CANARYEQ6", "CANARYEQ6"),
+    ('api_key = "CANARYEQ7 with spaces"', "CANARYEQ7"),
+    ("https://x.example/?q=a&token =CANARYEQ8", "CANARYEQ8"),
+    ("SECRET_KEY\t=\tCANARYEQ9", "CANARYEQ9"),
+    ("token_type: Bearer\npassword = abc:CANARYEQ10", "CANARYEQ10"),
+])
+def test_scrub_secrets_redacts_a_credential_with_spaces_around_the_equals_sign(text, canary):
+    out = bugreport._scrub_secrets(text)
+    assert canary not in out, out
+    assert bugreport._scrub_secrets(out) == out
+
+
+@pytest.mark.parametrize("line", [
+    "has_token = false",
+    "require_auth = 1",
+    "LOCALM_REQUIRE_AUTH = true and api_key = none",
+    "key = value",
+    "monkey = banana",
+])
+def test_scrub_secrets_keeps_a_flag_or_ordinary_value_with_spaces_around_the_equals_sign(line):
+    assert bugreport._scrub_secrets(line) == line
+
+
 def test_scrub_secrets_authorization_redaction_ends_with_the_line():
     out = bugreport._scrub_secrets("Authorization: CANARYRAW1\nn_gpu_layers=35 threads=8")
     assert out == "Authorization: <redacted>\nn_gpu_layers=35 threads=8"
@@ -1269,6 +1297,12 @@ def _scrub_seconds(text: str, samples: int = 5) -> float:
     pytest.param(lambda n: 'Authorization: "' + "\\" * n, id="auth-backslash-run"),
     pytest.param(lambda n: '"Authorization":' + " " * n + "null,", id="auth-flag-after-spaces"),
     pytest.param(lambda n: "Authorization: [" * n, id="auth-many-arrays"),
+    pytest.param(lambda n: "password" + " " * n + "=", id="query-spaces-before-equals"),
+    pytest.param(lambda n: "password =" + " " * n, id="query-spaces-after-equals"),
+    pytest.param(lambda n: "password =" + " " * n + "false", id="query-spaces-then-flag"),
+    pytest.param(lambda n: "Authorization: Digest a" + " " * n + "=", id="auth-spaces-before-equals"),
+    pytest.param(lambda n: "Authorization: Digest a=b" + ", a =" * n, id="auth-spaced-param-list"),
+    pytest.param(lambda n: "bearer abcdefgh" + " " * n + "=", id="bearer-spaces-before-equals"),
     pytest.param(lambda n: 'Authorization: Digest a=\\"' + "\\x" * n, id="auth-escaped-param-run"),
     pytest.param(lambda n: 'Authorization: a=b' + ', a=\\"' * n, id="auth-escaped-param-list"),
     pytest.param(lambda n: '"token":' + " " * n + "<redacted>", id="json-space-run"),

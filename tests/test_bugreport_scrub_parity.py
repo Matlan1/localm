@@ -84,6 +84,10 @@ _CORPUS = [
     'Authorization: Digest username="u", realm="Restricted Area", response="' + SECRET + '"',
     "Authorization: Token " + SECRET + " then the call failed, retrying",
     "headers: Authorization: Bearer " + SECRET + ", Accept: */*",
+    'Authorization: Digest username = "u", nonce = "' + SECRET + '", response = "' + SECRET + '"',
+    "password = " + SECRET + " and OPENAI_API_KEY = " + SECRET,
+    "has_token = false, require_auth = 1, key = value",
+    "token_type: Bearer password = abc:" + SECRET,
     '{"msg":"Authorization: Digest username=\\"u, v\\", realm=\\"R A\\", response=\\"'
     + SECRET + '\\""}',
     "level=error Authorization: Bearer " + SECRET + " status=401 path=/v1/chat",
