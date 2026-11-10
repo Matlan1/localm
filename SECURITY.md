@@ -379,8 +379,12 @@ this section states the security properties and, more importantly, their edges.
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
   bug-report upload (sent only when you press Send), and requests to your
-  configured ComfyUI (see *What it does not cover* above). Nothing else opts out of `off`; the issues list is refused under
-  it.
+  configured ComfyUI (see *What it does not cover* above).
+  The coder's off-machine model backends do not opt out: building
+  one (`--online`, `--anthropic`, `--url`, `LOCALCODER_URL`, the GUI's backend
+  choice, the reviewer) runs the network policy, so `off` refuses it, and
+  privacy mode refuses it unless the user typed the flag (an environment
+  variable never counts). The issues list is refused under `off` too.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

@@ -35,6 +35,13 @@ _DEVICE = "\\\\.\\PhysicalDrive0"
 #  Harness                                                                     #
 # --------------------------------------------------------------------------- #
 
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
+
+
 class _StubBackend:
     """Enough backend for a session. ``chat`` returns a canned plan so the
     estimate route can be driven without a model."""
@@ -347,6 +354,7 @@ def test_not_asking_for_native_tools_produces_no_note(tmp_path, monkeypatch):
         assert body["notes"] == []
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_the_coder_sends_no_tools_fields_to_localms_own_server():
     """A localm server is driven on the coder's own tool-call convention. A body
     that also carried tools would make the server describe the tools a second
@@ -366,6 +374,7 @@ def test_the_coder_sends_no_tools_fields_to_localms_own_server():
     assert body["tools"] == defs and body["tool_choice"] == "auto"
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_supports_native_tools_is_true_for_a_real_openai_style_endpoint():
     """The capability answer must not be a blanket False, or the warning would
     fire for the very backends the option exists for."""
