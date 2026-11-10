@@ -47,6 +47,12 @@ Scans tracked files and fails on:
      _CODEQL_BARRIER_NAMES) with a RELATIVE import and calls it. The barriers in
      .github/codeql/extensions/ apply only to calls reached through an absolute
      import.
+ 12. A function-local import that goes UP the declared layering or between
+     peers, counted per unit pair against .github/hygiene-import-baseline.json.
+ 13. An import of localm.plugins.builtin.<name> from a file outside that
+     plugin's own folder, counted per file against the same baseline. For both,
+     a count above the baseline fails and a count below it fails until the
+     baseline is lowered (--write-import-baseline rewrites it).
 
 It also runs the release-file manifest gate (scripts/check_manifest.py): every
 tracked file must be classified release-include or release-exclude, nothing
@@ -73,6 +79,7 @@ Stdlib only, so it runs in any environment without installing anything.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -1490,6 +1497,196 @@ def _import_direction_violations(tracked: list[Path] | None = None) -> list[str]
     return problems
 
 
+# ---- check 12 and 13: deferred up-imports and first-party plugin imports ----
+#
+# Check 12 counts the function-local imports that check 9 does not judge: an
+# import inside a function body that goes UP the layering or between peers.
+# Check 13 counts every import (module-level or function-local) of
+# localm.plugins.builtin.<name> from a file outside localm/plugins/builtin/<name>/.
+# Both are compared with .github/hygiene-import-baseline.json: a count above its
+# baseline (or a pair the baseline does not list) fails, and a count below its
+# baseline fails until the baseline is lowered, so the numbers only go down.
+# `python scripts/check_hygiene.py --write-import-baseline` rewrites the file
+# from the tree. Imports through importlib or __import__ are not seen.
+
+_IMPORT_BASELINE = ".github/hygiene-import-baseline.json"
+_IMPORT_BASELINE_KEYS = ("deferred_up_imports", "builtin_plugin_imports")
+_BUILTIN_PLUGINS = "localm.plugins.builtin"
+
+
+def _runtime_import_nodes(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Every import statement in *body* at any depth, function bodies included,
+    except one inside a branch that ``TYPE_CHECKING`` makes unreachable."""
+    out: list[ast.stmt] = []
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            out.append(node)
+            return
+        if isinstance(node, ast.If):
+            body_runs, else_runs = _type_checking_branches(node.test)
+            for child in (node.body if body_runs else []):
+                visit(child)
+            for child in (node.orelse if else_runs else []):
+                visit(child)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    for stmt in body:
+        visit(stmt)
+    return out
+
+
+def _builtin_plugin_targets(node: ast.stmt, own_module: str, is_package: bool,
+                            units: set[str]) -> list[str]:
+    """First-party plugin names that import statement *node* reaches:
+    ``localm.plugins.builtin.<name>...`` and
+    ``from localm.plugins.builtin import <name>``."""
+    names: list[str] = []
+    prefix = _BUILTIN_PLUGINS + "."
+    for target in _import_targets(node, own_module, is_package, units):
+        if target.startswith(prefix):
+            names.append(target[len(prefix):].split(".")[0])
+        elif target == _BUILTIN_PLUGINS and isinstance(node, ast.ImportFrom):
+            names.extend(a.name for a in node.names if a.name != "*")
+    return names
+
+
+def _import_counts() -> tuple[dict[str, dict[str, int]], list[str]]:
+    """``({baseline key: {pair: count}}, problems)`` for checks 12 and 13 over
+    the tracked ``localm/`` tree. A pair in ``deferred_up_imports`` is
+    ``"<unit> -> <unit>"``; in ``builtin_plugin_imports`` it is
+    ``"<file> -> <plugin>"``. A layering map that cannot be read is a problem,
+    and check 12 then counts nothing."""
+    counts: dict[str, dict[str, int]] = {k: {} for k in _IMPORT_BASELINE_KEYS}
+    problems: list[str] = []
+    pkg_root = REPO / "localm"
+    if not pkg_root.is_dir():
+        return counts, problems
+    index: dict[str, int] = {}
+    root_index = 0
+    try:
+        text = (REPO / _LAYERING_MAP).read_text(encoding="utf-8")
+    except OSError as e:
+        problems.append(f"{_LAYERING_MAP} could not be read ({e}); check 12 "
+                        "did not run")
+    else:
+        tiers, map_problems = _layering_tiers(text)
+        if map_problems:
+            problems.append(f"{_LAYERING_MAP} is malformed; check 12 did not run")
+        index = {u: i for i, (_, us) in enumerate(tiers) for u in us}
+        root_index = len(tiers)
+    tracked = _tracked_localm_files(pkg_root)
+    if tracked is None:
+        paths = sorted(pkg_root.rglob("*.py"))
+    else:
+        paths = sorted(p for p in tracked if p.suffix == ".py")
+    units = _units_on_disk(pkg_root)
+    for path in paths:
+        own_module = _module_name(path, pkg_root)
+        unit = _import_unit(own_module)
+        is_package = path.name == "__init__.py"
+        rel = path.relative_to(REPO).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, OSError) as e:
+            problems.append(f"could not parse {rel}: {e}")
+            continue
+        eager = {id(n) for n in _eager_module_statements(tree.body)}
+        own_plugin = None
+        if own_module.startswith(_BUILTIN_PLUGINS + "."):
+            own_plugin = own_module[len(_BUILTIN_PLUGINS) + 1:].split(".")[0]
+        for node in _runtime_import_nodes(tree.body):
+            for plugin in _builtin_plugin_targets(node, own_module, is_package, units):
+                if plugin != own_plugin:
+                    key = f"{rel} -> {plugin}"
+                    bucket = counts["builtin_plugin_imports"]
+                    bucket[key] = bucket.get(key, 0) + 1
+            if id(node) in eager or not index:
+                continue
+            iu = root_index if unit == "<root>" else index.get(unit)
+            if iu is None:
+                continue
+            for target in _import_targets(node, own_module, is_package, units):
+                other = _import_unit(target)
+                iv = index.get(other)
+                if other == unit or iv is None or iv > iu:
+                    continue
+                key = f"{unit} -> {other}"
+                bucket = counts["deferred_up_imports"]
+                bucket[key] = bucket.get(key, 0) + 1
+    return counts, problems
+
+
+def _read_import_baseline() -> tuple[dict[str, dict[str, int]] | None, str | None]:
+    """``(baseline, None)`` or ``(None, problem)``."""
+    path = REPO / _IMPORT_BASELINE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"{_IMPORT_BASELINE} could not be read ({e})"
+    except ValueError as e:
+        return None, f"{_IMPORT_BASELINE} is not valid JSON ({e})"
+    if not isinstance(data, dict) or set(data) != set(_IMPORT_BASELINE_KEYS):
+        return None, (f"{_IMPORT_BASELINE} must hold exactly the keys "
+                      f"{', '.join(_IMPORT_BASELINE_KEYS)}")
+    for key in _IMPORT_BASELINE_KEYS:
+        section = data[key]
+        if not isinstance(section, dict) or not all(
+                isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+                and v > 0 for k, v in section.items()):
+            return None, (f"{_IMPORT_BASELINE}: {key} must map each pair to a "
+                          "positive integer count")
+    return data, None
+
+
+def _import_baseline_violations() -> list[str]:
+    """Checks 12 and 13: counts above or below the committed baseline."""
+    if not (REPO / "localm").is_dir():
+        return []
+    counts, problems = _import_counts()
+    baseline, problem = _read_import_baseline()
+    if problem:
+        return problems + [problem + "; checks 12 and 13 did not run"]
+    what = {
+        "deferred_up_imports":
+            "function-local import goes UP the declared layering or between peers",
+        "builtin_plugin_imports":
+            "import of a first-party plugin from outside its own folder",
+    }
+    for key in _IMPORT_BASELINE_KEYS:
+        have, allowed = counts[key], baseline[key]
+        for pair in sorted(set(have) | set(allowed)):
+            n, cap = have.get(pair, 0), allowed.get(pair, 0)
+            if n > cap:
+                problems.append(
+                    f"{what[key]}: {pair} ({n}, baseline {cap} in {_IMPORT_BASELINE})"
+                    "\n      import through a lower unit or the plugin's public "
+                    "surface instead; the baseline only goes down")
+            elif n < cap:
+                problems.append(
+                    f"{_IMPORT_BASELINE} is stale: {key} {pair!r} is {n}, baseline "
+                    f"{cap}; lower it (python scripts/check_hygiene.py "
+                    "--write-import-baseline)")
+    return problems
+
+
+def _write_import_baseline() -> int:
+    counts, problems = _import_counts()
+    if problems:
+        for p in problems:
+            print("  " + p, file=sys.stderr)
+        print("Import baseline NOT written.", file=sys.stderr)
+        return 1
+    data = {k: dict(sorted(counts[k].items())) for k in _IMPORT_BASELINE_KEYS}
+    (REPO / _IMPORT_BASELINE).write_text(
+        json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+    total = {k: sum(v.values()) for k, v in data.items()}
+    print(f"Wrote {_IMPORT_BASELINE}: {total}")
+    return 0
+
+
 # ---- check 10: a test never reads a JSON key a route cannot produce ---------
 #
 # For every route whose handler builds its JSON response from dict literals
@@ -2281,6 +2478,8 @@ def _codeql_barrier_import_violations(files: list[Path]) -> list[str]:
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
+    if "--write-import-baseline" in argv:
+        return _write_import_baseline()
     strict = "--strict" in argv or _strict_env()
     tracked = _tracked_files()
     if not tracked:
@@ -2300,6 +2499,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
     problems.extend(_import_direction_violations())
+    problems.extend(_import_baseline_violations())
     problems.extend(_child_process_console_print_violations())
     problems.extend(_response_key_violations(tracked))
     problems.extend(_codeql_barrier_import_violations(tracked))

@@ -253,6 +253,7 @@ def _zip(version, files, deps='"click"'):
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("VERSION", version)
         z.writestr("pyproject.toml", f'[project]\nname = "localm"\ndependencies = [{deps}]\n')
+        z.writestr("uv.lock", "version = 1\n")
         z.writestr("localm/__init__.py", f"# {version}")
         for name, text in files.items():
             z.writestr(name, text)
