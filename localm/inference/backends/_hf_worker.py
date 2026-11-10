@@ -996,9 +996,8 @@ def _render_processor_prompt(processor, template_messages, *,
     with *chat_template* in place of the processor's own when given.
 
     Passes a non-empty ``processor_kwargs`` (unused while ``tokenize`` is False),
-    so SmolVLM's ``apply_chat_template`` does not put its default frame-sampling
-    arguments in ``**kwargs``, which makes transformers log a warning. See
-    test_render_logs_no_kwargs_warning."""
+    so SmolVLM's ``apply_chat_template`` keeps its default frame-sampling
+    arguments out of ``**kwargs``. See test_render_logs_no_kwargs_warning."""
     extra = {} if chat_template is None else {"chat_template": chat_template}
     return processor.apply_chat_template(
         template_messages, processor_kwargs={"add_special_tokens": False},

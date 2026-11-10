@@ -147,6 +147,52 @@ def test_native_awq_quantizer_replaces_layers():
     assert not isinstance(model.in_proj_a, NativeAWQLinear)
 
 
+def test_full_precision_segments_match_at_any_depth():
+    """A vision tower or hybrid input projection nested under the model stays
+    full precision; ordinary projections, and names that only contain a skip
+    word mid-segment, are quantized."""
+    quantizer_cls = _try_create_native_awq_quantizer_cls()
+    assert quantizer_cls is not None
+
+    class DummyConfig:
+        group_size = 128
+        bits = 4
+        quant_method = "awq"
+
+    class Tower(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv = nn.Linear(64, 64, bias=False)
+
+    class Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_proj_a = nn.Linear(64, 64, bias=False)
+            self.o_proj = nn.Linear(64, 64, bias=False)
+
+    class Inner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.visual = Tower()
+            self.vision_tower = Tower()
+            self.linear_attn = Attn()
+            self.prevision = Tower()
+
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = Inner()
+
+    model = DummyModel()
+    quantizer_cls(DummyConfig())._process_model_before_weight_loading(model)
+
+    for kept in (model.model.visual.qkv, model.model.vision_tower.qkv,
+                 model.model.linear_attn.in_proj_a):
+        assert isinstance(kept, nn.Linear) and not isinstance(kept, NativeAWQLinear)
+    assert isinstance(model.model.linear_attn.o_proj, NativeAWQLinear)
+    assert isinstance(model.model.prevision.qkv, NativeAWQLinear)
+
+
 def test_register_native_awq_quantizer_in_transformers():
     """Verify register_native_awq_quantizer injects into transformers quantizer mapping."""
     registered = register_native_awq_quantizer()
