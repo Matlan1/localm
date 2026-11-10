@@ -395,13 +395,13 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
                    "omitted, you are asked when custom nodes are present. Copy path "
                    "only (a fresh install starts clean).")
 def comfy_setup(copy_custom_nodes) -> None:
-    """Set up localm's own ComfyUI (stage S2 copy / stage S3 fresh).
+    """Set up localm's own ComfyUI (a copy of yours, or a fresh install).
 
     If you already have a working ComfyUI (comfy_workdir set, with a venv under it),
     localm REPLICATES it at the same commit into the localm data folder, makes a FRESH
     localm venv, installs the same packages, and shares your models via
-    extra_model_paths (S2). If you do NOT, localm installs a FRESH, hardware-matched
-    ComfyUI (S3): it clones a pinned ComfyUI, makes a localm venv, installs the PyTorch
+    extra_model_paths. If you do NOT, localm installs a FRESH, hardware-matched
+    ComfyUI: it downloads a pinned ComfyUI, makes a localm venv, installs the PyTorch
     build for your GPU, and adds the custom nodes its shipped workflows need. Your own
     ComfyUI is never touched. You are asked before any of your custom nodes are copied
     (copy path only).

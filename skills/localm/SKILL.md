@@ -12,15 +12,28 @@ description: >
 
 localm exposes a local, offline LLM engine as MCP tools: chat, model search
 and management, diagnostics, and (when active) coding-agent delegation and
-image generation. Every call runs on this machine's own hardware. Nothing is
-sent anywhere except an explicit download (`pull_model`) or a HuggingFace
-search (`search_models`).
+image generation. Inference runs on this machine's own hardware. Tools that
+can reach the network include: `search_models` and `list_model_files`
+(HuggingFace lookups); `pull_model` and `setup_embeddings` (model downloads);
+`install_plugin` (pip, for a plugin's dependencies, unless `with_deps` is
+false); `generate_image` (it downloads the native image runtime when none is
+installed, and with the ComfyUI backend it sends the prompt and any
+`input_image` to the configured ComfyUI address, which can be another host);
+and `run_coder_task`, whose agent has web tools (`fetch_url`, `web_search`, and
+the browser when it is enabled). A delegated coder run has no confirmation
+prompt, so those web tools either run or are refused; setting localm's network
+access (`net_mode`) to `off` refuses them.
 
 The tool list is not fixed. `run_coder_task` only appears when the coder
 plugin is active and the server was not started with `--no-coder`;
 `generate_image` only appears unless the server was started with
-`--no-images`; `embed` only appears when the active model backend can
-produce embeddings. Check what is actually advertised for this session
+`--no-images`; `embed` only appears when an embedding model is registered (run
+`setup_embeddings`) or the default model's backend can produce embeddings;
+`memory_recall` only appears when localm's memory plugin is active and the
+server was not started with `--no-memory`, and `memory_append` additionally
+needs `--memory-write`. The list is built once when the MCP server starts:
+after enabling a plugin, its tools appear only once the server is restarted
+(reconnect the client). Check what is actually advertised for this session
 rather than assuming a tool exists.
 
 ## Check capacity before loading or downloading a model
@@ -30,11 +43,18 @@ is tight, prefer a smaller quant over skipping the task or accepting a
 worse answer, and prefer evicting the currently loaded model over settling
 for an under-sized one when the task genuinely needs the better model.
 
-Before `pull_model`-ing something new, run `search_models` to find a repo,
-then `list_model_files` on that repo: it returns each quant's size and a
-fit badge (fits, tight, or too-big) against this machine's free VRAM, so
-you can pick a quant that will actually load instead of discovering it
-does not fit after a multi-gigabyte download.
+To choose a model, run `search_models` to find a repo, then
+`list_model_files` on that repo: it returns each quant's size and a fit badge
+(fits, tight, or too-big) against this machine's total VRAM (use
+`system_stats` for what is free right now), so you can pick a quant that will
+actually load instead of discovering it does not fit after a multi-gigabyte
+download.
+
+`pull_model` over MCP only downloads a repo localm already trusts: the
+HuggingFace source of a model that is already registered (for example to fetch
+another quant), or one of a short built-in list. For any other repo the pull
+has to be run by the user on the host (`localm pull <repo>:<file>`);
+`pull_model` refuses and names the `localm pull` command to run.
 
 Call `server_activity` before starting anything long-running (a pull, a
 re-embed, a media generation). It reports what any localm server running on
@@ -59,9 +79,10 @@ them, unless the call sets `yes: true`. `max_turns` (default 40) and
 
 ## `generate_image`
 
-Local FLUX image generation via ComfyUI. The tool is advertised whenever the
-server was not started with `--no-images`, independent of whether ComfyUI
-is actually reachable; a call fails if ComfyUI is not running. If ComfyUI
+Local image generation through the image plugin's backend: the built-in
+stable-diffusion.cpp runtime, or ComfyUI when one is set up. The tool is
+advertised whenever the server was not started with `--no-images`, whether or
+not a backend is ready; a call that cannot run says what is missing. If ComfyUI
 runs on a non-default host or port, that is configured on the localm side
 (the `FLUX_API_URL` environment variable, or the `comfy_api_url` setting),
 not per call. A successful call returns the saved file path and the seed
@@ -70,10 +91,10 @@ used, so a follow-up call can reproduce or vary the same image.
 ## `install_plugin` / `enable_plugin` / `list_plugins` manage localm itself, not this bundle
 
 These tools install and toggle localm's own engine plugins (`coder`, `rag`,
-`image`, `memory`, and others) inside the running localm instance. They have
+`image`, `memory`, and others) in localm's data directory. They have
 nothing to do with this Claude Code plugin: enabling localm's `coder` plugin
-is what makes `run_coder_task` appear in the tool list at all, but neither
-tool touches this MCP bundle's own installation.
+is what makes `run_coder_task` appear in the tool list (after the MCP server
+restarts), but neither tool touches this MCP bundle's own installation.
 
 ## Destructive tools
 
@@ -84,7 +105,7 @@ either; there is no undo.
 
 ## Reference
 
-The full tool table (every tool, its parameters, and its annotations) and
+The full tool table (every tool, what it does, and its annotations) and
 the coder agent's own MCP-client side (connecting external MCP servers to
 `localm coder`) are in `docs/mcp.md`. The CLI equivalents of these tools,
 and everything else localm can do outside MCP, are in `docs/cli.md`.
