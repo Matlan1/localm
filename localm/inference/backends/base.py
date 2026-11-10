@@ -57,6 +57,16 @@ class AudioDecodeUnavailable(AudioInputError):
     serving."""
 
 
+EMPTY_RAW_PROMPT_MESSAGE = (
+    "The prompt is empty and this model adds no start token, so there is "
+    "nothing to continue. Send some prompt text.")
+
+
+RAW_PROMPT_UNSUPPORTED_MESSAGE = (
+    "This model's backend cannot continue a raw prompt (text without the chat "
+    "template). Use /v1/chat/completions, or a GGUF or Transformers model.")
+
+
 class ImageDecodeUnavailable(UnsupportedInputError):
     """Raised when an image cannot be decoded because Pillow is not installed,
     as opposed to the image or the model being at fault.
@@ -595,6 +605,14 @@ class BaseBackend(ABC):
         return False
 
     @property
+    def supports_raw_prompt(self) -> bool:
+        """True when :meth:`chat_stream` takes ``raw_prompt``: a prompt
+        tokenised as given, with no chat template. Default False: a backend
+        that never declared it is refused a raw completion rather than
+        answering it as a chat turn."""
+        return False
+
+    @property
     def supports_logprobs(self) -> bool:
         """True when this backend, in its current state, can report the log
         probability of each generated token and its most likely alternatives
@@ -742,6 +760,14 @@ class BaseBackend(ABC):
             reply from a full prefill into an emptied cache, with no other
             reply decoding beside it, so the reply depends only on the request.
             A backend without a prompt cache ignores it.
+
+        A backend whose :attr:`supports_raw_prompt` is True also takes
+        ``raw_prompt``: the whole prompt as text, tokenised as given (the
+        tokenizer's own start token added when the model asks for one) with no
+        chat template and no reasoning-channel edit; *messages* and *thinking*
+        are then not read. Passed only when the caller asked for a raw
+        completion. An empty prompt that tokenises to nothing raises
+        :class:`UnsupportedInputError` with ``EMPTY_RAW_PROMPT_MESSAGE``.
 
         A backend whose :attr:`supports_logprobs` is True also takes
         ``logprobs`` (0 to 20 alternatives per token) and ``on_logprobs``, a

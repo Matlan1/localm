@@ -519,13 +519,20 @@ covered.
 
 Scope: any valid key (no specific scope required once auth is enabled).
 
-Raw text completion (streaming and non-streaming). Of the chat extras it takes
+Raw text completion (streaming and non-streaming). The model continues
+`prompt` exactly as sent: no chat template, no system prompt and no chat
+plugin's inlet hook is applied, so a code prefix is continued rather than
+explained. The tokenizer adds the model's own start token when the model asks
+for one. A model whose backend cannot take a raw prompt is a 400 (GGUF,
+Transformers and EXL2/EXL3 models can). The exchange is recorded in the audit
+log and transcript as the session mode says, and chat plugins' `stream` and
+`outlet` hooks still run on the reply. Of the chat extras it takes
 `top_k`, `repeat_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy` and
 `grammar_triggers`) and `cache_prompt`; `tools`, `response_format`,
 `chat_template_kwargs` and the routing fields are chat-only and are ignored
 here. Its usage block is narrower than chat's - see the table above.
 `prompt` is one string, or a list holding exactly one string. `echo: true`
-starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
+starts the reply text with the prompt, once. `presence_penalty`, `frequency_penalty`,
 `min_p` and `stream_options` work as on chat. `logprobs` (0 to 20) returns the
 legacy `logprobs` object for a GGUF model: `tokens`, `token_logprobs`,
 `top_logprobs` (each a map of the most likely tokens, always including the
