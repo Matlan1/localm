@@ -471,7 +471,8 @@ and search snippets are untrusted input to the model, and
   name or address, nears expiry (about 30 days before), or no longer chains to
   the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
-  the moment they exist, then restricted to the current user: `chmod` on
+  the moment they exist (on Windows, where a file mode sets no ACL, they are
+  created inside the already-restricted `tls` folder), then restricted to the current user: `chmod` on
   POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
   current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
