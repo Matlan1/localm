@@ -1171,6 +1171,10 @@ class TestGenerateImageSafety:
         """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
         monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
                             lambda *a, **k: True)
+        monkeypatch.setattr("localm.image_gen.comfy.ensure_comfy",
+                            lambda *a, **k: (True, "up"))
+        monkeypatch.setattr("localm.image_gen.comfy.free_comfy_vram",
+                            lambda *a, **k: True)
     def _call(self, server, args):
         return server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -1487,6 +1491,15 @@ class TestGenerateImageTarget:
     """The MCP image tool targets the ComfyUI the owner configured, resolved
     through the image plugin's own backend, so an MCP client and the GUI reach
     the same instance."""
+
+    @pytest.fixture(autouse=True)
+    def _comfy_lifecycle_stubbed(self, monkeypatch):
+        """ComfyUI's start-up check and VRAM release are stubbed: only the
+        generator is faked here."""
+        monkeypatch.setattr("localm.image_gen.comfy.ensure_comfy",
+                            lambda *a, **k: (True, "up"))
+        monkeypatch.setattr("localm.image_gen.comfy.free_comfy_vram",
+                            lambda *a, **k: True)
 
     def _kwargs(self, monkeypatch, tmp_path, data, managed=False):
         monkeypatch.delenv("FLUX_API_URL", raising=False)

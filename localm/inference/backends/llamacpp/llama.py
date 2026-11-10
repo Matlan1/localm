@@ -5649,6 +5649,7 @@ class LlamaCpp:
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
         **_ignored,
     ):
         """
@@ -5683,6 +5684,12 @@ class LlamaCpp:
         cache: the reply is computed from a full prefill into an emptied cache,
         alone (see :meth:`_generate`). Encoder-decoder and diffusion models never
         keep one.
+
+        *raw_prompt*, when given, is the whole prompt: it is tokenised as given
+        (control tokens parsed, the vocabulary's BOS added when it asks for one),
+        with no chat template, no reasoning-channel edit and no media; *messages*
+        and *thinking* are then not read. An encoder-decoder model reads it as its
+        encoder input.
         """
         if (logprobs is None) != (logprob_sink is None):
             raise ValueError("logprobs and logprob_sink must be passed together")
@@ -5702,6 +5709,8 @@ class LlamaCpp:
             raise UnsupportedInputError(
                 "min_p, presence_penalty and frequency_penalty cannot be applied "
                 "by a diffusion language model")
+        if raw_prompt is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
                 messages,
@@ -5719,44 +5728,54 @@ class LlamaCpp:
                 logprobs=logprobs,
             ), stream, logprob_sink)
 
-        # Use the model's embedded chat template when available (Gemma, Llama3,
-        # Mistral, etc.) so we don't force ChatML on every model.
-        prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
-        if fallback_reason:
-            self.chat_template_fallback_reason = fallback_reason
-
-        # If the template already encodes a BOS marker (e.g. Gemma's "<bos>"),
-        # parse_special=True (used inside encode) will convert it to the BOS
-        # token, so we must NOT also ask for add_special=True to avoid doubling.
-        # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
-        bos_markers = ("<bos>", "<s>", "﻿")
-        add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, messages_contain_audio,
-            messages_contain_image)
-        has_audio = messages_contain_audio(messages)
-        if has_audio and not self.supports_audio:
-            raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
-        going_to_vision = (getattr(self, "_mtmd", None) is not None
-                           and (has_audio or messages_contain_image(messages)))
-        if going_to_vision:
-            untrusted_ranges = ()
-            if any(untrusted_spans_of(m.get("content")) for m in messages):
-                from localm.debuglog import logger
-                logger.warning(
-                    "textguard: this request takes the vision path, which "
-                    "tokenises the whole prompt through mtmd in one call, so "
-                    "untrusted spans keep special-token parsing ON; only the "
-                    "text-level defang applies to this request")
+        if raw_prompt is not None:
+            going_to_vision = False
+            tokens = self._loaded_tokenizer().encode(
+                raw_prompt,
+                add_bos=not raw_prompt.startswith(("<bos>", "<s>", "\ufeff")))
+            if not tokens:
+                from localm.inference.backends.base import (
+                    EMPTY_RAW_PROMPT_MESSAGE, UnsupportedInputError)
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
         else:
-            untrusted_ranges = _untrusted_prompt_ranges(
-                self._model_ptr, messages, prompt, fallback_reason)
-        if thinking is False and not going_to_vision:
-            from localm.inference.backends.base import no_think_prompt
-            prompt = no_think_prompt(
-                prompt, api.llama_model_chat_template(self._model_ptr))
-        tokens = self._tokenizer.encode(
-            prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
+            # Use the model's embedded chat template when available (Gemma, Llama3,
+            # Mistral, etc.) so we don't force ChatML on every model.
+            prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
+            if fallback_reason:
+                self.chat_template_fallback_reason = fallback_reason
+
+            # If the template already encodes a BOS marker (e.g. Gemma's "<bos>"),
+            # parse_special=True (used inside encode) will convert it to the BOS
+            # token, so we must NOT also ask for add_special=True to avoid doubling.
+            # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
+            bos_markers = ("<bos>", "<s>", "﻿")
+            add_bos = not any(prompt.startswith(m) for m in bos_markers)
+            from localm.inference.backends.base import (
+                AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, messages_contain_audio,
+                messages_contain_image)
+            has_audio = messages_contain_audio(messages)
+            if has_audio and not self.supports_audio:
+                raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
+            going_to_vision = (getattr(self, "_mtmd", None) is not None
+                               and (has_audio or messages_contain_image(messages)))
+            if going_to_vision:
+                untrusted_ranges = ()
+                if any(untrusted_spans_of(m.get("content")) for m in messages):
+                    from localm.debuglog import logger
+                    logger.warning(
+                        "textguard: this request takes the vision path, which "
+                        "tokenises the whole prompt through mtmd in one call, so "
+                        "untrusted spans keep special-token parsing ON; only the "
+                        "text-level defang applies to this request")
+            else:
+                untrusted_ranges = _untrusted_prompt_ranges(
+                    self._model_ptr, messages, prompt, fallback_reason)
+            if thinking is False and not going_to_vision:
+                from localm.inference.backends.base import no_think_prompt
+                prompt = no_think_prompt(
+                    prompt, api.llama_model_chat_template(self._model_ptr))
+            tokens = self._tokenizer.encode(
+                prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
         if self.is_diffusion:
             gen = self._generate_diffusion(

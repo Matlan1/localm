@@ -34,7 +34,7 @@ from localm import peer_routing, scopes
 from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
-from localm.inference.protocol import ChatRequest, EmbeddingRequest
+from localm.inference.protocol import ChatRequest, CompletionRequest, EmbeddingRequest
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
 )
@@ -398,6 +398,19 @@ def register(app: FastAPI, ctx) -> None:
         inner = await _endpoint(request.app, "/v1/chat/completions")(chat_req, derived)
         return await _reply(inner, plan, kind, name, started)
 
+    async def _run_completion(request: Request, plan: P.Plan, kind: str, name: str):
+        started = time.perf_counter()
+        try:
+            completion_req = CompletionRequest(**plan.body)
+        except ValidationError as exc:
+            raise P.OllamaError(400, validation_text(exc.errors())) from None
+        derived = derived_request(
+            request, "/v1/completions", json.dumps(plan.body).encode("utf-8"))
+        inner = await _endpoint(request.app, "/v1/completions")(completion_req, derived)
+        if not isinstance(inner, Response):
+            inner = JSONResponse(inner)
+        return await _reply(inner, plan, kind, name, started)
+
     async def _reply(inner: Response, plan: P.Plan, kind: str, name: str,
                      started: float):
         body_iterator = getattr(inner, "body_iterator", None)
@@ -461,10 +474,14 @@ def register(app: FastAPI, ctx) -> None:
                 force=P.unload_forced(req))
         plan = P.plan_generate(req, _canonical(name))
         _note_ignored(plan, req)
-        reply = await _run_chat(request, plan, "generate", name)
+        if plan.raw:
+            reply = await _run_completion(request, plan, "generate", name)
+        else:
+            reply = await _run_chat(request, plan, "generate", name)
         if P.keep_alive_is_zero(req.keep_alive):
             return await _unload_after_reply(request, name, reply, P.unload_forced(req))
         return reply
+
 
     # ---------------------------------------------------------------- #
     #  Embeddings                                                       #

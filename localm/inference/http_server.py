@@ -4169,6 +4169,24 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # The Authorization-header path (CLI / SDK / coder) cannot be forged cross-site and
 # is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
+
+
+def session_cookie_name(request) -> str:
+    """Per-instance session cookie name. Browsers share cookies across ports of
+    one host, so the name carries the port the request arrived on; a request
+    with no explicit port uses the legacy ``SESSION_COOKIE``."""
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    return f"{SESSION_COOKIE}_{port}" if port else SESSION_COOKIE
+
+
+def session_cookie_value(request) -> str:
+    """The session id presented by *request*: the instance-specific cookie, else
+    the legacy unsuffixed one left by an older build."""
+    jar = request.cookies
+    return (jar.get(session_cookie_name(request)) or jar.get(SESSION_COOKIE) or "").strip()
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
@@ -4395,7 +4413,7 @@ def _request_token(request) -> tuple[Optional[str], str]:
     header = _bearer_token(request) or (request.headers.get("x-api-key") or "").strip()
     if header:
         return header, "header"
-    cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    cookie = session_cookie_value(request)
     if cookie:
         return cookie, "cookie"
     return None, "none"
@@ -4609,7 +4627,7 @@ def _csrf_ok(request) -> bool:
     header; SameSite=Strict and the same-origin guard remain in force."""
     from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
-    sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    sid = session_cookie_value(request)
     if not header or not sid:
         return False
     # ct_equal, not compare_digest: the header is caller-supplied and latin-1
@@ -6571,11 +6589,17 @@ def _debug_prompt_dump(messages: list) -> str:
     return "\n".join(lines)
 
 
-def _log_assembled_prompt(messages: list) -> None:
-    """Debug-log the messages about to reach the backend, content-gated on
-    debug_content_enabled(). See test_assembled_prompt_debug_capture.py."""
+def _log_assembled_prompt(messages: list, raw_prompt: Optional[str] = None) -> None:
+    """Debug-log the messages about to reach the backend, or with *raw_prompt*
+    that raw completion prompt, content-gated on debug_content_enabled(). See
+    test_assembled_prompt_debug_capture.py."""
     from localm.debuglog import debug_content_enabled, logger as _dbg
-    if debug_content_enabled():
+    if not debug_content_enabled():
+        return
+    if raw_prompt is not None:
+        _dbg.debug("raw completion prompt (%d character(s), no chat template):\n%s",
+                   len(raw_prompt), raw_prompt)
+    else:
         _dbg.debug("assembled chat prompt (%d message(s)):\n%s",
                     len(messages), _debug_prompt_dump(messages))
 
@@ -7408,11 +7432,13 @@ async def _stream_sse_completion_body(
         def __init__(self, records: list) -> None:
             self.records = records
 
+    call_outcome: dict = {}
+
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
         # orphan the consumer (see the fuller note in _stream_sse).
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         gen = None
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
@@ -7457,6 +7483,7 @@ async def _stream_sse_completion_body(
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing completion generation stream failed")
+            _snapshot_outcome(call_outcome, engine)
             # See _stream_sse: tolerate a gone loop when waking the consumer.
             try:
                 loop.call_soon_threadsafe(token_queue.put_nowait, None)
@@ -7586,14 +7613,18 @@ async def _stream_sse_completion_body(
     _log_chat_reply(reply, finish_reason=("error" if gen_error is not None else "stop"))
 
     completion_tokens = await _count_streamed_tokens(engine, streamed)
-    # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
-    # not "stop", so a client keying off finish_reason detects the failure even
-    # though the error text was already streamed as a visible chunk.
+    # A mid-stream error is "error", a stop sequence "stop", otherwise the
+    # backend's reason ("length" when max_tokens ran out).
+    if gen_error is not None:
+        finish_reason = "error"
+    elif stopped:
+        finish_reason = "stop"
+    else:
+        finish_reason = _outcome(call_outcome, "finish_reason", engine)
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
-        "choices": [{"text": "", "index": 0,
-                     "finish_reason": ("error" if gen_error is not None else "stop")}],
+        "choices": [{"text": "", "index": 0, "finish_reason": finish_reason}],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -8152,7 +8183,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
         gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []

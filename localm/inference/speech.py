@@ -105,12 +105,14 @@ def _kind_words(kind: str) -> str:
     return _KIND_WORDS.get(kind, f"a {kind} model")
 
 
-def resolve_speech_model(model: Optional[str]) -> SpeechModel:
+def resolve_speech_model(model: Optional[str], *,
+                         where: str = "the request's model field") -> SpeechModel:
     """The speech model a request names.
 
     An omitted model, ``localm`` or one of :data:`OPENAI_MODEL_ALIASES` resolves
     to the only registered speech model. Raises :class:`SpeechModelError` with
-    the HTTP status to report: 404 when nothing matching is registered, 400 when
+    the HTTP status to report (*where* names the place a model is chosen, for
+    the message): 404 when nothing matching is registered, 400 when
     an alias is ambiguous, 422 when the model is not a speech model or its files
     are missing."""
     from localm.config import load_registry
@@ -124,12 +126,12 @@ def resolve_speech_model(model: Optional[str]) -> SpeechModel:
                 "No text-to-speech model is registered. Add a Qwen3-TTS GGUF with "
                 "its mmproj (for example 'localm pull "
                 "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:"
-                "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf') and name it in the "
-                "request's model field.", 404)
+                "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf') and name it in "
+                + where + ".", 404)
         if len(names) > 1:
             raise SpeechModelError(
                 "Several text-to-speech models are registered (" + ", ".join(names)
-                + "); name one in the request's model field.", 400)
+                + "); name one in " + where + ".", 400)
         name = names[0]
     reg = load_registry()
     entry = reg.get(name)
@@ -152,7 +154,8 @@ def resolve_speech_model(model: Optional[str]) -> SpeechModel:
         raise SpeechModelError(
             f"Model {name!r} needs its mmproj (the file holding the speech "
             "stages), and none is attached. Pull the model again so its mmproj is "
-            "fetched, or attach one with 'localm pull --mmproj'.", 422)
+            f"fetched, or attach a file you already have with 'localm attach-mmproj "
+            f"{name} FILE'.", 422)
     return SpeechModel(name, path, mmproj)
 
 

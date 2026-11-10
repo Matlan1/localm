@@ -172,13 +172,18 @@ def registered_rerankers() -> list[str]:
                   if isinstance(entry, dict) and entry_is_reranker(name, entry))
 
 
-def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
+_HTTP_MODEL_FIELD = "the request's model field"
+
+
+def resolve_reranker(model: Optional[str], *,
+                     where: str = _HTTP_MODEL_FIELD) -> tuple[str, str]:
     """``(registry name, GGUF path)`` for the reranker a request names.
 
     An omitted or ``localm`` model resolves to the only registered reranker.
     Raises :class:`RerankerModelError` (with the HTTP status to report) when the
     model is not registered (404), names no reranker or several (400), or is
-    registered as something that cannot rerank (422)."""
+    registered as something that cannot rerank (422). *where* names the place a
+    model is chosen, for the messages."""
     from localm.config import load_registry
     from localm.model_manager.registry import entry_is_reranker
     reg = load_registry()
@@ -189,12 +194,13 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
             raise RerankerModelError(
                 "No reranker model is registered. Add a reranker GGUF (for "
                 "example bge-reranker-v2-m3 or Qwen3-Reranker) and name it in "
-                "the request's model field.", 404)
+                + where + ".", 404)
         if len(names) > 1:
             raise RerankerModelError(
                 "Several rerankers are registered (" + ", ".join(names) +
-                "); name one in the request's model field.", 400)
+                "); name one in " + where + ".", 400)
         name = names[0]
+    http = where == _HTTP_MODEL_FIELD
     entry = reg.get(name)
     if not isinstance(entry, dict):
         raise RerankerModelError(f"Model {name!r} is not registered.", 404)
@@ -204,13 +210,13 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
     if kind != "embedding":
         what = _KIND_WORDS.get(kind, f"a {kind} model")
         raise RerankerModelError(
-            f"Model {name!r} is {what}, not a reranker; /v1/rerank needs a "
-            "reranker GGUF.", 422)
+            f"Model {name!r} is {what}, not a reranker; "
+            + ("/v1/rerank" if http else "reranking") + " needs a reranker GGUF.", 422)
     if not entry_is_reranker(name, entry):
         raise RerankerModelError(
             f"Model {name!r} is an embedding model, not a reranker: it has no "
-            "classifier head to score a query against a document. Use "
-            "/v1/embeddings for it.", 422)
+            "classifier head to score a query against a document."
+            + (" Use /v1/embeddings for it." if http else ""), 422)
     path = _registered_model_path(name)
     if path is None:
         raise RerankerModelError(

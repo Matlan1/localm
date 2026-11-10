@@ -109,7 +109,8 @@ class TestGenerateMusic:
                 "synthwave, 80s", tmp_path / "out.flac",
                 localm_url="http://127.0.0.1:9/v1", instance_token="tok-abc")
         assert ok, msg
-        unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+        unload_spy.assert_called_once()
+        assert unload_spy.call_args.args == ("http://127.0.0.1:9/v1", "tok-abc")
 
     def test_no_lyrics_uses_instrumental_marker(self, tmp_path):
         ok, _, captured = self._run(tmp_path, seed=1)

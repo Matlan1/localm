@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Image-generation tool: a thin wrapper that delegates to
-localm.image_gen.comfy.generate_image."""
+"""Image-generation tool: a thin wrapper over the image plugin's backend facade
+(``generate_media``)."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ def tool_generate_image(
     _privacy: bool = False,
     _cancel=None,
 ) -> ToolResult:
-    """Generate with the image plugin's selected backend: the native one through
-    ``backend.generate_unless_comfy``, else localm.image_gen.comfy.generate_image.
+    """Generate with the image plugin's selected backend through
+    ``backend.generate_media``.
 
     In privacy mode (``_privacy=True``, injected by the agent) the prompt
     sidecar is suppressed so no prompt trace is written to disk. _cancel
@@ -33,52 +33,26 @@ def tool_generate_image(
     generation is stopped."""
     import os
 
-    from localm.image_gen.comfy import generate_image
     from localm.plugins.lookup import PluginUnavailable, plugin_api
 
     try:
         image_backend = plugin_api("image", "backend")
     except PluginUnavailable as e:
         return ToolResult.error(str(e))
+
     try:
         out_p = _confine(cwd, output_path)
         input_p = _confine(cwd, input_image) if input_image else None
     except PermissionError as e:
         return ToolResult.error(str(e))
     localm_url = os.environ.get("LOCALM_URL") or None
-    native = image_backend.generate_unless_comfy(
+    ok, message, _path = image_backend.generate_media(
         prompt, out_p, self_url=localm_url, swap=bool(localm_url),
         guidance=guidance, negative_prompt=negative_prompt, seed=seed,
         lora_name=lora_name, lora_strength_model=lora_strength_model,
         lora_strength_clip=lora_strength_clip, input_image=input_p, denoise=denoise,
-        write_sidecar=not _privacy, delete_outputs=_privacy, cancel_check=_cancel)
-    if native is not None:
-        ok, message = native
-        if ok:
-            rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p
-            return ToolResult.success(message, summary=f"generated {rel}")
-        return ToolResult.error(message)
-    # The image plugin's own resolution: the managed instance when it is
-    # selected, else the per-plugin comfy.api_url, else the global comfy_api_url,
-    # else default_api_url() (FLUX_API_URL, then the loopback default). The same
-    # target the GUI, REPL and MCP image paths use.
-    from localm.config import load_config
-    api_url = str(image_backend.settings(load_config()).get("api_url") or "")
-    ok, message = generate_image(
-        prompt, out_p,
-        api_url=api_url,
-        guidance=guidance,
-        negative_prompt=negative_prompt,
-        seed=seed,
-        lora_name=lora_name,
-        lora_strength_model=lora_strength_model,
-        lora_strength_clip=lora_strength_clip,
-        input_image=input_p,
-        denoise=denoise,
-        write_sidecar=not _privacy,
-        delete_outputs=_privacy,
-        cancel_check=_cancel,
-    )
+        write_sidecar=not _privacy, delete_outputs=_privacy, privacy=_privacy,
+        cancel_check=_cancel)
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p
         return ToolResult.success(message, summary=f"generated {rel}")

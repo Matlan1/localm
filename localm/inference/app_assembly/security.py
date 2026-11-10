@@ -461,7 +461,10 @@ def add_security_headers(app: FastAPI) -> None:
         "connect-src 'self' blob: https://huggingface.co https://*.hf.co; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
-        "frame-src 'self'; "
+        # The artifact canvas is the GUI's only frame and loads from srcdoc,
+        # which frame-src does not govern; 'none' refuses every navigation of
+        # that frame to a URL. See test_csp_frame_src_refuses_every_url.
+        "frame-src 'none'; "
         "object-src 'none'; "
         "base-uri 'none'; "
         # See the form-action note above: a NAVIGATION directive, no default-src

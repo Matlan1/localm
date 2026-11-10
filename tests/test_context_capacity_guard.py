@@ -26,6 +26,8 @@ from tests._bare_llama import make_bare_llama
 
 
 class _MockBackend(BaseBackend):
+    supports_raw_prompt = True
+
     def __init__(self, capacity: Optional[int] = 4096) -> None:
         self.effective_ctx_max = capacity
         self.n_ctx_max = capacity
@@ -144,12 +146,7 @@ class TestPreDispatchContextCapacityGuard:
         app = create_app(engine)
         client = TestClient(app)
 
-        # /v1/completions has no system-message field to opt the role-word
-        # nudge out via a "third person" mention, but the nudge's OWN
-        # _nudge_fits_capacity guard skips it anyway at this capacity (the
-        # ~190-char instruction exceeds 10% of 100) - the same guard
-        # /v1/chat/completions relies on, applied uniformly regardless of
-        # which route built the message list. So the prompt is unmodified.
+        # /v1/completions runs no inlet hook, so the prompt is counted as sent.
         oversized_prompt = "x" * 150
         expected_tokens = len(oversized_prompt)
         resp = client.post(

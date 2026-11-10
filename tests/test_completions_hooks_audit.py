@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""/v1/completions runs the same chat-pipeline hooks and the same audit log /
-transcript that /v1/chat/completions runs on every turn, so raw-completion
-traffic is not a parallel, unguarded path to the model.
+"""/v1/completions runs the chat pipeline's stream and outlet hooks and the same
+audit log / transcript that /v1/chat/completions runs on every turn. No inlet
+hook runs: the prompt reaches the model as sent.
 
 These tests drive the real /v1/completions handler (streaming + non-streaming)
-with a stub engine and a synthetic hook plugin, asserting the inlet/stream/outlet
-hooks run, that the exchange is handed to _audit_exchange, and that the
-text_completion response shape is unchanged.
+with a stub engine and a synthetic hook plugin, asserting the stream/outlet
+hooks run and the inlet does not, that the exchange is handed to
+_audit_exchange, and that the text_completion response shape is unchanged.
 """
 
 import json
@@ -143,7 +143,7 @@ def test_no_hooks_completion_stream_unchanged(env):
 #  Hooks run on /v1/completions                                                #
 # --------------------------------------------------------------------------- #
 
-def test_completion_inlet_and_outlet_transform(env):
+def test_completion_outlet_transforms_and_the_inlet_does_not_run(env):
     from localm.inference.http_server import create_app
     app = create_app(_echo_engine())
     _make_plugin(env / "plugins", "hookplug", HOOK_PLUGIN)
@@ -151,8 +151,8 @@ def test_completion_inlet_and_outlet_transform(env):
     with TestClient(app) as c:
         r = _post(c, {"prompt": "hi"})
     assert r.status_code == 200
-    # echo returns the inlet-rewritten prompt ("INLET:hi"); outlet appends.
-    assert r.json()["choices"][0]["text"] == "INLET:hi [OUT]"
+    # The inlet does not run on a raw completion; the outlet appends.
+    assert r.json()["choices"][0]["text"] == "hi [OUT]"
 
 
 def test_completion_stream_hook_transforms(env):
@@ -163,8 +163,8 @@ def test_completion_stream_hook_transforms(env):
     with TestClient(app) as c:
         r = _post(c, {"prompt": "hi", "stream": True})
     assert r.status_code == 200
-    # inlet rewrites to "INLET:hi"; the stream hook upper-cases each piece.
-    assert _sse_text(r) == "INLET:HI"
+    # The inlet does not run; the stream hook upper-cases each piece.
+    assert _sse_text(r) == "HI"
 
 
 def test_failing_inlet_isolated_completion(env):
