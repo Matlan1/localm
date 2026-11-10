@@ -31,6 +31,7 @@ def mem_env(tmp_path, monkeypatch):
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
     plug._auto_running = False
 
     sdir = tmp_path / "sessions"
