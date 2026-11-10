@@ -136,7 +136,10 @@ def _conflicts(a: str, b: str) -> bool:
 
 def _win_process(pid: int) -> tuple[Optional[bool], Optional[int]]:
     """``(alive, creation FILETIME)`` of Windows process *pid* from kernel32:
-    alive None when it cannot be told; the time None when it cannot be read."""
+    alive None when it cannot be told; the time None when it cannot be read.
+    ``(None, None)`` on any other platform."""
+    if sys.platform != "win32":
+        return None, None
     import ctypes
     from ctypes import wintypes
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
