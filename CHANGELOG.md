@@ -22,6 +22,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin that is turned off no longer contributes coder tools.** The coder agent now loads tool exports only from plugins that are installed and enabled, through the same loader as the rest of the plugin system.
 - **A third-party plugin cannot protect itself from removal, claim a reserved scope, or mount a page outside `/api/` and `/v1/`.** `protected` and `default_enabled` in a third-party manifest are ignored, scope checks run every time plugins are discovered (not only at install), and a plugin route outside those two prefixes is refused.
 - **Chat hooks are documented as transforms, not controls.** The plugin guide now lists every path that skips them and no longer suggests them for redaction.
+- **`localm coder doctor` and `/doctor` no longer run a repository's own programs.** The git check now runs with the same protections as the coder's git tools, so a project's `core.fsmonitor` setting or hooks are not started when you check a folder you have not trusted.
 
 ### Changed
 - **The browser voice (Kokoro) uses transformers.js 4.3.2 (from 4.3.1).** Its speech runtime and voices are unchanged.

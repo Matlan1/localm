@@ -137,10 +137,20 @@ def check_context(backend, work_dir: Path, project_map=None) -> Check:
 
 
 def _git(work_dir: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "--no-optional-locks", "-C", str(work_dir), *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=_GIT_TIMEOUT_S)
+    """Run a hardened git in *work_dir* (no fsmonitor, hooks or external
+    drivers). Raises FileNotFoundError when git is missing and
+    subprocess.TimeoutExpired on a timeout."""
+    from .tools.git import run_git
+    argv = ("--no-optional-locks", "-C", str(work_dir), *args)
+    res = run_git(argv, Path(work_dir), timeout=_GIT_TIMEOUT_S)
+    if res.not_found:
+        raise FileNotFoundError("git")
+    if res.timed_out:
+        raise subprocess.TimeoutExpired(["git", *args], _GIT_TIMEOUT_S)
+    if res.error is not None:
+        raise OSError(res.error)
+    return subprocess.CompletedProcess(
+        ["git", *args], res.returncode, res.stdout, res.stderr)
 
 
 def check_git(work_dir: Path) -> Check:
