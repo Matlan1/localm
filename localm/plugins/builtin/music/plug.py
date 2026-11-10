@@ -94,10 +94,10 @@ async def _require_native_acceptance(req: MusicRequest) -> None:
     def _check() -> str | None:
         from localm.media import backend_choice
         s = backend_choice.refine_auto(_backend.settings(load_config()), "Music")
-        if s.get("backend") != "native":
+        refusal = getattr(_backend._impl(s), "refusal", None)
+        if refusal is None:
             return None
-        from .backends import native
-        return native.refusal(
+        return refusal(
             model_overrides=req.model_overrides, sampler_name=req.sampler_name,
             scheduler=req.scheduler, lyrics_strength=req.lyrics_strength)
     try:
