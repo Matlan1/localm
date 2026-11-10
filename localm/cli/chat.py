@@ -479,8 +479,14 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         model_path, _display_hint = info
 
         from ..inference.engine import Engine
-        from ..model_manager.registry import get_operator_model_mmproj
+        from ..model_manager.registry import chat_load_refusal, get_operator_model_mmproj
         from localm.model_manager import load_registry as _reg
+
+        from rich.markup import escape
+        refusal = chat_load_refusal(model, _reg())
+        if refusal is not None:
+            console.print(f"[red]{escape(refusal)}[/red]")
+            sys.exit(1)
 
         # Priority: registered alias > Ollama manifest hint > engine auto-derive
         is_registered = model in _reg()

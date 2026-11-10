@@ -455,12 +455,32 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                 embed_fn=embed_fn, model_name=model_name,
                 on_progress=on_progress, batch=batch)
 
+    def _stored_doc_key(self, source: str) -> Optional[str]:
+        """The key under which *source* is indexed, or None. Accepts the stored
+        spelling, the path resolved the way ``add_paths`` stores it, or a
+        spelling that differs only in separators and (on Windows) case."""
+        docs = self._meta.get("docs", {})
+        if source in docs:
+            return source
+        try:
+            resolved = str(Path(source).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            resolved = source
+        if resolved in docs:
+            return resolved
+        wanted = os.path.normcase(os.path.normpath(resolved))
+        for key in docs:
+            if os.path.normcase(os.path.normpath(key)) == wanted:
+                return key
+        return None
+
     def remove_doc(self, source: str) -> bool:
         # Same per-collection lock and re-load as add_paths, and the same
         # cross-process lock.
         with _collection_lock(self.name), self._write_lock("a document removal"):
             self._load(use_cache=False)
-            if source not in self._meta.get("docs", {}):
+            source = self._stored_doc_key(source)
+            if source is None:
                 return False
             keep = [i for i, c in enumerate(self._chunks)
                     if c.get("source") != source]

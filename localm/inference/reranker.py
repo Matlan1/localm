@@ -172,13 +172,15 @@ def registered_rerankers() -> list[str]:
                   if isinstance(entry, dict) and entry_is_reranker(name, entry))
 
 
-def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
+def resolve_reranker(model: Optional[str], *,
+                     where: str = "the request's model field") -> tuple[str, str]:
     """``(registry name, GGUF path)`` for the reranker a request names.
 
     An omitted or ``localm`` model resolves to the only registered reranker.
     Raises :class:`RerankerModelError` (with the HTTP status to report) when the
     model is not registered (404), names no reranker or several (400), or is
-    registered as something that cannot rerank (422)."""
+    registered as something that cannot rerank (422). *where* names the place a
+    model is chosen, for the messages."""
     from localm.config import load_registry
     from localm.model_manager.registry import entry_is_reranker
     reg = load_registry()
@@ -189,11 +191,11 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
             raise RerankerModelError(
                 "No reranker model is registered. Add a reranker GGUF (for "
                 "example bge-reranker-v2-m3 or Qwen3-Reranker) and name it in "
-                "the request's model field.", 404)
+                + where + ".", 404)
         if len(names) > 1:
             raise RerankerModelError(
                 "Several rerankers are registered (" + ", ".join(names) +
-                "); name one in the request's model field.", 400)
+                "); name one in " + where + ".", 400)
         name = names[0]
     entry = reg.get(name)
     if not isinstance(entry, dict):

@@ -2737,7 +2737,7 @@
   "settings.sectionHeading.voice": "Voix",
   "settings.sections": "Sections des paramètres",
   "settings.server.help": "Contrôlez ce serveur LocaLM d'ici au lieu de forcer la fermeture de la fenêtre (qui peut planter sans déchargement propre). Le modèle est déchargé d'abord dans les deux cas. Redémarrer relance le serveur automatiquement ; Arrêter l'arrête (relancez-le depuis votre lanceur ou votre terminal).",
-  "settings.server.restartBody": "Cela redémarre le serveur LocaLM (le modèle est d'abord déchargé, puis rechargé). Il sera brièvement indisponible, puis se reconnectera automatiquement.",
+  "settings.server.restartBody": "Cela redémarre le serveur LocaLM avec la commande qui l'a lancé (le modèle chargé est déchargé et n'est rechargé que si le serveur a été lancé avec lui). Il sera brièvement indisponible, puis se reconnectera automatiquement.",
   "settings.server.restartButton": "Redémarrer le serveur",
   "settings.server.restartConfirm": "Redémarrer",
   "settings.server.restartFailed": "Impossible de redémarrer : {message}",

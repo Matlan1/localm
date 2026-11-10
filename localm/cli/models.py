@@ -1784,7 +1784,7 @@ def info():
               if _is_portable_home(HOME_DIR) else "standard")
     temp_path = temp_dir_in_use(HOME_DIR)
     temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
-    console.print(f"  [bold]mode       [/bold]   {mode_s}")
+    console.print(f"  [bold]install    [/bold]   {mode_s}")
     console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
     console.print()
     for k, v in sorted(cfg.items()):

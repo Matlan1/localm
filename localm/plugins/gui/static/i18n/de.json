@@ -2693,7 +2693,7 @@
   "settings.sectionHeading.voice": "Stimme",
   "settings.sections": "Einstellungsbereiche",
   "settings.server.help": "Steuern Sie diesen LocaLM-Server von hier aus, statt das Fenster gewaltsam zu schließen (was ohne sauberes Entladen abstürzen kann). Das Modell wird in beiden Fällen zuerst entladen. Neu starten bringt den Server automatisch zurück; Herunterfahren stoppt ihn (starten Sie ihn erneut über Ihren Launcher oder das Terminal).",
-  "settings.server.restartBody": "Dies startet den LocaLM-Server neu (das Modell wird zuerst entladen, dann neu geladen). Er ist kurz nicht erreichbar und verbindet sich danach automatisch wieder.",
+  "settings.server.restartBody": "Dies startet den LocaLM-Server neu mit dem Befehl, mit dem er gestartet wurde (das geladene Modell wird entladen und nur dann wieder geladen, wenn der Server damit gestartet wurde). Er ist kurz nicht erreichbar und verbindet sich danach automatisch wieder.",
   "settings.server.restartButton": "Server neu starten",
   "settings.server.restartConfirm": "Neu starten",
   "settings.server.restartFailed": "Neustart fehlgeschlagen: {message}",

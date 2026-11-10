@@ -63,9 +63,11 @@ def rerank_cmd(query, documents, model, docs_file, top_n, as_json):
                                "with --file")
     if not query.strip():
         raise click.UsageError("the query must not be empty")
+    from ..debuglog import native_console_paused
     try:
-        name, path = reranker.resolve_reranker(model)
-        outcome = reranker.rerank(path, query, texts)
+        with native_console_paused():
+            name, path = reranker.resolve_reranker(model, where="--model")
+            outcome = reranker.rerank(path, query, texts)
     except reranker.RerankerModelError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)

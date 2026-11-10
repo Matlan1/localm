@@ -26,6 +26,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
+- **`localm run` refuses an embedding model** with the same message the server gives, instead of printing gibberish and exiting 0.
+- **`localm rag rm-doc` finds a document whatever the path spelling** (forward or back slashes, any letter case on Windows).
+- **`localm rerank` and `localm memory` no longer print the llama.cpp loader log** when run without `--debug`.
+- **`localm info` labels the install shape `install`** so it no longer shares the word `mode` with the session mode below it, and `localm speak` and `localm rerank` tell you to use `--model` instead of naming an API request field.
+- **The Restart confirmation describes what restart does:** the server restarts with the command it was started with, and a model is loaded again only if the server was started with it.
 - **Running `localm serve` again no longer turns on the Web GUI of an API-only server.** A second `localm serve` for a project that already has a server reports the running one, as before, but it also asked that server to mount its GUI, coder included. It now only reports it; `localm gui` is still what adds the GUI to a running API-only server.
 - **`localm key clear` works when only named keys exist.** With named keys and no owner key it printed "No API key set (already open mode)" and removed nothing, although the server still required a key. It now removes every key, with the same confirmation as before. `localm key show` in that state no longer reports open mode either; it says the server requires a key.
 - **Bug reports redact more forms of a credential.** An `Authorization:` value is now removed whole under any scheme (`Token`, `ApiKey`, Digest and AWS-style values with several parts used to keep the secret and lose only the scheme word), also when the value is quoted. Header names written as JSON keys (`"Authorization"`, `"X-Auth-Token"`, `"x-api-token"`) and credential names with several parts (`"AWS_SECRET_ACCESS_KEY"`) are redacted, and a bearer token containing `+`, `/` or `=` no longer keeps its tail. The same applies to the standalone `report-issue` scripts.
