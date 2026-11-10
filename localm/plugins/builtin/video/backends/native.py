@@ -30,6 +30,10 @@ from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 4 * 1024 ** 3
 
+SUPPORTS_STEPS = True
+SUPPORTS_JOB_OPTIONS = True
+EMBEDS_OUTPUT_METADATA = True
+
 MIN_SIDE = 64
 MAX_SIDE = 1920
 MAX_FRAMES = 241

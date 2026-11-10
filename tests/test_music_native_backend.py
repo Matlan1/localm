@@ -542,9 +542,11 @@ def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path,
     save_config(cfg)
     s = music_backend.prepare_for_job(music_backend.settings(load_config()), load_config())
     assert s["backend"] == "a1111" and music_backend.is_comfy(s)
-    assert music_backend.generate_unless_comfy("lofi", tmp_path / "t.wav") is None
     import localm.cli.media as media_cli
+    import localm.image_gen.comfy as image_comfy
     import localm.music_gen as music_gen
+    monkeypatch.setattr(image_comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+    monkeypatch.setattr(image_comfy, "free_comfy_vram", lambda *a, **k: True)
     ran = []
     monkeypatch.setattr(music_gen, "generate_music",
                         lambda tags, out, **k: ran.append(tags) or (True, "saved"))

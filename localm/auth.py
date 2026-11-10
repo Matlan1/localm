@@ -926,26 +926,35 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
                      key_id, e)
 
 
+def _keystore_records(data: list) -> list:
+    """The entries of a parsed keystore list that are JSON objects; any other
+    entry (a string, number, null, nested list) is dropped."""
+    return [r for r in data if isinstance(r, dict)]
+
+
 def _load_keystore_checked() -> tuple:
-    """``(records, read_ok)``. ``read_ok`` is False when auth.json is PRESENT
-    and either could not be read (even after ``config._read_json_checked``'s
-    own bounded retry over a transient Windows sharing violation) or parses to
-    something other than a JSON list - the states in which an empty list is
-    indistinguishable from a genuinely empty keystore. See
+    """``(records, read_ok)``. ``records`` holds only the object entries.
+    ``read_ok`` is False when auth.json is PRESENT and either could not be read
+    (even after ``config._read_json_checked``'s own bounded retry over a
+    transient Windows sharing violation), parses to something other than a
+    JSON list, or holds an entry that is not a JSON object - the states in
+    which the returned list does not match what is on disk. See
     ``_load_keystore_for_write`` for the read-modify-write callers that must
     act on ``read_ok``."""
     from localm.config import _read_json_checked
     data, read_ok = _read_json_checked(keystore_file(), [])
     if not isinstance(data, list):
         return [], False
-    return data, read_ok
+    records = _keystore_records(data)
+    return records, read_ok and len(records) == len(data)
 
 
 def keystore_readable() -> bool:
-    """False when auth.json is present but could not be read or does not hold a
-    JSON list, so an empty ``list_keys()`` there does not mean no keys exist.
-    True when the file is absent or holds a list. Reads auth.json itself, as
-    ``list_keys`` does, never a ``.bak`` beside it."""
+    """False when auth.json is present but could not be read, does not hold a
+    JSON list, or holds an entry that is not a JSON object, so ``list_keys()``
+    there does not show everything in the file. True when the file is absent or
+    holds a list of objects. Reads auth.json itself, as ``list_keys`` does,
+    never a ``.bak`` beside it."""
     path = keystore_file()
     if not path.exists():
         return True
@@ -953,13 +962,14 @@ def keystore_readable() -> bool:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return False
-    return isinstance(data, list)
+    return isinstance(data, list) and all(isinstance(r, dict) for r in data)
 
 
 def _load_keystore() -> list:
-    """The keystore records, or [] when the file is absent, corrupt, or
-    unreadable. For a plain READ - verify(), list_keys(), fs_access_for(),
-    rag_roots_for(), key_hash_live(), scopes_for_key_hash() - failing toward
+    """The keystore's object entries (any other entry is skipped), or [] when
+    the file is absent, corrupt, or unreadable. For a plain READ - verify(),
+    list_keys(), fs_access_for(), rag_roots_for(), key_hash_live(),
+    scopes_for_key_hash() - failing toward
     "no match" is the safe direction, so this never needs ``read_ok`` and
     deliberately does NOT go through ``_load_keystore_checked()``/
     ``config._read_json_checked()``: that pre-checks ``Path.is_file()``, and
@@ -971,13 +981,13 @@ def _load_keystore() -> list:
         data = json.loads(keystore_file().read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return []
-    return data if isinstance(data, list) else []
+    return _keystore_records(data) if isinstance(data, list) else []
 
 
 def _load_keystore_for_write() -> list:
     """The keystore records for a read-modify-write, RAISING ``ConfigUnreadable``
-    instead of returning [] when auth.json exists but cannot be read or does
-    not hold a JSON list - the
+    instead of returning [] when auth.json exists but cannot be read, does
+    not hold a JSON list, or holds an entry that is not a JSON object - the
     same refusal ``config.update_config``/``update_registry`` apply to
     config.json/registry.json, extended to this store. Silently returning []
     here is exactly the bug: the caller then appends/mutates and persists a

@@ -17,6 +17,7 @@ comfy_target == "user" lets any of these three fields win.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -139,40 +140,25 @@ def _set_vram_estimate(s: dict, full_config: dict) -> dict:
     return s
 
 
-def generate_unless_comfy(prompt: str, out_path: Path, *, on_progress=None,
-                          before_generate=None, config: Optional[dict] = None,
-                          **kwargs) -> Optional[tuple[bool, str]]:
-    """Generate through the configured image backend for a caller that has its
-    own ComfyUI path (the chat REPL, the coder tool, the MCP tool).
+def generate_media(prompt: str, out_path: Path, *, on_progress=None,
+                   before_generate=None, config: Optional[dict] = None,
+                   **kwargs) -> tuple[bool, str, Path]:
+    """Generate through the configured image backend, ComfyUI or not: the one
+    entry point for the chat REPL, the CLI, the coder tool and the MCP tool.
 
-    Returns None when the backend is ComfyUI, so the caller runs its own
-    ComfyUI code unchanged; otherwise ``(ok, message)``. Runs
-    ``ensure_available``, then *before_generate* (e.g. unloading a chat model),
-    then ``generate`` with *kwargs*, and always releases the backend's VRAM
-    afterwards. *on_progress* receives every status line."""
+    Returns ``(ok, message, path)``, where *path* is *out_path* with the
+    backend's file suffix. Runs the configuration notes, the backend's request
+    refusal, ``ensure_available``, *before_generate* (e.g. unloading a chat
+    model), then ``generate`` with *kwargs* (the metadata strip runs there), and
+    always releases the backend's VRAM afterwards. *on_progress* receives every
+    status line. ``privacy=True`` withholds a file whose metadata strip
+    failed."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     s = prepare_for_job(settings(cfg), cfg)
-    if s.get("backend") == "comfy":
-        return None
-
-    def say(text: str) -> None:
-        if on_progress is not None:
-            on_progress(text)
-
-    for note in (s.get("warning"), s.get("backend_note")):
-        if note:
-            say(note)
-    ok, message = ensure_available(s, on_progress=say)
-    if not ok:
-        return False, message
-    say(message)
-    if before_generate is not None:
-        before_generate()
-    try:
-        return generate(s, prompt, out_path, on_progress=say, **kwargs)
-    finally:
-        free_vram(s)
+    return media_config.generate_media(
+        sys.modules[__name__], s, prompt, out_path, on_progress=on_progress,
+        before_generate=before_generate, **kwargs)
 
 
 # --- ComfyUI reference implementation (the default "comfy" backend, I1) ------
@@ -289,14 +275,17 @@ _COMFY_REF = SimpleNamespace(
     ensure_available=_comfy_ensure_available,
     free_vram=_comfy_free_vram,
     generate=_comfy_generate,
+    NEEDS_COMFY_SERVER=True,
+    EMBEDS_OUTPUT_METADATA=True,
 )
 
 
 # --- backend facade: dispatch to the configured backend (the I1 seam) --------
 # Shared with the music/video plugins - see media_config.make_backend_facade.
 
-_facade = media_config.make_backend_facade(__package__, _COMFY_REF)
+_facade = media_config.make_backend_facade(__package__, _COMFY_REF, "image")
 _impl = _facade.resolve
+supports = _facade.supports
 ensure_available = _facade.ensure_available
 free_vram = _facade.free_vram
 generate = _facade.generate
