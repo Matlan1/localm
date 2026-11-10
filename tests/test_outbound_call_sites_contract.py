@@ -77,9 +77,9 @@ def _aliases(tree):
                 local = a.asname or a.name
                 if node.module == "urllib" and a.name == "request":
                     mods[local] = "urllib.request"
-                elif node.module == "urllib.request" and a.name in ("urlopen", "build_opener"):
-                    funcs[local] = a.name
-                elif node.module == "socket" and a.name == "create_connection":
+                elif (node.module == "urllib.request"
+                        and a.name in ("urlopen", "build_opener")) or (
+                        node.module == "socket" and a.name == "create_connection"):
                     funcs[local] = a.name
                 elif node.module in ("requests", "httpx"):
                     funcs[local] = f"{node.module}.{a.name}"

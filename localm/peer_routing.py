@@ -409,7 +409,6 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
                       host=peer.get("host"), port=int(peer.get("port")),
                       scheme=scheme, api_key=api_key or "")
     url = _peer_url(probe, "/v1/models")
-    import requests
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
