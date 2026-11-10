@@ -47,11 +47,17 @@ def register(app: FastAPI, ctx) -> None:
                 "there is nothing to log into.")
         # verify() reads the keystore and can take the cross-process lock on it
         # (last-used stamping, legacy-row marking), so it runs off the event loop.
-        if not presented:
+        def _failed():
+            from localm import mgmt_events
+            host = request.client.host if request.client else ""
+            mgmt_events.record("login_failed", loopback=_is_loopback(host))
             raise HTTPException(401, "Invalid API key")
+
+        if not presented:
+            await run_in_threadpool(_failed)
         held = await run_in_threadpool(verify, presented)
         if held is None:
-            raise HTTPException(401, "Invalid API key")
+            await run_in_threadpool(_failed)
         # Mint an OPAQUE server-side session; the cookie carries the session id,
         # never the raw key. The scope/identity/fs-access snapshot is taken now, so
         # the session stays valid across a key roll.

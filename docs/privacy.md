@@ -36,7 +36,7 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 
 | Mode | What it saves automatically |
 | --- | --- |
-| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
+| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). The one automatic write is the content-free [management log](#the-management-log-written-in-every-mode). This is the "no traces" mode. |
 | **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
@@ -325,6 +325,12 @@ policy](network.md) instead.
 - **Turning the channel off entirely.** Clear the update endpoint
   (`update_url` and `bugreport_upload_url` both blank) to disable update
   checks regardless of network policy.
+
+---
+
+## The management log (written in every mode)
+
+localm appends one line to `logs/management.jsonl` in the data folder when an API key is created or revoked, a login with a wrong key is refused, an update is applied, a setting is saved or a plugin is installed or removed. A line holds the time, the kind of event, a key id or a fixed label (never a key), the names of the settings a save changed (never their values), the plugin name and versions, and for a refused login only whether the client was on this machine. It holds no conversation content and no secret, so privacy mode writes it too. The file is capped at 1 MB and one earlier file (`management.jsonl.1`) is kept. If it cannot be written, localm logs a warning and carries on with the operation.
 
 ---
 

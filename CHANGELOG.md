@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **A management log records key, login, update and config events in every session mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content, so privacy mode writes it too. It is capped at 1 MB with one earlier file kept.
+
 ### Changed
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.

@@ -233,6 +233,12 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     return {}
 
 
+def _record_event(kind: str, **fields) -> None:
+    """Append a management event; never raises into the key operation."""
+    from localm import mgmt_events
+    mgmt_events.record(kind, **fields)
+
+
 def set_api_key(key: Optional[str]) -> None:
     """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
     or None *key* clears it, returning the server to open mode.
@@ -269,6 +275,7 @@ def set_api_key(key: Optional[str]) -> None:
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_private(path, key.strip() + "\n")
+    _record_event("key_minted", principal="owner")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
@@ -305,6 +312,7 @@ def clear_api_key() -> list[dict[str, str]]:
     ``--debug``, so a caller reporting the outcome has to read this return value:
     a surviving key STILL GRANTS ACCESS."""
     failures: list[dict[str, str]] = []
+    had_key = key_file().exists() or keystore_file().exists()
     try:
         key_file().unlink(missing_ok=True)
     except OSError as e:
@@ -338,6 +346,8 @@ def clear_api_key() -> list[dict[str, str]]:
                          "path": str(owner_kdf_file()),
                          "error": f"{type(e).__name__}: {e}"})
     _forget_cached_digests()
+    if had_key and not failures:
+        _record_event("key_revoked", principal="all")
     return failures
 
 
@@ -1145,6 +1155,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         records = _load_keystore_for_write()
         records.append(record)
         _save_keystore(records)
+    _record_event("key_minted", principal=record["id"])
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "expires": record["expires"],
             "fs_access": record["fs_access"], "rag_roots": record["rag_roots"],
@@ -1168,6 +1179,7 @@ def revoke_key(key_id: str) -> bool:
         if len(remaining) == len(records):
             return False
         _save_keystore(remaining)
+    _record_event("key_revoked", principal=key_id)
     if target and target.get("hash"):
         try:
             from localm import sessions
