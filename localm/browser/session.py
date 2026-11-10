@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from localm.browser import discovery, launch_errors, netgate, provision
 
@@ -93,6 +93,15 @@ _PROFILE_PREFERENCES = {"webrtc": {"ip_handling_policy": "disable_non_proxied_ud
 
 #: Attempts, 0.2 s apart, to remove a closed browser's profile folder.
 _PROFILE_REMOVE_TRIES = 25
+
+
+def _host_only(url: str) -> str:
+    """The host of *url* (with its port, if any) for a log line; ``"(no host)"``
+    for a URL without one or one that cannot be parsed."""
+    try:
+        return urlsplit(url).netloc.rpartition("@")[2] or "(no host)"
+    except ValueError:
+        return "(no host)"
 
 
 def _new_profile_dir() -> str:
@@ -703,7 +712,9 @@ class BrowserSession:
     def _refuse(self, url: str, reason: str, *, kind: str = "request") -> None:
         if len(self.state.blocked) < _LOG_CAP:
             self.state.blocked.append(Blocked(url=url, reason=reason, kind=kind))
-        logger.info("browser %s blocked %s: %s", self.session_id, url, reason)
+        from localm.debuglog import debug_content_enabled
+        shown = url if debug_content_enabled() else _host_only(url)
+        logger.info("browser %s blocked %s: %s", self.session_id, shown, reason)
 
     async def _on_route(self, route, request) -> None:
         """Decide one request. An unexpected failure aborts it.

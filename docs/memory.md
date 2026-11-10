@@ -272,6 +272,10 @@ without ever writing new ones: turn on **Allow memory recall in privacy mode**
 (`memory_recall_in_privacy`, with the per-surface `..._chat` switch). Even then,
 it only READS: no reinforcement, no consolidation, no migration.
 
+The mode is taken per chat: a privacy-mode session that talks to a server
+running in `log` or `full` mode (`localm run MODEL --mode privacy`) is treated
+as privacy mode, whatever the server's own mode.
+
 Because the default is privacy, memory does nothing out of the box until you
 switch to `log` or `full`. This is deliberate (offline-first, no traces by
 default), not a bug.
