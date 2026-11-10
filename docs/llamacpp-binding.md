@@ -489,7 +489,9 @@ on the GPU). `localm bench-mtp` measures it per model. `mtp_draft_tokens`
 (1-3, default 1) sets how many tokens one step drafts.
 
 **Detection is a capability test, not a metadata test**
-(`llama_model_mtp_support()` in `_api.py`). Both of these must hold:
+(`llama_model_mtp_support()` in `_api.py`). A runtime that exports
+`llama_model_has_mtp` is asked directly (status `native-refused` when it says
+no). Otherwise both of these must hold:
 
 - the GGUF declares MTP heads (`<arch>.nextn_predict_layers`, or a tolerated
   alias some third-party conversions use instead);
@@ -592,14 +594,17 @@ are reported per reply (`mtp_paused_steps`, `usage.mtp`).
 **Why it declines**, recorded in `mtp_status`, logged
 (`MTP: active=%s status=%s`) and returned as `usage.mtp.reason` when a reply
 reports MTP `unavailable` or `stopped`:
-`disabled` (config off); `native-refused` / `no-metadata-api` /
+`disabled` (config off); `encoder-decoder` / `diffusion-model` (a kind of
+model that never drafts); `native-refused` / `no-metadata-api` /
 `no-mtp-metadata` / `unknown-architecture` / `no-mtp-graph:<arch>` (from
 `llama_model_mtp_support` - the runtime or the GGUF's own declaration refuses
 MTP for this model, distinct from the rewind case below);
-`rewind-unsupported` (the draft KV cache could not be rewound after a
-rejected draft, checked at load and again during generation);
+`rewind-unsupported` (the main KV cache cannot drop a rejected draft,
+checked at load and again when a rejected draft is removed during generation);
 `no-hidden-state-api` / `no-ctx-type-field` / `hidden-state-refused` /
-`context-refused` (this runtime cannot build or feed a draft context);
+`context-refused` (this runtime cannot build or feed a draft context;
+`context-refused` carries a `:kv_cache_type=<type>` suffix when the KV cache
+type is quantised);
 `draft-context-full` (the conversation outgrew the draft context - ordinary
 decoding continues, the reply does not stop); `draft-prefill-error:*`
 / `draft-prefill-failed:*` / `draft-trim-error:*` for a failed draft-side
@@ -701,8 +706,8 @@ as the batch grows), the draft model's one-token decode and its batched decode
 per token. Each target figure is the median of 5 timed decodes after 3 warm-up
 ones; a target whose one-token decode takes more than 20 ms gets 3 after 1, and
 one taking more than 50 ms a single timed decode after 1 warm-up, of the
-batches of 2 and `spec_draft_tokens + 1` only. A draft model that cannot beat
-plain decoding at an acceptance of 0.85 (`DRAFT_GATE_ACCEPTANCE`) is freed with
+batches of 2 and `spec_draft_tokens + 1` only. A draft model that would not beat
+plain decoding by 5% at an acceptance of 0.85 (`DRAFT_GATE_ACCEPTANCE`) is freed with
 status `draft-cannot-pay`. Each step then drafts the length k up to
 `spec_draft_tokens` (default 8, at most 16) with the most expected tokens per
 second, `(1 + p + ... + p^k) / cost(k)`; k 0 (a plain step) wins unless
@@ -741,17 +746,19 @@ The draft model is freed before the target. Its weights, its KV cache at the
 main context's size, its logits buffer and a fixed margin are charged in the
 VRAM estimate; under llama.cpp's implicit multi-GPU split that charge is
 spread over the devices in proportion to their shares. The draft goes on the
-GPU only when it fits beside the whole target (on an implicit split: when the
-per-device plan with it keeps the target's split and fits every device);
-otherwise it runs on the CPU, so it never costs the target layers or devices,
-and the reply's usage reports `draft-on-cpu`. A draft model that is missing, is
+GPU when it fits beside the target's GPU part (every layer, or the configured
+`n_gpu_layers` of them) or when free VRAM cannot be read (on an implicit split:
+when the per-device plan with it keeps the target's split and fits every device);
+with a target that has no GPU layers, or when it does not fit, it runs on the CPU, so it never costs the target layers or devices,
+and the usage of a reply that drafted reports `draft-on-cpu`. A draft model that is missing, is
 not a causal chat model by its metadata (a draft head, a diffusion,
 encoder-decoder, embedding, audio or image model; nothing is loaded), is not a
 GGUF file, fails to load, does not share the vocabulary, has recurrent layers,
 or whose context is refused leaves the model working without drafting, with the
 status naming why (`draft-model-missing`, `draft-not-gguf`,
 `draft-unsupported-role`, `draft-load-failed`, `draft-vocab-mismatch`,
-`draft-rewind-unsupported`, `draft-context-refused`, or `draft-error:<exception
+`draft-rewind-unsupported`, `draft-context-refused` (with a
+`:kv_cache_type=<type>` suffix when the KV cache type is quantised), or `draft-error:<exception
 type>` for any other setup error).
 `localm spec-drafts MODEL` lists the downloaded causal chat models whose
 metadata passes the vocabulary rule.
@@ -759,10 +766,11 @@ metadata passes the vocabulary rule.
 A model with recurrent layers needs one state snapshot per draft token to drop
 rejected drafts (`n_rs_seq`), so there the n-gram or draft-model draft length is
 capped at 4 (`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in
-the VRAM estimate. A cache that cannot drop a rejected draft at all is found at
+the VRAM estimate; the cap also applies when the runtime cannot say whether the
+model has recurrent layers. A cache that cannot drop a rejected draft at all is found at
 load (status `rewind-unsupported`) or on the first rejection, after which
-drafting stays off for that model. A turn with an image does not draft
-(`skipped` `image`). `LlamaCpp.speculation_report()` carries the source, its
+drafting stays off for that model. A turn with an image or audio does not draft
+(`skipped` `image`, or `audio` for a turn with audio and no image). `LlamaCpp.speculation_report()` carries the source, its
 status and the reply's figures to the parent in the done envelope
 (`speculation`), and `GgufBackend.last_speculation_usage` turns them into
 `usage.speculation` (see server-api.md). `localm bench-spec MODEL` compares a

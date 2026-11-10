@@ -473,13 +473,14 @@ GUI offers it when you pick that model in the sidebar.
 | Route | Scope | Purpose |
 |---|---|---|
 | `GET /v1/models/{model}/peer-offer` | `models:read` | Whether a live instance has this model loaded. `{"available": bool, "peer": {"instance_id", "host", "port", "scheme", "model", "requires_key"}}`, with `peer` null when `available` is false. `model` is that instance's own name for it; `requires_key` is false for an instance with no API key. A lookup that takes too long is a 504. |
-| `POST /v1/models/{model}/peer-route` | `models:write` | Accept an offer. Body `{"instance_id": "...", "api_key": "..."}`, with `api_key` empty for an instance that has no key. The key is checked against that instance first: a refused key is a 403 and nothing is stored. Returns `{"status": "routed", "model", "peer": {"instance_id", "host", "port", "scheme", "model", "peer_model"}}`. An empty `instance_id` or no model to route is a 400 (an absent `instance_id` field is a 422); an instance that is no longer live, no longer has the model loaded or is not reachable over loopback is a 409, as is a route that would have this instance record the chat in a persisting session mode; a check that takes too long is a 504. |
+| `POST /v1/models/{model}/peer-route` | `models:write` | Accept an offer. Body `{"instance_id": "...", "api_key": "..."}`, with `api_key` empty for an instance that has no key. The key is checked against that instance first: a refused key is a 403 and nothing is stored. Returns `{"status": "routed", "model", "peer": {"instance_id", "host", "port", "scheme", "model", "peer_model"}}`. An empty `instance_id` or no model to route is a 400 (an absent `instance_id` field is a 422); an instance that is no longer live, no longer has the model loaded or is not reachable over loopback is a 409, as is a route to an instance that would record the chat more than this instance's session mode allows, or that does not say how it would record it; a check that takes too long is a 504. |
 | `DELETE /v1/models/{model}/peer-route` | `models:write` | Stop forwarding. Returns `{"status": "unrouted", "model", "was_routed": bool}`; clearing a model with no route is a success. |
 
 A model is matched by its file (the same path, the same sha256, or the same
-file name and size), so a different model that merely shares a name is never
-offered; an instance that reports only its active model's name is matched by
-name. Any model that instance has loaded counts, not only its active one.
+file name and size), so a different model that merely shares a name is not
+offered when both files can be compared; when one side has no file identity
+(an instance that reports only its active model's name, or a model this
+instance has not registered) the match is by name. Any model that instance has loaded counts, not only its active one.
 Only an instance reached over loopback, with its identity verified, is ever
 offered or forwarded to. A route is dropped when that instance stops
 answering or refuses the key it was given (the request that found out gets a
@@ -493,13 +494,13 @@ accepted and again before every forwarded request, that it records the chat
 no more than this instance's mode allows (it reports this in the
 `session_mode` field of `GET /api/session` for a request carrying the
 `X-Localm-Session-Mode` header; it agrees to record less only for its owner
-key, or for any caller when it has no key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
+key or another key with the `admin` scope, or for any caller when it has no key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
 request is a 409 saying why (naming that instance, and its mode when it
 reports one); nothing is sent and the route stays. An instance that does not
 answer this check, or refuses the key, makes accepting a 403 and drops an
 existing route with a 502 as above. A
-forwarded request carries `X-Localm-Session-Mode`. With a key that is not that
-instance's owner key, it records at its own mode, which is checked before
+forwarded request carries `X-Localm-Session-Mode`. With a key that is neither that
+instance's owner key nor one with the `admin` scope, it records at its own mode, which is checked before
 each request; a change it makes to its mode while a request is running is not
 covered.
 
@@ -666,7 +667,7 @@ head; 503 when the model cannot be loaded or its worker fails.
 
 Scope: `voice`. Served by the voice plugin, so the route exists while that plugin is
 enabled. It answers with Whisper (`pip install "localm[voice]"`), or with an installed
-GGUF model that hears audio (for example `localm pull
+model that hears audio (a GGUF with an audio projector, or a HuggingFace-format audio model; for example `localm pull
 ggml-org/Qwen3-ASR-0.6B-GGUF:Qwen3-ASR-0.6B-Q8_0.gguf`), described below. The official
 `openai` SDK works against it:
 
@@ -684,9 +685,9 @@ never used as a path.
 
 | Field | Meaning |
 | --- | --- |
-| `file` | Required. One audio file, any format PyAV decodes (wav, mp3, m4a, ogg, flac, webm). At most 25 MB; larger is a `413` before it is fully read. |
+| `file` | Required. One audio file, any format PyAV decodes (wav, mp3, m4a, ogg, flac, webm). At most 25 MB; larger is a `413`, and a request body over 26 MB is refused before it is fully read. |
 | `model` | Optional. `whisper-1` or the configured `voice_stt_model` for Whisper, or the name of an installed model that hears audio. A registered model that cannot take audio is a `400`; any other name is a `404` naming what this server transcribes with. |
-| `language` | Optional ISO 639-1 code such as `en`. Detected when omitted. An unsupported code is a `400`. |
+| `language` | Optional ISO 639-1 code such as `en`. When omitted, Whisper uses the `voice_stt_language` setting if one is set and otherwise detects the language. A value that is not a 2 or 3 letter code is a `400`; with Whisper, so is a code Whisper does not support. |
 | `prompt` | Optional text that biases the transcript (names, jargon). |
 | `response_format` | `json` (default, `{"text": ...}`), `text`, `srt`, `vtt`, or `verbose_json` (task, language name, duration, text, segments with timing and confidence). |
 | `temperature` | Optional, 0 to 1. |
@@ -700,14 +701,15 @@ that is already loaded is used, else the first by name. The response carries
 `X-Localm-Transcription-Model` with the model that answered. That path gives `json` and
 `text` only (the model returns plain text without timestamps; `srt`, `vtt` and
 `verbose_json` are a `400`), takes WAV without any extra and other formats with the voice
-extra (`501` otherwise), accepts clips up to 10 minutes and 25 MB, decodes at 0.0
+extra (`501` otherwise; this is the GGUF path, a HuggingFace-format audio model decodes with its own reader), accepts clips up to 10 minutes and 25 MB, decodes at 0.0
 temperature unless `temperature` is sent, passes `language` and `prompt` to the model as
 part of its instruction (a dedicated speech model such as Qwen3-ASR ignores them), and answers `413` when the clip does not fit the model's context
 and `502` when the transcript hit the reply limit instead of returning it cut short. The
 audio is not recorded in the audit log or the transcript.
 
-`stream`, `include[]`, `chunking_strategy` and `known_speaker_*` change the output and
-are not implemented, so sending them is a `400`; other unknown fields are ignored. A
+`include[]`, `chunking_strategy` and `known_speaker_*` change the output and
+are not implemented, so sending them is a `400`, as is `stream=true` (`stream=false` is
+accepted); other unknown fields are ignored. A
 recording with no speech is a `200` with empty text. Failures: `400` an unreadable
 file or bad field, `403` a cross-origin browser request from an origin that is not
 this server, a local page or a `cors_origins` entry, `413` too large, `415` not

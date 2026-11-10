@@ -1297,7 +1297,7 @@
   "models.pull.sha256Placeholder": "sha256 (optional)",
   "models.pull.sha256Title": "Erwarteter SHA256-Wert. Wird gegen die heruntergeladene (oder lokale) Datei geprüft; bei Abweichung wird abgelehnt. Nicht unterstützt für ein vollständiges HuggingFace-Repo oder einen lokalen Ordner - beide bestehen aus vielen Dateien ohne einen einzelnen Hash-Wert.",
   "models.pull.shortcutPlaceholder": "Ausgewählte Verknüpfungen…",
-  "models.pull.shortcutTitle": "Ausgewählte kleine Modelle, die auch bei ausgeschaltetem Netzwerkzugriff funktionieren - wählt eine bekannt funktionierende Quantisierung und füllt die Felder unten aus",
+  "models.pull.shortcutTitle": "Ausgewählte kleine Modelle - wählt eine bekannt funktionierende Quantisierung und füllt die Felder unten aus. Die Liste erscheint auch bei ausgeschaltetem Netzwerkzugriff; der Download selbst braucht Netzwerkzugriff.",
   "models.pull.specNoDash": "Eine Modellangabe darf nicht mit '-' beginnen. Verwenden Sie owner/repo, owner/repo:file.gguf oder eine https-URL.",
   "models.pull.specPlaceholder": "owner/repo:file.gguf  ·  https://…  ·  ein lokaler Ordner oder .gguf-Pfad",
   "models.pull.saved": "{bytes} auf der Festplatte gespeichert",

@@ -159,10 +159,11 @@ module, a changed test file that exercises one per
 or every module when the gate itself, the `[tool.mutmut]` table, a
 `mutation-*` job or `tests/conftest.py` and what it imports changed). A pull
 request without the label runs no shard; its notice names the modules it
-touches. One `mutation-run` shard per selected module
-runs mutmut (`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
-`PYTHONHASHSEED` it prints first) and uploads its result
-file; `mutation-test` merges them and runs
+touches. Each selected module runs as one `mutation-run` shard, or as several
+parts for a module listed in `scripts/mutation_parts.py` (`auth` and `config`,
+five each). A shard runs mutmut (`scripts/mutmut_run.py run "<pattern>"`,
+`localm.<module>.*` for a whole module, under a random `PYTHONHASHSEED` it
+prints first) and uploads its result file; `mutation-test` merges them and runs
 `scripts/check_mutation_floors.py --modules` on the selected modules against the committed baseline
 `scripts/mutation_baseline.json`. The baseline records every mutant's
 disposition - `killed`, `survived` (a known gap, counted against the score),
@@ -173,7 +174,10 @@ score floor and the `controls`: concrete mutants, at least one per
 security-decision class (a weakened scope check, an authorization fallback
 flipped to allow, a skipped SSRF redirect re-validation, a widened
 net_mode=off exemption, a path-confinement bypass, a loopback classifier
-that accepts an unparseable host), that must stay killed. The gate fails on
+that accepts an unparseable host, an empty, unknown or expired key accepted, a
+cache-containment variable dropped for a child process, certificate
+verification switched off or inverted, a server given a certificate serving
+plain HTTP), that must stay killed. The gate fails on
 a score below its floor, a mutant recorded as killed that now survives (a
 weakened test or a nondeterministic outcome; the message names the re-run
 that tells them apart), a mutant with no disposition
@@ -358,9 +362,10 @@ reports to `gpu_registry`'s live peer detection, after verifying the forward tar
 
 `inference/compact.py` summarises older chat turns through the model when a
 conversation reaches 70% of the context ceiling, keeping the system prompt
-and at least the last four messages verbatim. The kept tail starts at a
+and the last four messages or more verbatim. The kept tail starts at a
 message the user wrote where one is available (not a tool event or tool
-result), the latest request is carried verbatim into the summary when it falls
+result); when the only such message is among the last three, the tail starts
+there and is shorter than four; the latest request is carried verbatim into the summary when it falls
 outside the tail, and roles keep alternating.
 Each summary request, prompt and reply budget together, is sized to fit the
 context window when the window is known and leaves room for one; removed
@@ -377,8 +382,9 @@ the context; a client disconnect stops the server's summary generation.
 The server compacts instead of reloading the model with a larger window when
 the system prompt, the recent messages it keeps, a summary and the reply buffer fit
 the window and the request declares no window of its own (`min_context`,
-`context_reserve`); otherwise it reloads first, with at least twice the window,
-and compacts only if the reloaded window is still too small.
+`context_reserve`); otherwise it reloads first, asking for at least twice the window (never more
+than the model's limit), and compacts only if the window is still too small
+afterwards.
 The server compacts down to half the window, keeping as many recent messages
 as fit, and keeps each summary in memory per engine, keyed by a hash of the
 messages it covers: a later request that resends the same conversation gets

@@ -93,8 +93,11 @@ another model.
 
 With `--share-loaded-models`, a model another localm instance on this machine
 (a `localm gui` or `localm serve`) already has loaded is used through that
-instance instead of loading a second copy into VRAM. The match is by model
-file, not by name. An instance of the same install is reached with this
+instance instead of loading a second copy into VRAM. It finds instances of this OS user that listen on a
+loopback address on a port from 8642 to 8741 (or 11434) and were not started
+with `--isolated`. The match is by model file (same path, same checksum, or
+same file name and size); the name is used only when one side reports no file
+details. An instance of the same install is reached with this
 install's own credential; an instance of another install only when it has no
 API key set. It is used only while it confirms it records a chat no more
 than this machine's chat persistence allows (the more private of Session

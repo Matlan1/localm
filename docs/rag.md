@@ -93,9 +93,10 @@ network drives as filesystem locations** is off.
 
 ### Per-key folder scoping
 
-A named API key's RAG reach can be confined further, to a specific set of
-folders - narrower than the global policy above, not wider than it. Mint one
-with:
+A named API key's RAG reach can be set to a specific set of folders of its
+own. Those folders replace the global policy above for that key (its allowed
+and denied lists do not apply to it); the always-refused credential folders
+and files still are. Mint one with:
 
 ```bash
 localm key create dashboard --scope rag --rag-root D:\docs\manuals --rag-root D:\docs\public
@@ -321,7 +322,11 @@ policy as an interactive add. Full details in
   trusted that way, since it may be hung or already gone, so it waits a bounded 30
   seconds, says so while it waits, and then REFUSES with a message naming the
   process that holds the collection rather than interleaving with it. A refused
-  command has changed nothing, and the API answers 409. There is no wall-clock
+  command has changed nothing. Over the API, create, delete and remove-doc answer
+  409; add, upload, repair and re-embed have already returned their job id, and
+  the job ends `failed` with the same message as an `error:` line. Deleting a
+  collection also waits a bounded 30 seconds for a writer in its own process
+  and then refuses. There is no wall-clock
   limit on how long a collection may be HELD, so an hours-long index of a big
   folder is safe: the holder keeps reporting in, and only a holder that stops
   reporting (a crash, a killed process) has its lock reclaimed. Collections are
