@@ -387,7 +387,7 @@ def build(engines: EngineCache, coder_shell: bool = False,
             peer_http = HTTPBackend(
                 engine._base, model=getattr(engine, "_model", None) or model_name,
                 api_key=getattr(engine, "_token", None) or "localm",
-                localm_server=True)
+                localm_server=True, trusted_peer=True)
             peer_http.session_mode = cfg.session_mode
             backend = peer_backend = PeerCoderBackend(engines, model_name, engine,
                                                       peer_http)

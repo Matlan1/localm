@@ -468,6 +468,15 @@ def _absolute_folder(text: str) -> Optional[Path]:
     return candidate if candidate.is_absolute() else None
 
 
+def _is_unc_or_device(text: str) -> bool:
+    """True for a UNC or device-namespace path: a leading two backslashes on any
+    host, or ``//`` and ``\\??\\`` on Windows. Lexical only, no filesystem
+    call."""
+    if text.startswith("\\\\"):
+        return True
+    return os.name == "nt" and (text.startswith("//") or text.startswith("\\??\\"))
+
+
 def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     """Where localm's temporary files go, or None to leave the system temp folder.
 
@@ -493,12 +502,12 @@ def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     if choice.lower() == "system":
         return None
     if choice and choice.lower() != "auto":
-        folder = _absolute_folder(choice)
+        folder = None if _is_unc_or_device(choice) else _absolute_folder(choice)
         if folder is not None:
             return folder
         if warn:
             print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
-                  "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
+                  "'auto', 'data', 'system' or a local absolute folder; using 'auto'.",
                   file=sys.stderr)
     return home / "tmp" if _is_portable_home(home) else None
 

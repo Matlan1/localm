@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import localm.inference.http_server as _hs
+from localm.bindhost import LOCAL_ORIGIN_PATTERN
 from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
 from localm.inference import responses_protocol as _responses
@@ -46,7 +47,7 @@ def add_cors(app: FastAPI) -> Any:
         cors_kwargs = {"allow_origins": cors_cfg}
     else:
         cors_kwargs = {
-            "allow_origin_regex": r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+            "allow_origin_regex": LOCAL_ORIGIN_PATTERN,
         }
     app.add_middleware(
         CORSMiddleware,

@@ -174,7 +174,7 @@ def _fake_releases_api(monkeypatch, payload, seen=None):
     import json as _json
 
     class _R:
-        def read(self):
+        def read(self, n=-1):
             return _json.dumps(payload).encode()
 
         def __enter__(self):

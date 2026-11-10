@@ -118,7 +118,7 @@ class TestInstallFromDirectoryMarkupEscaping:
     def test_scope_bracket_drop_survives_verbatim(self, runner, cli_env, tmp_path):
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty", scope=f"widget{BRACKET_DROP}")
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code == 0, r.output
         assert f"widget{BRACKET_DROP}" in r.output, (
             f"the 'Granted scope' line must show the manifest's scope "
@@ -127,7 +127,7 @@ class TestInstallFromDirectoryMarkupEscaping:
     def test_scope_bracket_style_survives_verbatim(self, runner, cli_env, tmp_path):
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty", scope=f"widget{BRACKET_STYLE}")
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code == 0, r.output
         assert f"widget{BRACKET_STYLE}" in r.output, (
             f"a scope segment that looks like a style tag must be shown as "
@@ -136,7 +136,7 @@ class TestInstallFromDirectoryMarkupEscaping:
     def test_version_survives_verbatim(self, runner, cli_env, tmp_path):
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty", version=f"1.0{BRACKET_DROP}")
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code == 0, r.output
         assert f"1.0{BRACKET_DROP}" in r.output, (
             f"the install success line must show the manifest version "
@@ -146,7 +146,7 @@ class TestInstallFromDirectoryMarkupEscaping:
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty",
                        requires_extras=[f"extra{BRACKET_STYLE}"])
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code != 0, r.output
         assert f"extra{BRACKET_STYLE}" in r.output, (
             f"the refusal of an entry that is not an extra name must name it "
@@ -162,7 +162,7 @@ class TestWarnMissingRequiresMarkupEscaping:
         guarantee."""
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty", requires=[f"dep{BRACKET_DROP}"])
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code == 0, r.output
         assert f"dep{BRACKET_DROP}" in r.output, (
             f"the missing-dependency note must name the real dependency "
@@ -184,7 +184,7 @@ class TestPluginStatusMarkupEscaping:
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty",
                       description=f"does things{BRACKET_STYLE}")
-        add = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        add = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert add.exit_code == 0, add.output
 
         r = runner.invoke(cli_env.main, ["plugin", "status"])
@@ -277,7 +277,7 @@ class TestInstallErrorMarkupEscaping:
 
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty")
-        r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
+        r = runner.invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
         assert r.exit_code == 1, r.output
         assert bad in r.output, (
             f"a ValueError from set_installed_from_dir must be shown "
