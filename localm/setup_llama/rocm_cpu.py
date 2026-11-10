@@ -23,6 +23,7 @@ from typing import Optional
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive
+from localm.setup_llama.library_files import _license_dest_name
 from localm.setup_llama.pins import (_PINNED_FALLBACK_SHA256, _ROCM_BUILD,
                                      _ROCM_CPU_ASSET, _ROCM_CPU_TAG, _ROCM_TAG,
                                      _UPSTREAM_REPO)
@@ -204,7 +205,7 @@ def _copy_openmp_license(extracted: Path, target: Path) -> list[Path]:
     found = sorted(p for p in extracted.rglob(_OPENMP_LICENSE) if p.is_file())
     if not found:
         return []
-    dst = target / _sl._license_dest_name(_OPENMP_LICENSE)
+    dst = target / _license_dest_name(_OPENMP_LICENSE)
     if dst.exists():
         return []
     shutil.copy2(found[0], dst)
