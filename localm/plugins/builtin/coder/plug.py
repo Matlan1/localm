@@ -306,7 +306,6 @@ def _bind_session(request: Request, session_id: str) -> None:
     request.state.coder_session = _get_session(request, session_id)
 
 
-_bind_session.coder_tier = "session"
 _session_router.dependencies.append(Depends(_bind_session))
 
 
@@ -317,7 +316,6 @@ def _owner_only(status: int, detail: str):
         is_owner, _ = _principal_from_request(request)
         if not is_owner:
             raise HTTPException(status, detail)
-    _require_owner.coder_tier = "owner"
     return Depends(_require_owner)
 
 
