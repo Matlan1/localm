@@ -1029,6 +1029,47 @@ class TestFiles:
         assert split["quant"] == "F16"
         assert files[1]["size_bytes"] == 8_000
 
+    def test_lists_files_in_folders_through_a_recursive_tree(self, monkeypatch):
+        seen = {}
+        _mock_fetch(monkeypatch, [
+            {"path": "sub", "type": "directory"},
+            {"path": "sub/inner-Q4_K_M.gguf", "size": 3_000},
+            {"path": "top-Q8_0.gguf", "size": 9_000},
+        ], seen)
+        files = hf_gguf_files("org/repo")
+        assert seen.get("recursive") == "true"
+        assert [f["file"] for f in files] == ["sub/inner-Q4_K_M.gguf", "top-Q8_0.gguf"]
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_missing_private_or_gated_repo_gets_a_plain_message(self, monkeypatch, status):
+        import requests
+
+        def fake(url, **kw):
+            resp = requests.Response()
+            resp.status_code = status
+            resp.url = url
+            resp.reason = "Unauthorized"
+            resp.raise_for_status()
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        with pytest.raises(DiscoverError) as e:
+            hf_gguf_files("org/missing")
+        text = str(e.value)
+        assert "not found, or it is private or gated" in text
+        assert "localm config hf_token" in text
+        assert "Client Error" not in text
+
+    def test_other_http_failures_keep_their_own_message(self, monkeypatch):
+        import requests
+
+        def fake(url, **kw):
+            resp = requests.Response()
+            resp.status_code = 500
+            resp.url = url
+            resp.raise_for_status()
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        with pytest.raises(DiscoverError, match="500"):
+            hf_gguf_files("org/repo")
+
     def test_no_gguf_files_hints_full_pull(self, monkeypatch):
         _mock_fetch(monkeypatch, [{"path": "config.json"}])
         with pytest.raises(DiscoverError, match="pull it whole"):
