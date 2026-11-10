@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **`localm mcp` decides whether the coder may run shell commands.** `run_coder_task` now denies every shell call unless the server is started with `--coder-shell`; before, the client's `yes=true` (or a project's `auto_approve`) was enough. File writes are still auto-approved. `--coder-root DIR` limits the folders the client can have the coder work in. The MCP `install_plugin` tool now follows the `auto_install_plugin_deps` setting when `with_deps` is not given.
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
