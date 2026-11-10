@@ -25,6 +25,9 @@ def _total_ram() -> int:
     except (ImportError, OSError) as e:
         logger.debug("could not read the installed RAM: %s", e)
         return 0
+    except Exception as e:
+        logger.warning("could not read the installed RAM, psutil failed: %r", e)
+        return 0
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
