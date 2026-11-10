@@ -20,7 +20,7 @@ own OS window instead of a browser tab - no address bar, no other tabs, and it
 closes and reopens like any other app.
 
 - **Setup asks up front.** `setup.sh` / `setup.bat` ask "Open localm's GUI as its
-  own app window, or in your browser?" before installing anything. The default is
+  own app window, or in your browser?" before localm itself is installed. The default is
   the browser tab (no extra install); choosing the app window installs
   `localm[desktop]` alongside the rest.
 - **Change your mind later without reinstalling**, from Settings &rsaquo; System &rsaquo;

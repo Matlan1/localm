@@ -151,7 +151,8 @@ def build(*, enable_memory_write: bool) -> dict[str, dict]:
                 "Queued for review, NOT saved: this contradicts a fact you "
                 f"entered yourself ({target.text!r}). localm never overwrites "
                 "your own memories from an external client. Accept or reject it "
-                "in Settings > Memory, or with `localm memory corrections`.")
+                "in the memory manager (type /memory in the chat), or with "
+                "`localm memory corrections`.")
 
         if len(existing) >= N_MAX:
             return _text_result(

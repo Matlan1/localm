@@ -152,8 +152,8 @@ structural sniff of the content. Only when both are inconclusive (an odd extensi
 whose shape is unclear) does localm consult the loaded chat model as a one-off
 tie-break, cached per extension so it fires at most once per indexing run, and
 never at all when no chat model is loaded. So an embedding-only index never stalls
-on a chat call. Turn the tie-break off entirely with `rag_classify_unknown_files
-false` (it is on by default); unclassifiable chunks then fall back to the `text`
+on a chat call. Turn the tie-break off entirely with `localm config
+rag_classify_unknown_files false` (it is on by default); unclassifiable chunks then fall back to the `text`
 label.
 
 ## How retrieval works (and why it's lexical-first)

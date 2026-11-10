@@ -377,9 +377,11 @@ class _PersistenceMixin:
         helper for episodic change detection - never raises. The code lets the
         caller tell an untracked new file (``??``) from a tracked edit so the diff
         can be built correctly."""
-        from ..tools.base import run_subprocess
+        from ..tools.git import repo_runs_programs, run_git
         try:
-            r = run_subprocess(["git", "status", "--porcelain"], self.cwd, timeout=10)
+            if repo_runs_programs(self.cwd):
+                return None
+            r = run_git(("status", "--porcelain"), self.cwd, timeout=10)
         except Exception:
             return None
         if r.not_found or r.error is not None or r.returncode != 0:
@@ -411,14 +413,14 @@ class _PersistenceMixin:
         pathspec, not the whole tree); untracked new files (``??``, which
         ``git diff`` omits entirely) get a capped content snapshot appended so the
         session's actual output still appears. Best-effort - '' on any failure."""
-        from ..tools.base import run_subprocess
+        from ..tools.git import repo_runs_programs, run_git
         parts: list[str] = []
         tracked = [p for p in paths if status.get(p, "") != "??"]
         if tracked:
-            for argv in (["git", "diff", "HEAD", "--", *tracked],
-                         ["git", "diff", "--", *tracked]):
+            for argv in (("diff", "HEAD", "--", *tracked),
+                         ("diff", "--", *tracked)):
                 try:
-                    r = run_subprocess(argv, self.cwd, timeout=15)
+                    r = None if repo_runs_programs(self.cwd) else run_git(argv, self.cwd, timeout=15)
                 except Exception:
                     r = None
                 if r is not None and r.returncode == 0 and r.error is None:

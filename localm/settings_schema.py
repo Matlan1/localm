@@ -239,8 +239,9 @@ CORE_FIELDS: list = [
                  step=1024),
     SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
                  "always unloads this instance's idle models when a new model needs "
-                 "their VRAM; ask asks first; never keeps them and uses the VRAM that "
-                 "is left (slower). Another instance's model is always asked about.",
+                 "their VRAM; ask asks first; never keeps them (slower; a manual "
+                 "switch still asks). Another instance's model is always "
+                 "asked about.",
                  group="Engine", applies=Applies.LIVE,
                  options=["always", "ask", "never"]),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
@@ -1170,7 +1171,7 @@ CORE_FIELDS: list = [
     SettingField("net_mode", Widget.SELECT, "Network access",
                  "Model-initiated web access: off = refused (model downloads too, "
                  "unless allowed); ask = chat and coder ask first, jobs and API "
-                 "clients do not; allow = no prompt. The SSRF guard always applies.",
+                 "clients do not; allow = no prompt. The SSRF guard applies in every mode.",
                  group="Network", owner="web", options=["off", "ask", "allow"]),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains localm may reach, model requests and model downloads alike. "

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-plugin config resolution for the media plugins (image, music, video).
 
-Backend-agnostic: this only manipulates the config dict. It knows nothing about
-ComfyUI or any specific backend - each plugin's backend reads the resolved block
-and fills in its own defaults.
+Only manipulates the config dict: each plugin's backend reads the resolved block
+and fills in its own defaults. The one backend name it knows is ``comfy``, the
+default backend, which backend resolution falls back to.
 
 Each media plugin stores a self-contained block under ``config["plugins"][name]``,
 e.g.::
