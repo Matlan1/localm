@@ -263,8 +263,11 @@ coding agent's shell access, so you can grant one without the other.
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists.
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
-  guards instead: a configured `comfy_api_url` that targets a link-local or
-  cloud-metadata address is refused, and the connection itself refuses any
+  guards instead: a configured `comfy_api_url` (or a media plugin's own
+  `comfy.api_url`, the model scan included) that targets a link-local or
+  cloud-metadata address is refused (169.254.0.0/16, fe80::/10,
+  fd00:ec2::/32, and a link-local IPv4 address in IPv4-mapped,
+  IPv4-compatible, NAT64 or 6to4 form), and the connection itself refuses any
   HTTP redirect outright. Loopback and LAN are both normal, unchecked ComfyUI
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`

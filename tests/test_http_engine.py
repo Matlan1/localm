@@ -27,7 +27,8 @@ def test_chat_stream_yields_tokens(monkeypatch):
     eng = HttpEngine("http://x/v1", token="t", model="m")
     captured = {}
 
-    def fake_post(url, json=None, headers=None, stream=None, timeout=None):
+    def fake_post(url, json=None, headers=None, stream=None, timeout=None,
+                  allow_redirects=True):
         captured.update(url=url, json=json, headers=headers)
         return _sse("Hel", "lo", " world")
 
@@ -218,7 +219,7 @@ def test_context_capacity_fetches_and_caches(monkeypatch):
     eng = HttpEngine("http://x/v1", token="t", model="m")
     calls = []
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None, allow_redirects=True):
         calls.append((url, headers))
         r = MagicMock()
         r.status_code = 200
