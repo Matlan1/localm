@@ -2571,7 +2571,8 @@ def plan_capability_route(model_name: str | None, messages: list,
 def _forget_removed_model(name: str) -> bool:
     """Drop this process's state for *name* when it left the registry and its
     model file is gone (``localm rm`` ran in another process). A model that is
-    loaded, or whose file still exists, is kept. Returns whether anything was
+    loaded, whose file still exists, or whose path is not an absolute file path
+    (a hub repo id) is kept. Returns whether anything was
     dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
     global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
     from pathlib import Path
@@ -2579,7 +2580,7 @@ def _forget_removed_model(name: str) -> bool:
     if engine is not None and engine.loaded:
         return False
     path = getattr(engine, "model_path", None)
-    if not path or Path(str(path)).exists():
+    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
         return False
     _engines.pop(name, None)
     if name in _engines_lru:
