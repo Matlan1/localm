@@ -652,7 +652,7 @@ def _store_root() -> Optional[Path]:
 class PluginManager:
     """Discovers INSTALLED plugins (in the installed folder) and loads / unloads /
     enables / disables them at runtime on *app*; installs plugins by copying them
-    from the bundled store (or their GitHub repo) into the installed folder.
+    from the bundled store into the installed folder.
 
     Two locations: the STORE (bundled shelf, ``store_root``, read only on install)
     and the INSTALLED folder (``installed_root``, the ONLY place discovery/loading
@@ -1160,9 +1160,10 @@ class PluginManager:
             return False
 
     def _provision_from_store(self, name: str) -> bool:
-        """Copy the plugin from the bundled store into the installed folder (or,
-        if missing from the store, fetch it from its GitHub repo). No-op if it is
-        already installed. Raises KeyError when no source exists.
+        """Copy the plugin from the bundled store into the installed folder. No-op
+        if it is already installed. Raises NotImplementedError when the plugin is
+        missing from the store but its catalog entry has a repo URL (not fetched),
+        and KeyError when no source exists.
 
         A directory already present at the destination with no manifest (an
         interrupted or partial previous install) is replaced rather than
@@ -1489,7 +1490,7 @@ class PluginManager:
 
     # ---- public lifecycle (install/uninstall = store<->installed) -----------
     def install(self, name: str) -> None:
-        """Install a plugin: copy it from the bundled store (or its GitHub repo)
+        """Install a plugin: copy it from the bundled store
         into the installed folder, then load + enable it on the live app. Rolls
         back the copy if it does not load. KeyError if no such plugin exists."""
         copied = self._provision_from_store(name)    # may raise KeyError

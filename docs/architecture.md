@@ -6,9 +6,14 @@ localm core is a model loader plus a plugin engine. The CLI is a thin shell
 over a pluggable inference backend, and everything above bare chat is a
 plugin. The core design rule: the CLI knows nothing about inference;
 inference knows nothing about CLI. They communicate through `Engine`, with
-a couple of narrow, deliberate exceptions (`localm/cli/doctor.py` imports
+a few narrow, deliberate exceptions (`localm/cli/doctor.py` imports
 the llama.cpp loader directly for GPU-probe diagnostics; `localm/cli/chat.py`
-catches specific backend exception types). CHAT
+and `localm/cli/_core.py` import the backend exception types from
+`inference/backends/base.py`; `localm/cli/chat.py` also reads capability
+routing and compaction constants from `inference/`; `localm/cli/models.py`
+imports `describe_gpu_placement` from `inference/engine.py`;
+`localm/cli/rag.py` imports the default embedding model name from
+`inference/embedder.py`). CHAT
 is the protected, preinstalled plugin (#0); coder, browser, image, music,
 video, rag, web, memory, voice (Whisper STT), tts (Kokoro in-browser TTS),
 jobs (scheduled tasks), and mcp are all plugins layered on top.
@@ -294,6 +299,19 @@ hybrid-attention layers that AWQ checkpoints leave unquantized (vision
 towers, projectors, some hybrid-attention sublayers) are skipped and kept in
 their original precision.
 
+## Plugin-supplied inference backends
+
+A plugin can offer a backend for model files or folders the built-in GGUF and
+Hugging Face backends refuse. It calls `Host.register_inference_backend` with
+an `InferenceBackendDescriptor` (`claims`, `create`, optional `refusal`) and
+declares `capabilities = ["inference-backend"]` in its manifest.
+`inference/backend_registry.py` holds the registered descriptors;
+`engine.create_backend` asks the built-ins first, then the descriptors in
+registration order, and the first whose `claims` returns True builds the
+backend. The descriptor is dropped when the plugin is disabled or uninstalled.
+The `exllama` store plugin (EXL2 and EXL3 models, NVIDIA GPU, Linux) is the one
+first-party user.
+
 ## HTTP server
 
 `inference/http_server.py` builds the FastAPI app (`create_app(engine)`) and
@@ -379,7 +397,11 @@ and `unregister()`.
 **Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
 read-only first-party plugins listed above). *Installed* plugins live under
 `<data dir>/plugins/`. Installing copies a plugin from the store into the
-installed location.
+installed location. Three first-party packages sit outside the store:
+`localm/plugins/coder/` (the coder agent that the `coder` store plugin
+imports), `localm/plugins/mcpserver/` (the MCP server behind the `mcp` store
+plugin) and `localm/plugins/gui/` (the web GUI, attached to the server by
+`attach_gui` and not a plugin).
 
 **States.** A plugin is *active* only when it is both installed (present under
 `<data dir>/plugins/`) and enabled (listed in `config["plugins_enabled"]`); the
