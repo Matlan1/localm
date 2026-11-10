@@ -21,14 +21,18 @@ headroom, with no per-device split shortfall. Anything else falls back to
 single-resident. A wrong PERMIT ends in a native OOM or a driver TDR, not a
 graceful error.
 
-Scope: admission is single-process. The free-VRAM reading and the decision are
-not a reservation, so two localm processes that read before either allocates
-can both admit. Other instances are only asked to unload through
-``localm.gpu_registry``, which finds them by listening port and so never sees a
-process that does not listen (``localm run``, ``localm job run``, the stdio MCP
-server). The embedder and reranker are not residents here: an embedder load
-asks the chat owners to unload (``localm.vram.evict_chat_for_embedder``), but
-admission never treats a loaded embedder as a resident it could evict.
+Scope: the decision runs in one process, and the free-VRAM reading is not a
+reservation. Across processes, every caller holds the per-GPU load lease
+(``localm.inference.load_lease``) from its first VRAM reading until its load has
+allocated or failed, so a second localm process of the same data dir, listening
+or not (``localm run``, ``localm job run``, the stdio MCP server), reads free
+VRAM only after the first load's memory is on the card. Other instances are
+only asked to unload through ``localm.gpu_registry``, which finds them by
+listening port. The shared embedder, reranker and speech model are residents
+too (``shared_residents``): admission counts their VRAM in the reading, and the
+eviction ladder may release an idle one (``pick_shared_eviction_victim``) once
+no idle chat model is left; an embedder load in turn asks the chat owners to
+unload (``localm.vram.evict_chat_for_embedder``).
 
 Two optional knobs sit on top of the VRAM arithmetic, both OFF by default:
 
