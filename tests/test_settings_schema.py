@@ -312,7 +312,7 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     assert ss.admin_only_keys() == (
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
-        | HOST_PATH_OWNER_KEYS
+        | HOST_PATH_OWNER_KEYS | _NEWLY_OWNER_ONLY
         | {"hf_trust_remote_code"}
         | {"net_allow_private", "cors_origins"}
         # update_allow_prerelease decides which builds the updater suggests

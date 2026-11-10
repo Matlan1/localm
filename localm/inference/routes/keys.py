@@ -87,10 +87,9 @@ def register(app: FastAPI, ctx) -> None:
                 "Refusing to set rag_roots: only the owner key may confine a "
                 "new key's RAG-indexing reach to specific folders."
             )
-        held = _hs.caller_scopes(request)
-        if not is_owner and held is not None:
+        if not is_owner:
             beyond = [s for s in scopes.normalize(scope_list)
-                      if not scopes.grants(held, s)]
+                      if not _hs.caller_grants(request, s)]
             if beyond:
                 raise HTTPException(
                     403,

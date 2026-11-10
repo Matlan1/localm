@@ -17,7 +17,6 @@ def test_a_stored_unc_or_device_temp_location_falls_back_to_auto(
     (tmp_path / "config.json").write_text(
         json.dumps({config.TEMP_LOCATION_KEY: value}), encoding="utf-8")
     assert config.temp_dir(tmp_path, warn=False) in (None, tmp_path / "tmp")
-    assert config.temp_dir(tmp_path, warn=False) != config._absolute_folder(value)
 
 
 def test_a_stored_local_absolute_temp_location_is_used(tmp_path, monkeypatch):

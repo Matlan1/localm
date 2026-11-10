@@ -25,7 +25,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_API_KEY", OWNER_KEY)
     from localm import auth
     admin_only_key = auth.create_key(
-        "minter", ["keys:admin"], allow_privileged=True)["key"]
+        "minter", ["keys:admin", "chat"], allow_privileged=True)["key"]
     with TestClient(create_app(None)) as c:
         yield c, admin_only_key
 
@@ -50,9 +50,9 @@ def test_a_keys_admin_key_cannot_mint_a_scope_it_does_not_hold(env):
 
 def test_a_keys_admin_key_can_mint_a_scope_it_holds(env):
     c, minter = env
-    resp = _mint(c, minter, ["keys:admin"])
+    resp = _mint(c, minter, ["chat"])
     assert resp.status_code == 200, resp.text
-    assert "keys:admin" in resp.json()["scopes"]
+    assert "chat" in resp.json()["scopes"]
 
 
 def test_the_owner_key_can_mint_any_scope(env):
