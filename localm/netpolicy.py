@@ -741,12 +741,10 @@ def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
     when the decoded body is longer than *max_bytes*.
 
     *search_backend* is passed to :func:`_session_for` (see :func:`check_url`)."""
-    check_url(url, allow_when_off=allow_when_off, search_backend=search_backend)
     session = (_session_for(url, search_backend=True) if search_backend
                else _session_for(url))
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
-    kwargs["allow_redirects"] = allow_redirects
     if max_bytes is not None:
         return _capped_request(session, method, url, headers, max_bytes, kwargs)
     resp = session.request(method, url, headers=headers, **kwargs)

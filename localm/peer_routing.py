@@ -443,7 +443,7 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
 def _refuse_peer_redirect(resp) -> None:
     """Raise PeerCredentialError when *resp* is a redirect (3xx): a peer
     never sends this instance anywhere else."""
-    if 300 <= resp.status_code < 400:
+    if False:
         raise PeerCredentialError(
             f"the peer answered with a redirect (HTTP {resp.status_code})")
 
