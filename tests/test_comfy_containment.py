@@ -63,7 +63,7 @@ def _minimal_png() -> bytes:
     """A structurally valid 1x1 PNG for the stub's image outputs.
 
     ComfyUI writes real PNGs, so the stub does too: with non-PNG bytes
-    generate_image's _strip_png_metadata warns that the strip could not run,
+    the metadata strip warns that it could not run,
     which is not what these containment tests exercise."""
     def chunk(ctype: bytes, data: bytes) -> bytes:
         return (len(data).to_bytes(4, "big") + ctype + data
@@ -654,7 +654,8 @@ def test_generate_image_threads_instance_token_to_unload(stub, tmp_path, monkeyp
         )
 
     assert ok, msg
-    unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+    unload_spy.assert_called_once()
+    assert unload_spy.call_args.args == ("http://127.0.0.1:9/v1", "tok-abc")
 
 
 def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
@@ -725,6 +726,16 @@ def test_generate_music_contains_via_env_dir(stub, tmp_path, monkeypatch):
 #  The saved track / clip carries none of the prompt ComfyUI embedded in it    #
 # --------------------------------------------------------------------------- #
 
+def _facade_generate(plugin, stub, prompt, out, **kwargs):
+    """Generate through the plugin's backend facade (ComfyUI backend), which
+    strips the embedded metadata from the saved file."""
+    from importlib import import_module
+    backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
+    s = {"backend": "comfy", "api_url": stub.base_url, "launch_cmd": "",
+         "workdir": "", "output_dir": ""}
+    return backend.generate(s, prompt, out, self_url=None, **kwargs)
+
+
 def test_generate_music_strips_the_embedded_lyrics_from_the_saved_track(
         stub, tmp_path, monkeypatch):
     monkeypatch.setattr(music_comfy, "workflow_path",
@@ -733,10 +744,9 @@ def test_generate_music_strips_the_embedded_lyrics_from_the_saved_track(
     stub.file_ext = ".flac"
     out = tmp_path / "saved" / "track.flac"
 
-    ok, msg = music_comfy.generate_music(
-        "lofi, chill", out, api_url=stub.base_url, lyrics="[verse] la la",
-        duration_seconds=5.0, write_sidecar=False,
-    )
+    ok, msg = _facade_generate(
+        "music", stub, "lofi, chill", out, lyrics="[verse] la la",
+        duration_seconds=5.0, write_sidecar=False)
 
     assert ok, msg
     comfy_copy = next(stub.output_dir.glob("ComfyUI_*"))
@@ -758,10 +768,8 @@ def test_generate_video_strips_the_embedded_prompt_from_the_saved_clip(
     stub.file_ext = ".mp4"
     out = tmp_path / "saved" / "clip.mp4"
 
-    ok, msg = video_comfy.generate_video(
-        "a fox in the snow", out, api_url=stub.base_url,
-        seconds=1.0, write_sidecar=False,
-    )
+    ok, msg = _facade_generate(
+        "video", stub, "a fox in the snow", out, seconds=1.0, write_sidecar=False)
 
     assert ok, msg
     comfy_copy = next(stub.output_dir.glob("ComfyUI_*"))
@@ -784,10 +792,8 @@ def test_generate_music_warns_when_the_track_is_not_a_container_it_can_strip(
     stub.media_bytes = b"FAKEMEDIADATA"
     out = tmp_path / "saved" / "track.flac"
 
-    ok, msg = music_comfy.generate_music(
-        "lofi, chill", out, api_url=stub.base_url,
-        duration_seconds=5.0, write_sidecar=False,
-    )
+    ok, msg = _facade_generate(
+        "music", stub, "lofi, chill", out, duration_seconds=5.0, write_sidecar=False)
 
     assert ok, msg
     assert out.read_bytes() == b"FAKEMEDIADATA"                 # bytes untouched

@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm.plugins.gui.web import attach_gui
+from tests.media_bytes import flac_bytes, mp4_bytes, png_bytes
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +100,7 @@ class TestImageGalleryOwnership:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"\x89PNG fake")
+            Path(out_path).write_bytes(png_bytes())
             return True, f"Image saved to {out_path}"
         monkeypatch.setattr(comfy, "generate_image", fake_gen)
 
@@ -378,7 +379,7 @@ class TestMusicGalleryOwnership:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
-            Path(out_path).write_bytes(b"FLACfake")
+            Path(out_path).write_bytes(flac_bytes())
             return True, f"Track saved to {out_path}"
         monkeypatch.setattr(music_gen, "generate_music", fake_gen)
 
@@ -429,7 +430,7 @@ class TestVideoGalleryOwnership:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"fake mp4")
+            Path(out_path).write_bytes(mp4_bytes())
             return True, f"Video saved to {out_path}"
         monkeypatch.setattr(video_gen, "generate_video", fake_gen)
 
