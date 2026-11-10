@@ -774,9 +774,10 @@ generating is waited for; if it stays busy, a model switch asks before it stops
 that reply. When the free-VRAM reading stays inconclusive after the idle models
 are unloaded and the reading is retried, the HTTP server refuses the load (503)
 and the MCP server loads the model alone, rather than stacking models until the
-driver runs out; with `unload_for_room never` such a load goes beside the
-others. This applies to the HTTP server (`localm serve` / `localm gui`) and the
-MCP server (`localm mcp`).
+driver runs out; on the HTTP server with `unload_for_room never` (or `ask`, for
+a load that is not a model switch) such a load goes beside the others. The rest
+applies to the HTTP server (`localm serve` / `localm gui`) and the MCP server
+(`localm mcp`); the MCP server does not read `unload_for_room`.
 
 Two optional knobs override that arithmetic when you would rather decide
 yourself:
@@ -791,8 +792,9 @@ localm config pinned_models ""              # clear every pin
 
 Both are off by default, so behavior is unchanged unless you set them. The cap
 bounds how many models stay loaded regardless of how much headroom there is
-(while `unload_for_room` is `always`, the default; with `ask` or `never` a model
-that fits is loaded beside the others over the cap);
+(on the HTTP server while `unload_for_room` is `always`, the default; there, with
+`ask` or `never`, a model that fits is loaded beside the others over the cap; the
+MCP server always applies the cap);
 pinning protects named models from being chosen as the eviction victim (it never
 loads a model on its own). If pins leave nothing that can be evicted, the load
 still goes ahead and the missed policy is logged rather than silently dropped.

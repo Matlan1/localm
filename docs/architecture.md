@@ -382,8 +382,9 @@ the context; a client disconnect stops the server's summary generation.
 The server compacts instead of reloading the model with a larger window when
 the system prompt, the recent messages it keeps, a summary and the reply buffer fit
 the window and the request declares no window of its own (`min_context`,
-`context_reserve`); otherwise it reloads first, asking for at least twice the window (never more
-than the model's limit), and compacts only if the window is still too small
+`context_reserve`); otherwise it reloads first, asking for at least twice the window when the
+prompt does not fit, or for the declared window (rounded up to a multiple of
+4096) when the request declares one, never more than the model's limit, and compacts only if the window is still too small
 afterwards.
 The server compacts down to half the window, keeping as many recent messages
 as fit, and keeps each summary in memory per engine, keyed by a hash of the

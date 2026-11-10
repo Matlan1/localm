@@ -121,8 +121,9 @@ collection route:
 
 A document added through `.../upload` (bytes from the caller's own device,
 never a host filesystem read) is not subject to this check - it never named a
-host path to confine. Only the owner key may set `rag_roots` on another key
-(via `key create` or `POST /v1/keys`); the owner's own reach, and open mode
+host path to confine. Only the owner key (or a key holding `admin`) may set `rag_roots` on another key
+over the API (`POST /v1/keys`), and `localm key create --rag-root` from this
+machine's terminal; the owner's own reach, and open mode
 (no key configured), are never confined by it. See
 [cli.md](cli.md#api-keys).
 

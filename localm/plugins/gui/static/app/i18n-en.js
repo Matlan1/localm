@@ -1435,7 +1435,7 @@ export const I18N_EN = {
     "Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.",
   "models.pull.shortcutPlaceholder": "Curated shortcuts…",
   "models.pull.shortcutTitle":
-    "Curated small models - picks a known-good quant and fills in the fields below. The list shows even with network access set to Off; the download itself needs network access.",
+    "Curated small models - picks a known-good quant and fills in the fields below. The list shows even with network access set to Off; the download itself needs network access or the model-downloads allowance.",
   "models.pull.specNoDash":
     "A model spec can't start with '-'. Use owner/repo, owner/repo:file.gguf, or an https URL.",
   "models.pull.specPlaceholder":
