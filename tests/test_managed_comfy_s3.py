@@ -108,8 +108,8 @@ def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
     assert spec.variant == "rocm"
-    assert "torch==2.9.1+rocm7.13.0" in spec.packages
-    assert "torchvision==0.24.0+rocm7.13.0" in spec.packages
+    assert "torch==2.11.0+rocm7.13.0" in spec.packages
+    assert "torchvision==0.26.0+rocm7.13.0" in spec.packages
     assert "rocm-sdk-libraries-gfx103x-all" in spec.packages
     assert spec.extra_index_url == "https://repo.amd.com/rocm/whl/gfx103X-all/"
 
@@ -119,14 +119,35 @@ def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
     UNPINNED, and the later "install ComfyUI's requirements" step runs plain
     `pip install -r requirements.txt` with no --extra-index-url. torch and
     torchvision are already satisfied by the ROCm wheels this spec installs
-    first, and pinning a matching ROCm torchaudio build (same repo, same "2.9"
+    first, and pinning a matching ROCm torchaudio build (same repo, same "2.11"
     series and rocm7.13.0 tag as the torch pin) makes that bare requirement
     already-satisfied too - otherwise it resolves to a plain-PyPI build whose
     compiled C extension does not match this ROCm torch's ABI."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6900 XT"))
-    assert "torchaudio==2.9.0+rocm7.13.0" in spec.packages
+    assert "torchaudio==2.11.0+rocm7.13.0" in spec.packages
+
+
+def test_comfy_amd_torch_pins_match_pyproject_gpu_extra():
+    """The managed ComfyUI venv installs the same ROCm torch stack as the [gpu]
+    extra: _AMD_GFX103X_TORCH has no runtime link to pyproject, so this is the
+    only thing that keeps the two from drifting apart."""
+    import tomllib
+
+    from localm.media import managed_comfy_fresh as fresh
+    root = Path(__file__).resolve().parents[1]
+    deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["optional-dependencies"]["gpu"]
+    wanted = {}
+    for dep in deps:
+        req = dep.split(";")[0].strip()
+        name = req.split("==")[0].strip()
+        if name in ("torch", "torchvision", "torchaudio"):
+            wanted[name] = req.replace(" ", "")
+    assert set(wanted) == {"torch", "torchvision", "torchaudio"}
+    assert all("+rocm" in req for req in wanted.values())
+    assert sorted(fresh._AMD_GFX103X_TORCH) == sorted(wanted.values())
 
 
 def test_torch_spec_nvidia_is_cuda(monkeypatch):
@@ -239,7 +260,7 @@ def test_torch_install_args_amd_uses_extra_index(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
     args = fresh.comfy_torch_install_args(spec)
-    assert "torch==2.9.1+rocm7.13.0" in args
+    assert "torch==2.11.0+rocm7.13.0" in args
     assert "--extra-index-url" in args
     assert "https://repo.amd.com/rocm/whl/gfx103X-all/" in args
 
