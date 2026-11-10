@@ -190,9 +190,9 @@ def tool_git_push(
 ) -> ToolResult:
     """Push the current branch to a remote.
 
-    A *remote* or *branch* that is empty after stripping, or begins with ``-``,
-    is refused; the two are passed after ``--`` so git never reads either as an
-    option."""
+    A *remote* that is empty after stripping, or a *remote* or *branch* that
+    begins with ``-``, is refused; the two are passed after ``--`` so git never
+    reads either as an option."""
     remote = (remote or "origin").strip()
     branch = (branch or "").strip()
     for label, value in (("remote", remote), ("branch", branch)):
