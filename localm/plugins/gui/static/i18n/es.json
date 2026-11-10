@@ -2739,7 +2739,7 @@
   "settings.sectionHeading.voice": "Voz",
   "settings.sections": "Secciones de ajustes",
   "settings.server.help": "Controla este servidor de LocaLM desde aquí en lugar de forzar el cierre de la ventana (lo que puede provocar un fallo sin liberar el modelo limpiamente). En ambos casos, el modelo se libera primero. Reiniciar vuelve a poner el servidor en marcha automáticamente; Apagar lo detiene (vuelve a iniciarlo desde tu lanzador o terminal).",
-  "settings.server.restartBody": "Esto reinicia el servidor de LocaLM (primero se libera el modelo y después se vuelve a cargar). Estará brevemente no disponible y luego se volverá a conectar automáticamente.",
+  "settings.server.restartBody": "Esto reinicia el servidor de LocaLM con el comando con el que se inició (el modelo cargado se libera y solo se vuelve a cargar si el servidor se inició con él). Estará brevemente no disponible y luego se volverá a conectar automáticamente.",
   "settings.server.restartButton": "Reiniciar servidor",
   "settings.server.restartConfirm": "Reiniciar",
   "settings.server.restartFailed": "No se pudo reiniciar: {message}",
