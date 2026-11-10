@@ -1127,7 +1127,14 @@ def pull_model(
         # else let add_local detect it (GGUF -> llm, HF dir -> config.json,
         # otherwise the 'unknown' sentinel).
         local_type = None if model_type == "auto" else model_type
-        return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
+        added = _mm.add_local(str(local), name=name, model_type=local_type, store=store)
+        if added and mmproj_spec:
+            ok, message = _mm.attach_mmproj_after_add(str(local), name, mmproj_spec)
+            if not ok:
+                console.print(f"[red]--mmproj was not applied:[/red] {escape(message)}")
+                return False
+            console.print(f"[green]{escape(message)}[/green]")
+        return added
 
     logger.info("pull: downloading %s", _spec_for_log(spec))
     from . import pending_pulls
