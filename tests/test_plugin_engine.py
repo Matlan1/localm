@@ -1744,6 +1744,8 @@ def test_failed_first_run_provisioning_is_reported(env, monkeypatch, caplog):
 
 
 def test_installed_protected_plugin_left_disabled_is_enabled_again(env):
+    """A protected plugin (chat) missing from plugins_enabled still counts as
+    enabled and is active, and discovery does not rewrite config.json."""
     from localm.config import load_config, update_config
     from localm.plugins.engine import PluginManager
 
@@ -1752,9 +1754,11 @@ def test_installed_protected_plugin_left_disabled_is_enabled_again(env):
     _make_plugin(inst, "chat", _ping("chat"))
     update_config(lambda cfg: cfg.__setitem__("plugins_enabled", []))
 
-    PluginManager(FastAPI(), store_root=store, installed_root=inst).discover()
+    m = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    m.discover()
 
-    assert "chat" in load_config().get("plugins_enabled", [])
+    assert m.is_enabled("chat") and m.is_active("chat")
+    assert load_config().get("plugins_enabled") == []
 
 
 def test_failed_builtin_refresh_is_reported(env, monkeypatch, caplog):
