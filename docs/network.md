@@ -234,7 +234,11 @@ coding agent's shell access, so you can grant one without the other.
   shell-command approval (and `always_confirm` for `run_shell`), not the
   network policy.
 - **Model downloads** (`localm pull`) and **online coder providers**
-  (OpenAI/Anthropic opt-ins) - explicit user actions. Note that model
+  (OpenAI/Anthropic opt-ins, or a `--url` that is not on this machine) -
+  explicit user actions. An off-machine coder backend is checked by
+  `check_url` and by the privacy-mode gate when it is built, so `off` refuses
+  it, and privacy mode refuses it unless the user typed the flag
+  (`LOCALCODER_URL` is refused). Note that model
   downloads DO go through this same policy's domain lists and SSRF guard
   (`check_url`); `off` is bypassed only via the separate
   `net_allow_model_downloads` setting. A Hugging Face pull checks the hub
