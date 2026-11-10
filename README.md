@@ -2,7 +2,7 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Fully offline by default - nothing leaves your machine unless you allow it. Cloud providers are available, but always opt-in.</p>
+<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Local by default - chat, the coder and generation run on your machine, and cloud providers are always opt-in. The one automatic request is the periodic update check, which you can turn off, and which stays off when `net_mode` is `off`.</p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
