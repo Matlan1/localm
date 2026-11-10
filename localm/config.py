@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
 import copy
+import hashlib
 import json
+import math
 import os
 import socket
 import sys
@@ -1433,6 +1435,11 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     The RETURN VALUE is the pre-rename ``ok``, so a caller that logs its own
     subsystem-named warning on failure keeps that signal.
 
+    When this process holds the cross-process lock on *path* (see
+    ``_cross_process_lock``), the lock file is re-checked immediately before the
+    replace and ``ConfigLockLost`` is raised, with nothing written, if it no
+    longer holds that acquisition's token.
+
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
@@ -1452,6 +1459,7 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     count rather than raising); without the loop a silently truncated keystore
     or session store could replace a good one. Raising leaves the temp file
     behind and the destination untouched."""
+    assert_store_lock_held(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     data = text.encode("utf-8")
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -1701,8 +1709,7 @@ def _warn_unreadable_once(candidate: Path, error) -> None:
     if key in _warned_unreadable:
         return
     _warned_unreadable.add(key)
-    from localm.debuglog import logger
-    logger.warning("%s is unreadable (%s)", candidate.name, error)
+    _logger().warning("%s is unreadable (%s)", candidate.name, error)
 
 
 def _read_json_state(path: Path, default):
@@ -1984,7 +1991,7 @@ def _unlink_lock_file(lockpath: Path) -> None:
             if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 break
             _transient_backoff(attempt)
-    from localm.debuglog import logger
+    logger = _logger()
     logger.warning("could not remove released lock file %s (%s); config/registry "
                    "writes in every localm process fail on it until it is %.0fs "
                    "old and reclaimed", lockpath.name, last, _CROSS_LOCK_STALE_AGE)
@@ -2014,58 +2021,139 @@ def _read_lock_for_release(lockpath: Path) -> Optional[bytes]:
     return None
 
 
-def _lock_token(pid: int, nonce: str) -> bytes:
-    """The bytes a holder writes into its lock file: ``<pid>:<nonce>:<pid space
-    id>:<start identity as JSON>``. The last two fields are empty when the
-    process start identity cannot be read."""
-    from localm import instances
+def _logger():
+    from localm.debuglog import logger
+    return logger
+
+
+def _host_tag() -> str:
+    """An opaque tag for the machine and platform whose process table a pid
+    belongs to."""
+    raw = f"{sys.platform}|{socket.gethostname()}".encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _proc_alive(pid: int) -> Optional[bool]:
+    """Whether process *pid* is running; None when this platform cannot say."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import psutil
+            return psutil.pid_exists(pid)
+        except Exception:
+            return None
     try:
-        start = instances.process_start_identity(pid)
-        machine = instances.pid_space_id() if start else ""
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+        if stat.decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
+    return True
+
+
+def _proc_start_identity(pid: int) -> Optional[dict]:
+    """When process *pid* started, in a form no change of the system clock
+    alters: ``{"boot", "ticks"}`` on Linux, ``{"created"}`` on Windows and
+    macOS (psutil). None when it cannot be read."""
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_bytes()
+            ticks = int(stat[stat.rindex(b")") + 2:].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="ascii").strip() or None
+        except (OSError, ValueError):
+            boot = None
+        return {"boot": boot, "ticks": ticks}
+    if sys.platform in ("win32", "darwin"):
+        try:
+            import psutil
+            return {"created": float(psutil.Process(pid).create_time())}
+        except Exception:
+            return None
+    return None
+
+
+def _same_process(recorded: dict, current: Optional[dict]) -> Optional[bool]:
+    """True when the two start identities name one process, False when they name
+    two, None when they cannot be compared."""
+    if not isinstance(current, dict):
+        return None
+    rt, ct = recorded.get("ticks"), current.get("ticks")
+    if type(rt) is int and type(ct) is int:
+        rb, cb = recorded.get("boot"), current.get("boot")
+        if not (isinstance(rb, str) and isinstance(cb, str)):
+            return None
+        return rb == cb and rt == ct
+    rc, cc = recorded.get("created"), current.get("created")
+    if type(rc) in (int, float) and type(cc) in (int, float):
+        if math.isfinite(rc) and math.isfinite(cc):
+            return abs(rc - cc) <= 1.0
+    return None
+
+
+def _lock_token(pid: int, nonce: str) -> bytes:
+    """The bytes a holder writes into its lock file: ``<pid>:<nonce>:<host
+    tag>:<start identity as JSON>``. The last two fields are empty when the
+    process start identity cannot be read."""
+    try:
+        start = _proc_start_identity(pid)
     except Exception as e:
-        from localm.debuglog import logger
-        logger.debug("lock token: no start identity for pid %s (%s)", pid, e)
-        start, machine = None, ""
+        _logger().debug("lock token: no start identity for pid %s (%s)", pid, e)
+        start = None
+    host = _host_tag() if start else ""
     tail = json.dumps(start, separators=(",", ":"), sort_keys=True) if start else ""
-    return f"{pid}:{nonce}:{machine}:{tail}".encode("ascii")
+    return f"{pid}:{nonce}:{host}:{tail}".encode("ascii")
 
 
 def _lock_holder_state(raw: bytes) -> str:
     """``"alive"``, ``"dead"`` or ``"unknown"`` for the holder a lock file's
     bytes *raw* name.
 
-    ``"alive"``: the token names this pid space and a start identity, and the
+    ``"alive"``: the token names this host and a start identity, and the
     process now running under that pid has that start identity; a token naming
     this process counts only while one of its acquisitions holds that exact
     token. ``"dead"``: the pid has exited, now names a process with another
     start identity, or is this process's under a token no acquisition holds.
-    ``"unknown"``: anything else (a token without a start identity, another pid
-    space, unparseable bytes, a probe that cannot answer)."""
+    ``"unknown"``: anything else (a token without a start identity, another
+    host, unparseable bytes, a probe that cannot answer)."""
     parts = raw.split(b":", 3)
     if len(parts) != 4 or not parts[2] or not parts[3]:
         return "unknown"
     try:
         pid = int(parts[0])
-        machine = parts[2].decode("ascii")
+        host = parts[2].decode("ascii")
         recorded = json.loads(parts[3].decode("ascii"))
     except (ValueError, RecursionError):
         return "unknown"
     if pid <= 0 or not isinstance(recorded, dict):
         return "unknown"
-    from localm import instances
     try:
-        if machine != instances.pid_space_id():
+        if host != _host_tag():
             return "unknown"
-        if not instances.pid_alive(pid):
+        alive = _proc_alive(pid)
+        if alive is None:
+            return "unknown"
+        if not alive:
             return "dead"
-        current = instances.process_start_identity(pid)
+        same = _same_process(recorded, _proc_start_identity(pid))
     except Exception as e:
-        from localm.debuglog import logger
-        logger.debug("lock liveness probe for pid %s failed (%s)", pid, e)
+        _logger().debug("lock liveness probe for pid %s failed (%s)", pid, e)
         return "unknown"
-    if instances.start_identity_differs(recorded, current):
+    if same is False:
         return "dead"
-    if not instances.start_identity_matches(recorded, current):
+    if same is None:
         return "unknown"
     if pid == os.getpid():
         with _held_lock_tokens_guard:

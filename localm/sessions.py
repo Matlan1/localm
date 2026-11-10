@@ -114,8 +114,7 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
     (None: ``_LOCK`` is waited for without a bound and the cross-process lock for
     the config default). Raises ``TimeoutError`` (an ``OSError``) when either is
     still held past it."""
-    from localm import storekit
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     path = sessions_file()
     if create_dirs:
         ensure_dirs()
@@ -129,7 +128,7 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
         if not path.parent.is_dir():
             yield
             return
-        with storekit.store_lock(path, timeout=timeout):
+        with _cross_process_lock(path, timeout=timeout):
             yield
     finally:
         _LOCK.release()
@@ -143,8 +142,8 @@ def _save(records: list) -> None:
     # The temp file is restricted rather than the destination: it already holds
     # the full digest payload, and os.replace carries its ACL onto the
     # destination. atomic_write_private also creates the temp at 0600.
-    from localm import storekit
-    storekit.write_private(path, json.dumps(records, indent=2), retrying=False)
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(records, indent=2))
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:

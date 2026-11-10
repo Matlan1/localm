@@ -264,13 +264,12 @@ def set_api_key(key: Optional[str]) -> None:
             "'localm key generate' produces). Spaces, punctuation, and non-English "
             "letters cannot be sent reliably in an HTTP Authorization header, so "
             "most clients would fail to authenticate with such a key.")
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    from localm import storekit
-    with storekit.store_lock(path):
-        storekit.write_private(path, key.strip() + "\n", retrying=True)
+    with _cross_process_lock(path):
+        _atomic_write_private(path, key.strip() + "\n", retrying=True)
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
@@ -895,10 +894,9 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
     if not key_id:
         return
     try:
-        from localm import storekit
-        from localm.config import ensure_dirs
+        from localm.config import _cross_process_lock, ensure_dirs
         ensure_dirs()
-        with _KEYSTORE_LOCK, storekit.store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
             records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
@@ -919,8 +917,8 @@ def _load_keystore_checked() -> tuple:
     indistinguishable from a genuinely empty keystore. See
     ``_load_keystore_for_write`` for the read-modify-write callers that must
     act on ``read_ok``."""
-    from localm import storekit
-    data, read_ok = storekit.read_json_checked(keystore_file(), [])
+    from localm.config import _read_json_checked
+    data, read_ok = _read_json_checked(keystore_file(), [])
     if not isinstance(data, list):
         return [], False
     return data, read_ok
@@ -989,8 +987,7 @@ def _save_keystore(records: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Writers of this file are already serialized cross-process. See
     # test_keystore_two_process_create_key_no_lost_writes.
-    from localm import storekit
-    storekit.write_private(path, json.dumps(records, indent=2), retrying=True)
+    _atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
 
 
 # Filesystem-access level a credential may reach on the SERVER HOST. A single
@@ -1143,10 +1140,9 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "fs_access": norm_fs_access(fs_access),
         "rag_roots": norm_rag_roots(rag_roots),
     }
-    from localm import storekit
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
-    with _KEYSTORE_LOCK, storekit.store_lock(keystore_file()):
+    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
         records = _load_keystore_for_write()
         records.append(record)
         _save_keystore(records)
@@ -1164,10 +1160,9 @@ def revoke_key(key_id: str) -> bool:
     until expiry. (The cookie auth path also re-validates a scoped session's key on
     every request via key_hash_live, so this is belt-and-suspenders cleanup that
     keeps the session store tidy rather than the sole enforcement.)"""
-    from localm import storekit
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
-    with _KEYSTORE_LOCK, storekit.store_lock(keystore_file()):
+    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
         records = _load_keystore_for_write()
         target = next((r for r in records if r.get("id") == key_id), None)
         remaining = [r for r in records if r.get("id") != key_id]
@@ -1415,10 +1410,9 @@ def _touch_last_used(key_hash: str) -> None:
             return
         _last_used_writes[key_hash] = now
     try:
-        from localm import storekit
-        from localm.config import ensure_dirs
+        from localm.config import _cross_process_lock, ensure_dirs
         ensure_dirs()
-        with _KEYSTORE_LOCK, storekit.store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
             records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY

@@ -16,7 +16,6 @@ import time
 import pytest
 
 import localm.config as cfg
-from localm import instances
 
 
 @pytest.fixture()
@@ -143,7 +142,7 @@ def test_an_unreadable_primary_is_reported_once_through_the_logger(
 # --------------------------------------------------------------------------- #
 
 pytestmark_identity = pytest.mark.skipif(
-    instances.process_start_identity(os.getpid()) is None,
+    cfg._proc_start_identity(os.getpid()) is None,
     reason="this platform cannot read a process start identity")
 
 _HOLDER = (
@@ -276,7 +275,7 @@ def test_assert_store_lock_held_is_a_no_op_without_a_lock(home):
 
 
 # --------------------------------------------------------------------------- #
-#  The stores share one contract (storekit)                                    #
+#  Writes through the shared store lock                                       #
 # --------------------------------------------------------------------------- #
 
 def test_set_api_key_waits_on_the_store_lock(home, monkeypatch):
@@ -305,8 +304,7 @@ def test_set_api_key_writes_under_the_lock_and_releases_it(home, monkeypatch):
     assert not _lockpath(home / "auth.key").exists()
 
 
-def test_storekit_write_private_uses_a_temp_name_unique_to_the_writer(home, monkeypatch):
-    from localm import storekit
+def test_atomic_write_private_uses_a_temp_name_unique_to_the_writer(home, monkeypatch):
     seen = []
     real = cfg.os.replace
 
@@ -315,37 +313,22 @@ def test_storekit_write_private_uses_a_temp_name_unique_to_the_writer(home, monk
         return real(src, dst)
 
     monkeypatch.setattr(cfg.os, "replace", spy)
-    storekit.write_private(home / "x.json", "{}", retrying=False)
+    cfg.atomic_write_private(home / "x.json", "{}")
     assert seen and str(os.getpid()) in seen[0] and seen[0].endswith(".tmp")
     assert seen[0] != "x.json.tmp"
 
 
-def test_storekit_write_private_refuses_after_the_lock_was_lost(home):
-    from localm import storekit
+def test_atomic_write_private_refuses_after_the_lock_was_lost(home):
     target = home / "x.json"
     target.write_text("old", encoding="utf-8")
-    with storekit.store_lock(target):
+    with cfg._cross_process_lock(target):
         _lockpath(target).write_bytes(b"777:feedface")
         with pytest.raises(cfg.ConfigLockLost):
-            storekit.write_private(target, "new")
+            cfg.atomic_write_private(target, "new")
     assert target.read_text(encoding="utf-8") == "old"
+    assert not list(home.glob("x.json.*.tmp"))
 
 
-def test_storekit_read_for_write_refuses_a_bak_served_store(home):
-    from localm import storekit
-    target = home / "x.json"
-    target.write_text("[1, 2]", encoding="utf-8")
-    target.with_name("x.json.bak").write_text("[1]", encoding="utf-8")
-    assert storekit.read_for_write(target, [], list, "refused") == [1, 2]
-    target.write_text("[", encoding="utf-8")
-    with pytest.raises(cfg.ConfigUnreadable, match="refused"):
-        storekit.read_for_write(target, [], list, "refused")
-
-
-def test_keystore_credentials_and_sessions_take_the_lock_through_storekit():
-    import inspect
-
-    from localm import auth, model_source_credentials, sessions
-    for mod in (auth, model_source_credentials, sessions):
-        src = inspect.getsource(mod)
-        assert "storekit.store_lock" in src, mod.__name__
+def test_atomic_write_private_without_a_lock_still_writes(home):
+    cfg.atomic_write_private(home / "x.json", "fresh")
+    assert (home / "x.json").read_text(encoding="utf-8") == "fresh"

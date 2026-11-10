@@ -47,8 +47,8 @@ def _read_all_checked() -> tuple:
     ``auth._load_keystore_checked`` for this store. A read-modify-write
     (``set_credentials``) must refuse on ``read_ok`` False rather than persist
     ``{}`` over an existing file. A plain read treats both as no records."""
-    from localm import storekit
-    data, read_ok = storekit.read_json_checked(credentials_path(), {})
+    from localm.config import _read_json_checked
+    data, read_ok = _read_json_checked(credentials_path(), {})
     if not isinstance(data, dict):
         return {}, False
     return data, read_ok
@@ -59,13 +59,13 @@ def _read_all() -> dict:
 
 
 def _write_all(records: dict) -> bool:
-    from localm import storekit
+    from localm.config import atomic_write_private
     path = credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # retrying=True: set_credentials serializes every writer of this file
     # cross-process before calling here. See
     # test_credentials_two_process_set_no_lost_writes.
-    return storekit.write_private(path, json.dumps(records, indent=2), retrying=True)
+    return atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
 
 
 def _blank_to_none(value) -> Optional[str]:
@@ -164,11 +164,10 @@ def set_credentials(updates: dict) -> None:
     and ``config.ConfigUnreadable``, writing nothing, if the store file exists
     but could not be read or does not hold a JSON object."""
     checked = validate_credential_updates(updates)
-    from localm import storekit
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
     path = credentials_path()
-    with _CRED_LOCK, storekit.store_lock(path):
+    with _CRED_LOCK, _cross_process_lock(path):
         records, read_ok = _read_all_checked()
         if not read_ok:
             raise _unreadable_store_error(path)
