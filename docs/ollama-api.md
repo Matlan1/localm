@@ -35,7 +35,8 @@ like the rest of the API.
 
 | Route | Needs |
 |---|---|
-| `POST /api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `GET /api/version` | any valid key |
+| `POST /api/chat`, `/api/generate` | `chat` |
+| `POST /api/embed`, `/api/embeddings`, `GET /api/version` | any valid key |
 | `GET /api/tags`, `GET /api/ps`, `POST /api/show` | `models:read` |
 | `POST /api/copy`, `POST /api/pull`, `/api/push`, `/api/create`, `DELETE /api/delete`, `/api/blobs/{digest}` | `models:write` |
 

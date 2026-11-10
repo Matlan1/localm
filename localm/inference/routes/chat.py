@@ -30,6 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
+from localm import scopes
 from localm.inference.backends.base import (
     RAW_PROMPT_UNSUPPORTED_MESSAGE, EmbedBatchTooLargeError, GrammarUnsupportedError,
     InvalidGrammarError, PretokenizerUnsafeInputError, RerankerHeadMissingError,
@@ -80,6 +81,7 @@ def register(app: FastAPI, ctx) -> None:
         http_server.caller_recorder)."""
         return _hs.caller_recorder(_recorder, request)
     _require_auth = _hs._require_auth
+    _require_chat = _hs.require_scope(scopes.CHAT)
     _touch_activity = _hs._touch_activity
     _protocol_messages_to_dicts = _hs._protocol_messages_to_dicts
     _stream_sse = _hs._stream_sse
@@ -576,7 +578,7 @@ def register(app: FastAPI, ctx) -> None:
             resp.headers[_hk] = _hv
         return resp
 
-    @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
+    @app.post("/v1/chat/completions", dependencies=[Depends(_require_chat)])
     async def chat_completions(req: ChatRequest, request: Request):
         from localm import peer_routing
 
@@ -915,7 +917,7 @@ def register(app: FastAPI, ctx) -> None:
             "results": results,
         }
 
-    @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
+    @app.post("/v1/completions", dependencies=[Depends(_require_chat)])
     async def completions(req: CompletionRequest, request: Request):
         # Same peer-routing short-circuit as /v1/chat/completions above.
         from localm import peer_routing

@@ -134,7 +134,7 @@ def register(app: FastAPI, ctx) -> None:
         return {"authed": False, "warnings": warnings}
 
     @app.post("/api/auth/key/clear",
-              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))],
+              dependencies=[Depends(require_scope(scopes.ADMIN))],
               include_in_schema=False)
     async def clear_owner_key(request: Request, response: Response):
         """Delete the server-side owner key (auth.key) and immediately
@@ -145,6 +145,9 @@ def register(app: FastAPI, ctx) -> None:
         False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
         subsequent web UI requests that rely on the session cookie will fail auth and
         be redirected to the key gate by the client.
+
+        Requires the owner key (``scopes.ADMIN``): a scoped key, including one
+        holding ``config:write`` or ``keys:admin``, gets 403.
 
         Refused with 409 on a server that must hold a key
         (``network_bind_needs_key``) when the clear would leave none.
@@ -223,11 +226,10 @@ def register(app: FastAPI, ctx) -> None:
 
         OWNER-GATED AND REMOTE-CAPABLE:
 
-        * Requires ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear
-          route takes, and NOT ``keys:admin``. Clearing REMOVES a credential;
-          setting INSTALLS one the caller chose, so a merely config:write or
-          keys:admin holder POSTing ``{"key": "<a value I know>"}`` would promote
-          itself to owner in a single call.
+        * Requires ``scopes.ADMIN`` (as the sibling clear route does), NOT
+          ``config:write`` and NOT ``keys:admin``: a config:write or keys:admin
+          holder POSTing ``{"key": "<a value I know>"}`` would promote itself to
+          owner in a single call.
         * NOT loopback-only. Reaching this route already requires the owner
           credential, so it grants no authority the caller does not already hold.
           The backstop against a stolen owner cookie rolling the key is
