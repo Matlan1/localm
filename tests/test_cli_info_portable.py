@@ -51,13 +51,13 @@ def _row(output: str, label: str) -> str:
 class TestInfoPortableReport:
     def test_standard_install_reports_standard_and_system_temp(self, info_output, tmp_path):
         out = info_output(tmp_path / "data")
-        assert _squash("standard") in _row(out, "mode")
+        assert _squash("standard") in _row(out, "install")
         assert _squash("system temp folder") in _row(out, "temp dir")
 
     def test_portable_install_reports_portable_and_data_tmp(self, info_output):
         home = _REPO_ROOT / "portable-info-probe"
         out = info_output(home)
-        assert _squash("portable") in _row(out, "mode")
+        assert _squash("portable") in _row(out, "install")
         assert _squash(str(home / "tmp")) in _row(out, "temp dir")
 
     def test_temp_dir_override_is_reported(self, info_output, monkeypatch, tmp_path):
@@ -65,3 +65,12 @@ class TestInfoPortableReport:
         monkeypatch.setenv(config.TEMP_DIR_ENV, str(override))
         out = info_output(tmp_path / "data")
         assert _squash(str(override)) in _row(out, "temp dir")
+
+
+class TestInfoLabels:
+    def test_the_install_shape_and_the_session_mode_have_different_labels(
+            self, info_output, tmp_path):
+        out = info_output(tmp_path / "data")
+        labels = [line.split()[0] for line in out.splitlines() if line.split()]
+        assert labels.count("install") == 1
+        assert labels.count("mode") == 1
