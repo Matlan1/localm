@@ -5002,7 +5002,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     # start reconciles those rows to "interrupted", which is the honest word for
     # a server that stopped while work was in flight.
     try:
-        from localm.plugins.gui.jobs import terminate_children_for_exit
+        from localm.jobmanager import terminate_children_for_exit
         _killed = terminate_children_for_exit()
         if _killed:
             from localm.debuglog import logger as _dbg
@@ -5302,7 +5302,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # start reconciles those rows to "interrupted", which is the honest word for
     # a server that stopped while work was in flight.
     try:
-        from localm.plugins.gui.jobs import terminate_children_for_exit
+        from localm.jobmanager import terminate_children_for_exit
         _killed = terminate_children_for_exit()
         if _killed:
             from localm.debuglog import logger as _dbg

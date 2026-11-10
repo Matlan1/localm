@@ -600,7 +600,7 @@ class TestGuiRoutes:
         def fake_start_cli(self, kind, cli_args, **kw):
             started.append((kind, list(cli_args), kw.get("host_label")))
             return _FakeJob()
-        monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
         monkeypatch.setattr("localm.netpolicy.pinned_request",
                             _Server(BODY, stop_after=1500))
         assert mm.pull_model(URL, name="tiny") is False

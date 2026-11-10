@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 import localm.config as cfg
 from localm import setup_llama as sl
-from localm.plugins.gui import jobs as gui_jobs
+from localm import jobmanager as gui_jobs
 from localm.plugins.gui.web import attach_gui
 
 
