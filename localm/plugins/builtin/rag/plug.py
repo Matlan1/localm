@@ -1484,8 +1484,8 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
     from localm.inference.http_server import principal_id
     # Refuse a second concurrent setup instead of queueing it behind the first:
-    # get_embedder's `with _LOAD_LOCK:` / `with _LOCK:` are bare acquires with no
-    # timeout, so the loser would wait silently for as long as the winner takes.
+    # the loser would wait in get_embedder for the winner's load, up to
+    # load_lease.LOAD_WAIT_TIMEOUT_S, with no progress of its own.
     #
     # This check-then-act is atomic only because it sits in an `async def` on the
     # single event loop with no `await` between the check and start_fn below.

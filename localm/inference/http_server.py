@@ -54,7 +54,8 @@ from localm.inference.backends.base import (
     UnsupportedInputError,
     VisionInputError,
 )
-from localm.inference import residency, switch_admission
+from localm.inference import load_lease, residency, switch_admission
+from localm.inference.load_lease import LoadBusyError
 from localm.inference.compact import CompactionCache
 from localm.inference.engine import Engine
 from localm.inference.inference_gate import InferenceGate, exclusively, set_capacity
@@ -667,7 +668,7 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
             engine.load()
             return
         lock = engine_mod._LOAD_LOCK
-        with lock:
+        with load_lease.bounded(lock, what=f"loading {getattr(engine, 'display_name', 'a model')}"):
             fresh = getattr(lock, "generation", None) == reading.mark + 1
             discover.using_shared_gpu_reading(
                 reading.state if fresh else None, engine.load)
@@ -751,10 +752,60 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     backend fails to load it. ``LoadSkipped`` (a 503) is raised for
     *skip_if_latched*.
 
+    From its first VRAM reading until its load has returned or failed the call
+    holds the GPU load lease (``localm.inference.load_lease``), so another
+    localm process reads free VRAM only after this load allocated it; a lease
+    still held elsewhere after ``load_lease.LOAD_WAIT_TIMEOUT_S`` raises
+    ``LoadBusyError`` (a 503 with Retry-After).
+
     Loads of one model are serialized by its ``_inference_sems`` semaphore.
     The admission decisions come from ``localm.inference.switch_admission``;
     the ``_switch_*`` helpers below perform the effects.
     """
+    lease = _SwitchLease(name)
+    try:
+        return await _switch_engine_leased(
+            name, make_engine, lease, on_active=on_active, preempt=preempt,
+            force=force, activate=activate, skip_if_latched=skip_if_latched,
+            on_status=on_status, allow_embedding=allow_embedding,
+            reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
+    finally:
+        await lease.drop(asyncio.get_running_loop())
+
+
+class _SwitchLease:
+    """The GPU load lease one ``switch_engine`` call holds from its first VRAM
+    reading until its load has returned or failed."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.keys: Optional[tuple] = None
+
+    async def take(self, loop) -> None:
+        """Take the lease of the current config's keys, once; raises
+        ``LoadBusyError`` past ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
+        if self.keys is not None:
+            return
+        purpose = f"loading {self.name}"
+        self.keys = await loop.run_in_executor(
+            None, lambda: load_lease.acquire(load_lease.lease_keys(), purpose=purpose))
+
+    async def drop(self, loop) -> None:
+        """Release the lease when it was taken."""
+        keys, self.keys = self.keys, None
+        if keys:
+            await loop.run_in_executor(None, load_lease.release, keys)
+
+
+async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
+                                on_active=None, preempt: bool = True,
+                                force: bool = False, activate: bool = True,
+                                skip_if_latched: bool = False,
+                                on_status: Optional[Callable[[str], None]] = None,
+                                allow_embedding: bool = False,
+                                reserve_ctx: Optional[int] = None,
+                                keep_others: bool = False, own_pins: int = 0) -> dict:
+    """``switch_engine``'s body; takes *lease* before its first VRAM reading."""
     global _engine_factory, _switch_desired
 
     await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
@@ -794,6 +845,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
             if heal_budget is not None:
+                await lease.take(loop)
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
             if (_engines.get(name) is resident and _is_reusable(resident)
@@ -820,6 +872,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                               "it is used as loaded: %s", name, exc.detail)
                     _postpone_placement_recheck(resident)
             if heal_budget is not None:
+                await lease.take(loop)
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
                 fits = (heal_probe.probe_ok and heal_probe.measurable
@@ -852,6 +905,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if healing is not None:
             budget = heal_budget
         else:
+            await lease.take(loop)
             budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if budget is not None and (budget.check_split_fit or budget.plugin_backend):
                 sized = _engines.get(name)
@@ -1930,20 +1984,12 @@ def _shared_vram_holds() -> SharedVramHolds:
     media runtimes (``vram.native_media_runtime_states``). Takes their locks;
     must not run on the event loop thread."""
     from localm import vram as _vram
-    from localm.inference import embedder as _embedder_mod
-    from localm.inference import reranker as _reranker_mod
-    from localm.inference import speech as _speech_mod
     holds, unknown = [], []
-    for kind, mod in (("embedding model", _embedder_mod),
-                      ("reranker model", _reranker_mod),
-                      ("speech model", _speech_mod)):
-        loaded, hold = mod.resident_vram_hold()
-        if not loaded:
-            continue
-        if hold is None:
-            unknown.append(kind)
+    for resident in residency.shared_residents():
+        if resident.hold is None:
+            unknown.append(resident.kind)
         else:
-            holds.append(hold)
+            holds.append(resident.hold)
     busy = []
     for name, state in _vram.native_media_runtime_states().items():
         (busy if state == "busy" else unknown).append(name)
@@ -2180,6 +2226,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         return {"status": "cancelled", "model": name, "reason": str(e)}
+    except LoadBusyError:
+        raise
     except RuntimeError as exc:
         _routing_latch.record_failure(name, exc, fingerprint=fingerprint)
         raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
@@ -8371,6 +8419,8 @@ async def _complete(
             text = await _generate_full(engine, messages, request,
                                         timing=timing, on_logprobs=lp_records.extend,
                                         **gen_kwargs)
+        except LoadBusyError:
+            raise
         except _BACKEND_ERROR_TYPES as e:
             # A backend refusal the CALLER can act on (an image this vision model
             # could not process, a grammar the deferred check finally rejected at
