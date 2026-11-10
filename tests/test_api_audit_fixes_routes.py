@@ -229,9 +229,10 @@ def _remove_from_registry(monkeypatch, name):
 
 
 def test_a_removed_model_is_404_by_name_and_not_resolved_for_an_unnamed_request(
-        setup_multi_model, monkeypatch):
+        setup_multi_model, monkeypatch, tmp_path):
     client = _authed_client(hs.create_app(None))
     _load(client, "model-a")
+    hs._engines["model-a"].model_path = str(tmp_path / "removed.gguf")
     assert client.post("/v1/models/unload", params={"model": "model-a"}).status_code == 200
     _remove_from_registry(monkeypatch, "model-a")
 

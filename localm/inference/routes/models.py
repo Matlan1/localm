@@ -32,7 +32,7 @@ async def _body_fields(request: Request, allowed: tuple[str, ...]) -> dict:
         return {}
     try:
         body = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise HTTPException(400, "Request body must be a JSON object") from None
     if not isinstance(body, dict):
         raise HTTPException(400, "Request body must be a JSON object")
