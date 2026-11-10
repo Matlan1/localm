@@ -308,7 +308,7 @@ CORE_FIELDS: list = [
                  "Tokens a diffusion language model writes per reply. It fills the whole "
                  "length every time, so longer is slower. Limited by Max tokens per "
                  "reply and by the room the prompt leaves (2048 at most).",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=2048),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
