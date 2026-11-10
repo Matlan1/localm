@@ -761,17 +761,19 @@ def _localm_unload(localm_url: Optional[str] = None,
     if not url:
         return None
     try:
-        import requests as _rq
-
         from localm import tls as _tls
         from localm.auth import resolve_bearer_headers
+        from localm.loopback_http import local_request
         headers = resolve_bearer_headers(instance_token)
         # Unload waits for any in-flight generation to finish AND for VRAM to be
         # actually reclaimed before it returns (it must not free the context
-        # mid-decode), so give it time.
+        # mid-decode), so give it time. A redirect is returned, not followed,
+        # and counts as a failed unload.
         target = f"{url}/models/unload" + ("" if media else "?media=false")
-        resp = _rq.post(target, headers=headers, timeout=180,
-                        verify=_tls.requests_verify(url))
+        resp = local_request("POST", target, headers=headers, timeout=180,
+                             verify=_tls.requests_verify(url))
+        if 300 <= resp.status_code < 400:
+            return None
         if not resp.ok:
             return None
         try:
