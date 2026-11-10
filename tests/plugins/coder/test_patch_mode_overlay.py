@@ -184,3 +184,53 @@ def test_a_call_that_changes_nothing_is_reported_as_skipped(project):
     result = _run(agent, "edit_file", path="calc.py", old="no such text", new="x")
     assert result.ok is False
     assert agent.has_patch() is False
+
+
+def test_files_without_a_final_newline_still_give_an_applicable_multifile_patch(project):
+    (project / "nonl.txt").write_bytes(b"alpha\nbeta")
+    (project / "other.txt").write_bytes(b"one\ntwo\n")
+    agent = _agent(project)
+    _run(agent, "edit_file", path="nonl.txt", old="beta", new="gamma")
+    _run(agent, "edit_file", path="other.txt", old="two", new="three")
+    diff = agent.flush_patch()
+    assert "\\ No newline at end of file" in diff
+    assert "---" not in "".join(
+        line for line in diff.splitlines() if line.startswith(("-", "+")) and "a/" not in line and "b/" not in line and line[1:2] == "-")
+    check = _git_apply_check(project, diff)
+    assert check.returncode == 0, check.stderr
+
+
+def test_the_overlay_is_safe_to_read_while_writes_land(project):
+    import threading
+    agent = _agent(project)
+    stop = threading.Event()
+    errors = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                agent.current_patch()
+                agent.has_patch()
+            except Exception as e:
+                errors.append(e)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    try:
+        for i in range(200):
+            agent._patch_overlay.record(f"f{i}.txt", "x\n")
+    finally:
+        stop.set()
+        t.join()
+    assert errors == []
+
+
+def test_grep_and_search_replace_see_a_file_created_in_the_session(project):
+    agent = _agent(project)
+    _run(agent, "write_file", path="newmod.py", content="def mul(a, b):\n    return a * b\n")
+    assert "newmod.py" in _run(agent, "grep", pattern="def mul").output
+    assert _run(agent, "search_replace", pattern=r"\bmul\b", replacement="multiply",
+                glob="**/*.py").ok
+    diff = agent.flush_patch()
+    assert "+def multiply(a, b):" in diff
+    assert "--- /dev/null" in diff or "--- a/newmod.py" in diff

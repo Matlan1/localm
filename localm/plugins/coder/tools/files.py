@@ -1271,6 +1271,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
             skipped_binary += 1
             continue
         files.append(fp)
+    if _overlay is not None:
+        files.extend(f for f in _overlay.new_files(base, file_glob)
+                     if not any(part in prune_dirs for part in f.parts[base_depth:-1]))
 
     results = []
     total_hits = 0
@@ -1423,6 +1426,8 @@ def tool_search_replace(
         p for p in cwd.glob(glob)
         if p.is_file() and p.resolve().is_relative_to(cwd_resolved)
     )
+    if _overlay is not None:
+        candidates = sorted({*candidates, *_overlay.new_files(cwd, glob)})
     changes: list[tuple[Path, Path, str, int, bytes]] = []  # (abs, rel, new_text, count, old_bytes)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
     locked: list[str] = []      # matching files a restricted session may not change
@@ -1446,7 +1451,7 @@ def tool_search_replace(
                 guarded.append(str(fp))
             continue
         try:
-            if size_cap > 0 and fp.stat().st_size > size_cap:
+            if size_cap > 0 and fp.exists() and fp.stat().st_size > size_cap:
                 try:
                     oversized.append(str(fp.relative_to(cwd)))
                 except ValueError:
@@ -1490,7 +1495,7 @@ def tool_search_replace(
                 or unwritable_file_name(fp.name)
                 or unwritable_file_name(fp.resolve().name)
                 or inside_unwritable_dir(cwd_resolved, fp.resolve(), redirects)
-                or has_other_hard_link(fp.resolve())):
+                or (fp.exists() and has_other_hard_link(fp.resolve()))):
             locked.append(str(rel))
             continue
         changes.append((fp, rel, new_text, len(matches), old_bytes))
