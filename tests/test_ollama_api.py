@@ -581,8 +581,8 @@ def test_generate_sends_system_then_prompt(client, engine):
 
 
 @pytest.mark.parametrize("extra", [
-    {"raw": True}, {"suffix": "tail"}, {"template": "{{ .Prompt }}"},
-    {"context": [1, 2]}])
+    {"suffix": "tail"}, {"template": "{{ .Prompt }}"}, {"context": [1, 2]},
+    {"raw": True, "suffix": "tail"}, {"raw": True, "context": [1, 2]}])
 def test_generate_refuses_what_it_cannot_honour(client, extra):
     r = _generate(client, stream=False, **extra)
     assert r.status_code == 400 and _has_key(r, "error")

@@ -2064,6 +2064,8 @@
   "settings.field.chatMode.label": "Persistencia propia del chat",
   "settings.field.chatSystemPrompt.help": "El prompt del sistema con el que empieza cada chat nuevo. El campo Prompt del sistema de un chat lo reemplaza en esa conversación; déjalo en blanco para usar este. Vacío = sin prompt del sistema predeterminado.",
   "settings.field.chatSystemPrompt.label": "Prompt del sistema predeterminado",
+  "settings.field.chatStyleNote.help": "En el chat de esta aplicación y en localm run, añade al mensaje de sistema una nota breve que pide al modelo responder de forma directa y hablar de sí mismo como «yo». Las solicitudes de otros programas a través de la API nunca la reciben.",
+  "settings.field.chatStyleNote.label": "Añadir la nota de estilo del chat",
   "settings.field.chatToolGrammar.help": "Cuando el modelo empieza un <tool_call> (la herramienta de búsqueda/lectura web), fuerza que sea JSON de llamada a herramienta válido (gramática GBNF diferida; solo backends locales compatibles con gramáticas). El texto libre y el razonamiento no se ven afectados.",
   "settings.field.chatToolGrammar.label": "Restringir con gramática las llamadas a herramientas del chat",
   "settings.field.chatWebMaxLookups.help": "Con el acceso web activado, el máximo de búsquedas y lecturas de páginas que el modelo puede hacer por mensaje. También se detienen cuando repite una búsqueda o página, o cuando dos seguidas no encuentran nada nuevo. 0 = sin límite.",

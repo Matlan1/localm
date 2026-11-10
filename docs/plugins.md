@@ -384,11 +384,21 @@ def unregister():
 
 Scope and limits:
 
-- The chain runs for **every** `/v1/chat/completions` and `/v1/completions`
-  client (the GUI, raw API callers, and the coder agent pointed at localm); a
-  `/v1/completions` prompt reaches the hooks as a single user message. It does
-  **not** run for the in-process `localm run` REPL, which calls the engine
-  directly.
+- The chain runs for **every** `/v1/chat/completions` client (the GUI, raw API
+  callers, and the coder agent pointed at localm), and the routes that answer
+  through it (`/v1/messages`, `/v1/responses`, Ollama `/api/chat` and
+  `/api/generate`). On `/v1/completions` (and Ollama `/api/generate` with
+  `raw: true`) only `stream` and `outlet` run: the raw prompt reaches the model
+  as sent, with no `inlet`. The chain does **not** run for the in-process
+  `localm run` REPL (`--no-server`), which calls the engine directly.
+- A hook can tell localm's own chat from other callers by
+  `ctx.state["client_id"]`: the GUI chat and `localm run` send
+  `X-Client-Id: chat`, the coder sends `coder`, and an API client usually sends
+  nothing. The built-in chat plugin's two inlets (a style note asking the model
+  to answer directly and to speak of itself as "I", and the `<think>` note for
+  reasoning models) apply only to `chat`; an API caller's messages reach the
+  model unchanged. The `chat_style_note` setting (Settings > Chat) turns the
+  style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing

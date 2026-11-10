@@ -1038,6 +1038,9 @@ DEFAULT_CONFIG: dict = {
     # before it stops looking things up and answers from what it found. 0 = no
     # ceiling. Repeated and no-progress lookups end the loop sooner either way.
     "chat_web_max_lookups": 20,
+    # The GUI chat and `localm run` add a short style note to the system prompt
+    # (answer directly, speak of yourself as "I"). API callers never get it.
+    "chat_style_note": True,
     # Chat avatars: an emoji or a small data:image URI, never a URL. See
     # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
     "user_avatar": "",

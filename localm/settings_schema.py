@@ -483,6 +483,13 @@ CORE_FIELDS: list = [
                  "or page, or two in a row find nothing new. 0 = no limit.",
                  group="Chat", owner="chat", min=0, max=100, step=1,
                  applies=Applies.LIVE),
+    SettingField("chat_style_note", Widget.TOGGLE,
+                 "Add the chat style note",
+                 "In this app's chat and in localm run, add a short note to the "
+                 "system prompt asking the model to answer directly and to speak of "
+                 "itself as \"I\". Requests from other programs through the API "
+                 "never get it.",
+                 group="Chat", owner="chat", applies=Applies.LIVE),
     # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.
     SettingField("user_avatar", Widget.HIDDEN, "Your icon",
