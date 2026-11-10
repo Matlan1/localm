@@ -12,11 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
 - **Running `localm serve` again no longer turns on the Web GUI of an API-only server.** A second `localm serve` for a project that already has a server reports the running one, as before, but it also asked that server to mount its GUI, coder included. It now only reports it; `localm gui` is still what adds the GUI to a running API-only server.
 - **`localm key clear` works when only named keys exist.** With named keys and no owner key it printed "No API key set (already open mode)" and removed nothing, although the server still required a key. It now removes every key, with the same confirmation as before. `localm key show` in that state no longer reports open mode either; it says the server requires a key.
+- **The coder's git tools no longer run programs named by a repository's own configuration.** `git_status`, `git_diff` and `git_log` ran plain `git`, so a cloned repository with a `core.fsmonitor`, external diff or textconv setting could start a command on a read. Every git the coder starts now switches those off, and the read tools refuse a repository whose configuration or hooks can run programs.
 - **The Ouro Thinking models now generate.** They loaded but stopped on the first reply with `'int' object has no attribute 'shape'`, because their cache code expected a different argument from the transformers localm uses. localm now bridges that for Ouro models, and Ouro-1.4B, 2.6B and both Thinking variants answer.
 - **A damaged Whisper speech model can be downloaded again.** When the speech model file in localm's cache fails its check, localm now removes it completely, including the copy Hugging Face keeps in its shared store, so the next download fetches a good file instead of failing the same check every time.
 - **Ouro models (ByteDance Ouro-1.4B, 2.6B and their Thinking variants) load and answer.** Their bundled code was written for an older transformers and failed to load on the one localm uses (`'OuroConfig' object has no attribute 'pad_token_id'`). With `hf_trust_remote_code` on, localm now bridges the three differences for these models only; models without bundled code, other bundled-code models and the default (off) setting are unchanged.
