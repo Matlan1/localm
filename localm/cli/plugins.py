@@ -27,7 +27,7 @@ def plugin() -> None:
 # (builtin/ + external dirs) and the user's installed set; enable/disable toggles
 # an installed plugin active/inactive. A PluginManager with no app is enough to
 # flip config (no routes are mounted from the CLI - a running GUI server picks
-# HTTP routes up on its next start, while stdio plugins like mcp take effect
+# HTTP routes up the next time it reads the plugin list, while stdio plugins like mcp take effect
 # immediately). Nothing is installed by default: only what the user selects.
 
 def _engine_manager():
@@ -225,7 +225,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
-    (coder, image/music/video, rag, web, voice, tts, mcp). Run by the installer
+    (coder, browser, image/music/video, rag, web, memory, voice, tts, jobs, mcp). Run by the installer
     after dependencies are in place, and any time afterwards. Plugins that need a
     pip extra have it installed for you (you are asked once; --with-deps/--no-deps
     or the auto_install_plugin_deps setting decide non-interactively).
