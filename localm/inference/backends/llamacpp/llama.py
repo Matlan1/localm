@@ -5732,7 +5732,7 @@ class LlamaCpp:
 
         if raw_prompt is not None:
             going_to_vision = False
-            tokens = self._tokenizer.encode(
+            tokens = self._loaded_tokenizer().encode(
                 raw_prompt,
                 add_bos=not raw_prompt.startswith(("<bos>", "<s>", "\ufeff")))
             if not tokens:
