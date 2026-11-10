@@ -46,7 +46,7 @@ localm run hf-model --device cpu          # HuggingFace models: device override 
 localm run mymodel --no-server            # load the model in this process
 ```
 
-By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server is not up within about 20 seconds, `run` says so and loads MODEL in its own process as well, while the background server keeps starting. `--ctx`, `--gpu-layers`, `--mmproj` and `--device` apply when `run` loads the model or starts the server; attached to a server that is already running they are not applied. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
+By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server is not up within about 20 seconds, `run` says so and loads MODEL in its own process as well, while the background server keeps starting. `--ctx`, `--gpu-layers`, `--mmproj` and `--device` apply when `run` loads the model or starts the server; attached to a server that is already running they are not applied, and `run` names the ones it did not apply. The same model named by its path or by another registered name for the same file is not a different model. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
 
 A message mymodel cannot handle - an image it cannot read, or a conversation
 that has outgrown the context window it was trained for - is answered by an
@@ -88,7 +88,7 @@ localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit dev
 
 Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](gui.md) for details.
 
-A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). An attach cannot change the running server, so a second `localm gui` that names another model, another `--port` or `--host`, or passes `--ctx`, `--gpu-layers`, `--mode`, `--pull`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--qr`, `--api-mode`, `--mmproj` or `--device` exits 1 and lists what it could not apply; drop the option or add `--new`. `gui` and `serve` run in the foreground until Ctrl+C.
+A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). An attach cannot change the running server, so a second `localm gui` that names another model, another `--port` or `--host`, or passes `--ctx`, `--gpu-layers`, `--mode`, `--pull`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--qr`, `--api-mode`, `--mmproj` or `--device` exits 1 and lists what it could not apply; drop the option or add `--new`. A second `localm serve` refuses the same options the same way. `gui` and `serve` run in the foreground until Ctrl+C.
 
 Past loopback, built-in TLS is on by default: `--no-tls` serves plain HTTP, and `--tls-cert FILE --tls-key FILE` use your own PEM certificate instead of localm's local-CA one. Without an API key, a bind past loopback is refused unless `--insecure` is passed (see [Configuration](#configuration)).
 
@@ -398,10 +398,10 @@ localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
 localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
-localm unload [MODEL]           # free VRAM on the running server: all models, or just one
+localm unload [MODEL] [--force] # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. When the removal would delete the file, it also refuses while a running localm server that uses this data directory (whichever folder it serves) still has that file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model that is not busy with a request and stops the image, video and music runtimes no job is using; a model still busy after a short wait is left loaded and named in the output (exit code 1 when nothing could be unloaded for that reason). A named model that is not loaded is a no-op.
+`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. When the removal would delete the file, it also refuses while a running localm server that uses this data directory (whichever folder it serves) still has that file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model that is not busy with a request and stops the image, video and music runtimes no job is using; a model still busy after a short wait is left loaded and named in the output (exit code 1 when nothing could be unloaded for that reason). A named model that is still busy after the wait is left loaded and the command exits 1. `--force` stops the requests running on a busy model (the reply being written is cut off) and unloads it. A named model that is not loaded is a no-op.
 
 ---
 
@@ -461,7 +461,7 @@ localm comfy restart               # stop it, then launch a fresh one
 handle on a ComfyUI localm launched belongs to the process that launched it -
 only that process can end it. `localm comfy stop` never kills a ComfyUI you
 started yourself: it aborts the render and frees the VRAM, and says so rather
-than implying the process is gone. `localm comfy restart` does the same to a
+than implying the process is gone. When that ComfyUI does not accept the abort, `stop` says so and exits 1. `localm comfy restart` does the same to a
 ComfyUI you started yourself and launches nothing; it relaunches only one localm
 started, or starts one when none is running. A cold start compiles GPU kernels and can take
 minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`. `localm comfy status` also works without a server, but then reports whether localm launched the running ComfyUI as unknown.

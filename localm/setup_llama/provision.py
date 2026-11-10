@@ -83,6 +83,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             console.print(f"[dim]CUDA runtime:[/dim] {cudart['name']} "
                           f"({_human_mb(cudart.get('size'))}) - no Toolkit install needed")
             _sl._fetch_and_place(cudart["browser_download_url"], target, cudart_sha)
+            _sl.write_nvidia_cuda_notice(target)
         else:
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
         return tag
@@ -102,6 +103,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                       + " - no Toolkit install needed")
         if not _sl._fetch_and_place(cudart_url, target, cudart_sha):
             raise ArtifactError("the CUDA runtime bundle contained no libraries")
+        _sl.write_nvidia_cuda_notice(target)
         return tag
     if chosen == "cuda" and with_cudart and sys.platform not in ("win32", "darwin"):
         # sys.platform, not _platform_key(): matches this function's OWN
