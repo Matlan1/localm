@@ -23,6 +23,7 @@ from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LI
 from localm.setup_llama.versions import _tag_for
 from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 import localm.setup_llama as _sl
+from localm.http_ssl import read_bounded
 
 # --------------------------------------------------------------------------- #
 #  Backend resolution                                                          #
@@ -291,7 +292,7 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
+            data = json.loads(read_bounded(r).decode("utf-8"))
             return data.get("assets", [])
     except Exception as e:
         # Best-effort probe: every caller has a pinned fallback for exactly

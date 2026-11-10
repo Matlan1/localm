@@ -8,6 +8,13 @@ import pytest
 from localm.plugins.coder.tools import tool_read_env
 
 
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
+
+
 class TestReadEnv:
     def test_env_file_secrets_redacted(self, tmp_path):
         (tmp_path / ".env").write_text(
@@ -206,6 +213,7 @@ class TestHTTPBackendLocalServer503Wiring:
         assert post.call_count == 1
         sleep.assert_not_called()
 
+    @pytest.mark.usefixtures("open_gate")
     def test_non_localm_backend_retries_persistent_503(self):
         from localm.plugins.coder.backends.http import (
             _MAX_RETRIES, CoderServerError, HTTPBackend)

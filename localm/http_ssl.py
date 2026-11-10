@@ -55,6 +55,45 @@ class RedirectDowngradeRefused(urllib.error.URLError):
     """
 
 
+class BodyTooLarge(OSError):
+    """A response body was longer than the caller's byte cap."""
+
+
+MAX_METADATA_BYTES = 16 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def read_bounded(resp, max_bytes: int = MAX_METADATA_BYTES) -> bytes:
+    """Read the whole body of *resp*, at most *max_bytes* long. Raises
+    :class:`BodyTooLarge` (an ``OSError``) when the body is longer."""
+    data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise BodyTooLarge(f"the response is larger than {max_bytes} bytes")
+    return data
+
+
+def copy_bounded(resp, out, max_bytes: int = MAX_DOWNLOAD_BYTES, *,
+                 chunk_size: int = 65536) -> int:
+    """Copy the body of *resp* to the binary file *out*, at most *max_bytes*
+    long (default :data:`MAX_DOWNLOAD_BYTES`), and return the byte count. Raises :class:`BodyTooLarge` (an
+    ``OSError``) once the body passes *max_bytes*; bytes up to that point have
+    already been written to *out*."""
+    total = 0
+    while True:
+        chunk = resp.read(chunk_size)
+        if not chunk:
+            return total
+        total += len(chunk)
+        if total > max_bytes:
+            raise BodyTooLarge(f"the response is larger than {max_bytes} bytes")
+        out.write(chunk)
+
+
+_REDIRECT_KEPT_HEADERS = frozenset(
+    {"user-agent", "accept", "accept-encoding", "accept-language", "range",
+     "if-range"})
+
+
 class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse a redirect that leaves HTTPS for a weaker scheme.
 
@@ -70,6 +109,10 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     caller that legitimately started on plain http (a user-configured http
     endpoint) has no confidentiality left to lose and keeps working; a caller on
     https can never be walked off it.
+
+    When a redirect changes the host, only the headers in
+    ``_REDIRECT_KEPT_HEADERS`` travel to the new host: caller credentials
+    (``X-Localm-Token``, ``Authorization``, cookies) are dropped.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -81,7 +124,14 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
                 f"refused an HTTPS -> {new or 'scheme-less'} downgrade redirect "
                 f"(HTTP {code}, to {newurl!r}) - the response after it would "
                 "travel in cleartext")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and (
+                (urllib.parse.urlsplit(req.get_full_url()).hostname or "").lower()
+                != (urllib.parse.urlsplit(newurl).hostname or "").lower()):
+            new_req.headers = {k: v for k, v in new_req.headers.items()
+                               if k.lower() in _REDIRECT_KEPT_HEADERS}
+            new_req.unredirected_hdrs = {}
+        return new_req
 
 
 def _open(req, timeout, context, handlers):

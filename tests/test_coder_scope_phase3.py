@@ -33,6 +33,13 @@ from localm.plugins.coder.backends.http import (
 #  Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
+
+
 def _make_agent(tmp_path: Path, scope: str | None = None) -> Agent:
     backend = MagicMock()
     backend.model_id = "test-model"
@@ -213,6 +220,7 @@ class TestScopedToolCoverage:
 # ---------------------------------------------------------------------------
 
 class TestAnthropicBackend:
+    @pytest.mark.usefixtures("open_gate")
     def test_constructor_targets_messages_endpoint(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         backend = make_anthropic_backend(model="claude-opus-4-5")
@@ -246,12 +254,14 @@ class TestAnthropicBackend:
         assert "anthropic-version" in captured["headers"]
         assert "Authorization" not in captured["headers"]
 
+    @pytest.mark.usefixtures("open_gate")
     def test_base_url_is_anthropic(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         backend = make_anthropic_backend(model="claude-opus-4-5")
         # The grammar guard must still treat anthropic as an external provider.
         assert backend.supports_grammar is False
 
+    @pytest.mark.usefixtures("open_gate")
     def test_system_message_is_lifted_out(self, monkeypatch):
         """Anthropic takes a top-level `system`, not a system role message."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")

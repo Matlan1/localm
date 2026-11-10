@@ -33,6 +33,8 @@ def _safe_echo(message: object = "", **kwargs) -> None:
     click.echo(strip_controls(str(message)), **kwargs)
 
 import localm.plugins.coder.cli as _cli
+from localm.netpolicy import NetworkPolicyError
+from localm.remotegate import OffMachineModelRefused
 from localm.stdio import force_utf8_stdio
 from ..backends.http import (
     HTTPBackend,
@@ -338,7 +340,8 @@ def main(
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci,
-        machine_output=bool(task) and output_format in ("json", "jsonl"))
+        machine_output=bool(task) and output_format in ("json", "jsonl"),
+        session_mode=session_mode)
     # Every coder request needs structured tool calls. A localm server answers
     # one --model cannot serve with an installed model that can, unless pinned;
     # any other server ignores both.
@@ -796,8 +799,23 @@ def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
     return platform != "win32" and (machine_output or not stdout_tty)
 
 
+def _gate_mode(session_mode):
+    """The off-machine gate's mode string for a resolved SessionMode, or None."""
+    return getattr(session_mode, "value", session_mode)
+
+
+def _url_typed_on_command_line() -> bool:
+    """True when ``--url`` came from the command line rather than the
+    ``LOCALCODER_URL`` environment variable or a default."""
+    from click.core import ParameterSource
+    ctx = click.get_current_context(silent=True)
+    return (ctx is not None
+            and ctx.get_parameter_source("url") == ParameterSource.COMMANDLINE)
+
+
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
-                   force_new, work_dir, ci, probe_only=False, machine_output=False):
+                   force_new, work_dir, ci, probe_only=False, machine_output=False,
+                   session_mode=None):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
@@ -807,7 +825,24 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     WITHOUT starting a server, so the caller can report whether it answers.
 
     ``machine_output`` is True for a ``--output-format json|jsonl`` run, whose
-    stdout carries only the result document or the event lines."""
+    stdout carries only the result document or the event lines.
+
+    A provider flag or a ``--url`` typed on the command line passes the
+    off-machine gate's "user typed it" override; ``LOCALCODER_URL`` does not,
+    so privacy mode refuses it. *session_mode* is the session's resolved mode
+    (None resolves the ambient coder mode)."""
+    try:
+        return _build_backend_gated(
+            provider, url, model, api_key, native_tools, port, no_server,
+            force_new, work_dir, ci, probe_only, machine_output, session_mode)
+    except (OffMachineModelRefused, NetworkPolicyError) as e:
+        print_error(str(e))
+        sys.exit(2 if ci else 1)
+
+
+def _build_backend_gated(provider, url, model, api_key, native_tools, port,
+                         no_server, force_new, work_dir, ci, probe_only,
+                         machine_output, session_mode):
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -824,21 +859,27 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     if provider == "openai":
         if not model:
             model = "gpt-4o"
-        backend = make_openai_backend(model=model)
+        backend = make_openai_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif provider == "anthropic":
         if not model:
             model = "claude-opus-4-5"
         # Anthropic Messages API (x-api-key + anthropic-version + /v1/messages).
-        backend = make_anthropic_backend(model=model)
+        backend = make_anthropic_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif url:
         # Explicit URL - no server management
         if not model:
             print_error("--url requires --model")
             sys.exit(2 if ci else 1)
-        backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key,
-                              native_tools=native_tools)
+        backend = HTTPBackend(
+            url.rstrip("/"), model, api_key=api_key, native_tools=native_tools,
+            gate_mode=_gate_mode(session_mode),
+            user_typed_remote=_url_typed_on_command_line())
         backend.assume_ctx_window = True
 
     else:
@@ -919,6 +960,15 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     cmd.append("--no-model")
                 if port:
                     cmd.extend(["-p", str(port)])
+                # --new: the child starts its own server even while another one
+                # serves this project, and the wait below skips every instance
+                # that was registered before the spawn.
+                preexisting_ids: frozenset = frozenset()
+                if force_new:
+                    cmd.append("--new")
+                    preexisting_ids = frozenset(
+                        e.get("instance_id") for e in instances.list_entries(home_dir())
+                        if e.get("instance_id"))
 
                 import os
                 kwargs = {}
@@ -994,7 +1044,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                             if proc.poll() is not None:
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
-                            _tgt = instances.attach_target(home_dir(), _root)
+                            _tgt = instances.attach_target(
+                                home_dir(), _root, exclude_ids=preexisting_ids)
                             if _tgt:
                                 break
                     if _tgt:

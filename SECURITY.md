@@ -228,6 +228,9 @@ localm process's own permissions rather than a sandbox:
   generated file OUT of the data directory needs host filesystem access, the
   same dial as the folder picker that chooses the destination. The same rule
   covers the `generate_image` MCP tool, which reaches the same upload.
+  That tool's `output_path` writes only a new image file (`.png`, `.jpg`,
+  `.jpeg`, `.webp`) in the data directory's `mcp-images` folder or the image
+  gallery; any other path, and a file that already exists, is refused.
   Known limit, if you issue several media keys: those source folders are
   SHARED, so one media key can use another's generated image as an img2img
   source. The uploads inbox has no per-key ownership at all, so this is a
@@ -248,8 +251,10 @@ localm process's own permissions rather than a sandbox:
   (`localm plugin install <path>` / `POST /api/plugins/install-external`)
   refuses a source tree containing any symlink or Windows junction, so a
   malicious plugin source cannot smuggle a file's contents out through a link
-  or drive a large copy through a self-referencing cycle. (A plugin installed
-  by its store name is copied from localm's own shipped files.)
+  or drive a large copy through a self-referencing cycle. Third-party plugins
+  run unsandboxed in-process, so install only code you trust. The install
+  route refuses a UNC or device path, and needs host filesystem access or a
+  server bound to loopback; a plugin's routes must sit under `/api/` or `/v1/`.
 - **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
   are privileged and are never granted implicitly: a `POST /v1/keys` call made
   with the owner key (or a key holding `admin`), or `localm key create --allow-privileged` from this
@@ -377,8 +382,12 @@ this section states the security properties and, more importantly, their edges.
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
   bug-report upload (sent only when you press Send), and requests to your
-  configured ComfyUI (see *What it does not cover* above). Nothing else opts out of `off`; the issues list is refused under
-  it.
+  configured ComfyUI (see *What it does not cover* above).
+  The coder's off-machine model backends do not opt out: building
+  one (`--online`, `--anthropic`, `--url`, `LOCALCODER_URL`, the GUI's backend
+  choice, the reviewer) runs the network policy, so `off` refuses it, and
+  privacy mode refuses it unless the user typed the flag (an environment
+  variable never counts). The issues list is refused under `off` too.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

@@ -27,6 +27,13 @@ from tests._real_gguf import fetch_gguf, require_native_runtime
 _API = "localm.inference.backends.llamacpp.llama.api"
 
 
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
+
+
 class TestBuildSamplerLazySelection:
     def _mock_api(self, lazy_supported=True):
         mock_api = MagicMock()
@@ -185,6 +192,7 @@ class TestSupportsGrammarIsLocalmOnly:
         from localm.plugins.coder.backends.http import make_localm_backend
         assert make_localm_backend("m", port=8642).supports_grammar is True
 
+    @pytest.mark.usefixtures("open_gate")
     def test_arbitrary_url_does_not(self):
         from localm.plugins.coder.backends.http import HTTPBackend
         # A hand-typed --backend URL (LM Studio, vLLM, a remote server) must
@@ -192,6 +200,7 @@ class TestSupportsGrammarIsLocalmOnly:
         assert HTTPBackend("http://127.0.0.1:1234/v1", "m").supports_grammar is False
         assert HTTPBackend("https://my-remote.example/v1", "m").supports_grammar is False
 
+    @pytest.mark.usefixtures("open_gate")
     def test_explicit_flag_enables(self):
         from localm.plugins.coder.backends.http import HTTPBackend
         b = HTTPBackend("https://my-remote.example/v1", "m", localm_server=True)
