@@ -22,7 +22,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from localm.plugins.gui.jobs import Job
+from localm.jobmanager import Job
 from localm.plugins.gui.web import attach_gui
 
 

@@ -11,7 +11,7 @@ Settings > Images > **Generation backend** (config `plugins.image.backend`):
 
 | Value | Behaviour |
 |---|---|
-| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
+| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, `FLUX_API_URL` is set, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
 | `native` | Always the native backend. |
 | `comfy` | Always ComfyUI. |
 
@@ -212,7 +212,7 @@ picked here stay in the page and go to the server with the next generation; they
 saved anywhere else.
 
 - **Mask (inpaint / outpaint).** *Paint mask* opens the input image (a gallery image set
-  with *Use as img2img input*, or a file loaded with *Load image file*) in an editor: paint
+  with *use as input*, or a file loaded with *Load image file*) in an editor: paint
   the area to repaint in white with the brush, take paint off with the eraser, *Invert* or
   *Clear* the mask, and *Extend canvas* by a number of pixels on any side to outpaint (the
   new border is filled from the image's edge and repainted; Denoise is set to 1 when it is

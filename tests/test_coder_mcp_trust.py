@@ -316,7 +316,9 @@ def test_the_startup_prompt_lists_the_server_and_obeys_the_answer(
     assert "MCP server" in shown and "marker_server.py" in shown
     assert _spawned(marker) == spawned
     assert (TOOL in agent._mcp_tool_names) is bool(spawned)
-    assert ToolHooks.load(project).trusted is remembered
+    from localm.plugins.coder import hook_trust
+    hooks = ToolHooks.load(project)
+    assert hook_trust.is_trusted(hooks.trust_path, hooks.digest) is remembered
 
 
 def test_the_flag_trusts_and_starts_them(proj):
@@ -394,7 +396,10 @@ def test_session_trust_of_another_folders_servers_says_they_do_not_start(proj, t
         hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
     said = " ".join(c.args[0] for c in info.call_args_list)
     assert "are not started" in said and "next session" not in said
-    assert _spawned(marker) == 0 and not ToolHooks.load(project).trusted
+    from localm.plugins.coder import hook_trust
+    hooks = ToolHooks.load(project)
+    assert _spawned(marker) == 0
+    assert not hook_trust.is_trusted(hooks.trust_path, hooks.digest)
 
 
 @pytest.mark.parametrize("args_toml, argv_tail", [

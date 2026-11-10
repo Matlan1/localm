@@ -117,6 +117,36 @@ def test_run_autostart_gives_the_server_no_shared_stdio(monkeypatch):
         assert seen[stream] == subprocess.DEVNULL
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the Windows own-console server launch")
+def test_run_autostart_gives_the_server_its_own_console_on_windows(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from localm.audit import SessionMode
+    from localm.cli.chat import run
+
+    seen = {}
+
+    def fake_popen(cmd, **kw):
+        seen["cmd"] = cmd
+        seen.update(kw)
+        return MagicMock()
+
+    monkeypatch.setenv("LOCALM_OWN_CONSOLE", "0")
+    monkeypatch.setattr("localm.instances.attach_target", lambda *a, **k: None)
+    monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: ".")
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+    monkeypatch.setattr("localm.audit.effective_mode", lambda *a, **k: SessionMode.LOG)
+    CliRunner().invoke(run, ["definitely-not-a-real-model-xyz", "-p", "hi"])
+    assert seen["creationflags"] == subprocess.CREATE_NEW_CONSOLE
+    assert seen["env"]["LOCALM_OWN_CONSOLE"] == "1"
+    assert "start_new_session" not in seen
+    assert not {"stdin", "stdout", "stderr"} & set(seen)
+    assert os.environ["LOCALM_OWN_CONSOLE"] == "0"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the POSIX detached-server launch")
 def test_a_detached_server_does_not_hold_the_callers_pipe_open(tmp_path):
     pidfile = tmp_path / "pid"

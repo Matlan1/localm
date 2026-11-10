@@ -10,6 +10,7 @@ binds.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from pathlib import Path
@@ -187,9 +188,24 @@ def coder_engine(engines: EngineCache, decision):
     return engine, decision.current, decision
 
 
-def build(engines: EngineCache) -> dict[str, dict]:
+def _inside(path: Path, root: Path) -> bool:
+    """True when the resolved *path* is *root* or below it."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def build(engines: EngineCache, coder_shell: bool = False,
+          coder_root: Path | None = None) -> dict[str, dict]:
     """``generate_image`` and ``run_coder_task``. The coder agent runs on an
-    engine from *engines*, pinned for the length of the run."""
+    engine from *engines*, pinned for the length of the run.
+
+    *coder_shell*: the operator allowed the coder to run shell commands
+    unattended; without it ``run_coder_task`` never auto-approves shell, whatever
+    ``yes`` or a project config say. *coder_root*: when set, ``cwd`` must resolve
+    inside it."""
     def generate_image(args: dict) -> dict:
         prompt = args.get("prompt", "")
         if not prompt:
@@ -304,6 +320,10 @@ def build(engines: EngineCache) -> dict[str, dict]:
         cwd_path = Path(cwd).expanduser()
         if not cwd_path.is_dir():
             return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
+        if coder_root is not None and not _inside(cwd_path.resolve(), coder_root):
+            return _text_result(
+                "'cwd' must be inside the folder this server was started with "
+                "(--coder-root).", is_error=True)
 
         # The coder Agent runs IN THIS PROCESS on an engine from this server's
         # own EngineCache: one resident model serves chat, embed and every
@@ -323,7 +343,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
         try:
             cfg = coder_runner.resolve_task_config(
                 work_dir, model=args.get("model") or None, max_turns=max_turns,
-                yes=bool(args.get("yes")), unattended=True)
+                yes=bool(args.get("yes")) and coder_shell, unattended=True)
         except ProjectConfigUnreadable as e:
             return _text_result(f"Project config could not be read: {e}", is_error=True)
         except coder_runner.InvalidSessionMode as e:
@@ -376,11 +396,15 @@ def build(engines: EngineCache) -> dict[str, dict]:
                 engine, model_name, lock=engines.generation_lock(engine),
                 still_resident=lambda: engines.is_resident(model_name, engine))
 
-        # Default OFF, matching the CLI's own fail-closed default: without
-        # `yes` file writes still happen but run_shell is denied, since there
-        # is nobody to confirm it.
+        # Shell approval is the operator's launch decision (--coder-shell):
+        # without it neither `yes` nor a project's auto_approve is honoured, and
+        # file writes still happen while run_shell is denied.
+        if not coder_shell and cfg.auto_approve:
+            cfg = dataclasses.replace(cfg, auto_approve=False)
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
-            _srv._log("coder task: run_shell is denied for this run (no 'yes')")
+            _srv._log("coder task: run_shell is denied for this run "
+                      + ("(no 'yes')" if coder_shell
+                         else "(server started without --coder-shell)"))
 
         def _release():
             engines.unpin(engine)
@@ -435,6 +459,17 @@ def build(engines: EngineCache) -> dict[str, dict]:
         text = result.response + ("\n\n[denied] " + denied if denied else "") + meta
         return _text_result(text, is_error=not result.success)
 
+    if coder_shell:
+        yes_description = (
+            "Auto-approve shell commands too, not just file writes (default "
+            "false: shell calls are denied without this since there is no TTY "
+            "to confirm them)")
+    else:
+        yes_description = (
+            "Accepted for compatibility. This server was started without "
+            "--coder-shell, so shell calls are always denied and file writes "
+            "are the only thing auto-approved")
+
     return {
         "generate_image": {
             "description": ("Generate an image locally with the image plugin's backend "
@@ -475,11 +510,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "model": MODEL_PARAM,
                     "max_turns": {"type": "integer",
                                   "description": "Safety cap on agent iterations (default: 40)"},
-                    "yes": {"type": "boolean",
-                            "description": ("Auto-approve shell commands too, not just file "
-                                             "writes (default false: shell calls are denied "
-                                             "without this since there is no TTY to confirm "
-                                             "them)")},
+                    "yes": {"type": "boolean", "description": yes_description},
                     "timeout_seconds": {"type": "integer",
                                         "description": ("Give up after this long (default 900, "
                                                         "at most 3600). Loading the model and "
