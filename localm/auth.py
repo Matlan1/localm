@@ -264,11 +264,12 @@ def set_api_key(key: Optional[str]) -> None:
             "'localm key generate' produces). Spaces, punctuation, and non-English "
             "letters cannot be sent reliably in an HTTP Authorization header, so "
             "most clients would fail to authenticate with such a key.")
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_private(path, key.strip() + "\n")
+    with _cross_process_lock(path):
+        _atomic_write_private(path, key.strip() + "\n", retrying=True)
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
