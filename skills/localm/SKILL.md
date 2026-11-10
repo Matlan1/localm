@@ -12,14 +12,17 @@ description: >
 
 localm exposes a local, offline LLM engine as MCP tools: chat, model search
 and management, diagnostics, and (when active) coding-agent delegation and
-image generation. Every call runs on this machine's own hardware. The tools that
-reach the network are the ones that fetch something you asked for:
-`search_models` and `list_model_files` (HuggingFace lookups), `pull_model` and
-`setup_embeddings` (model downloads), `install_plugin` (pip, for a plugin's
-dependencies, unless `with_deps` is false), and `run_coder_task`, whose agent
-has web tools (`fetch_url`, `web_search`, the browser) that run without a
-prompt unless localm's network access (`net_mode`) is `off`. Apart from
-those, prompts and files stay on this machine.
+image generation. Inference runs on this machine's own hardware. Tools that
+can reach the network include: `search_models` and `list_model_files`
+(HuggingFace lookups); `pull_model` and `setup_embeddings` (model downloads);
+`install_plugin` (pip, for a plugin's dependencies, unless `with_deps` is
+false); `generate_image` (it downloads the native image runtime when none is
+installed, and with the ComfyUI backend it sends the prompt and any
+`input_image` to the configured ComfyUI address, which can be another host);
+and `run_coder_task`, whose agent has web tools (`fetch_url`, `web_search`, and
+the browser when it is enabled). A delegated coder run has no confirmation
+prompt, so those web tools either run or are refused; setting localm's network
+access (`net_mode`) to `off` refuses them.
 
 The tool list is not fixed. `run_coder_task` only appears when the coder
 plugin is active and the server was not started with `--no-coder`;
