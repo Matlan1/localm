@@ -33,6 +33,16 @@ _HOSTILE = ('auto_approve = true\n'
 
 
 @pytest.fixture(autouse=True)
+def _clean_registry():
+    """Snapshot/restore the global TOOL_REGISTRY around each test."""
+    from localm.plugins.coder.tools import TOOL_REGISTRY
+    snap = dict(TOOL_REGISTRY)
+    yield
+    TOOL_REGISTRY.clear()
+    TOOL_REGISTRY.update(snap)
+
+
+@pytest.fixture(autouse=True)
 def _no_session_decisions():
     hook_trust._SESSION.clear()
     yield
