@@ -420,36 +420,6 @@ def _build_image_workflow(
     return True, "", uploaded_name
 
 
-def _strip_png_metadata(output_path: Path) -> str:
-    """Strip PNG metadata/EXIF for privacy (pure-Python, zero deps), in place.
-
-    Returns a warning string when the strip did not run (the file is not a PNG,
-    or the rewrite failed), else ""."""
-    try:
-        png_bytes = output_path.read_bytes()
-        if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-            clean = bytearray(b"\x89PNG\r\n\x1a\n")
-            pos, limit = 8, len(png_bytes)
-            while pos + 8 <= limit:
-                length = int.from_bytes(png_bytes[pos:pos + 4], "big")
-                chunk_type = png_bytes[pos + 4:pos + 8]
-                total_len = 12 + length
-                if chunk_type not in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
-                    clean.extend(png_bytes[pos:pos + total_len])
-                pos += total_len
-            output_path.write_bytes(bytes(clean))
-        else:
-            # Not a PNG (a custom workflow save node can emit WebP/JPEG to the
-            # hardcoded .png path). The bytes are left untouched and the caller
-            # gets a warning instead of a clean-strip result.
-            return ("WARNING: generated file is not a PNG; image metadata could "
-                    "not be stripped and may still contain prompt/EXIF data.")
-    except (OSError, ValueError) as e:
-        return ("WARNING: could not strip image metadata "
-                f"({e}); the file may still contain prompt/EXIF data.")
-    return ""
-
-
 def _write_image_sidecar(
     output_path: Path,
     *,
@@ -738,7 +708,7 @@ def generate_image(
         # Skipped when the caller decided the media model fits alongside the chat model
         # (swap=False), so the chat model stays hot.
         if swap:
-            _localm_unload(localm_url, instance_token)
+            _localm_unload(localm_url, instance_token, on_failure=_say, label="image")
 
         # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
         # FIRST (comfy_console_tail_start), so a partial-apply warning printed while
@@ -838,14 +808,10 @@ def generate_image(
                 "Check the ComfyUI console - a SaveImage node error is likely."
             )
 
-        # 11. Fetch image from ComfyUI /view, save locally, strip metadata
+        # 11. Fetch image from ComfyUI /view, save locally
         try:
             info = {"filename": filename, "subfolder": subfolder, "type": img_type}
             output_sha256 = comfy_fetch_output(api_url, info, output_path, timeout=10)
-
-            # Strip PNG metadata/EXIF for privacy; a strip that did not run returns
-            # a warning rather than an empty string.
-            strip_warning = _strip_png_metadata(output_path)
 
             # Output containment (opt-in): clear ComfyUI's history entry and delete its
             # own on-disk copy ONLY when delete_outputs is set (user opted in, or
@@ -893,7 +859,7 @@ def generate_image(
                   "weights may not have fully applied - see comfy-launch.log."
             ) if comfy_console_warning_text else ""
 
-            combined = "\n".join(w for w in (strip_warning, contain_warning, comfy_warning,
+            combined = "\n".join(w for w in (contain_warning, comfy_warning,
                                              sidecar_warning) if w)
             return True, _with_warning(
                 f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",

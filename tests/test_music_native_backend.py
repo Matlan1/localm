@@ -491,9 +491,14 @@ def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fa
                                                        answer, complaint):
     from localm.media import comfy_client
     calls = []
-    monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
-                        calls.append((url, token, media)) or answer)
+
+    def _unload(url, token=None, media=True, on_failure=None, label="media"):
+        calls.append((url, token, media))
+        if answer is None:
+            on_failure(comfy_client.unload_failed_notice("HTTP 403", label))
+        return answer
+
+    monkeypatch.setattr(comfy_client, "_localm_unload", _unload)
     lines = []
     ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
                                self_url="http://127.0.0.1:9/v1", instance_token="tok",
@@ -520,7 +525,7 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     monkeypatch.setattr(server, "stop", lambda: True)
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
+                        lambda url, token=None, media=True, **kw:
                         calls.append(url) or {"status": "unloaded"})
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
     from localm.cli import main
@@ -537,9 +542,11 @@ def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path,
     save_config(cfg)
     s = music_backend.prepare_for_job(music_backend.settings(load_config()), load_config())
     assert s["backend"] == "a1111" and music_backend.is_comfy(s)
-    assert music_backend.generate_unless_comfy("lofi", tmp_path / "t.wav") is None
     import localm.cli.media as media_cli
+    import localm.image_gen.comfy as image_comfy
     import localm.music_gen as music_gen
+    monkeypatch.setattr(image_comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+    monkeypatch.setattr(image_comfy, "free_comfy_vram", lambda *a, **k: True)
     ran = []
     monkeypatch.setattr(music_gen, "generate_music",
                         lambda tags, out, **k: ran.append(tags) or (True, "saved"))

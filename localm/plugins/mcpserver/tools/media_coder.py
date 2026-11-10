@@ -217,23 +217,10 @@ def build(engines: EngineCache, coder_shell: bool = False,
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
         from localm.audit import SessionMode, effective_mode
-        from localm.config import home_dir, load_config
-        from localm.image_gen.comfy import generate_image as gen_img
+        from localm.config import home_dir
         from localm.media import paths as _media_paths
 
         home = home_dir().resolve()
-
-        try:
-            from localm.plugins.builtin.image import backend as _image_backend
-            api_url = _image_backend.settings(load_config()).get("api_url") or None
-        except Exception as exc:                     # noqa: BLE001
-            from localm.debuglog import logger
-            logger.debug("could not resolve the image plugin ComfyUI url (%s); "
-                         "using the shared default", exc)
-            api_url = None
-        if not api_url:
-            from localm.media.comfy_client import default_api_url
-            api_url = default_api_url()
 
         def _confine_output(raw: str) -> Path:
             """Resolve an MCP ``output_path`` to a NEW image file in a
@@ -316,14 +303,14 @@ def build(engines: EngineCache, coder_shell: bool = False,
             return _text_result(str(e), is_error=True)
 
         is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
-        # comfy.generate_image builds its own rich Console / Progress on stdout;
+        # The ComfyUI generator builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
         from localm.plugins.builtin.image import backend as image_backend
 
         def _generate():
             with _quiet_stdout():
-                native = image_backend.generate_unless_comfy(
+                ok, message, _path = image_backend.generate_media(
                     prompt, out,
                     guidance=args.get("guidance"),
                     negative_prompt=args.get("negative_prompt"),
@@ -332,23 +319,10 @@ def build(engines: EngineCache, coder_shell: bool = False,
                     denoise=args.get("denoise"),
                     write_sidecar=not is_privacy,
                     delete_outputs=is_privacy,
+                    privacy=is_privacy,
                     on_progress=_srv.report_progress,
                 )
-            if native is not None:
-                return native
-            with _quiet_stdout():
-                return gen_img(
-                    prompt, out,
-                    api_url=api_url,
-                    guidance=args.get("guidance"),
-                    negative_prompt=args.get("negative_prompt"),
-                    seed=args.get("seed"),
-                    input_image=input_p,
-                    denoise=args.get("denoise"),
-                    write_sidecar=not is_privacy,
-                    delete_outputs=is_privacy,
-                    on_progress=_srv.report_progress,
-                )
+            return ok, message
 
         try:
             _reserve(out)

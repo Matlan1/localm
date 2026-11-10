@@ -766,3 +766,153 @@ def test_powershell_reporter_outcome_when_actually_executed(tmp_path, monkeypatc
     assert proc.returncode == rc, out
     assert ("Sent to the maintainer" in out) == sent, out
     assert ("Could not send" in out) == (not sent), out
+
+
+# ------------------- the attached log goes through the digest -------------- #
+
+_CANARY = "ZQXCHATCANARY4711"
+_LOG_WITH_CONTENT = (
+    "2026-07-13 15:24:49,000 WARNING localm.engine: model load slow on device 0\n"
+    "2026-07-13 15:24:50,000 DEBUG   localm: raw model output:\n"
+    f"my bank pin is {_CANARY}\n"
+    f"second line of the reply {_CANARY}\n"
+    "2026-07-13 15:24:51,000 ERROR   localm.server: request failed: boom\n"
+)
+
+
+def test_newest_log_drops_chat_content_records(tmp_path):
+    log = tmp_path / "localm_run.log"
+    log.write_text(_LOG_WITH_CONTENT, encoding="utf-8")
+    path, digest, note = ri._newest_log(str(log))
+    assert _CANARY not in digest, f"chat content reached the report: {digest}"
+    assert "request failed: boom" in digest
+    assert "model load slow" in digest
+    assert path == log
+    assert note == ""
+    body = ri.build_body("t", "d", {}, path, digest, note)
+    assert _CANARY not in body
+    assert "## Recent log digest" in body
+
+
+def test_newest_log_attaches_no_log_when_the_digest_module_does_not_load(
+        tmp_path, monkeypatch):
+    log = tmp_path / "localm_run.log"
+    log.write_text(_LOG_WITH_CONTENT, encoding="utf-8")
+    monkeypatch.setattr(ri, "_load_log_digest", lambda: None)
+    path, digest, note = ri._newest_log(str(log))
+    assert (path, digest) == (None, "")
+    assert note == ri._LOG_NOTE_NO_DIGEST
+    body = ri.build_body("t", "d", {}, path, digest, note)
+    assert _CANARY not in body
+    assert ri._LOG_NOTE_NO_DIGEST in body
+
+
+def test_load_log_digest_loads_the_shipped_module():
+    mod = ri._load_log_digest()
+    assert mod is not None
+    assert mod.is_content_record(
+        {"level": "DEBUG", "logger": "localm",
+         "lines": ["2026-07-13 15:24:50,000 DEBUG   localm: raw model output:"]})
+
+
+def _ps1_content_marker() -> str:
+    text = (_MOD_PATH.parent / "report_issue.ps1").read_text(encoding="utf-8")
+    found = re.findall(r"^\$contentMarker = '([^']*)'$", text, re.M)
+    assert len(found) == 1, "report_issue.ps1 must define $contentMarker once"
+    return found[0]
+
+
+def _load_shipped_log_digest():
+    path = _MOD_PATH.parents[1] / "localm" / "_log_digest.py"
+    spec = importlib.util.spec_from_file_location("_log_digest_parity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# One header per _CONTENT_MARKER_RES entry, beside the ones harvested from
+# tests/test_log_digest.py.
+_MARKER_SAMPLES = (
+    "2026-07-13 15:24:50,000 DEBUG   localm: raw model output:",
+    "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory embed_one failed for 'x': y",
+    '2026-07-13 15:24:50,000 DEBUG   localm.jobs: jobs web tool: web_search {"q": "x"}',
+    "2026-07-13 15:24:50,000 DEBUG   localm: assembled chat prompt (3 message(s)):",
+    "2026-07-13 15:24:50,000 DEBUG   localm: chat completion reply (finish_reason=stop):",
+    "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory consolidate prompt:",
+    "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory auto-consolidate response:",
+    "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory consolidation: "
+    "evaluating candidate [1/4]: x",
+    "2026-07-13 15:24:50,000 DEBUG   localm.memory: memory consolidation: decision for x",
+    "2026-07-13 15:24:50,000 DEBUG   localm.rag: rag index: notes.md",
+    "2026-07-13 15:24:50,000 DEBUG   localm.rag: rag extract identity: a.zip member b",
+)
+_NON_CONTENT_SAMPLES = (
+    "2026-07-13 15:24:50,000 WARNING localm.rag: rag index degrade: no embedder",
+    "2026-07-13 15:24:50,000 DEBUG   localm.jobs: jobs web tool: web_search",
+    "2026-07-13 15:24:50,000 DEBUG   localm: GET /api/stats 200",
+)
+
+
+def test_powershell_content_marker_matches_every_log_digest_content_sample():
+    digest = _load_shipped_log_digest()
+    ps_re = re.compile(_ps1_content_marker())
+    for p in digest._CONTENT_MARKER_RES:
+        assert p.pattern in _ps1_content_marker(), (
+            f"report_issue.ps1 $contentMarker lacks the _log_digest marker {p.pattern!r}")
+    src = (Path(__file__).parent / "test_log_digest.py").read_text(encoding="utf-8")
+    harvested = re.findall(
+        r'"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} [^"\\]*)', src)
+
+    def is_content(line):
+        return digest.is_content_record({"level": "", "logger": "", "lines": [line]})
+
+    content = [s for s in harvested if is_content(s)] + list(_MARKER_SAMPLES)
+    assert len(content) > len(_MARKER_SAMPLES), "harvest from test_log_digest.py found nothing"
+    for p in digest._CONTENT_MARKER_RES:
+        assert any(p.search(s) for s in _MARKER_SAMPLES), (
+            f"no sample in _MARKER_SAMPLES for the marker {p.pattern!r}")
+    for s in content:
+        assert is_content(s), s
+        assert ps_re.search(s), f"the PowerShell marker misses a content header: {s!r}"
+        assert ps_re.search(s + "\r\nreply text"), f"CRLF form missed: {s!r}"
+    for s in _NON_CONTENT_SAMPLES:
+        assert not is_content(s), s
+        assert not ps_re.search(s), f"the PowerShell marker flags a benign line: {s!r}"
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+class TestPowerShellReporterLogAttachment:
+    def _run(self, tmp_path, log_text):
+        pwsh = shutil.which("powershell") or shutil.which("pwsh")
+        if not pwsh:
+            pytest.skip("no PowerShell interpreter on PATH")
+        ps1 = _copy_ps1_reporter_to_isolated_dir(tmp_path)
+        log = tmp_path / "run.log"
+        log.write_bytes(log_text.replace("\n", "\r\n").encode("utf-8"))
+        env = dict(os.environ)
+        env.pop("LOCALM_BUGREPORT_URL", None)
+        env.pop("LOCALM_BUGREPORT_TOKEN", None)
+        proc = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "--summary", "log test", "--log", str(log)],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+            env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, f"script exited {proc.returncode}: {out}"
+        saved = list((ps1.parent.parent / "home" / "bug-reports").glob("bug-*.md"))
+        assert saved, f"nothing was saved locally: {out}"
+        return out, saved[0].read_text(encoding="utf-8")
+
+    def test_log_with_chat_content_attaches_no_tail(self, tmp_path):
+        out, report = self._run(tmp_path, _LOG_WITH_CONTENT)
+        assert _CANARY not in report, report
+        assert _CANARY not in out, out
+        assert "it holds chat content" in report, report
+        assert "Recent log tail" not in report, report
+
+    def test_log_without_chat_content_attaches_its_tail(self, tmp_path):
+        out, report = self._run(
+            tmp_path, "2026-07-13 15:24:51,000 ERROR   localm.server: request failed: boom\n")
+        assert "## Recent log tail" in report, report
+        assert "request failed: boom" in report, report

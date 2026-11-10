@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Voice plugin: Whisper speech-to-text for the chat mic button.
+"""Voice plugin: speech-to-text for the chat mic button (Whisper, or a registered
+audio model when Whisper is not available).
 
 Routes (mounted by the engine, auto-scoped to the ``voice`` capability):
   GET  /api/voice/status          - is STT usable / is the model cached / why not
@@ -23,7 +24,10 @@ from pydantic import BaseModel
 from localm.inference.errors import route_errors
 from localm.executor import get_plugin_executor
 from localm.voice import VoiceError
+from . import audio_model as _audio_model
 from . import transcriptions as _transcriptions
+
+_WHISPER_UNAVAILABLE = ("needs-faster-whisper", "download-blocked")
 
 _router = APIRouter()
 
@@ -48,7 +52,9 @@ async def voice_status(request: Request):
     that governs net_mode itself. ``download_blocked`` says why not when the
     model is missing and the package is there, else it is "". When the mic is
     unavailable for that cause, ``reason`` is the same text, except under
-    net_mode=off, which keeps its own. The flag only drives UI; POST
+    net_mode=off, which keeps its own. When Whisper is not usable but a
+    registered model can hear audio, ``available`` is true and ``audio_model``
+    names the model the mic route falls back to. The flag only drives UI; POST
     /api/voice/model/download re-checks all of it server-side."""
     import importlib.util
     from localm.voice import stt_available, stt_model_cached
@@ -77,9 +83,16 @@ async def voice_status(request: Request):
                                 "policy).")
             if not ok:
                 reason = download_blocked
+    audio_model = ""
+    if not ok:
+        names = await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(), _audio_model.audio_model_names)
+        if names:
+            ok, reason, audio_model = True, "", names[0]
     return {"available": ok, "reason": reason,
             "model_cached": cached, "model": model_name,
-            "can_download": can_download, "download_blocked": download_blocked}
+            "can_download": can_download, "download_blocked": download_blocked,
+            "audio_model": audio_model}
 
 
 @_router.post("/api/voice/model/download")
@@ -158,7 +171,7 @@ def _voice_error_status(e: VoiceError) -> tuple[int, str]:
     VoiceError: _voice_error_status,
     Exception: lambda e: (502, f"Transcription failed: {e}"),
 })
-async def voice_transcribe(req: TranscribeRequest):
+async def voice_transcribe(req: TranscribeRequest, request: Request):
     from localm.voice import transcribe_bytes
     try:
         data = base64.b64decode(req.audio_b64, validate=True)
@@ -169,9 +182,24 @@ async def voice_transcribe(req: TranscribeRequest):
     if len(data) > 25_000_000:
         raise HTTPException(413, "Recording too large (max 25 MB)")
     loop = asyncio.get_running_loop()
-    text = await loop.run_in_executor(
-        get_plugin_executor(),
-        lambda: transcribe_bytes(data, language=req.language))
+    executor = get_plugin_executor()
+    audio_name = await loop.run_in_executor(executor, _transcriptions.resolve_engine, None)
+    if audio_name is None:
+        try:
+            text = await loop.run_in_executor(
+                executor, lambda: transcribe_bytes(data, language=req.language))
+            return {"text": text}
+        except VoiceError as e:
+            if getattr(e, "code", "") not in _WHISPER_UNAVAILABLE:
+                raise
+            names = await loop.run_in_executor(executor, _audio_model.audio_model_names)
+            if not names:
+                raise
+            audio_name = await loop.run_in_executor(
+                executor, _audio_model.preferred, names)
+    text = await _audio_model.transcribe(
+        request, audio_name, data, _audio_model.format_label(data, "", ""),
+        language=req.language, prompt=None, temperature=None)
     return {"text": text}
 
 

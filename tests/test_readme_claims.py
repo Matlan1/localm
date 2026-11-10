@@ -78,7 +78,8 @@ def test_network_doc_names_the_ungoverned_paths():
     doc = _collapsed(_NETWORK_DOC)
     idx = doc.find("What the policy does NOT govern")
     assert idx != -1, "docs/network.md lost its 'What the policy does NOT govern' section"
-    section = doc[idx:idx + 2000]
+    end = doc.find(" ## ", idx)
+    section = doc[idx:end if end != -1 else None]
     assert "bug-report" in section.lower()
     assert "comfyui" in section.lower()
 

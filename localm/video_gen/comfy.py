@@ -72,7 +72,6 @@ from localm.media.comfy_client import (
     SUBMIT_URL_ERROR,
     UploadedInputCopy,
 )
-from localm.media.output_metadata import strip_video_metadata
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
 # stack).  Drop a wan_workflow_local.json next to it (gitignored) to use
@@ -455,7 +454,7 @@ def generate_video(
 
         # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
         if swap:
-            _localm_unload(localm_url, instance_token)
+            _localm_unload(localm_url, instance_token, on_failure=_say, label="video")
 
         # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
         # nodes per the plan resolve_media_placement() decided. A component whose loader is
@@ -559,10 +558,6 @@ def generate_video(
         except Exception as e:
             return False, f"Failed to download generated clip from ComfyUI: {e}"
 
-        # Strip the container metadata ComfyUI's SaveVideo embeds (the submitted
-        # workflow, prompt included); a strip that did not run returns a warning.
-        strip_warning = strip_video_metadata(output_path)
-
         # Output containment: when delete_outputs is set (opt-in, forced True by
         # the caller in privacy mode), clear ComfyUI's history entry (the
         # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
@@ -580,11 +575,11 @@ def generate_video(
 
         # Sidecar JSON - everything needed to reproduce or tweak the clip.
         # Skipped entirely in privacy mode (write_sidecar=False): with the container
-        # metadata stripped above, the sidecar is the only file that records the
+        # metadata stripped by the backend facade, the sidecar is the only file that records the
         # prompt. The console warning (a real quality issue with THIS clip) is still
         # reported in the message either way - only the sidecar's record of it is
         # what privacy mode suppresses.
-        output_warning = "\n".join(w for w in (strip_warning, contain_warning) if w)
+        output_warning = "\n".join(w for w in (contain_warning,) if w)
         if not write_sidecar:
             return True, _with_warning(
                 _with_warning(

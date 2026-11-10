@@ -129,7 +129,7 @@ def test_every_committed_requirement_set_is_fully_hash_locked(requirements):
 
 def test_the_requirement_sets_directory_holds_the_sets_the_currency_check_covers():
     names = {p.name for p in (ROOT / ".github" / "requirements").glob("*.txt")}
-    assert names == {"torch-cpu.txt", "mutmut.txt", "build.txt"}
+    assert names == {"torch-cpu.txt", "mutmut.txt", "build.txt", "editable.txt"}
 
 
 def test_the_torch_cpu_set_is_hash_locked_and_pins_the_cpu_build():

@@ -31,6 +31,11 @@ from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
+
+SUPPORTS_STEPS = True
+SUPPORTS_CLIP_SKIP = True
+SUPPORTS_JOB_OPTIONS = True
+SUPPORTS_UPSCALE = True
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 2 * 1024 ** 3
@@ -909,8 +914,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
         say("Freeing VRAM: unloading the chat model...")
-        if _localm_unload(self_url, instance_token, media=False) is None:
-            say("Could not unload the chat model - the image model may run low on VRAM.")
+        _localm_unload(self_url, instance_token, media=False, on_failure=say, label="image")
     relay = _event_relay(say, on_preview, cancel_check)
     runner = shared.runner
     hires_path = None
