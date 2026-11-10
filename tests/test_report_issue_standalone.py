@@ -144,6 +144,13 @@ def test_scrub_redacts_any_auth_scheme_json_header_keys_and_base64_bearer(line, 
     assert "<redacted>" in out
 
 
+def test_scrub_redacts_an_authorization_array_and_bytes_value_whole():
+    assert (ri.scrub('{"Authorization":["Bearer CANARYARRAY1"], "n": 1}')
+            == '{"Authorization":<redacted>, "n": 1}')
+    assert (ri.scrub("{'Authorization': b'Basic CANARYBYTES2'}")
+            == "{'Authorization': <redacted>}")
+
+
 def test_scrub_strips_bare_and_prefixed_credential_assignments():
     """ri.scrub redacts a credential written as a plain name=value line (a .env
     fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=),

@@ -116,17 +116,24 @@ _HEADER_SECRET_RE = re.compile(
 )
 
 
-# An ``Authorization:`` value, whatever its scheme. A quoted value goes whole
-# (to the closing quote, or to the end of the line when there is none) and
-# the text after the closing quote is kept. An unquoted value goes to the end
-# of its line; when it is one of the scheme words Bearer, Basic, Digest,
-# Negotiate or NTLM alone on its line, the next line goes too. A value that
-# already reads ``<redacted>`` is left as it is. ``Proxy-Authorization`` and
-# ``X-Authorization`` end in the same name and are matched by it. See
+# An ``Authorization`` value, whatever its scheme, as a header line
+# (``Authorization: ...``) or a quoted object key (``"Authorization": ...``).
+# A quoted value, with backslash escapes and an optional one-letter prefix
+# (``b'...'``), goes whole (to the closing quote, or to the end of the line
+# when there is none) and the text after the closing quote is kept; so does a
+# ``[...]`` array. Any other value goes to the end of its line; when it is one
+# of the scheme words Bearer, Basic, Digest, Negotiate or NTLM alone on its
+# line, the next line goes too. A value that already reads ``<redacted>`` and
+# a flag literal (``null``, ``false``, ...) are left as they are.
+# ``Proxy-Authorization`` and ``X-Authorization`` end in the same name and are
+# matched by it. See
 # test_header_json_and_bearer_patterns_do_not_grow_superlinearly.
 _AUTH_HEADER_RE = re.compile(
-    r"(?i)(authorization\s*:\s*)(?=\S)(?!<redacted>)"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?"
+    r"(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
     r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^\r\n]*)"
 )
 
@@ -144,27 +151,29 @@ _AUTH_HEADER_RE = re.compile(
 # value. The short generic names (key, auth, sig) stay prefix-only here for the
 # reason branch 3 gives above - a bare ``"key": "gpt-4"`` is ordinary data.
 # A name may follow any number of ``_``/``-`` separated parts, so
-# ``"X-Auth-Token"``, ``"Proxy-Authorization"`` and
-# ``"AWS_SECRET_ACCESS_KEY"`` are matched.
-# The value is a quoted string (backslash escapes included), a whole ``[...]``
-# array, or an unquoted run with an optional leading scheme word; the unquoted
-# run stops at the JSON structural characters, so a redaction never eats the
-# rest of the object.
+# ``"X-Auth-Token"`` and ``"AWS_SECRET_ACCESS_KEY"`` are matched. An
+# ``"Authorization"`` key is _AUTH_HEADER_RE's.
+# The value is a quoted string (backslash escapes and an optional one-letter
+# prefix included), a whole ``[...]`` array, or an unquoted run with an
+# optional leading scheme word; the unquoted run stops at the JSON structural
+# characters, so a redaction never eats the rest of the object. A value that
+# already reads ``<redacted>`` is left as it is.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
     r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
-    r"|access[_-]?token|signature|authorization)"
+    r"|access[_-]?token|signature)"
     r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
     # Same flag carve-out as _QUERY_SECRET_RE: ``"has_token": false`` survives.
     # The leading ``\s*`` is load-bearing: the ``\s*`` inside the name group can
     # give the separator space back on backtracking, so without it the guard is
     # tested one character too late and matches nothing.
-    r"(?=\S)"
+    r"(?=\S)(?!<redacted>)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"(?:[^\"\\\r\n]|\\.)*\"?|'(?:[^'\\\r\n]|\\.)*'?|\[[^\]\r\n]*\]?"
-    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^,}\]\s]*)"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)"
 )
 
 
@@ -175,8 +184,8 @@ def _scrub_query_and_header_secrets(text: str) -> str:
     if not text:
         return text
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
-    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
+    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
     return text
 
@@ -402,8 +411,8 @@ def _scrub_secrets(text: str) -> str:
         return text
     text = _scrub_home(text)
     text = _scrub_url_creds(text)
-    text = _scrub_query_and_header_secrets(text)
     text = _BEARER_RE.sub(r"\1<redacted>", text)
+    text = _scrub_query_and_header_secrets(text)
     text = _APIKEY_RE.sub("<redacted>", text)
     text = _scrub_emails(text)
     text = _scrub_hosts(text)

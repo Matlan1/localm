@@ -232,6 +232,20 @@ def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
      "Authorization: <redacted>"),
     ("Authorization: Bearer\r\n CANARYFOLDED13", "CANARYFOLDED13",
      "Authorization: <redacted>"),
+    ("{'Authorization': b'Bearer CANARYBYTES14'}", "CANARYBYTES14",
+     "{'Authorization': <redacted>}"),
+    ("{'Authorization': b'Basic CANARYBYTES15', 'n': 1}", "CANARYBYTES15",
+     "{'Authorization': <redacted>, 'n': 1}"),
+    ('{ Authorization: "Digest username=\\"u\\", response=\\"CANARYESC16\\"" }',
+     "CANARYESC16", "{ Authorization: <redacted> }"),
+    ('{Authorization : "abc\\"CANARYESC17"}', "CANARYESC17", "{Authorization : <redacted>}"),
+    ('"Authorization": Token CANARYBARE18', "CANARYBARE18", '"Authorization": <redacted>'),
+    ("'Authorization': Digest username=\"u\", response=\"CANARYBARE19\"", "CANARYBARE19",
+     "'Authorization': <redacted>"),
+    ("X-Api-Key:\nAuthorization: Basic CANARYNEXT20", "CANARYNEXT20",
+     "X-Api-Key:\n<redacted> <redacted>"),
+    ('{"Authorization": "Bearer\nCANARYSPLIT21"}', "CANARYSPLIT21",
+     '{"Authorization": <redacted>\n<redacted>"}'),
 ])
 def test_scrub_secrets_redacts_an_authorization_value_whole_for_any_scheme(
         line, canary, expected):
@@ -249,9 +263,12 @@ def test_scrub_secrets_authorization_redaction_is_idempotent():
     once = bugreport._scrub_secrets(
         "Authorization: Token CANARYTOK1 then the request failed\n"
         "Authorization: AWS4-HMAC-SHA256 Credential=CANARYAWS2, Signature=CANARYSIG3\n"
+        'call("Authorization": "Basic CANARYCALL6") done\n'
+        '"x-auth-token":"CANARYSEMI7"; x\n'
         "{ Authorization: 'Token CANARYJS4', n: 1 }\n"
         '{"Authorization":["Bearer CANARYARR5"], "n": 1}')
     assert "CANARY" not in once, once
+    assert 'call("Authorization": <redacted>) done\n"x-auth-token":<redacted>; x\n' in once
     assert once.endswith("{ Authorization: <redacted>, n: 1 }\n"
                          '{"Authorization":<redacted>, "n": 1}')
     assert bugreport._scrub_secrets(once) == once
@@ -1142,6 +1159,11 @@ def test_scrub_secrets_leaves_non_credential_json_fields_intact():
      '{"password": <redacted>, "n": 1}'),
     ('{"api_keys": 2, "token": ["CANARYLIST9", "CANARYLIST10"], "n": 1}', "CANARYLIST10",
      '{"api_keys": 2, "token": <redacted>, "n": 1}'),
+    ('{"X-Auth-Token": b"Bearer CANARYBYTES11"}', "CANARYBYTES11",
+     '{"X-Auth-Token": <redacted>}'),
+    ('{"token": (Bearer CANARYPAREN12)}', "CANARYPAREN12",
+     '{"token": <redacted> <redacted>)}'),
+    ('"proxy_auth": digest\n"timeout": 30', "digest", '"proxy_auth": <redacted>\n"timeout": 30'),
 ])
 def test_scrub_secrets_redacts_json_header_and_multi_part_credential_keys(
         text, canary, expected):
@@ -1190,6 +1212,10 @@ def _scrub_seconds(text: str, samples: int = 5) -> float:
     pytest.param(lambda n: '"token":"' + '\\"' * n, id="json-escaped-quote-run"),
     pytest.param(lambda n: '"token":[' + "a" * n, id="json-open-array"),
     pytest.param(lambda n: '"token":[' * n, id="json-many-arrays"),
+    pytest.param(lambda n: 'Authorization: "' + "\\" * n, id="auth-backslash-run"),
+    pytest.param(lambda n: '"Authorization":' + " " * n + "null,", id="auth-flag-after-spaces"),
+    pytest.param(lambda n: "Authorization: [" * n, id="auth-many-arrays"),
+    pytest.param(lambda n: '"token":' + " " * n + "<redacted>", id="json-space-run"),
     pytest.param(lambda n: "bearer " + "+/=" * n, id="bearer-base64-run"),
     pytest.param(lambda n: "bearer " * n, id="bearer-name-run"),
 ])

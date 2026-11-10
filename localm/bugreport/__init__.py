@@ -56,7 +56,7 @@ from localm.bugreport.errors import (
     LocalmError, RateLimitedError,
 )
 from localm.bugreport.scrub import (
-    _scrub_home, _scrub_url_creds, _QUERY_SECRET_RE, _HEADER_SECRET_RE, _JSON_SECRET_RE,
+    _scrub_home, _scrub_url_creds, _QUERY_SECRET_RE, _HEADER_SECRET_RE, _AUTH_HEADER_RE, _JSON_SECRET_RE,
     _scrub_query_and_header_secrets, _BEARER_RE, _APIKEY_RE, _scrub_secrets,
 )
 from localm.bugreport.diagnostics import (

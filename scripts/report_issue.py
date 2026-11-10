@@ -152,8 +152,11 @@ _HEADER_SECRET_RE = re.compile(
 # An Authorization value under any scheme. Byte-identical to _AUTH_HEADER_RE
 # in localm/bugreport/scrub.py.
 _AUTH_HEADER_RE = re.compile(
-    r"(?i)(authorization\s*:\s*)(?=\S)(?!<redacted>)"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?"
+    r"(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
     r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^\r\n]*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
@@ -161,14 +164,15 @@ _AUTH_HEADER_RE = re.compile(
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
     r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
-    r"|access[_-]?token|signature|authorization)"
+    r"|access[_-]?token|signature)"
     r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
-    r"(?=\S)"
+    r"(?=\S)(?!<redacted>)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"(?:[^\"\\\r\n]|\\.)*\"?|'(?:[^'\\\r\n]|\\.)*'?|\[[^\]\r\n]*\]?"
-    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^,}\]\s]*)"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)"
 )
 # The account segment under a well-known home root. The Windows separator is
 # one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
@@ -375,13 +379,14 @@ def scrub(text: str) -> str:
     text = re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
     # Strip user:pass@ credentials from any URL-ish value.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+    # Bearer tokens anywhere in the text.
+    text = _BEARER_RE.sub(r"\1<redacted>", text)
     # Credential-named query params, header lines and JSON keys.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
-    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
+    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
-    # Bearer tokens and API keys anywhere in the text.
-    text = _BEARER_RE.sub(r"\1<redacted>", text)
+    # API keys anywhere in the text.
     text = _APIKEY_RE.sub("<redacted>", text)
     # Email addresses, except the maintainer's.
     text = _EMAIL_RE.sub(_email_replacement, text)
