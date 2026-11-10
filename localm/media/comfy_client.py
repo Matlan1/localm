@@ -1544,9 +1544,6 @@ def is_own_comfy_process(api_url: str, pid: Optional[int]) -> bool:
         return False
 
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
-
-
 def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
     """Who holds the TCP port of a local *api_url*, or ``None``.
 
@@ -1566,9 +1563,10 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError:
         return None
-    if host not in _LOOPBACK_HOSTS:
+    from localm.bindhost import is_local_dial_host, self_connect_host
+    if not is_local_dial_host(host):
         return None
-    probe_host = "127.0.0.1" if host in ("localhost", "0.0.0.0") else host
+    probe_host = self_connect_host(host)
     try:
         with socket.create_connection((probe_host, port), timeout=timeout):
             pass
