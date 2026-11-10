@@ -3389,13 +3389,11 @@ class LlamaCpp:
         splice each item in at its place.
 
         Raises ``AudioInputError`` for an audio part when *audio_rate* is 0 and
-        for a clip that cannot be decoded, ``ImageLimitError`` for an image that
-        cannot be decoded, ``VisionInputError`` for an image that cannot be
-        fetched, and ``AudioDecodeCancelled`` once *should_stop* returns True
+        for a clip that cannot be decoded, ``VisionInputError`` for an image that
+        cannot be decoded or fetched, and ``AudioDecodeCancelled`` once *should_stop* returns True
         while an audio clip decodes."""
         from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, ImageLimitError, UnsupportedInputError,
-            VisionInputError)
+            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, UnsupportedInputError, VisionInputError)
         from localm.inference.media import (
             ImageBudget, decode_audio_clip, decode_image_url)
         from localm.netpolicy import NetworkPolicyError
@@ -3423,9 +3421,9 @@ class LlamaCpp:
                         raise VisionInputError(
                             f"The attached image could not be fetched: {e}") from e
                     except Exception as e:
-                        raise ImageLimitError(
-                            f"The attached image could not be read "
-                            f"({type(e).__name__}).") from e
+                        raise VisionInputError(
+                            f"The attached image could not be read: "
+                            f"{type(e).__name__}: {str(e)[:200]}") from e
                     media.append((pil.width, pil.height, pil.tobytes()))
                     parts.append(marker)
                 elif part.get("type") == "input_audio":

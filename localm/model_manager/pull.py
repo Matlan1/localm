@@ -3324,6 +3324,44 @@ def _pull_hf_snapshot(
         return False
 
 
+def _snapshot_unsafe_name(dest: Path, names) -> Optional[str]:
+    """The first of *names* (repo-relative file names from a HuggingFace
+    listing, ``/``-separated) that a download into *dest* must refuse, or None.
+    Each path component must pass :func:`_safe_models_filename` against the
+    folder it lands in: no reserved character (``:`` included), no reserved
+    device name, no trailing dot or space, no ``.``/``..`` or empty component,
+    and no OS short-name alias of a different existing file."""
+    for raw in names:
+        name = str(raw or "")
+        base = dest
+        for part in name.split("/"):
+            if _safe_models_filename(part, base) is None:
+                return name
+            base = base / part
+    return None
+
+
+def _snapshot_listing_names(repo_id: str, repo_siblings,
+                            commit: Optional[str]) -> tuple[Optional[list], Optional[str]]:
+    """``(names, commit)``: the file names of *repo_id* and the commit they were
+    read at. From *repo_siblings* (read at *commit*) when the listing was read;
+    else from ``list_repo_files`` at *commit*, or, without one, at the commit
+    ``repo_info`` reports for the default branch. ``(None, None)`` when no list
+    can be read, or no commit is known for it."""
+    if repo_siblings is not None:
+        return [str(getattr(s, "rfilename", "") or "") for s in repo_siblings], commit
+    try:
+        api = _hf_api()
+        if commit is None:
+            commit = _valid_commit(getattr(api.repo_info(repo_id), "sha", None))
+        if commit is None:
+            return None, None
+        return list(api.list_repo_files(repo_id, revision=commit)), commit
+    except Exception as e:
+        logger.debug("could not list the files of %s: %s", repo_id, e)
+        return None, None
+
+
 def _pull_hf_snapshot_locked(
     repo_id: str,
     model_name: str,
@@ -3507,6 +3545,23 @@ def _pull_hf_snapshot_locked(
     # them.
     if not _mm._check_disk_space(_mm.MODELS_DIR,
                                  max(0, total_size - _disk_bytes())):
+        return False
+
+    names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
+    if names is None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] its file list could not be "
+            "read from Hugging Face, so the file names it would write cannot be "
+            "checked. Retry when Hugging Face answers.")
+        return False
+    commit = listed_at
+    unsafe = _snapshot_unsafe_name(dest, names)
+    if unsafe is not None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] it contains a file named "
+            f"{escape(repr(unsafe))}, which is not a plain file name on this computer "
+            "(a reserved character or device name, a trailing dot or space, a path "
+            "step, or another name for a file already there).")
         return False
 
     _mm.ensure_dirs()

@@ -563,6 +563,29 @@ def test_folder_hands_redacted_first_lines_over_in_order_with_forwarded_lines():
     ], events
 
 
+_TRIGGERED_QUOTE_RECORD = [
+    "Grammar triggered on regex: '<tool_call>",
+    "{\"name\": \"write_file\", \"arguments\": {\"content\": \"name = 'Alice'",
+    "ZQX-SECRET my bank pin is 4711",
+    "ZQX-SECRET second leaked line\"}}'",
+]
+
+
+def test_folder_consumes_a_triggered_record_whose_text_ends_a_line_in_a_quote():
+    passed, recorded = _fold(_TRIGGERED_QUOTE_RECORD + ["llama_decode: ordinary native line"])
+    assert passed == ["llama_decode: ordinary native line"], passed
+    assert recorded == ["Grammar triggered on regex"]
+
+
+def test_folder_releases_a_line_held_after_a_triggered_record_at_the_next_trace_line():
+    lines = (["Grammar triggered on regex: '<tool_call>'", "ggml: short note"]
+             + _record_lines(3, "x"))
+    passed, recorded = _fold(lines)
+    assert passed == ["ggml: short note"], passed
+    assert recorded == ["Grammar triggered on regex",
+                        "Grammar still awaiting trigger after 1 token(s)"]
+
+
 def _run_with_debug_file(monkeypatch, tmp_path, content_allowed, chunks):
     log = tmp_path / "debug.log"
     calls = []
@@ -618,6 +641,16 @@ def test_debug_file_keeps_a_line_held_after_a_record_when_the_stream_ends(monkey
         monkeypatch, tmp_path, False, [_awaiting(5, "ZQXa"), b"last native line\n"])
     assert data == (b"Grammar still awaiting trigger after token 5\n"
                     b"last native line\n"), data
+
+
+def test_debug_file_copy_of_a_triggered_record_with_quoted_text_holds_none_of_it(
+        monkeypatch, tmp_path):
+    stream = "".join(line + "\n" for line in _TRIGGERED_QUOTE_RECORD)
+    stream += "llama_decode: ordinary native line\n"
+    data, _ = _run_with_debug_file(monkeypatch, tmp_path, False, [stream.encode()])
+    assert b"ZQX" not in data, data
+    assert data == (b"Grammar triggered on regex\n"
+                    b"llama_decode: ordinary native line\n"), data
 
 
 def _open_readers():

@@ -26,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
@@ -585,6 +585,9 @@ def register(app: FastAPI, ctx) -> None:
         except UnsupportedFieldError as e:
             raise HTTPException(400, str(e)) from e
 
+        if not req.messages:
+            raise HTTPException(400, "'messages' must not be empty")
+
         # Plain-dict messages for the backend. Hoisted above engine resolution
         # because capability routing reads them to decide which model answers.
         messages = _protocol_messages_to_dicts(req.messages)
@@ -671,7 +674,8 @@ def register(app: FastAPI, ctx) -> None:
             headers={**sse_headers, **_prepared_headers(prepared)})
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
-    async def embeddings(req: EmbeddingRequest, request: Request):
+    async def embeddings(req: EmbeddingRequest, request: Request,
+                         response: Response = None):  # pyright: ignore[reportArgumentType]
         # An empty model means "no preference": resolved below to the configured
         # embedder when one exists, otherwise through the general get_engine()
         # resolution. Refused only when there is nothing to fall back to.
@@ -781,6 +785,7 @@ def register(app: FastAPI, ctx) -> None:
                     return base64.b64encode(buf).decode("ascii")
                 return vec
 
+            _est_tokens = sum(max(1, len(t) // 4) for t in texts_emb if t)
             return {
                 "object": "list",
                 "data": [
@@ -791,7 +796,7 @@ def register(app: FastAPI, ctx) -> None:
                 # block require an explicit match against it. req.model is None on
                 # the omitted-model-resolved-to-the-configured-embedder path.
                 "model": resolved_model,
-                "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                "usage": {"prompt_tokens": _est_tokens, "total_tokens": _est_tokens},
             }
 
         # Resolve without forcing a chat-model load: a GGUF backend (can_embed=False)
@@ -847,6 +852,15 @@ def register(app: FastAPI, ctx) -> None:
             None, lambda: sum(
                 count_tokens_or_estimate(engine.count_tokens, t, "an embedding input")
                 for t in texts))
+        reported_model = resolved_model or engine.display_name
+        if getattr(engine, "embeds_via_dedicated", lambda: False)():
+            from localm.config import load_config
+            from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+            reported_model = str(load_config().get("embedding_model") or "").strip() \
+                or DEFAULT_EMBEDDING_MODEL
+            if response is not None:
+                response.headers["x-localm-embedding-model"] = reported_model
+                response.headers["x-localm-requested-model"] = engine.display_name
         return {
             "object": "list",
             "data": [
@@ -856,7 +870,7 @@ def register(app: FastAPI, ctx) -> None:
             # Report the model that actually answered when the request named none:
             # resolved_model is None in that case and falls through to
             # engine.display_name. An explicit "localm" echoes back unchanged.
-            "model": resolved_model or engine.display_name,
+            "model": reported_model,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
 

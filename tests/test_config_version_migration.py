@@ -167,6 +167,20 @@ def test_current_version_file_is_not_rewritten_on_load(config_file):
     assert config_file.stat().st_mtime_ns == before
 
 
+def test_an_unstamped_file_no_step_changes_is_not_rewritten_on_load(config_file):
+    """A file below the current version whose settings no step changes keeps
+    its bytes and gets no .bak on load; the stamp waits for the next save."""
+    _write(config_file, {"temperature": 0.5})
+    before = config_file.read_bytes()
+
+    cfg.load_config()
+
+    assert config_file.read_bytes() == before
+    assert not config_file.with_name(config_file.name + ".bak").exists()
+    cfg.update_config(lambda c: c.update({"port": 9123}))
+    assert _stored(config_file)["config_version"] == cfg.CURRENT_CONFIG_VERSION
+
+
 def test_absent_file_is_not_created_by_load(config_file):
     cfg.load_config()
 

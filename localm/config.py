@@ -807,6 +807,7 @@ DEFAULT_CONFIG: dict = {
     "tls_cert": "",
     "tls_key": "",
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    "allowed_hosts": None,    # None = own names only; list of host names; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
     # False (default) = open in local/dev mode on loopback.
@@ -1912,8 +1913,17 @@ def _apply_config_migrations(stored: dict) -> None:
 
 
 def _config_needs_migration(stored) -> bool:
-    return (isinstance(stored, dict) and bool(stored)
-            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION)
+    """True when a migration step would change *stored*'s settings. A file that
+    only lacks the version stamp is not rewritten on load; the stamp is written
+    with the next save."""
+    if not (isinstance(stored, dict) and stored
+            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION):
+        return False
+    migrated = copy.deepcopy(stored)
+    _apply_config_migrations(migrated)
+    migrated.pop(CONFIG_VERSION_KEY, None)
+    original = {k: v for k, v in stored.items() if k != CONFIG_VERSION_KEY}
+    return migrated != original
 
 
 def _warn_unknown_stored_keys(stored: dict) -> None:

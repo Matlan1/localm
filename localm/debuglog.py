@@ -823,15 +823,15 @@ class _GrammarTraceFolder:
     arrives or at :meth:`flush`. A triggered record is passed to *record* as
     ``Grammar triggered on regex``.
 
-    An awaiting record ends at a line ending in "`)", but a piece can itself
-    contain "`)" before a newline. So after such a line the following lines are
-    held: a line of at most _MAX_TAIL characters that ends in "`)" and does not
-    start with "Grammar " is taken, together with the held lines, as the rest
-    of the piece; a line starting with "Grammar ", a longer line, :meth:`flush`,
-    or _MAX_CONTINUATION_LINES held lines release the held lines to *forward*.
-    A triggered record ends at the first of its lines that ends in "'". A
-    record whose closing delimiter has not arrived after
-    _MAX_CONTINUATION_LINES further lines is treated as ended.
+    An awaiting record ends at a line ending in "`)" and a triggered record at
+    a line ending in "'", but the generated text can itself contain that
+    delimiter before a newline. So after such a line the following lines are
+    held: a line of at most _MAX_TAIL characters that ends in the same
+    delimiter and does not start with "Grammar " is taken, together with the
+    held lines, as the rest of the record; a line starting with "Grammar ", a
+    longer line, :meth:`flush`, or _MAX_CONTINUATION_LINES held lines release
+    the held lines to *forward*. A record whose closing delimiter has not
+    arrived after _MAX_CONTINUATION_LINES further lines is treated as ended.
 
     *redacted*, when given, receives the first line of every record with its
     payload removed (``Grammar still awaiting trigger after token <id>`` or
@@ -854,7 +854,7 @@ class _GrammarTraceFolder:
         self._awaiting = 0
         self._closer: Optional[str] = None
         self._continuations = 0
-        self._settling = False
+        self._settling: Optional[str] = None
         self._held: list = []
 
     def feed(self, line: str) -> None:
@@ -870,7 +870,7 @@ class _GrammarTraceFolder:
             if (text.startswith(self._TRACE_PREFIX)
                     or len(text) > self._MAX_TAIL):
                 self._release()
-            elif text.endswith(self._AWAITING_CLOSER):
+            elif text.endswith(self._settling):
                 self._held.clear()
                 return
             else:
@@ -907,11 +907,11 @@ class _GrammarTraceFolder:
             self._close()
 
     def _close(self) -> None:
-        self._settling = self._closer == self._AWAITING_CLOSER
+        self._settling = self._closer
         self._closer = None
 
     def _release(self) -> None:
-        self._settling = False
+        self._settling = None
         held, self._held = self._held, []
         for line in held:
             self._forward(line)

@@ -122,6 +122,10 @@ collection route:
   `.../repair`, `.../reembed`) are all refused (403) for a collection that
   holds any document indexed from outside the granted roots, even one added
   by a different, less-restricted key.
+- **Scheduled re-syncs** (`POST /api/jobs` and `PUT /api/jobs/{id}` with
+  `task_kind: rag`) are refused (403) for such a collection; a scheduled run
+  re-syncs only within the creating key's granted roots and is not run once
+  they no longer cover the collection.
 
 A document added through `.../upload` (bytes from the caller's own device,
 never a host filesystem read) is not itself path-confined - it never named a
