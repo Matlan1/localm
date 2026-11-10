@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
-from localm.plugins.builtin.jobs.store import Job, JobStore
+from localm.plugins.builtin.jobs.store import TASK_KIND_SCOPES, Job, JobStore
 
 # Upper bound on how long the runner blocks its worker thread waiting for the server
 # loop to complete a guarded shared-engine unload. Must stay above unload_one_model's
@@ -65,6 +65,10 @@ def run_job(job: Job, *, engine=None) -> dict:
     started = time.time()
     owned_engine = None
     try:
+        refusal = _creator_refusal(job)
+        if refusal:
+            logger.warning("jobs: job %s was not run: %s", job.id, refusal)
+            raise PermissionError(refusal)
         eng = engine
         if job.task_kind in ("chat", "memory"):
             served = _served_engine(job, engine)
@@ -655,6 +659,37 @@ def _shell_still_authorized(job: Job) -> bool:
         _remember_owner_key_job(job)
         return True
     return key_hash_live(job.owner)
+
+
+def _creator_refusal(job: Job) -> Optional[str]:
+    """None when *job* may run, else why it must not.
+
+    A job with no owner (open mode) or created by the owner key runs. Any other
+    job needs its creating key to still exist and to hold the scope for the job's
+    task kind; a revoked or expired key, an unreadable keystore, or a key whose
+    scopes were narrowed all refuse the run."""
+    if (getattr(job, "owner", None) is None
+            or getattr(job, "owner_is_owner_key", False)):
+        return None
+    from localm import scopes as S
+    from localm.auth import (_hash_key, _legacy_owner_identity, get_api_key,
+                             scopes_for_key_hash)
+    owner_key = get_api_key()
+    if owner_key and job.owner in (_hash_key(owner_key),
+                                   _legacy_owner_identity(owner_key)):
+        _remember_owner_key_job(job)
+        return None
+    held = scopes_for_key_hash(job.owner)
+    if held is None:
+        return ("the key that created this job could not be re-confirmed at "
+                "run time (it may have been revoked or expired, or - if it was "
+                "the owner key - simply rolled since; run or edit the job as the "
+                "owner to repair it), so the job was not run")
+    required = TASK_KIND_SCOPES.get(job.task_kind)
+    if required is not None and not S.grants(held, required):
+        return (f"the key that created this job no longer holds the "
+                f"{required!r} scope, so the job was not run")
+    return None
 
 
 def _cwd_trusted(job: Job) -> bool:
