@@ -35,6 +35,35 @@ class TestOwnerKey:
         assert r.exit_code == 0
         assert "open mode" in r.output.lower()
 
+    def test_show_with_named_keys_only_does_not_claim_open_mode(self, runner):
+        auth.create_key("dash", ["models:read"])
+        r = runner.invoke(main, ["key", "show"])
+        assert r.exit_code == 0, r.output
+        assert "open mode" not in r.output.lower()
+        assert "requires a key" in r.output
+
+    def test_show_with_an_unparseable_keystore_does_not_claim_open_mode(self, runner):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text("{not json", encoding="utf-8")
+        r = runner.invoke(main, ["key", "show"])
+        assert r.exit_code == 0, r.output
+        assert "open mode" not in r.output.lower()
+        assert "requires a key" in r.output
+
+    def test_show_with_a_malformed_keystore_entry_does_not_crash(self, runner):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text('["x"]', encoding="utf-8")
+        r = runner.invoke(main, ["key", "show"])
+        assert r.exception is None, r.output
+        assert "requires a key" in r.output
+
+    def test_show_with_an_unreadable_owner_key_file_does_not_claim_open_mode(self, runner):
+        auth.key_file().mkdir(parents=True)
+        r = runner.invoke(main, ["key", "show"])
+        assert r.exit_code == 0, r.output
+        assert "open mode" not in r.output.lower()
+        assert "requires a key" in r.output
+
     def test_generate_persists_and_shows_once(self, runner):
         r = runner.invoke(main, ["key", "generate"])
         assert r.exit_code == 0

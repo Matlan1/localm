@@ -121,7 +121,9 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
 
     With *unattended*, a project ``mode`` that would persist more than the mode
     configured without the project file is ignored (see
-    ``localm.audit.effective_unattended_mode``).
+    ``localm.audit.effective_unattended_mode``), and so is the project's
+    ``auto_approve``. ``auto_approve``, ``verify``, ``model`` and a widening
+    ``mode`` apply only once the project is trusted (``load_project_config``).
 
     Raises ``ProjectConfigUnreadable`` when the project config exists but
     cannot be read, and ``InvalidSessionMode`` for an unknown mode."""
@@ -143,7 +145,7 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
         temperature = float(proj_cfg["temperature"])
     if seed is None and "seed" in proj_cfg:
         seed = int(proj_cfg["seed"])
-    if not yes and proj_cfg.get("auto_approve"):
+    if not yes and not unattended and proj_cfg.get("auto_approve"):
         yes = True
     always_confirm: set = set()
     if interactive_confirm:
