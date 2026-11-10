@@ -1291,12 +1291,11 @@ async def session_set_cwd(session_id: str, req: SessionCwdRequest,
 async def session_memory(session_id: str, request: Request):
     """The project-memory file (LOCALCODER.md) this session injects.
 
-    NOT owner-gated, unlike history and episodes, and the difference is real
-    rather than an oversight: those are the owner's own records held in the
-    localm home directory, while this is a file in the session's own project
-    directory that a restricted session's confined write_file/edit_file can
-    already read and rewrite (SAFE_RESTRICTED_TOOLS). Gating it would refuse
-    through the front door what stays open at the side, which is theatre.
+    NOT owner-gated, unlike history and episodes: those are the owner's own
+    records held in the localm home directory, while this is a file in the
+    session's own project directory that a restricted session's read_file can
+    already read. Changing it (the two POST routes below) is refused for a
+    restricted session, as its write tools are.
     """
     session = request.state.coder_session
     return session.memory()
@@ -1315,6 +1314,9 @@ async def session_remember(session_id: str, req: MemoryRequest, request: Request
     session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
+    if session.restricted:
+        raise HTTPException(
+            403, "A restricted session cannot change the project memory.")
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "text is required")
@@ -1336,6 +1338,9 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
     session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
+    if session.restricted:
+        raise HTTPException(
+            403, "A restricted session cannot change the project memory.")
     pattern = req.pattern.strip()
     if not pattern:
         raise HTTPException(400, "pattern is required")
@@ -2014,7 +2019,10 @@ async def coder_hooks(request: Request, cwd: str = ""):
     non-owner gets ``configured: false`` and nothing else. ``digest`` is what
     POST /api/coder/hooks/trust must echo back. ``mcp_servers`` lists each
     server as ``{"name", "argv", "env", "trusted_calls", "line"}``, where
-    ``line`` is the one-line description the REPL shows. Each hook's
+    ``line`` is the one-line description the REPL shows. ``project`` lists
+    the other settings and files the trust covers (auto_approve, verify, model,
+    a widening mode, .localcoder/system.md, memory.md, skills), one display
+    line each. Each hook's
     ``matcher``, ``command`` and ``error`` come escaped by
     ``hooks.display_safe`` (non-ASCII as ``\\uXXXX``)."""
     if not _is_owner(request):
@@ -2025,12 +2033,13 @@ async def coder_hooks(request: Request, cwd: str = ""):
         from localm.plugins.coder.hooks import display_safe
         from localm.plugins.coder.mcp import mcp_argv
         hooks = _load_hooks(root)
-        if hooks is None or not hooks.has_commands():
+        if hooks is None or not hooks.needs_trust():
             return {"configured": False, "cwd": str(root),
                     "warnings": list(hooks.warnings) if hooks else []}
         return {
             "configured": True, "cwd": str(root),
             "config_path": str(hooks.config_path),
+            "project": [display_safe(line) for line in hooks.describe_project()],
             "trusted": hooks.trusted, "digest": hooks.digest,
             "warnings": list(hooks.warnings),
             "hooks": [
@@ -2070,7 +2079,7 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
     def _trust():
         from localm.plugins.coder.hook_trust import TrustStoreUnreadable
         hooks = _load_hooks(root)
-        if hooks is None or not hooks.has_commands():
+        if hooks is None or not hooks.needs_trust():
             raise HTTPException(
                 404, "No tool hooks or MCP servers are configured for this project.")
         if req.digest != hooks.digest:
@@ -2096,12 +2105,16 @@ async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
     root = _episode_root(req.cwd)
 
     def _forget():
-        from localm.plugins.coder.hook_trust import TrustStoreUnreadable, forget_trust
+        from localm.plugins.coder.hook_trust import (
+            TrustStoreUnreadable, clear_session_decision, forget_trust, project_folder,
+            trust_path)
         from localm.plugins.coder.project_config import find_project_config
-        path = find_project_config(root)
-        if path is None:
+        config = find_project_config(root)
+        if config is None and not project_folder(root).is_dir():
             raise HTTPException(404, "No project config found for this folder.")
+        path = trust_path(root)
         try:
+            clear_session_decision(path)
             return {"forgotten": forget_trust(path)}
         except TrustStoreUnreadable as e:
             raise HTTPException(500, f"The hook trust record could not be read: {e}") from e
