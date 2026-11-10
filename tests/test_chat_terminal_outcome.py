@@ -132,12 +132,26 @@ def test_chat_stream_client_abort_marks_ctx_abort_and_skips_outlet():
     assert outlet_calls == [], "the outlet ran for a turn the client abandoned"
 
 
+def _record_completion_contexts(monkeypatch, seen):
+    """Record each ChatHookContext the completions route builds: no inlet runs
+    there, so the inlet recorder never sees it."""
+    import localm.inference.routes.chat as chat_routes
+
+    class _Recorded(chat_routes.ChatHookContext):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen["ctx"].append(self)
+
+    monkeypatch.setattr(chat_routes, "ChatHookContext", _Recorded)
+
+
 # --------------------------------------------------------------------------- #
 #  raw completions streaming path                                             #
 # --------------------------------------------------------------------------- #
 
-def test_completions_stream_error_skips_outlet_and_marks_ctx_error():
+def test_completions_stream_error_skips_outlet_and_marks_ctx_error(monkeypatch):
     app, seen = _hooked_app(_engine(raise_after=True))
+    _record_completion_contexts(monkeypatch, seen)
     with TestClient(app) as c:
         r = c.post("/v1/completions", json={
             "model": "test-model", "prompt": "hi", "stream": True})
@@ -157,8 +171,9 @@ def test_completions_stream_success_runs_outlet_once():
     assert seen["outlet"] == [("partial", "success")]
 
 
-def test_completions_nonstream_error_skips_outlet_and_marks_ctx_error():
+def test_completions_nonstream_error_skips_outlet_and_marks_ctx_error(monkeypatch):
     app, seen = _hooked_app(_engine(raise_after=True))
+    _record_completion_contexts(monkeypatch, seen)
     with TestClient(app) as c:
         r = c.post("/v1/completions", json={
             "model": "test-model", "prompt": "hi", "stream": False})

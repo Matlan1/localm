@@ -1952,6 +1952,8 @@ export const I18N_EN = {
   "settings.field.chatToolGrammar.help": "Once the model starts a <tool_call> (the web search/fetch tool), force it to be valid tool-call JSON (lazy GBNF grammar; local grammar-capable backends only). Free text and thinking are unaffected.",
   "settings.field.chatWebMaxLookups.label": "Web lookups per message",
   "settings.field.chatWebMaxLookups.help": "With web access on, the most searches and page reads the model may run for one message. They also stop when it repeats a search or page, or two in a row find nothing new. 0 = no limit.",
+  "settings.field.chatStyleNote.label": "Add the chat style note",
+  "settings.field.chatStyleNote.help": "In this app's chat and in localm run, add a short note to the system prompt asking the model to answer directly and to speak of itself as \"I\". API requests from other programs never get it.",
   "settings.field.guiPreviewEnabled.label": "Preview generated pages in a sandboxed canvas",
   "settings.field.guiPreviewEnabled.help": "Adds a canvas button to a self-contained HTML or SVG block in a reply, rendering it in a sandboxed frame with no network access and no access to this app. On by default.",
   "settings.field.guiPreviewOwnerOnly.label": "Restrict the preview canvas to owner sessions",

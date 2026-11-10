@@ -63,7 +63,9 @@ def test_priority_then_registration_order():
 # --------------------------------------------------------------------------- #
 
 def _think_ctx(model_id):
-    return ChatHookContext(model_id=model_id, stream=False, request_id="r")
+    ctx = ChatHookContext(model_id=model_id, stream=False, request_id="r")
+    ctx.state["client_id"] = "chat"
+    return ctx
 
 
 def _cap_ctx(model_id, capacity):
