@@ -94,8 +94,8 @@ def _home() -> Path:
 
 def _persist_enabled() -> bool:
     """Chat persistence/writes are off in privacy mode (the default)."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    from localm.audit import automatic_write_allowed
+    return automatic_write_allowed("chat")
 
 
 # ------------------------------------------------------------------ #
