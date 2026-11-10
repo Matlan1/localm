@@ -32,7 +32,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Collection, Optional
 
 from localm.debuglog import logger
 
@@ -1013,8 +1013,12 @@ def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
 
 
 def find_attachable(home: Path, root_dir: str,
-                    probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+                    probe: Optional[Callable[[dict], bool]] = None,
+                    *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
     """The live, identity-verified instance serving *root_dir*, or None.
+
+    Entries whose ``instance_id`` is in *exclude_ids* are skipped (neither
+    probed nor reaped).
 
     Attaches ONLY on a verified /whoami handshake (app==localm + matching
     instance_id), so an impostor on a reused port is never attached to. A same-dir
@@ -1027,6 +1031,8 @@ def find_attachable(home: Path, root_dir: str,
     target = _canon(root_dir)
     for entry in list_entries(home):
         if _canon(entry.get("root_dir", "")) != target:
+            continue
+        if exclude_ids and entry.get("instance_id") in exclude_ids:
             continue
         try:
             alive = probe(entry)
@@ -1058,14 +1064,15 @@ def attach_url(entry: dict) -> str:
 
 
 def attach_target(home: Path, root_dir: str,
-                  probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+                  probe: Optional[Callable[[dict], bool]] = None,
+                  *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
     """The thin-client attach point for the instance serving *root_dir*, or None.
 
     A CLI chat / coder client uses this to talk to the running instance's ``/v1``
     (with its registry ``token``) instead of starting its own server + model.
     Returns ``{base_url, token, port, scheme, mode}`` (loopback - same
-    machine)."""
-    entry = find_attachable(home, root_dir, probe=probe)
+    machine). *exclude_ids* as for find_attachable."""
+    entry = find_attachable(home, root_dir, probe=probe, exclude_ids=exclude_ids)
     if not entry:
         return None
     from localm.bindhost import self_connect_host, url_host

@@ -796,8 +796,9 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
     except Exception:
         return
     if sys.platform == "win32":
+        from localm import sysprog as _sysprog
         try:
-            done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+            done = subprocess.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],
                                   capture_output=True, timeout=10)
             if done.returncode == 0:
                 return

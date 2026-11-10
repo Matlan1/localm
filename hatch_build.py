@@ -16,7 +16,9 @@ no file is touched. Any failure here also passes the scripts through unchanged:
 the installer then fails on the locked launcher, as it would without this hook, and an
 update that ran it rolls back.
 
-Temporary: updates from 0.3.3 on do not reinstall the project over a running launcher.
+Every update or repair that reinstalls the project (``uv pip install -e``) builds it
+with this hook, including the ones the updaters of released versions run. See
+test_a_running_launcher_is_left_out_of_the_build.
 """
 import os
 import subprocess

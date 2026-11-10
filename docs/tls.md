@@ -68,14 +68,20 @@ if 8642 was busy - use the address it prints). Under the hood:
   expiry (about 30 days before) or when it no longer covers an address or name
   the server needs. The CA is reused for those regenerations, so a device you trusted once stays trusted
   after your address changes.
-- The CA itself is replaced only when it cannot be reused: it has reached its own
-  expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are missing or
-  unreadable. localm mints a fresh CA in those cases, and every device that
+- The CA itself is replaced only when it cannot be reused: it is within 30 days
+  of its own expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are
+  missing or unreadable. The certificate is replaced together with it. localm mints a fresh CA in those cases, and every device that
   trusted the old one has to repeat the trust step below.
 - If certificates ever get into a state you cannot explain, stop localm, delete
   `<LOCALM_HOME>/tls/`, and start it again. The CA and the certificate are both
   rebuilt from scratch, so every device has to trust the new CA afterwards.
 - The CA private key never leaves your machine.
+- Details: both keys are RSA-2048, the server certificate is valid for 730 days
+  (never past the CA's own expiry), and the CA carries no name constraints, so
+  a device that trusts it trusts anything it signs. Beside `ca.crt`, `ca.key`,
+  `server.crt` and `server.key`, the `tls/` folder holds `meta.json`, a record
+  of which names and addresses the certificate covers. Keep the key files
+  private; the CA key can sign for any name.
 
 ### The one-time "trust this certificate" step
 
@@ -123,7 +129,7 @@ example one issued for a real hostname) instead of the built-in local CA.
 ### From the GUI: Settings > Server
 
 Everything above has a Settings equivalent, so a browser-only user (no
-terminal) can bind past loopback too - Settings > Server:
+terminal) can bind past loopback too - Settings > Server & network:
 
 - **Bind address** (`bind_host`) - blank for loopback-only, `0.0.0.0` for
   every IPv4 interface, `::` for every interface on both IPv4 and IPv6, or a
@@ -143,7 +149,7 @@ that could fix it. So instead of exiting, a Settings-driven bind that fails
 the check - no key, too short a key, TLS setup failing, or the configured
 address simply not being bindable on this machine right now - falls back to
 127.0.0.1 with a loud warning (console, log, and a hint in the Companion app
-card under Settings > Server) rather than leaving the server unreachable. An
+card under Settings > Server & network) rather than leaving the server unreachable. An
 explicit `-H` from a terminal keeps failing hard (exits) exactly as above,
 since a terminal can always add `--insecure` or fix the key itself.
 
@@ -153,6 +159,20 @@ You only need this when you want a real domain name and a publicly trusted
 certificate (no per-device trust step), for example to reach localm from the
 public internet. Keep localm on 127.0.0.1 so the only way in is through the
 proxy.
+
+localm answers only to its own names (see the Host check in
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding)).
+A proxy that forwards the browser's host name, as Caddy does by default and nginx
+does with `proxy_set_header Host $host`, needs that name in `allowed_hosts`,
+then a restart:
+
+```powershell
+localm config allowed_hosts llm.example.internal
+```
+
+nginx's default sets `Host` to the `proxy_pass` address: `127.0.0.1:8642` or
+another IP address needs nothing, a name (such as a compose service name,
+`http://localm:8642`) needs that name in `allowed_hosts`.
 
 ### Caddy (automatic certificates)
 

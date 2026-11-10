@@ -630,6 +630,17 @@ class TestGuiRoutes:
         assert r.status_code == 200 and r.json()["removed_bytes"] == 1500
         assert c.get("/api/models/pulls/interrupted").json()["downloads"] == []
 
+    def test_resume_by_a_key_without_host_fs_is_remote_only(self, client, home):
+        c, started = client
+        [d] = c.get("/api/models/pulls/interrupted").json()["downloads"]
+        from localm import auth
+        from localm import scopes as S
+        key = auth.create_key("puller", [S.MODELS_WRITE], fs_access="none")["key"]
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume",
+                   json={"fresh": True}, headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        assert started[-1][1][:2] == ["pull", "--remote-only"]
+
     def test_resume_of_a_changed_source_starts_nothing(self, client, monkeypatch):
         c, started = client
         [d] = c.get("/api/models/pulls/interrupted").json()["downloads"]

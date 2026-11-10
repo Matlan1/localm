@@ -713,6 +713,9 @@ def spec_drafts(model):
               help="Internal: route a single-file HF pull to this directory "
                    "instead of <data dir>/models (used by the GUI's ComfyUI "
                    "missing-model download flow).")
+@click.option("--remote-only", "remote_only", is_flag=True, hidden=True,
+              help="Internal: treat MODEL_SPEC as a remote spec even when it "
+                   "names a file or folder on this machine.")
 @click.option("--register/--no-register", default=True, hidden=True,
               help="Internal: whether to add the download to localm's own "
                    "model registry (off for a file routed to --comfy-dest-dir, "
@@ -731,7 +734,8 @@ def spec_drafts(model):
               help="Stop offering the interrupted download ID; its files are "
                    "kept and --list-interrupted still shows it.")
 def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
-         comfy_dest_dir, register, list_interrupted, resume, delete_id, dismiss_id):
+         comfy_dest_dir, register, remote_only, list_interrupted, resume, delete_id,
+         dismiss_id):
     """Download a model from HuggingFace, CivitAI, or a URL.
 
     \b
@@ -792,13 +796,13 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
         if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
             _offer_interrupted(model_spec, name)
         rc = _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-                       comfy_dest_dir, register, type_hint)
+                       comfy_dest_dir, register, type_hint, remote_only=remote_only)
     if rc:
         sys.exit(rc)
 
 
 def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-              comfy_dest_dir, register, type_hint=False) -> int:
+              comfy_dest_dir, register, type_hint=False, remote_only=False) -> int:
     """Run one pull as ``localm pull`` does; returns its exit code (0, 1, or
     130 when Ctrl+C stopped it)."""
     from ..model_manager.pull import forget_stopped_download
@@ -807,7 +811,7 @@ def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
                         dest_dir=comfy_dest_dir, register=register,
-                        type_is_hint=type_hint)
+                        type_is_hint=type_hint, allow_local=not remote_only)
     except KeyboardInterrupt:
         click.echo("\n" + _stopped_pull_message(), err=True)
         return 130
@@ -2211,12 +2215,18 @@ def gpus_cmd():
 
 @main.command("unload")
 @click.argument("model", required=False, shell_complete=_complete_model_name)
-def unload_cmd(model):
+@click.option("--force", is_flag=True,
+              help="Stop requests still running on a busy model (the reply "
+                   "being written is cut off) and unload it.")
+def unload_cmd(model, force):
     """Unload the currently loaded model(s) from a running localm server.
 
     With no MODEL, unloads everything - frees the GPU for another task, the
     same as the GUI's "Unload all". With MODEL, unloads only that one,
     leaving any other loaded models running.
+
+    A model still busy with a request is left loaded and the command exits 1;
+    --force stops its requests and unloads it.
 
     Talks to the server already serving this directory (see `localm status`);
     set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
@@ -2251,8 +2261,13 @@ def unload_cmd(model):
     headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
 
     try:
+        params = {}
+        if model:
+            params["model"] = model
+        if force:
+            params["force"] = "true"
         resp = requests.post(f"{url}/v1/models/unload", headers=headers,
-                             params={"model": model} if model else None,
+                             params=params or None,
                              timeout=180, verify=tls.requests_verify(url))
     except requests.RequestException as e:
         # show_url() already escapes its own argument; only `e` needs it here.
@@ -2284,9 +2299,23 @@ def unload_cmd(model):
     if data.get("status") == "already_unloaded":
         # A targeted unload on a registered-but-not-loaded model is an
         # idempotent no-op success, reported as such rather than as an unload.
+        if not model:
+            console.print("[dim]Nothing was loaded.[/dim]")
+            return
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    if data.get("status") == "confirm_required":
+        # The model is still busy with a request and stays loaded.
+        busy = escape(str(data.get("model") or model))
+        detail = data.get("detail")
+        console.print(f"[yellow]'{busy}' is busy with a running request and was "
+                      "not unloaded.[/yellow]")
+        if detail:
+            console.print(f"  {escape(str(detail))}")
+        console.print("Try again when it finishes, or re-run with "
+                      "[bold]--force[/bold] to stop it and unload it.")
+        sys.exit(1)
     skipped = [str(s) for s in (data.get("skipped_in_use") or [])]
     left = data.get("media_left_running")
     left = left if isinstance(left, dict) else {}
@@ -2300,11 +2329,15 @@ def unload_cmd(model):
     if data.get("status") == "in_use":
         if skipped:
             _print_left_loaded()
-            console.print("Try again when it finishes.")
+            console.print("Try again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]."
+                             if data.get("confirm_required") and not force else "."))
         else:
             console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
                           "by a running request and was not unloaded.[/yellow] Try "
-                          "again when it finishes.")
+                          "again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]." if not force
+                             else "."))
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
@@ -2365,10 +2398,10 @@ def stop_cmd(instance_id, stop_all, timeout):
     stop a specific instance, or --all to stop every running one.
 
     Requests the same clean shutdown the GUI's Settings page uses (model
-    unloaded, then the process exits). Without LOCALM_API_KEY set, a plain
-    local instance declines the unauthenticated request (by design), and if
-    the server does not confirm within --timeout for any reason, `stop` ends
-    the process directly instead.
+    unloaded, then the process exits), with the API key when one is set and
+    otherwise the instance's own local token. If the server refuses the
+    request or does not confirm within --timeout, `stop` ends the process
+    directly instead.
     """
     import time
 
@@ -2448,11 +2481,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                                      timeout=5, verify=tls.requests_verify(url),
                                      allow_redirects=False)
                 if resp.status_code in (401, 403):
-                    # The open-mode management gate refuses an unauthenticated POST
-                    # from a bare local client with no shell/API-key credential,
-                    # which is the DEFAULT case for a plain `localm
-                    # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
-                    # back to a direct kill rather than hard-failing.
+                    # The server refused the credential. Fall back to ending
+                    # the process directly.
                     graceful_denied = True
                 elif resp.status_code == 200:
                     deadline = time.monotonic() + timeout
@@ -2470,10 +2500,10 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         if not stopped:
             if graceful_denied:
-                console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
-                              f"unauthenticated shutdown request (set "
-                              f"LOCALM_API_KEY for a clean model-unload "
-                              f"shutdown) - ending the process directly.")
+                console.print(f"[dim]{escape(iid)}:[/dim] server refused the "
+                              f"shutdown request (set LOCALM_API_KEY to its key for "
+                              f"a clean model-unload shutdown) - ending the process "
+                              f"directly.")
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path

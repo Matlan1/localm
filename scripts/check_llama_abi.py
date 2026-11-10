@@ -29,7 +29,8 @@ The two enum outcomes are DISTINCT:
 IT ALSO CHECKS THE LIBMTMD SPEECH GENERATION BINDING (``mtmd_gen.py``) against
 ``tools/mtmd/mtmd.h`` and ``tools/mtmd/mtmd-helper.h`` at the same ref: the
 interface is read from the headers (``mtmd_gen_audio_voice_name`` declared =
-state_v3, else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
+state_v3, or state_v4 when ``mtmd_helper_gen_audio_inp`` also has a ``temp``
+field, else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
 else ``mtmd_gen_state_init`` declared = state, else legacy), every struct localm allocates must match field for field with the
 same total size, and every function localm binds must take as many arguments as
 localm declares, with the same structs passed or returned by value.
@@ -56,24 +57,27 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
-# One upstream ref per llama_model_params layout localm binds, plus one for the
-# newest llama_context_params layout. The default run checks all four.
+# One upstream ref per llama_model_params layout localm binds, plus one for each
+# of the two newest llama_context_params layouts. The default run checks all
+# five.
 LLAMA_ABI_REFS = {
     "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
     "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
     "v3": "b10905",   # lazy_mode@28 inserted (b10653; named lazy_mode from b10679)
     "ctx_v3": "b11505",  # context_params moe_cache_size@112 inserted (b11480)
+    "ctx_v4": "b12191",  # context_params moe_cache_cpu_share@120 inserted (b12191)
 }
 LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
 
 # One upstream ref per libmtmd speech generation interface localm binds
-# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all four.
+# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all five.
 MTMD_SPEECH_REFS = {
     "legacy": "b11757",    # stateless: seed and state_data in mtmd_gen_inp/out
     "state": "b11908",     # mtmd_gen_state, 4-argument mtmd_gen_audio_process
     "state_v2": "b11941",  # n_past/out_mode/voice in the helper input, penalty pair in mtmd_gen_inp
     "state_v3": "b12061",  # no voice in the helper input, n_voices in mtmd_gen_audio_info
+    "state_v4": "b12219",  # temp before seed in the helper input
 }
 _MTMD_HEADERS = ("tools/mtmd/mtmd.h", "tools/mtmd/mtmd-helper.h")
 
@@ -291,13 +295,16 @@ def _header_model_params_layout(header: str) -> str:
 
 
 def _header_context_params_layout(header: str) -> str:
-    """Which llama_context_params layout a header carries: 'v1', 'v2' or 'v3'.
+    """Which llama_context_params layout a header carries: 'v1' to 'v4'.
 
     Independent axis from the model_params split above (see _structs' module
-    docstring). 'v3' is keyed on moe_cache_size (inserted after type_v at
-    upstream b11480), 'v2' on n_outputs_max_per_seq (inserted directly before
-    n_threads sometime between lemonade b1307 and b10360)."""
+    docstring). 'v4' is keyed on moe_cache_cpu_share (inserted after
+    moe_cache_size at upstream b12191), 'v3' on moe_cache_size (inserted after
+    type_v at upstream b11480), 'v2' on n_outputs_max_per_seq (inserted directly
+    before n_threads sometime between lemonade b1307 and b10360)."""
     body = _strip_comments(_extract_struct_body(header, "llama_context_params"))
+    if re.search(r"\bmoe_cache_cpu_share\b", body):
+        return "v4"
     if re.search(r"\bmoe_cache_size\b", body):
         return "v3"
     return "v2" if re.search(r"\bn_outputs_max_per_seq\b", body) else "v1"
@@ -315,15 +322,18 @@ def _localm_layout(struct_name: str, layout: str):
     _ensure_localm_importable()
     from localm.inference.backends.llamacpp import _structs as S
 
-    cls = {
-        "llama_model_params": {"v1": S.LlamaModelParamsV1,
-                               "v2": S.LlamaModelParamsV2,
-                               "v3": S.LlamaModelParamsV3}[layout],
-        "llama_context_params": {"v1": S.LlamaContextParamsV1,
-                                 "v2": S.LlamaContextParamsV2,
-                                 "v3": S.LlamaContextParamsV3}[layout],
-        "llama_batch": S.LlamaBatch,
-    }[struct_name]
+    if struct_name == "llama_batch":
+        cls = S.LlamaBatch
+    else:
+        cls = {
+            "llama_model_params": {"v1": S.LlamaModelParamsV1,
+                                   "v2": S.LlamaModelParamsV2,
+                                   "v3": S.LlamaModelParamsV3},
+            "llama_context_params": {"v1": S.LlamaContextParamsV1,
+                                     "v2": S.LlamaContextParamsV2,
+                                     "v3": S.LlamaContextParamsV3,
+                                     "v4": S.LlamaContextParamsV4},
+        }[struct_name][layout]
     out = {}
     for fname, ftype in cls._fields_:
         out[fname] = (getattr(cls, fname).offset, ctypes.sizeof(ftype))
@@ -559,13 +569,20 @@ def _fetch_mtmd_headers(ref: str) -> str:
 def _header_speech_interface(mtmd_text: str):
     """Which speech generation interface mtmd headers declare: the first
     interface in ``mtmd_gen._INTERFACE_MARKERS`` (the runtime's own table)
-    whose marker function the headers declare, None when they declare none."""
+    whose marker function the headers declare, None when they declare none.
+    The state_v3 marker is state_v4 when ``mtmd_helper_gen_audio_inp`` has a
+    ``temp`` field: the header-side reading of what the runtime tells apart by
+    the seed offset in ``mtmd_helper_gen_audio_inp_default``."""
     _ensure_localm_importable()
     from localm.inference.backends.llamacpp import mtmd_gen as G
 
     text = _strip_comments(mtmd_text)
     for marker, interface in G._INTERFACE_MARKERS:
         if _prototype(text, marker) is not None:
+            if interface == G.INTERFACE_STATE_V3:
+                body = _extract_block_body(text, "struct", "mtmd_helper_gen_audio_inp")
+                if body is not None and "temp" in dict(_parse_field_decls(body)):
+                    return G.INTERFACE_STATE_V4
             return interface
     return None
 
@@ -753,8 +770,10 @@ def main() -> int:
                          f"{LLAMA_ABI_REFS['v2']} (post-reorder) and "
                          f"{LLAMA_ABI_REFS['v3']} (lazy_mode inserted) and "
                          f"{LLAMA_ABI_REFS['ctx_v3']} (context_params "
-                         "moe_cache_size inserted), since localm binds all "
-                         "three layouts of each params struct.")
+                         "moe_cache_size inserted) and "
+                         f"{LLAMA_ABI_REFS['ctx_v4']} (context_params "
+                         "moe_cache_cpu_share inserted), since localm binds "
+                         "every layout of each params struct.")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
     ap.add_argument("--mtmd-header", action="append", default=None,
@@ -812,7 +831,7 @@ def main() -> int:
             and seen_speech != set(MTMD_SPEECH_REFS)):
         print(f"\nFAIL: expected to check every speech generation interface, only "
               f"saw {sorted(seen_speech)} - the refs in MTMD_SPEECH_REFS no longer "
-              "cover all four.")
+              "cover all five.")
         total += 1
 
     # Both layout axes must have been exercised.
@@ -822,11 +841,11 @@ def main() -> int:
               "longer cover the model_params reorder and the lazy_mode insertion.")
         total += 1
     if (not args.header and not args.ref
-            and seen_context_layouts != {"v1", "v2", "v3"}):
-        print(f"\nFAIL: expected to check all three context_params layouts, only "
+            and seen_context_layouts != {"v1", "v2", "v3", "v4"}):
+        print(f"\nFAIL: expected to check all four context_params layouts, only "
               f"saw {sorted(seen_context_layouts)} - the pinned refs in "
-              "LLAMA_ABI_REFS no longer cover the n_outputs_max_per_seq and "
-              "moe_cache_size insertions.")
+              "LLAMA_ABI_REFS no longer cover the n_outputs_max_per_seq, "
+              "moe_cache_size and moe_cache_cpu_share insertions.")
         total += 1
 
     if additive:

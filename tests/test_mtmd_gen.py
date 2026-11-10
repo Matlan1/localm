@@ -18,16 +18,43 @@ class _Fn:
         self.argtypes = argtypes
 
 
+class _DefaultInputFn(_Fn):
+    """``mtmd_helper_gen_audio_inp_default`` of a library whose helper input is
+    *layout*: upstream's defaults (top_k 50, top_p 1, temp -1 where the layout
+    has it, a random seed, WAV), returned through whatever restype the caller
+    set, as the native function writes its bytes into the caller's buffer."""
+
+    def __init__(self, layout, seed=0xFFFFFFFF):
+        super().__init__()
+        self._layout = layout
+        self._seed = seed
+
+    def __call__(self):
+        inp = self._layout(top_k=50, top_p=1.0, seed=self._seed, out_type=1)
+        if hasattr(inp, "temp"):
+            inp.temp = -1.0
+        out = self.restype()
+        ctypes.memmove(ctypes.byref(out), ctypes.byref(inp),
+                       min(ctypes.sizeof(out), ctypes.sizeof(inp)))
+        return out
+
+
 class _FakeLib:
     """A CDLL stand-in: ``lib[name]`` returns a fresh function object for every
-    exported *name*, as ctypes does; attributes are the shared, cached ones."""
+    exported *name*, as ctypes does; attributes are the shared, cached ones.
+    ``mtmd_helper_gen_audio_inp_default`` returns the defaults laid out as
+    *helper_layout*, with *seed* as the default seed."""
 
-    def __init__(self, exports):
+    def __init__(self, exports, helper_layout=None, seed=0xFFFFFFFF):
         self._exports = set(exports)
+        self._helper_layout = helper_layout or g._HelperInputV3
+        self._seed = seed
 
     def __getitem__(self, name):
         if name not in self._exports:
             raise AttributeError(f"function '{name}' not found")
+        if name == "mtmd_helper_gen_audio_inp_default":
+            return _DefaultInputFn(self._helper_layout, self._seed)
         return _Fn()
 
 
@@ -119,6 +146,41 @@ class TestAbiGate:
         assert ns.mtmd_helper_gen_audio_next_is_text.restype is ctypes.c_bool
         assert ns.mtmd_gen_audio_voice_name.restype is ctypes.c_char_p
 
+    def test_a_state_v3_marker_with_the_temp_layout_binds_the_state_v4_interface(self):
+        lib = _FakeLib(_exports(g.INTERFACE_STATE_V4), helper_layout=g._HelperInputV4)
+        ns = g.bind_generation_api(lib)
+        assert ns.interface == g.INTERFACE_STATE_V4
+        assert ns.helper_input is g._HelperInputV4
+        assert ns.mtmd_gen_audio_get_info.restype is g._GenAudioInfoV3
+        assert ns.mtmd_gen_inp_default.restype is g._GenInpV2
+        assert ns.mtmd_helper_gen_audio_set_input.argtypes[1] is ctypes.POINTER(
+            g._HelperInputV4)
+        assert ns.mtmd_helper_gen_audio_inp_default.restype is g._HelperInputV4
+        assert ns.mtmd_gen_audio_voice_name.restype is ctypes.c_char_p
+
+    def test_the_state_v3_layout_keeps_the_state_v3_interface(self):
+        lib = _FakeLib(_exports(g.INTERFACE_STATE_V3), helper_layout=g._HelperInputV3)
+        ns = g.bind_generation_api(lib)
+        assert ns.interface == g.INTERFACE_STATE_V3
+        assert ns.mtmd_helper_gen_audio_inp_default.restype is g._HelperInputV3
+
+    @pytest.mark.parametrize("layout, want", [
+        (g._HelperInputV3, g.INTERFACE_STATE_V3), (g._HelperInputV4, g.INTERFACE_STATE_V4)])
+    def test_the_default_seed_offset_decides_the_layout(self, layout, want):
+        assert g._helper_input_interface(_FakeLib(
+            _exports(g.INTERFACE_STATE_V3), helper_layout=layout)) == want
+
+    def test_a_default_input_matching_neither_layout_is_refused(self):
+        lib = _FakeLib(_exports(g.INTERFACE_STATE_V3), seed=7)
+        with pytest.raises(g.SpeechUnavailable, match="does not recognise"):
+            g.bind_generation_api(lib)
+
+    def test_a_state_v3_marker_without_the_default_input_function_is_refused(self):
+        lib = _FakeLib(_exports(g.INTERFACE_STATE_V3)
+                       - {"mtmd_helper_gen_audio_inp_default"})
+        with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
+            g.bind_generation_api(lib)
+
     @pytest.mark.parametrize("interface", [g.INTERFACE_LEGACY, g.INTERFACE_STATE,
                                            g.INTERFACE_STATE_V2])
     def test_the_audio_info_of_an_older_interface_has_no_voice_count(self, interface):
@@ -177,6 +239,11 @@ class TestAbiGate:
             "out_mode": 28, "speaker_ref": 32, "lang": 40, "top_k": 48,
             "top_p": 52, "seed": 56, "out_type": 60}
         assert ctypes.sizeof(g._HelperInputV3) == 64
+        assert _offsets(g._HelperInputV4) == {
+            "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16, "n_past": 24,
+            "out_mode": 28, "speaker_ref": 32, "lang": 40, "top_k": 48,
+            "top_p": 52, "temp": 56, "seed": 60, "out_type": 64}
+        assert ctypes.sizeof(g._HelperInputV4) == 72
 
     def test_the_audio_infos_match_the_c_layouts(self):
         assert _offsets(g._GenAudioInfo) == {"type": 0, "sample_rate": 4,
@@ -299,6 +366,7 @@ class _FakeMtmd:
                             "lang": inp.lang, "n_past": getattr(inp, "n_past", None),
                             "out_mode": getattr(inp, "out_mode", None),
                             "voice": getattr(inp, "voice", None),
+                            "temp": getattr(inp, "temp", None),
                             "prompt": inp.prompt, "speaker": bool(inp.speaker_ref)})
         self.step = 0
         self.calls.append("set_input")
@@ -344,7 +412,8 @@ class _FakeMtmd:
         self.calls.append("bitmap_free")
 
     def mtmd_gen_inp_default(self, ctx):
-        if self.interface in (g.INTERFACE_STATE_V2, g.INTERFACE_STATE_V3):
+        if self.interface in (g.INTERFACE_STATE_V2, g.INTERFACE_STATE_V3,
+                              g.INTERFACE_STATE_V4):
             return g._GenInpV2()
         if self.interface == g.INTERFACE_STATE:
             return g._GenInp()
@@ -381,7 +450,8 @@ class _FakeProjector:
 
 
 @pytest.fixture(params=[g.INTERFACE_STATE, g.INTERFACE_STATE_V2,
-                        g.INTERFACE_STATE_V3, g.INTERFACE_LEGACY])
+                        g.INTERFACE_STATE_V3, g.INTERFACE_STATE_V4,
+                        g.INTERFACE_LEGACY])
 def synth(monkeypatch, request):
     calls = []
     api = g.api
@@ -488,6 +558,15 @@ class TestSynthesisLoop:
         assert (sent["n_past"], sent["out_mode"], sent["voice"]) == (0, 0, None)
         assert sent["lang"] == b"english" and sent["top_k"] == 40
         assert not hasattr(sent["layout"], "voice")
+
+    def test_the_state_v4_input_asks_for_the_model_default_temperature(self, synth):
+        if synth._m.interface != g.INTERFACE_STATE_V4:
+            pytest.skip("the state_v4 interface only")
+        synth.synthesize("hello", language="en", seed=3)
+        sent = synth._m.inputs[0]
+        assert sent["temp"] == -1.0
+        assert (sent["n_past"], sent["out_mode"], sent["voice"]) == (0, 0, None)
+        assert sent["seed"] == 3 and sent["top_k"] == 40
 
     def test_a_repeated_seed_resets_the_legacy_generator_before_the_request(self, synth):
         if synth._m.interface != g.INTERFACE_LEGACY:

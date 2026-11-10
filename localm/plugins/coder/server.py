@@ -89,6 +89,7 @@ class ManagedServer:
         # names this interpreter's localm.
         cmd = [
             sys.executable, "-m", "localm", "serve", self.model,
+            "--new",
             "--host", self.host,
             "--port", str(self.port),
             *self._extra,

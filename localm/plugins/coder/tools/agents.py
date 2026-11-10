@@ -177,7 +177,27 @@ def inherited_child_kwargs(
         # this line can only ever take capability away from the child.
         role=role,
         verify_cmd=verify_cmd,
+        patch_mode=getattr(parent, "patch_mode", False) is True,
     )
+
+
+def patch_mode_refusal(parent: Any, tool: str) -> Optional[ToolResult]:
+    """The error *tool* returns when *parent* runs in patch mode, else None. A
+    child's edits would not reach the parent's patch, so no child is spawned."""
+    if getattr(parent, "patch_mode", False) is True:
+        return ToolResult.error(
+            f"{tool} is not available in patch mode: a sub-agent's edits would "
+            "not be collected into this session's patch. Make the edits in this "
+            "session instead.")
+    return None
+
+
+def inherit_session_state(parent: Any, child: Any) -> None:
+    """Copy the confirmation state that is not a constructor argument from
+    *parent* to *child*: whether untrusted content is in context, and whether
+    that re-arms confirmation."""
+    child._untrusted_in_context = getattr(parent, "_untrusted_in_context", False) is True
+    child.taint_rearms_confirm = getattr(parent, "taint_rearms_confirm", True) is not False
 
 
 def _prepare_child(
@@ -215,6 +235,10 @@ def _prepare_child(
     writes too - giving it a second, redundant oracle would only run the same
     check twice for no gain.
     """
+    refusal = patch_mode_refusal(parent, tool)
+    if refusal is not None:
+        return None, refusal
+
     from ..roles import resolve_role
     try:
         resolve_role(role)
@@ -273,6 +297,7 @@ def _prepare_child(
         confirm_handler=confirm_handler, role=role,
         verify_cmd=_isolated_verify_cmd(parent, cwd) if isolated else None,
     ))
+    inherit_session_state(parent, child)
     return child, full_task
 
 
@@ -543,6 +568,9 @@ def tool_spawn_agent_background(
     if _parent_agent is None:
         return ToolResult.error(
             "spawn_agent_background requires a running parent agent")
+    refusal = patch_mode_refusal(_parent_agent, "spawn_agent_background")
+    if refusal is not None:
+        return refusal
 
     # REFUSE TO LAUNCH when there is no channel to ask on, rather than launching
     # and relying on the child hitting the fail-closed branch later. The

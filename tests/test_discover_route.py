@@ -347,3 +347,46 @@ def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
         r2 = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
     assert r2.json()["vram"]["total"] == 16_000_000_000
     assert r2.json()["results"][0]["fit"] == "too-big"
+
+
+def _psutil_import_raises(monkeypatch, exc):
+    """Make `import psutil` raise *exc*, as a half-initialised psutil does."""
+    import builtins
+    import sys
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "psutil" or name.startswith("psutil."):
+            raise exc
+        return real_import(name, *a, **kw)
+
+    monkeypatch.delitem(sys.modules, "psutil", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_total_ram_reports_zero_and_warns_when_psutil_import_breaks(monkeypatch, caplog):
+    from localm.plugins.gui.routes.models import discovery
+    _psutil_import_raises(monkeypatch, NotImplementedError("platform linux is not supported"))
+    with caplog.at_level("WARNING", logger="localm"):
+        assert discovery._total_ram() == 0
+    assert any("platform linux is not supported" in r.getMessage()
+               and r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_search_still_answers_when_psutil_import_breaks(gui_app, monkeypatch):
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return [{"id": "org/big", "downloads": 1, "likes": 0, "updated": "", "formats": ["hf"],
+                 "size_bytes": 40_000_000_000}]
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub({"total": 16_000_000_000}))
+    _psutil_import_raises(monkeypatch, NotImplementedError("platform linux is not supported"))
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
+    assert r.status_code == 200, r.text
+    result = r.json()["results"][0]
+    assert result["fit"] == "too-big"
+    assert "exceeds_memory" not in result

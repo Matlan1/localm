@@ -173,7 +173,7 @@ class TestSearchRetries:
         b = retrieve("linz", fetch_top=0)
         assert b.search_status == "failed"
         assert b.search_error == ("The search backend set in Settings > "
-                                  "Network failed: searx.test closed the "
+                                  "Server & network failed: searx.test closed the "
                                   "connection before answering.")
         assert "ConnectionResetError" not in b.search_error
         assert srv.connections == 3

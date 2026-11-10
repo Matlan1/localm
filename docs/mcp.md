@@ -38,7 +38,7 @@ always present; several are conditional (marked below).
 | `embed` | Embedding vectors from the local model (only when the default model's backend can embed or an embedding model is registered, for example after `localm setup-embeddings`) | |
 | `rerank` | Rank documents by relevance to a query with a registered reranker model | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
-| `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`) | |
+| `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`). `output_path` must be a new `.png`, `.jpg`, `.jpeg` or `.webp` file: a relative path goes under the data directory's `mcp-images` folder, an absolute one must be inside `mcp-images` or `gui_images`; without it the image gets a new name in `mcp-images` | |
 | `memory_recall` | Read the owner's durable chat memory (only when the memory plugin is active and not `--no-memory`) | read-only |
 | `memory_append` | Offer one fact for that memory (memory plugin active, and only with `--memory-write`) | |
 
@@ -280,8 +280,9 @@ a server's tools the same way based on this one setting.
 
 - **untrusted (default)**: every tool the server offers - including a
   read-only one like a search or query tool - is registered as destructive,
-  so each call is gated by a confirmation prompt. You review each call and
-  decide to allow or skip.
+  so each call is gated by a confirmation prompt, under `--yes` and GUI
+  auto-approve too; a run that cannot ask denies the call. You review each call
+  and decide to allow or skip.
 - **trusted**: every tool from that server runs without prompts. Use this only
   for servers you trust completely (e.g. internal tools you wrote, well-known
   open-source projects with security track records) - a single tool call you

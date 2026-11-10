@@ -433,6 +433,7 @@ _MIDDLEWARE_STACK = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
     ("BaseHTTPMiddleware", "_keyless_network_gate"),

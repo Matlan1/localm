@@ -48,7 +48,8 @@ time are covered: a function-local import (how a genuine import cycle is
 broken), an `importlib` call, and a plugin loaded under its own module name
 are outside it, and so are tests and scripts.
 
-`scripts/check_hygiene.py` enforces the map on every commit and in CI. It
+`scripts/check_hygiene.py` enforces the map in CI, and on every commit once
+the pre-commit hook is installed (`python scripts/check_hygiene.py --install-hook`). It
 also fails on a unit the map does not place, on a placed unit that no longer
 exists, and on a unit placed twice, so the map cannot rot silently. There is
 no allow-list: a tier carries exactly `name`, `role` and `units`, and any
@@ -67,8 +68,8 @@ Two tools cover that gap.
 `scripts/check_hygiene.py` (check 10) reads every route whose handler
 builds its JSON response from dict literals, and every test that reads a
 top-level key from that route's response, and fails when the key is one the
-handler cannot produce. It runs on every commit through the pre-commit hook
-and in CI's hygiene gate, before any test runs. It does not see a handler
+handler cannot produce. It runs in CI's hygiene gate, before any test runs, and on every commit once
+the pre-commit hook is installed. It does not see a handler
 whose response comes from another module, a model class, a file or stream,
 or a non-literal merge (that shape is open and not judged); a nested key; a
 key read through a helper or a fixture rather than a `.json()` call in the
@@ -433,11 +434,10 @@ sees: the dataclasses `Surface` and `PluginSpec` (manifest shape),
 `ModelRoleDescriptor`, `InferenceBackendDescriptor` and `PluginSettingField`, and the `Host` protocol (the
 API the engine hands to `register`). The host exposes `mount_router`,
 `mount_static`, `add_settings`, `register_tab`, `plugin_config`,
-`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `register_model_role`,
+`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `track`, `register_model_role`,
 `register_inference_backend`, `register_chat_hook` and the caller checks
-`caller_is_owner`, `caller_principal` and `caller_owns`; `has_scope` and `require_scope` are declared but raise
-`NotImplementedError`, and the concrete `PluginHost` adds `driving_engine` and
-`on_startup`. `catalog.py` holds the static first-party catalog.
+`caller_is_owner`, `caller_principal` and `caller_owns`; the concrete `PluginHost` adds
+`driving_engine` and `on_startup`. `catalog.py` holds the static first-party catalog.
 
 **Lifecycle.** `PluginManager` discovers installed plugins, then
 `load_enabled` mounts each active plugin at runtime through `PluginHost`
@@ -450,9 +450,11 @@ happen at runtime without restarting the server.
 targets; the engine refuses to load a plugin whose `api_version` it does not
 support, surfacing an error rather than crashing.
 
-**Capability scopes.** Every plugin declares a capability scope, and its
-HTTP routes are gated to that scope, so a plugin cannot reach beyond the
-permissions it asked for.
+**Capability scopes.** Every plugin declares a capability scope, and the HTTP
+routes it mounts are gated to that scope and must sit under `/api/` or `/v1/`.
+The scope gates those routes only. Third-party plugins run unsandboxed
+in-process, so install only code you trust. Chat hooks are transforms, not
+controls (see [plugins.md](plugins.md)).
 
 See [plugins.md](plugins.md) for the full authoring guide. A broken plugin
 warns and is skipped, never crashing the host.

@@ -81,6 +81,42 @@ def test_a_program_these_modules_run_is_not_found_with_which(module):
     assert calls == []
 
 
+_NEVER_BARE = {"taskkill", "taskkill.exe", "nvidia-smi", "nvidia-smi.exe"}
+
+
+def _bare_program_lists(tree):
+    """(line, name) for each list or tuple literal whose first item is a program
+    from _NEVER_BARE, the shape of an argv started by bare name."""
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.List, ast.Tuple)) and node.elts
+                and isinstance(node.elts[0], ast.Constant)
+                and isinstance(node.elts[0].value, str)
+                and node.elts[0].value.lower() in _NEVER_BARE):
+            yield node.lineno, node.elts[0].value
+
+
+def test_no_system_program_is_launched_by_bare_name_anywhere_in_localm():
+    root = Path(__file__).resolve().parent.parent / "localm"
+    bad = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bad += [f"{path.relative_to(root.parent).as_posix()}:{line} {name}"
+                for line, name in _bare_program_lists(tree)]
+    assert bad == []
+
+
+def test_the_bare_program_scan_flags_a_bare_launch():
+    tree = ast.parse("import subprocess\nsubprocess.run(['taskkill', '/F'])\n")
+    assert list(_bare_program_lists(tree)) == [(2, "taskkill")]
+
+
+def test_require_raises_file_not_found_for_a_missing_program(tmp_path, monkeypatch):
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [])
+    monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+    with pytest.raises(FileNotFoundError):
+        sysprog.require("tool")
+
+
 def test_a_missing_program_is_none(tmp_path, monkeypatch):
     monkeypatch.setattr(sysprog, "system_candidates", lambda name: [str(tmp_path / "none")])
     monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))

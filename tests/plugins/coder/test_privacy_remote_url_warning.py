@@ -37,6 +37,8 @@ def run_cli(tmp_path, monkeypatch):
     _activate_coder_plugin(monkeypatch, tmp_path / "home")
     proj = tmp_path / "proj"
     proj.mkdir()
+    from localm import netpolicy
+    monkeypatch.setattr(netpolicy, "check_url", lambda url, **kw: None)
     import socket
     real_connect = socket.socket.connect
     dialled: list = []
@@ -77,9 +79,10 @@ def test_an_off_machine_url_from_the_environment_says_where_it_came_from(run_cli
     result, printed = run_cli(
         "--mode", "privacy", env={"LOCALCODER_URL": "http://192.0.2.10:9/v1"})
 
-    assert result.exception is None, result.output
+    assert result.exit_code == 1
     assert "off-machine model server" in printed
     assert "from LOCALCODER_URL" in printed
+    assert "Off-machine models are off in privacy mode" in result.output
 
 
 def test_a_loopback_url_in_privacy_mode_does_not_warn(run_cli):
