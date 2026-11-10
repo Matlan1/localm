@@ -38,7 +38,7 @@ always present; several are conditional (marked below).
 | `embed` | Embedding vectors from the local model (only when the default model's backend can embed or an embedding model is registered, for example after `localm setup-embeddings`) | |
 | `rerank` | Rank documents by relevance to a query with a registered reranker model | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
-| `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`) | |
+| `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`). `output_path` must be a new `.png`, `.jpg`, `.jpeg` or `.webp` file: a relative path goes under the data directory's `mcp-images` folder, an absolute one must be inside `mcp-images` or `gui_images`; without it the image gets a new name in `mcp-images` | |
 | `memory_recall` | Read the owner's durable chat memory (only when the memory plugin is active and not `--no-memory`) | read-only |
 | `memory_append` | Offer one fact for that memory (memory plugin active, and only with `--memory-write`) | |
 
