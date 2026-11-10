@@ -466,13 +466,11 @@ class ToolHooks:
         set_session_decision(self.trust_path, self.digest, True)
 
     def revoke(self) -> None:
-        """Stop these hooks, and the project's other trust-gated settings and
-        files, for the rest of this process, whatever the trust store says."""
-        from .hook_trust import set_session_decision
+        """Stop these hooks for the rest of the session, whatever the trust
+        store says."""
         self.trusted = False
         self.trust_source = None
         self.revoked = True
-        set_session_decision(self.trust_path, self.digest, False)
 
     def refresh_trust(self) -> bool:
         """Re-read the trust store, so trust granted or withdrawn elsewhere
@@ -480,8 +478,12 @@ class ToolHooks:
         stay trusted; revoked hooks stay off. Returns ``trusted``."""
         if self.revoked or not self.needs_trust() or self.trust_source in ("session", "fixed"):
             return self.trusted
-        from .hook_trust import is_trusted, renewed_digest
+        from .hook_trust import is_trusted, renewed_digest, session_decision
         self.digest = renewed_digest(self.trust_path, self.digest)
+        if session_decision(self.trust_path, self.digest):
+            self.trusted = True
+            self.trust_source = "session"
+            return True
         stored = is_trusted(self.trust_path, self.digest)
         self.trusted = stored
         self.trust_source = "store" if stored else None
@@ -491,11 +493,11 @@ class ToolHooks:
         """Trust these hooks now and record it for later sessions. Raises
         OSError or TrustStoreUnreadable when the record cannot be written; the
         hooks are trusted for this session either way."""
-        from .hook_trust import remember_trust, set_session_decision
+        from .hook_trust import clear_session_decision, remember_trust
         self.trusted = True
         self.trust_source = "session"
         self.revoked = False
-        set_session_decision(self.trust_path, self.digest, True)
+        clear_session_decision(self.trust_path)
         remember_trust(self.trust_path, self.digest)
         self.trust_source = "store"
 

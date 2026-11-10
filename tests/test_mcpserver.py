@@ -2297,7 +2297,8 @@ class TestRunCoderTaskInProcess:
         assert "not a registered model" in resp["result"]["content"][0]["text"]
         assert factory.loads == loads_before
 
-    def test_project_config_model_is_honoured(self, coder_env, tmp_path):
+    def test_project_config_model_is_honoured(self, coder_env, tmp_path, monkeypatch):
+        monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
         factory = _scripted_engine_factory(["done"])
         server, engines = _coder_server(factory)
         project = _project(tmp_path)

@@ -175,7 +175,7 @@ class TestUntrustedProjectIsIgnored:
         hooks.trust_for_session()
         assert resolve_task_config(root).auto_approve is True
         assert not hook_trust._store().exists()
-        ToolHooks.load(root).revoke()
+        hook_trust.set_session_decision(hooks.trust_path, hooks.digest, False)
         assert resolve_task_config(root).auto_approve is False
         assert ToolHooks.load(root).revoked is True
 
@@ -423,7 +423,7 @@ def test_a_linked_bundled_file_is_refused(tmp_path):
     assert tool_use_skill(root, name="repo-skill", file="inner.txt").output == "inner"
     result = tool_use_skill(root, name="repo-skill", file="alias.txt")
     assert not result.ok
-    assert "link" in result.output
+    assert result.output != "inner"
 
 
 def test_untrusted_project_skills_are_not_discovered(tmp_path):

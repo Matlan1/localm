@@ -359,10 +359,10 @@ def keep_trust(cwd: Path):
         path, digest = before
         old_digest = digest
         decided = session_decision(path, digest)
-        if decided:
-            how = "session"
-        elif decided is None and is_trusted(path, digest):
+        if decided is not False and is_trusted(path, digest):
             how = "store"
+        elif decided:
+            how = "session"
     yield
     if how is None:
         return
@@ -474,10 +474,13 @@ def forget_trust(config_path: Path) -> bool:
     """Remove the record for *config_path*. Returns True when one was removed.
 
     Raises OSError when the store cannot be written, and TrustStoreUnreadable
-    when an existing store cannot be read."""
+    when an existing store cannot be read. This process's decision for
+    *config_path* is dropped once the store is updated."""
     with _locked():
         entries = _load_strict()
         if entries.pop(config_key(config_path), None) is None:
+            clear_session_decision(config_path)
             return False
         _write(entries)
+        clear_session_decision(config_path)
         return True

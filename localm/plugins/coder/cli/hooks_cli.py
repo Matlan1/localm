@@ -37,6 +37,7 @@ def _remember(hooks) -> bool:
     try:
         hooks.remember_trust()
     except (OSError, TrustStoreUnreadable) as e:
+        hooks.trust_for_session()
         print_warning(f"{_noun(hooks)} are trusted for this session only: the trust "
                       f"record could not be saved ({e}).")
         return False
@@ -164,7 +165,9 @@ def settle_project_trust(work_dir, *, trust_flag: bool, can_prompt: bool) -> Non
         hooks.trust_for_session()
         print_info(f"{_noun(hooks)} trusted for this session.")
     else:
+        from ..hook_trust import set_session_decision
         hooks.revoke()
+        set_session_decision(hooks.trust_path, hooks.digest, False)
 
 
 def resolve_hook_trust(agent, *, trust_flag: bool, can_prompt: bool) -> None:
