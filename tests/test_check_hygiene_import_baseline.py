@@ -228,4 +228,4 @@ def test_real_tree_counts_are_non_trivial():
     counts, problems = ch._import_counts()
     assert problems == []
     assert sum(counts["deferred_up_imports"].values()) > 0
-    assert "localm/model_manager/registry.py -> jobs" in counts["builtin_plugin_imports"]
+    assert "localm/cli/media.py -> image" in counts["builtin_plugin_imports"]
