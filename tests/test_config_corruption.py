@@ -142,22 +142,23 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         import json
         assert json.loads(p.read_text(encoding="utf-8"))["port"] == 9191
 
-    def test_recovered_from_bak_still_writes(self, cfg_home):
-        """The second control: an unreadable PRIMARY whose .bak reads fine is a
-        SUCCESSFUL read of real data, so it must not refuse."""
+    def test_a_primary_served_from_bak_is_refused_too(self, cfg_home):
+        """An unreadable PRIMARY whose .bak reads fine is the previous
+        generation, not the current settings: saving would persist the older
+        copy over it, so it refuses and leaves both files as they were."""
         import json
         p = cfg_home / "config.json"
         p.write_text(json.dumps({"net_mode": "off"}), encoding="utf-8")
         cfg.update_config(lambda c: c.__setitem__("port", 9393))   # rotates .bak
         p.write_text("{ corrupt", encoding="utf-8")
+        bak = p.with_name("config.json.bak")
+        bak_before = bak.read_bytes()
 
-        cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
+        with pytest.raises(cfg.ConfigUnreadable):
+            cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
 
-        got = json.loads(p.read_text(encoding="utf-8"))
-        # 8192, not the 4096 DEFAULT: _user_delta drops a value equal to the
-        # default, so the default can never appear in the file.
-        assert got["n_ctx"] == 8192
-        assert got["net_mode"] == "off", "the .bak's real settings were lost"
+        assert p.read_text(encoding="utf-8") == "{ corrupt"
+        assert bak.read_bytes() == bak_before
 
 
 # --------------------------------------------------------------------------- #

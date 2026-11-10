@@ -289,7 +289,7 @@ def test_set_api_key_waits_on_the_store_lock(home, monkeypatch):
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
     try:
         with pytest.raises(cfg.ConfigLockTimeout):
-            auth.set_api_key("abc-123")
+            auth.set_api_key("abc-12345678")
     finally:
         lockpath.unlink()
     assert not (home / "auth.key").exists()
@@ -300,8 +300,8 @@ def test_set_api_key_writes_under_the_lock_and_releases_it(home, monkeypatch):
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(auth, "key_file", lambda: home / "auth.key")
     monkeypatch.setattr(auth, "owner_kdf_file", lambda: home / "auth.kdf.json")
-    auth.set_api_key("abc-123")
-    assert (home / "auth.key").read_text(encoding="utf-8").strip() == "abc-123"
+    auth.set_api_key("abc-12345678")
+    assert (home / "auth.key").read_text(encoding="utf-8").strip() == "abc-12345678"
     assert not _lockpath(home / "auth.key").exists()
 
 
