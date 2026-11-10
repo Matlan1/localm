@@ -972,7 +972,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `dispatch_parallel` | Run up to 2 sub-tasks at once, each in its own git worktree | yes | no |
 | `fetch_url` | Fetch a URL and return its text, HTML stripped | see below | no |
 | `web_search` | Search the web, returning titles, URLs and snippets | see below | no |
-| `generate_image` | Generate or refine an image with the local pipeline | no | no |
+| `generate_image` | Generate or refine an image with the local pipeline (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
 | `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
 | `browser_navigate` | Open a URL in the automated browser (browser plugin) | see below | no |
@@ -1010,7 +1010,7 @@ Six things the table cannot express, and each of them matters:
   the project controls (a test suite runs the project's own test files). A one-shot
   `localm coder "TASK"` without `--yes` denies them, `--interactive-confirm` asks
   before each, and an untrusted MCP server's tools ask before every call even under
-  `--yes`. `generate_image` still has real side effects and does not ask.
+  `--yes`. `generate_image` writes a file and asks exactly like `write_file`.
 - **Untrusted content re-arms confirmation.** Once the session has read a web page,
   a search result, an MCP tool's output or a skill, every destructive, network or
   code-running tool asks again until your next message, even with writes

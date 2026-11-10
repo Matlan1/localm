@@ -177,7 +177,7 @@ export async function register(ctx) {
     const policy = await currentNetPolicy();
     if (planVoiceFetch(policy.mode, cached, policy.allowDownloadsWhenOff) !== "refuse") return;
     const message = "Voice download is blocked (net_mode=off). Turn network access on, " +
-      "or allow model downloads while network access is off, in Settings -> Network";
+      "or allow model downloads while network access is off, in Settings > Server & network";
     ctx.toast(message + "; using the browser voice", true);
     throw new NetGateError(message);
   }
@@ -189,7 +189,7 @@ export async function register(ctx) {
     if (decision === "refuse") {
       throw new NetGateError(
         "Voice model download is blocked (net_mode=off). Turn network access on, " +
-        "or allow model downloads while network access is off, in Settings -> Network.");
+        "or allow model downloads while network access is off, in Settings > Server & network.");
     }
     if (decision === "confirm" && !(await requestDownloadConsent())) {
       throw new NetGateError(

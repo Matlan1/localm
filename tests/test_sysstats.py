@@ -606,6 +606,7 @@ def test_gpu_util_probe_never_blocks_the_polling_thread(monkeypatch):
         release.wait(5)   # simulate a slow/wedged nvidia-smi
         return _Proc()
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr("subprocess.run", _hanging_run)
 
     t0 = time.monotonic()
@@ -646,6 +647,7 @@ def test_gpu_util_reports_percent_once_probe_lands(monkeypatch):
         returncode = 0
         stdout = "17.5\n"
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc())
 
     assert sysstats._gpu_util() == {}   # first call: probe just started, no reading yet
@@ -670,6 +672,7 @@ def test_gpu_util_omits_field_when_nvidia_smi_absent(monkeypatch):
         calls.append(1)
         raise FileNotFoundError("nvidia-smi not found")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr("subprocess.run", _missing)
 
     assert sysstats._gpu_util() == {}
@@ -699,6 +702,7 @@ def test_gpu_util_does_not_reprobe_within_the_refresh_window(monkeypatch):
         calls.append(1)
         return _Proc()
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr("subprocess.run", _run)
 
     sysstats._gpu_util()

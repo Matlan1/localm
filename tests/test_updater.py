@@ -1387,3 +1387,18 @@ def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tm
     assert exc is not None, "apply() did not refuse a site-packages install"
     assert isinstance(exc, LocalmError), f"refused with the wrong error: {exc!r}"
     assert "pip" in str(exc).lower()
+
+
+def test_apply_records_one_update_applied_event(tmp_path, monkeypatch, sig_env):
+    import json
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    monkeypatch.setattr("localm.config.HOME_DIR", home)
+    inst = _fake_install(tmp_path, deps=("click",))
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    lines = (home / "logs" / "management.jsonl").read_text(encoding="utf-8").splitlines()
+    (ev,) = [json.loads(x) for x in lines]
+    assert ev["kind"] == "update_applied"
+    assert (ev["version_from"], ev["version_to"]) == ("0.1.0", "0.2.0")

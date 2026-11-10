@@ -38,7 +38,8 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_OVERLAY_READ_TOOLS, _PROJECT_MAP_TOOLS,
+    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_MODE_REFUSED_TOOLS,
+    _PATCH_OVERLAY_READ_TOOLS, _PROJECT_MAP_TOOLS,
     _RESTRICTED_PATH_WRITE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
@@ -594,6 +595,17 @@ class _ExecutionMixin:
             self._emit("tool_result", tool=call.name, ok=result.ok,
                        summary=result.summary, output=result.output[:4000],
                        duration_s=duration_s)
+            return result
+
+        if getattr(self, "patch_mode", False) is True and call.name in _PATCH_MODE_REFUSED_TOOLS:
+            result = ToolResult.error(
+                f"[patch-mode] {call.name} writes a file that cannot be captured as "
+                "a diff - skipped. Turn patch mode off to run it.")
+            if interactive:
+                console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            # No duration_s: never reached tool_def.fn.
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary=f"[patch-mode] {call.name} skipped")
             return result
 
         # Scope check - reject file operations that fall outside the active glob.

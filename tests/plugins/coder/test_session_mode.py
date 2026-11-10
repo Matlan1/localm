@@ -182,7 +182,7 @@ class TestMakeAuditLog:
 #  Agent.close() - per mode
 # ---------------------------------------------------------------------------
 
-def _make_agent(tmp_path, mode):
+def _make_agent(tmp_path, mode, **kw):
     from localm.plugins.coder.agent import Agent
     backend = MagicMock()
     backend.model_id = "test-model"
@@ -192,7 +192,7 @@ def _make_agent(tmp_path, mode):
          patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
         mock_pm.build.return_value.file_count.return_value = 0
         mock_factory.return_value = NullAuditLog()
-        agent = Agent(backend=backend, cwd=tmp_path, mode=mode)
+        agent = Agent(backend=backend, cwd=tmp_path, mode=mode, **kw)
     return agent
 
 
@@ -202,6 +202,16 @@ class TestAgentClose:
         agent = _make_agent(tmp_path, mode)
         result = agent.close()
         assert result is None
+
+    def test_restricted_full_close_writes_nothing_under_localcoder(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL, restricted=True)
+        agent._messages = [
+            {"role": "user", "content": "Write a hello world"},
+            {"role": "assistant", "content": "print('hello world')"},
+        ]
+        agent._turns = 1
+        assert agent.close() is None
+        assert not (tmp_path / ".localcoder").exists()
 
     def test_full_close_writes_markdown(self, tmp_path):
         agent = _make_agent(tmp_path, SessionMode.FULL)
