@@ -33,7 +33,12 @@ def tool_generate_image(
     generation is stopped."""
     import os
 
-    from localm.plugins.builtin.image import backend as image_backend
+    from localm.plugins.lookup import PluginUnavailable, plugin_api
+
+    try:
+        image_backend = plugin_api("image", "backend")
+    except PluginUnavailable as e:
+        return ToolResult.error(str(e))
 
     try:
         out_p = _confine(cwd, output_path)

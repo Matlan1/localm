@@ -26,6 +26,14 @@ from localm.plugins.builtin.music import backend as music_backend
 from localm.plugins.builtin.music.backends import native
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 def _wav(seconds: float = 0.5, with_list: bool = True) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -348,9 +356,8 @@ def test_route_refuses_workflow_picks_for_native(tmp_path, monkeypatch, no_comfy
         r = c.post("/api/music", headers=h, json={
             "tags": "lofi", "duration_seconds": 2,
             "model_overrides": {"1": {"ckpt_name": "ace.safetensors"}}})
-        end, lines = _wait_job(c, r.json()["job_id"], h)
-        assert end and end["status"] == "failed"
-        assert any("Workflow model choices apply to ComfyUI" in ln for ln in lines)
+        assert r.status_code == 400
+        assert "Workflow model choices apply to ComfyUI" in r.json()["detail"]
         assert fake_generate == []
         assert prepared == []
 
@@ -531,7 +538,7 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     from localm.cli import main
     result = cli_runner.invoke(main, ["music", "lofi", "-d", "1", "-o", str(tmp_path / "s.wav")])
     assert result.exit_code == 0, result.output
-    assert calls == ["http://127.0.0.1:9"]
+    assert calls == ["http://127.0.0.1:9/v1"]
 
 
 def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path, monkeypatch,

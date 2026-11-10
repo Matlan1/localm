@@ -1102,13 +1102,14 @@ def pull_model(
     # charset-validated anywhere upstream, so both are escaped. `actual` is a
     # hashlib hexdigest and is escaped too.
     from rich.markup import escape
+    local: Optional[Path] = None
     try:
         local = Path(model_spec).expanduser()
         is_local_path = (allow_local and local.exists()
                          and (local.is_absolute() or local.is_file()))
     except OSError:
         is_local_path = False
-    if is_local_path:
+    if is_local_path and local is not None:
         # A user-supplied --sha256 is verified against the real bytes here and
         # the pull is refused on a mismatch, never registered as a success. A
         # full HF repo refuses --sha256 outright instead.

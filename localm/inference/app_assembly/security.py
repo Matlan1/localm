@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import re
 import secrets
 import socket
 import time
@@ -31,6 +32,28 @@ from localm.bindhost import (LOCAL_ORIGIN_PATTERN, host_header_name,
 from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
 from localm.inference import responses_protocol as _responses
+
+_LOCAL_ORIGIN_RE = re.compile(rf"^{LOCAL_ORIGIN_PATTERN}$")
+
+
+def simple_request_origin_allowed(request: Any) -> bool:
+    """False for a browser request whose Origin is not this server itself, a
+    local page (localhost or 127.0.0.1, any port) or a configured
+    ``cors_origins`` entry. A request with no Origin (an SDK, curl) passes.
+
+    For a route a browser can reach with a CORS "simple request" (a multipart
+    upload), which no preflight gates."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    if origin.split("://", 1)[-1] == request.headers.get("host", ""):
+        return True
+    if _LOCAL_ORIGIN_RE.match(origin):
+        return True
+    from localm.config import load_config
+    configured = load_config().get("cors_origins")
+    return configured == "*" or (isinstance(configured, list) and origin in configured)
+
 
 SHELL_REJECTED_HEADER = "X-Localm-Shell-Rejected"
 """Set on the open-mode gate's 403 when the presented shell or instance token

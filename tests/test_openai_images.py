@@ -76,7 +76,7 @@ def image_app(home, monkeypatch):
     app.state.jobs = JobManager()
     app.state.self_url = "http://127.0.0.1:8642/v1"
     backend = _Backend()
-    mod = sys.modules["_localm_plugin_image.backend"]
+    mod = sys.modules["localm.plugins.builtin.image.backend"]
     for name in ("settings", "ensure_available", "generate"):
         monkeypatch.setattr(mod, name, getattr(backend, name))
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
@@ -293,7 +293,7 @@ class TestRefusals:
 
     def test_a_failed_reload_after_a_failed_generation_does_not_hide_the_reason(
             self, client, backend, monkeypatch):
-        mod = sys.modules["_localm_plugin_image.backend"]
+        mod = sys.modules["localm.plugins.builtin.image.backend"]
         monkeypatch.setattr(mod, "free_vram", lambda s: True, raising=False)
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
         monkeypatch.setattr("localm.vram.unload_chat_for_media",
@@ -311,7 +311,7 @@ class TestRefusals:
 
     def test_an_error_after_a_successful_availability_check_is_the_reason(
             self, client, backend, monkeypatch):
-        mod = sys.modules["_localm_plugin_image.backend"]
+        mod = sys.modules["localm.plugins.builtin.image.backend"]
 
         def _boom(*a, **k):
             raise RuntimeError("kaboom")
@@ -324,7 +324,7 @@ class TestRefusals:
 
     def test_unavailable_backend_is_a_502_with_its_message(
             self, client, backend, image_app, monkeypatch):
-        mod = sys.modules["_localm_plugin_image.backend"]
+        mod = sys.modules["localm.plugins.builtin.image.backend"]
         monkeypatch.setattr(mod, "ensure_available",
                             lambda s, on_progress=None: (False, "ComfyUI missing"))
         r = client.post(URL, json={"prompt": "p"})
@@ -462,7 +462,7 @@ class _FakeRequest:
 class TestAwaitJob:
     @pytest.fixture
     def plug(self, image_app, monkeypatch):
-        mod = sys.modules["_localm_plugin_image"]
+        mod = sys.modules["localm.plugins.builtin.image.plug"]
         monkeypatch.setattr(mod, "JOB_POLL_SECONDS", 0.02)
         monkeypatch.setattr(mod, "CANCEL_SETTLE_SECONDS", 0.3)
         return mod
@@ -554,7 +554,7 @@ class TestKernelOriginGate:
         app.state.jobs = JobManager()
         app.state.self_url = "http://127.0.0.1:8642/v1"
         backend = _Backend()
-        mod = sys.modules["_localm_plugin_image.backend"]
+        mod = sys.modules["localm.plugins.builtin.image.backend"]
         for name in ("settings", "ensure_available", "generate"):
             monkeypatch.setattr(mod, name, getattr(backend, name))
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
@@ -582,7 +582,7 @@ class TestKernelOriginGate:
 class TestRemoveTreeWhenIdle:
     @pytest.fixture
     def plug(self, image_app, monkeypatch):
-        mod = sys.modules["_localm_plugin_image"]
+        mod = sys.modules["localm.plugins.builtin.image.plug"]
         monkeypatch.setattr(mod, "JOB_POLL_SECONDS", 0.02)
         return mod
 

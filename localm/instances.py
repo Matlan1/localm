@@ -166,7 +166,12 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     """Write this process's registry entry atomically; return its path. The file
     is owner-only where the OS supports it (it carries the attach token).
     ``scheme`` (http|https) records whether this instance serves TLS, so a
-    discovering client probes /whoami on the right protocol."""
+    discovering client probes /whoami on the right protocol.
+
+    The entry also carries ``pid_space`` (:func:`pid_space_id`) and
+    ``start_identity`` (:func:`process_start_identity` of this process, or
+    None when it cannot be read), which :func:`entry_process_state` compares
+    with the live process before anything ends that pid."""
     d = run_dir(home)
     _lock_down_dir(d)
     entry = {
@@ -180,6 +185,8 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
         "version": _version(),
         "started": started or _now_iso(),
         "token": token,
+        "pid_space": pid_space_id(),
+        "start_identity": process_start_identity(os.getpid()),
     }
     path = registry_path(home, instance_id)
     # The entry carries the per-instance attach token, so it is restricted the
@@ -448,7 +455,66 @@ def path_is_local(path) -> bool:
     return False
 
 
-def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
+def entry_process_state(entry: dict) -> tuple[str, str]:
+    """Whether the process at a registry entry's pid is the server the entry
+    describes. Returns ``(state, reason)``:
+
+    - ``"gone"``: the pid is invalid or no process has it.
+    - ``"same"``: the live process's start identity matches the recorded
+      ``start_identity`` in the same pid space.
+    - ``"stale"``: the live process's start identity differs from the
+      recorded one, so the pid now belongs to another process.
+    - ``"unknown"``: neither can be proven: an entry with no recorded
+      identity or pid space (written by an earlier localm), one recorded in
+      another pid space, or a live process whose start identity cannot be
+      read or compared.
+
+    *reason* is a sentence for the person for ``"unknown"`` and ``"stale"``,
+    empty otherwise. Never raises.
+    """
+    try:
+        pid = int(entry.get("pid", -1) or -1)
+    except (TypeError, ValueError):
+        return "gone", ""
+    try:
+        if pid <= 0 or not pid_alive(pid):
+            return "gone", ""
+    except Exception as e:
+        logger.debug("entry_process_state: liveness of pid %s unreadable (%s)", pid, e)
+        return "unknown", (f"localm could not tell whether pid {pid} is still "
+                           f"running.")
+    recorded = entry.get("start_identity")
+    space = entry.get("pid_space")
+    if not isinstance(space, str):
+        return "unknown", (f"this entry was written by an earlier localm that did "
+                           f"not record when its server started, so localm cannot "
+                           f"prove that pid {pid} is still that server.")
+    if not isinstance(recorded, dict):
+        return "unknown", (f"its server could not read its own start time when it "
+                           f"registered (on Windows and macOS this needs the psutil "
+                           f"package), so localm cannot prove that pid {pid} is "
+                           f"still that server.")
+    if space != pid_space_id():
+        return "unknown", (f"this entry was written on another machine or "
+                           f"container sharing this data folder, so pid {pid} "
+                           f"here may be an unrelated program.")
+    try:
+        current = process_start_identity(pid)
+    except Exception as e:
+        logger.debug("entry_process_state: start identity of pid %s unreadable (%s)",
+                     pid, e)
+        current = None
+    if start_identity_differs(recorded, current):
+        return "stale", (f"its server has already exited and pid {pid} now "
+                         f"belongs to another program.")
+    if start_identity_matches(recorded, current):
+        return "same", ""
+    return "unknown", (f"localm cannot read when pid {pid} started, so it cannot "
+                       f"prove that pid {pid} is still that server.")
+
+
+def kill_pid(pid: int, *, timeout: float = 10.0,
+             start_identity: Optional[dict] = None) -> bool:
     """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
     (POST /v1/server/shutdown) could not be confirmed - the server did not
     answer, took too long, or is an older build without that route. Sends a
@@ -456,7 +522,11 @@ def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
     TerminateProcess on Windows, where there is no finer-grained graceful
     signal for an unrelated process), force-kills if it has not exited within
     *timeout*. Returns whether the pid is confirmed gone afterward; never
-    raises."""
+    raises.
+
+    With *start_identity*, the process is ended only when its start identity,
+    read after it is opened, matches that one (:func:`start_identity_matches`);
+    otherwise nothing is signalled and the result is whether the pid is gone."""
     if not isinstance(pid, int) or pid <= 0 or not pid_alive(pid):
         return True
     # Imported before the try below, not inside it: psutil is an optional extra,
@@ -471,6 +541,11 @@ def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
         return not pid_alive(pid)
     try:
         proc = psutil.Process(pid)
+        if start_identity is not None and not start_identity_matches(
+                start_identity, process_start_identity(pid)):
+            logger.warning("kill_pid(%s): process start identity does not match "
+                           "the recorded one; not ending it", pid)
+            return not pid_alive(pid)
         proc.terminate()
         try:
             proc.wait(timeout=timeout)
@@ -491,14 +566,14 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
                is_alive: Optional[Callable[[dict], bool]] = None) -> list[str]:
     """Remove registry entries for processes that are gone (or whose file is
     corrupt). Never reaps *self_id* or a live entry. Returns the instance_ids
-    removed. *is_alive* lets a caller swap in a /whoami handshake; the default is
-    process liveness."""
+    removed. *is_alive* lets a caller swap in a /whoami handshake; the default
+    keeps an entry unless :func:`entry_process_state` reports ``"gone"`` or
+    ``"stale"`` (a live pid whose start identity differs from the recorded
+    one)."""
     d = run_dir(home)
     if not d.is_dir():
         return []
-    # `or -1` so a null or empty pid reads as a dead process and is reaped;
-    # without it int(None) raises and the corrupt entry is kept forever.
-    alive = is_alive or (lambda e: pid_alive(int(e.get("pid", -1) or -1)))
+    alive = is_alive or (lambda e: entry_process_state(e)[0] not in ("gone", "stale"))
     removed: list[str] = []
     for f in sorted(d.glob("*.json")):
         entry = read_entry(f)
@@ -664,13 +739,9 @@ def find_attachable(home: Path, root_dir: str,
             alive = False
         if alive:
             return entry
-        # Reap only when the process is also gone; never delete a live entry on a
-        # transient or identity probe miss.
-        try:
-            pid_gone = not pid_alive(int(entry.get("pid", -1) or -1))
-        except (TypeError, ValueError):
-            pid_gone = True
-        if pid_gone:
+        # Reap only when the process is also gone or its pid now names another
+        # process; never delete a live entry on a transient or identity probe miss.
+        if entry_process_state(entry)[0] in ("gone", "stale"):
             unregister_instance(entry.get("_path"))
     return None
 

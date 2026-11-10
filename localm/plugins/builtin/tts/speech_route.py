@@ -281,8 +281,8 @@ _OPENAPI = {"requestBody": {"required": True, "content": {
 async def create_speech(request: Request):
     from localm.inference import speech
     from localm.inference.backends.llamacpp.mtmd_gen import wav_pcm_payload
-    from localm.plugins.builtin.voice.transcriptions import _origin_allowed
-    if not _origin_allowed(request):
+    from localm.inference.app_assembly.security import simple_request_origin_allowed
+    if not simple_request_origin_allowed(request):
         raise HTTPException(
             403, "Cross-origin request refused (only this server's own pages, local "
                  "apps, or a configured 'cors_origins' entry may request speech).")
