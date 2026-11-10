@@ -2102,6 +2102,8 @@
   "settings.field.coderReviewerModel.label": "Nom du modèle relecteur",
   "settings.field.coderToolGrammar.help": "Dès que le modèle commence un <tool_call>, impose un JSON d'appel d'outil valide (backends locaux compatibles grammaire uniquement). Si le modèle continue de répondre sans appel, une nouvelle tentative n'autorise que la réflexion et un appel.",
   "settings.field.coderToolGrammar.label": "Contraindre les appels d'outils du Coder par grammaire",
+  "settings.field.coderUnattendedNetwork.help": "Indique si une exécution du Coder que personne ne surveille (localm coder avec une tâche, l'outil MCP run_coder_task, une tâche planifiée) peut utiliser fetch_url, web_search, les outils du navigateur et git_push lorsque l'accès réseau est sur ask. deny = ils sont refusés ; allow = ils s'exécutent sans demander. Avec l'accès réseau sur off, ils restent refusés. Les exécutions que vous surveillez demandent toujours.",
+  "settings.field.coderUnattendedNetwork.label": "Outils réseau dans les exécutions du Coder sans surveillance",
   "settings.field.coderUntrustedProvenance.help": "Marque les résultats d'outils du Coder issus du web, de la recherche web et des serveurs MCP externes comme données non fiables, pour qu'une page récupérée ne puisse pas injecter de commandes. Laissez activé sauf raison précise. S'applique aux nouvelles sessions.",
   "settings.field.coderUntrustedProvenance.label": "Marquer le contenu externe non fiable",
   "settings.field.comfyApiUrl.help": "Où ComfyUI écoute. Vide utilise FLUX_API_URL, sinon http://127.0.0.1:8188. Non utilisé tant que ComfyUI à utiliser vaut own et que le ComfyUI de localm est installé.",

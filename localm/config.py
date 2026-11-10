@@ -1037,6 +1037,9 @@ DEFAULT_CONFIG: dict = {
     # cannot inject into the model loop (indirect prompt injection). Defense in
     # depth (blocks nothing, only labels). Leave ON absent a specific reason.
     "coder_untrusted_provenance": True,
+    # Whether an unattended coder run (no one to ask) may use network tools
+    # while net_mode is "ask": "deny" or "allow". net_mode "off" still refuses them.
+    "coder_unattended_network": "deny",
     # Pre-done self-review: before the coder declares done, a reviewer model reads
     # the diff and feeds blocking issues back for one more fix pass. Off by default
     # (adds a model round-trip per task that changed files).

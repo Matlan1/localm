@@ -199,6 +199,9 @@ class Agent(
         # tools ask again. Cleared by the next user message.
         self._untrusted_in_context = False
         self.taint_rearms_confirm = True
+        # True lets network tools run without asking under net_mode "ask" when
+        # this run has no confirm handler and is not interactive.
+        self.unattended_network = False
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
         cap_backend_session_mode(backend, mode)

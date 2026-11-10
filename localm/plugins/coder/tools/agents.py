@@ -194,10 +194,12 @@ def patch_mode_refusal(parent: Any, tool: str) -> Optional[ToolResult]:
 
 def inherit_session_state(parent: Any, child: Any) -> None:
     """Copy the confirmation state that is not a constructor argument from
-    *parent* to *child*: whether untrusted content is in context, and whether
-    that re-arms confirmation."""
+    *parent* to *child*: whether untrusted content is in context, whether
+    that re-arms confirmation, and whether an unattended run may use network
+    tools."""
     child._untrusted_in_context = getattr(parent, "_untrusted_in_context", False) is True
     child.taint_rearms_confirm = getattr(parent, "taint_rearms_confirm", True) is not False
+    child.unattended_network = getattr(parent, "unattended_network", False) is True
 
 
 def _prepare_child(

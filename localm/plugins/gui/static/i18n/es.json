@@ -2102,6 +2102,8 @@
   "settings.field.coderReviewerModel.label": "Nombre del modelo revisor",
   "settings.field.coderToolGrammar.help": "Cuando el modelo empieza un <tool_call>, fuerza JSON de llamada a herramienta válido (solo backends locales compatibles con gramáticas). Si el modelo sigue respondiendo sin llamada, un reintento solo permite razonamiento y una llamada.",
   "settings.field.coderToolGrammar.label": "Restringir con gramática las llamadas a herramientas de Coder",
+  "settings.field.coderUnattendedNetwork.help": "Si una ejecución de Coder que nadie supervisa (localm coder con una tarea, la herramienta MCP run_coder_task, un trabajo programado) puede usar fetch_url, web_search, las herramientas del navegador y git_push mientras el acceso a la red está en ask. deny = se rechazan; allow = se ejecutan sin preguntar. Con el acceso a la red en off se siguen rechazando. Las ejecuciones que supervisas siguen preguntando.",
+  "settings.field.coderUnattendedNetwork.label": "Herramientas de red en ejecuciones de Coder desatendidas",
   "settings.field.coderUntrustedProvenance.help": "Marca como datos no fiables los resultados de herramientas de Coder que vienen de la web, la búsqueda web y servidores MCP externos, para que una página descargada no pueda inyectar órdenes. Déjalo activado salvo que tengas un motivo. Se aplica a las sesiones nuevas.",
   "settings.field.coderUntrustedProvenance.label": "Marcar contenido externo no fiable",
   "settings.field.comfyApiUrl.help": "Dónde escucha ComfyUI. En blanco usa FLUX_API_URL y, si no, http://127.0.0.1:8188. No se usa mientras ComfyUI que usar sea own y el ComfyUI propio de localm esté instalado.",

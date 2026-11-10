@@ -732,8 +732,14 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
+        # An unattended run (no handler, not interactive) whose user allowed
+        # network tools treats net_mode "ask" like "allow" for this call.
+        can_ask = interactive or getattr(self, "confirm_handler", None) is not None
+        net_waived = (net_mode == "ask" and not can_ask
+                      and getattr(self, "unattended_network", False) is True)
+        net_gated = net_mode == "ask" and not net_waived
         executes_code = getattr(tool_def, "executes_project_code", False) is True
-        gated = (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+        gated = (tool_def.destructive or net_gated or tool_def.ask_by_default
                  or executes_code)
         lenient_call = isinstance(call, ToolCall) and call.lenient
         # Confirmation always_confirm requires, which a session allow never waives.
@@ -764,8 +770,8 @@ class _ExecutionMixin:
             and getattr(self, "taint_rearms_confirm", True) is True
             and (tool_def.destructive or call.name in _NETWORK_TOOLS or executes_code)
         )
-        # net_mode "ask" asks under auto_approve too.
-        net_ask = net_mode == "ask"
+        # net_mode "ask" asks under auto_approve too, unless waived above.
+        net_ask = net_gated
         needs_confirm = shell_unchecked or data_hit is not None or tainted or net_ask or (
             gated and (not self.auto_approve or forced or lenient_call)
         )
@@ -787,7 +793,6 @@ class _ExecutionMixin:
         # call and always_confirm, which the read-only shortcut honours too.
         # Only where someone could have been asked: a run with no way to ask
         # still denies, as before.
-        can_ask = interactive or getattr(self, "confirm_handler", None) is not None
         if (needs_confirm and can_ask and session_allowable and call.name == "run_shell"
                 and self._read_only_shell(call)):
             needs_confirm = False
@@ -795,6 +800,11 @@ class _ExecutionMixin:
             if interactive:
                 print_info(f"  ({note})")
             self._emit("info", text=f"{call.name}: {note}")
+        if net_waived and not needs_confirm:
+            note = (f"{call.name}: ran without asking, this unattended run may "
+                    "use network tools")
+            self._emit("info", text=note)
+            self._audit.notice("unattended_network_allowed", note)
         session_allowed = getattr(self, "_session_allowed", None)
         if session_allowed is None:
             session_allowed = self._session_allowed = set()

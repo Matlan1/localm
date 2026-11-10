@@ -893,6 +893,8 @@ def _run_coder(job: Job, *, engine=None) -> str:
         restricted=restricted,
         server_side=True,
     )
+    from localm.plugins.coder.runner import unattended_network_setting
+    agent.unattended_network = unattended_network_setting()
     try:
         out = (agent.run_task(job.prompt) or "").strip()
         notes = []
