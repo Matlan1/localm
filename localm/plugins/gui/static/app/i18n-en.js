@@ -2170,7 +2170,7 @@ export const I18N_EN = {
   "settings.field.media.nativeModel.label": "Native model",
   "settings.field.media.nativeModel.help": "Registered name or file path: a full checkpoint, or a diffusion model (encoders and VAE from the native fields, else your registered models). Blank uses the recommended model once downloaded.",
   "settings.field.media.nativeRuntime.label": "Native runtime",
-  "settings.field.media.nativeRuntime.help": "stable-diffusion.cpp build to use. auto uses the best installed build and installs the recommended one only when none is installed.",
+  "settings.field.media.nativeRuntime.help": "stable-diffusion.cpp build to use. auto installs the recommended build for this machine, keeps an installed GPU build, and uses the CPU build only when no GPU build can be installed or loaded.",
   "settings.field.music.nativeRuntime.help": "Compute backend for native music. auto picks the best one for this machine and falls back to Vulkan, then CPU.",
   "settings.field.media.nativeSteps.label": "Native sampling steps",
   "settings.field.media.nativeSteps.help": "Blank uses the model's recommended steps (or 20).",
