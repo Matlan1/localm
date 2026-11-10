@@ -177,17 +177,6 @@ log file only when the debug log is on. The Settings "Recent errors" list (the
 last five) is kept in the browser's memory in privacy mode and gone on reload; in
 `log` and `full` mode it is also kept in the browser's local storage.
 
-### A server the coder starts without a terminal
-
-When `localm coder` runs without a terminal (stdin not a terminal, for example
-from a script or CI job; on Linux and macOS also when its output is piped or
-`--output-format json` or `jsonl` is used) and has to start a server itself,
-that server's console output is written to a `localm-coder-autostart-*.log`
-file in localm's temporary-files folder (the Temporary files setting), in every
-session mode, and localm does not delete it. It holds what the server would
-otherwise print in its console window: start-up lines, warnings and native
-runtime messages.
-
 ### "Keep diagnostics for bug reports" (`keep_diagnostics`)
 
 Privacy mode saves nothing - which also means a hang or crash leaves nothing to
