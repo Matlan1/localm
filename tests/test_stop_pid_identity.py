@@ -376,7 +376,7 @@ class TestCliAfterGracefulAnswer:
 
         def flip(entry):
             seen.append(1)
-            if len(seen) == 1:
+            if len(seen) <= 2:
                 return real_state(entry)
             return "stale", f"pid {child.pid} now belongs to another program."
 
@@ -384,6 +384,7 @@ class TestCliAfterGracefulAnswer:
              patch("localm.tls.requests_verify", return_value=True), \
              patch.object(instances, "entry_process_state", side_effect=flip):
             res = CliRunner().invoke(main, ["stop", "acst", "--timeout", "1"])
+        assert len(seen) == 3, "pre-sweep, before the request, after it"
         assert child.poll() is None
         assert "this entry was stale" in res.output
         assert not p.exists()
