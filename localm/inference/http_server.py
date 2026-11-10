@@ -2568,6 +2568,35 @@ def plan_capability_route(model_name: str | None, messages: list,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
+def _forget_removed_model(name: str) -> bool:
+    """Drop this process's state for *name* when it left the registry and its
+    model file is gone (``localm rm`` ran in another process). A model that is
+    loaded, or whose file still exists, is kept. Returns whether anything was
+    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
+    from pathlib import Path
+    engine = _engines.get(name)
+    if engine is not None and engine.loaded:
+        return False
+    path = getattr(engine, "model_path", None)
+    if not path or Path(str(path)).exists():
+        return False
+    _engines.pop(name, None)
+    if name in _engines_lru:
+        _engines_lru.remove(name)
+    _inference_sems.pop(name, None)
+    _last_activity_per_model.pop(name, None)
+    if _active_model_name == name:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+    if _last_active_model_name == name:
+        _last_active_model_name = None
+    if _default_model_name == name:
+        _default_model_name = None
+    return True
+
+
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
                      on_status: Optional[Callable[[str], None]] = None,
@@ -2622,6 +2651,11 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             name = name or _default_model_name
             if name != _default_model_name and name not in _engines:
                 raise HTTPException(503, "No model loaded. Please load a model first.")
+
+    if registry:
+        unnamed = not (model_name or "").strip() or (model_name or "").strip() == "localm"
+        while name and name not in registry and _forget_removed_model(name):
+            name = _resolve_unnamed_model_name() if unnamed else name
 
     # Only enforce registration check if the registry is not empty
     if registry:

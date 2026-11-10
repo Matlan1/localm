@@ -8,15 +8,57 @@ globals, so a model swap that reassigns them is reflected here.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 import localm.inference.http_server as _hs
 from localm import scopes
 from localm.executor import get_plugin_executor
+
+
+async def _body_fields(request: Request, allowed: tuple[str, ...]) -> dict:
+    """Fields a model-lifecycle route reads from an optional JSON body.
+
+    An empty body yields {}. Returns only keys listed in *allowed*; raises 400
+    for a body that is not a JSON object or that carries any other key, naming
+    the keys the route does read.
+    """
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Request body must be a JSON object") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be a JSON object")
+    unknown = sorted(k for k in body if k not in allowed)
+    if unknown:
+        raise HTTPException(
+            400,
+            f"Unknown field(s) in request body: {', '.join(unknown)}. "
+            f"This route reads: {', '.join(allowed)}")
+    return body
+
+
+def _opt_str(value, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(400, f"'{name}' must be a string")
+    return value
+
+
+def _opt_bool(value, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise HTTPException(400, f"'{name}' must be true or false")
+    return value
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -187,8 +229,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def unload_model(model: str | None = None, force: bool = False,
-                           media: bool = True):
+    async def unload_model(request: Request, model: str | None = None,
+                           force: bool | None = None, media: bool | None = None):
         """
         Release model(s) from GPU/CPU memory.
 
@@ -199,7 +241,7 @@ def register(app: FastAPI, ctx) -> None:
         next matching /v1/chat/completions call reloads the model.
 
         A model still busy with a request is not cut off unless `force` is
-        true (a query parameter, like `model`). Without it, a busy chat model
+        true (a query parameter or JSON body field, like `model`). Without it, a busy chat model
         gets a short wait to finish, then stays loaded with its reply running:
         a named one answers `{"status": "confirm_required", "model": ...,
         "detail": ...}`, and an unload of everything lists it in
@@ -215,7 +257,16 @@ def register(app: FastAPI, ctx) -> None:
         even with `force`, and is listed in `skipped_in_use` and
         `media_left_running`. `media=false` (a query parameter) leaves them
         loaded.
+
+        `model`, `force` and `media` are read from the query string or from a
+        JSON body; the query wins when both are given. A body key other than
+        those answers 400.
         """
+        body = await _body_fields(request, ("model", "force", "media"))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
+        force = _opt_bool(force if force is not None else body.get("force"), "force", False)
+        media = _opt_bool(media if media is not None else body.get("media"), "media", True)
         if model:
             from localm.config import load_registry
             if model not in load_registry() and model != _hs._default_model_name:
@@ -225,7 +276,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/rename",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def rename_model(model: str, new_name: str):
+    async def rename_model(request: Request, model: str | None = None,
+                           new_name: str | None = None):
         """
         Rename a registered model (`model`) to `new_name`.
 
@@ -233,12 +285,22 @@ def register(app: FastAPI, ctx) -> None:
         the new name, and config, job and RAG references to the old name are
         updated where possible. A model that is currently loaded keeps serving
         under the new name.
+
+        `model` and `new_name` are read from the query string or a JSON body;
+        a body key other than those answers 400.
         """
+        body = await _body_fields(request, ("model", "new_name"))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
+        if new_name is None:
+            new_name = _opt_str(body.get("new_name"), "new_name")
+        if not model or not new_name:
+            raise HTTPException(400, "'model' and 'new_name' are required")
         return await _hs.rename_registered_model(model, new_name)
 
     @app.post("/v1/models/load",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def load_model(model: str | None = None):
+    async def load_model(request: Request, model: str | None = None):
         """
         Load a model into memory ahead of the first inference request.
 
@@ -247,7 +309,13 @@ def register(app: FastAPI, ctx) -> None:
         configured default. Answers 503 when there is none. Returns `status`
         `loaded`, `already_loaded` or `peer_routed` (the model is routed to a
         peer instance), with the model name.
+
+        `model` is read from the query string or a JSON body; a body key other
+        than `model` answers 400.
         """
+        body = await _body_fields(request, ("model",))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
         name = model or _hs._resolve_unnamed_model_name()
         if not name:
             raise HTTPException(503, "No model specified or configured to load")

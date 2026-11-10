@@ -541,6 +541,46 @@ def test_chat_unload_idiom_unloads(client, engine):
     assert engine.loaded is False
 
 
+def test_chat_with_messages_and_keep_alive_zero_unloads_after_the_reply(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _chat(client, stream=False, keep_alive=0)
+    assert r.status_code == 200
+    assert r.json()["message"]["content"] == "Hello world"
+    assert engine.loaded is False
+
+
+def test_streamed_chat_with_keep_alive_zero_unloads_after_the_last_chunk(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _chat(client, stream=True, keep_alive="0s")
+    assert _lines(r)[-1]["done"] is True
+    assert engine.loaded is False
+
+
+def test_generate_with_prompt_and_keep_alive_zero_unloads_after_the_reply(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _generate(client, stream=False, keep_alive=0)
+    assert r.status_code == 200
+    assert engine.loaded is False
+
+
+def test_chat_with_keep_alive_zero_from_a_chat_only_key_answers_and_stays_loaded(
+        protected, engine):
+    app, keys = protected
+    body = {"model": MODEL, "stream": False, "keep_alive": 0,
+            "messages": [{"role": "user", "content": "hi"}]}
+    with TestClient(app) as c:
+        r = _call(c, "POST", "/api/chat", body, key=keys["chat"])
+    assert r.status_code == 200
+    assert "models:write" in r.headers["x-localm-keep-alive"]
+    assert engine.loaded is True
+
+
+def test_chat_with_keep_alive_unset_leaves_the_model_loaded(client, engine):
+    r = _chat(client, stream=False)
+    assert r.status_code == 200
+    assert engine.loaded is True
+
+
 def test_unknown_request_keys_are_ignored_not_fatal(client):
     r = _chat(client, stream=False, mystery_field=1, options={"mirostat": 2})
     assert r.status_code == 200

@@ -1652,6 +1652,16 @@ class PluginManager:
                 out[name] = miss
         return out
 
+    def plugin_scope_names(self) -> set[str]:
+        """Every capability scope a plugin known to this host owns: installed,
+        store-listed and first-party catalog plugins."""
+        from localm.plugins import catalog as _cat
+        self.discover()
+        names = {spec.scope or name for name, spec in self.store_catalog().items()}
+        names.update(spec.scope or name for name, spec in self._specs.items())
+        names.update(e.name for e in _cat.CATALOG)
+        return names
+
     def scope_deps_warnings(self, granted_scopes) -> list:
         """Warnings for minting a key: a granted capability scope that maps to a
         first-party plugin which is not installed, or is installed but missing a

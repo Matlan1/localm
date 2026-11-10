@@ -46,6 +46,15 @@ def register(app: FastAPI, ctx) -> None:
         scope_list = body.get("scopes", [])
         if not isinstance(scope_list, list):
             raise HTTPException(400, "'scopes' must be a list of scope strings")
+        _mgr = getattr(app.state, "plugin_manager", None)
+        _valid = scopes.all_known_scopes()
+        if _mgr is not None:
+            _valid |= _mgr.plugin_scope_names()
+        _unknown = [s for s in scopes.normalize(scope_list) if s not in _valid]
+        if _unknown:
+            raise HTTPException(
+                400, f"Unknown scope(s): {', '.join(_unknown)}. "
+                     f"Valid scopes: {', '.join(sorted(_valid))}")
         # Prefer a server-computed deadline from a relative TTL (expires_in seconds)
         # so a key's lifetime never depends on the client's clock; fall back to an
         # absolute epoch (expires) for raw API clients that want a specific deadline.
