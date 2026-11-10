@@ -247,6 +247,11 @@ def build(engines: EngineCache) -> dict[str, dict]:
             # A fresh embedder load can print to stdout too, like chat() above.
             with _quiet_stdout():
                 engine = engines.get(args.get("model"))
+                if (getattr(engine, "loaded", True) is not True
+                        and getattr(getattr(engine, "_backend", None), "can_embed",
+                                    True) is not False):
+                    # Admission and the load under one GPU load lease hold.
+                    engine = engines.get_loaded(engines.resolve_model(args.get("model")))
             with engines.serving(engine):
                 return engine.embed(texts)
 

@@ -37,6 +37,7 @@ def _smi(monkeypatch, *, tool="nvidia-smi", returncode=0, stdout="", stderr=""):
             return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
         raise FileNotFoundError(cmd[0] if cmd else "?")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(subprocess, "run", _run)
 
 

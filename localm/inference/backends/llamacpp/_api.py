@@ -40,7 +40,7 @@ def _context_params_class():
     """The ``llama_context_params`` ctypes class matching the LOADED runtime.
 
     upstream inserted new fields (``n_outputs_max_per_seq``, then
-    ``moe_cache_size``) partway through that struct (see ``_structs``'
+    ``moe_cache_size``, then ``moe_cache_cpu_share``) partway through that struct (see ``_structs``'
     docstring), so - same reasoning as
     ``_model_params_class`` above - the class cannot be a module constant.
     Resolved once per process by ``_abi.context_params_layout``; imported
@@ -106,12 +106,13 @@ def llama_model_default_params():
 
 def llama_context_default_params():
     """Native default context params, as an instance of the LOADED build's
-    layout. The concrete class is ``LlamaContextParamsV1``, ``...V2`` or
-    ``...V3`` - callers must not assume any of them (same contract as
+    layout. The concrete class is ``LlamaContextParamsV1``, ``...V2``,
+    ``...V3`` or ``...V4`` - callers must not assume any of them (same contract as
     ``llama_model_default_params`` above). Every field this codebase sets or
     reads (``n_ctx``, ``n_batch``, ``rope_scaling_type``, ``offload_kqv``, ...)
-    is named identically in all three, since each split is a single INSERTED
-    field (``n_outputs_max_per_seq`` for V2, ``moe_cache_size`` for V3), not a
+    is named identically in all four, since each split is a single INSERTED
+    field (``n_outputs_max_per_seq`` for V2, ``moe_cache_size`` for V3,
+    ``moe_cache_cpu_share`` for V4), not a
     rename or reorder of anything already in use - see ``_structs``'
     docstring."""
     fn = _bind("llama_context_default_params", _context_params_class())
