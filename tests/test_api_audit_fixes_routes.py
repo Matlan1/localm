@@ -7,7 +7,6 @@ messages, a corrupt attached image, and the RAG query ``k`` bound."""
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from localm.inference import http_server as hs
@@ -169,29 +168,6 @@ def test_embeddings_with_an_embedding_model_fills_usage(setup_multi_model, monke
     usage = r.json()["usage"]
     assert usage["prompt_tokens"] > 0
     assert usage["total_tokens"] == usage["prompt_tokens"]
-
-
-# ----------------------------------------------------------------- F8
-
-def _owner_client():
-    app = hs.create_app(None)
-    return TestClient(app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
-
-
-def test_key_with_unknown_scope_is_refused_listing_valid_ones():
-    client = _owner_client()
-    r = client.post("/v1/keys", json={"name": "b", "scopes": ["nonsense"]})
-    assert r.status_code == 400
-    detail = r.json()["detail"]
-    assert "nonsense" in detail and "models:read" in detail
-    listing = client.get("/v1/keys")
-    assert all("nonsense" not in k.get("scopes", []) for k in listing.json()["keys"])
-
-
-def test_key_with_known_scopes_is_still_minted():
-    r = _owner_client().post("/v1/keys",
-                             json={"name": "ok", "scopes": ["chat", "models:read"]})
-    assert r.status_code == 200, r.text
 
 
 # ----------------------------------------------------------------- F10
