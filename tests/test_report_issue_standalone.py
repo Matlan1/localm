@@ -120,6 +120,24 @@ def test_scrub_redacts_authorization_header_regardless_of_scheme():
     assert out.count("Authorization: <redacted>") == 3
 
 
+@pytest.mark.parametrize("line, canary", [
+    ("Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b",
+     "9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b"),
+    ("Authorization: ApiKey CANARYAPIKEY1", "CANARYAPIKEY1"),
+    ("Authorization: AWS4-HMAC-SHA256 Credential=AKIACANARY2/20261110/us-east-1/s3/"
+     "aws4_request, SignedHeaders=host, Signature=CANARYSIG3", "CANARYSIG3"),
+    ("{ Authorization: 'Token CANARYJS4', n: 1 }", "CANARYJS4"),
+    ('{"headers":{"Authorization":"Basic dXNlcjpwYXNz"}}', "dXNlcjpwYXNz"),
+    ('{"X-Auth-Token":"abc123secret"}', "abc123secret"),
+    ("{'x-api-token': 'CANARYREPR5'}", "CANARYREPR5"),
+    ("Bearer abcdefgh+ijkl/mnop==", "+ijkl/mnop=="),
+])
+def test_scrub_redacts_any_auth_scheme_json_header_keys_and_base64_bearer(line, canary):
+    out = ri.scrub(line)
+    assert canary not in out, out
+    assert "<redacted>" in out
+
+
 def test_scrub_strips_bare_and_prefixed_credential_assignments():
     """ri.scrub redacts a credential written as a plain name=value line (a .env
     fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=),
