@@ -68,14 +68,20 @@ if 8642 was busy - use the address it prints). Under the hood:
   expiry (about 30 days before) or when it no longer covers an address or name
   the server needs. The CA is reused for those regenerations, so a device you trusted once stays trusted
   after your address changes.
-- The CA itself is replaced only when it cannot be reused: it has reached its own
-  expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are missing or
-  unreadable. localm mints a fresh CA in those cases, and every device that
+- The CA itself is replaced only when it cannot be reused: it is within 30 days
+  of its own expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are
+  missing or unreadable. The certificate is replaced together with it. localm mints a fresh CA in those cases, and every device that
   trusted the old one has to repeat the trust step below.
 - If certificates ever get into a state you cannot explain, stop localm, delete
   `<LOCALM_HOME>/tls/`, and start it again. The CA and the certificate are both
   rebuilt from scratch, so every device has to trust the new CA afterwards.
 - The CA private key never leaves your machine.
+- Details: both keys are RSA-2048, the server certificate is valid for 730 days
+  (never past the CA's own expiry), and the CA carries no name constraints, so
+  a device that trusts it trusts anything it signs. Beside `ca.crt`, `ca.key`,
+  `server.crt` and `server.key`, the `tls/` folder holds `meta.json`, a record
+  of which names and addresses the certificate covers. Keep the key files
+  private; the CA key can sign for any name.
 
 ### The one-time "trust this certificate" step
 

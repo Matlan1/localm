@@ -2115,12 +2115,18 @@ class _SignallingLoadLock:
     get_embedder tries to take it (get_embedder re-imports engine._LOAD_LOCK
     on every call, so this module-attribute swap reaches it)."""
 
-    def __enter__(self):
+    def acquire(self, blocking=True, timeout=-1):
         wants_load_lock.set()
-        real_load_lock.acquire()
+        return real_load_lock.acquire(blocking, timeout)
+
+    def release(self):
+        real_load_lock.release()
+
+    def __enter__(self):
+        self.acquire()
 
     def __exit__(self, *exc):
-        real_load_lock.release()
+        self.release()
 
 
 eng._LOAD_LOCK = _SignallingLoadLock()

@@ -57,6 +57,7 @@ from typing import Any, Callable, Optional
 
 from localm import __version__ as _LOCALM_VERSION
 from localm.inference.backends.base import LOADING_MODEL_STATUS
+from localm.inference.load_lease import LoadBusyError
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
@@ -197,6 +198,41 @@ class EngineCache:
         self._lock = threading.RLock()
         # Created on first use by routing_latch().
         self._latch = None
+        # GPU load lease keys get() took while a _load_scope() is open, and the
+        # depth of open scopes. Both guarded by _lock.
+        self._scope_lease: list = []
+        self._scope_depth = 0
+
+    @contextlib.contextmanager
+    def _load_scope(self):
+        """Keep every GPU load lease ``get()`` takes inside the block until the
+        block ends, so admission and the load that follows it are one hold.
+        Caller must hold ``_lock``."""
+        self._scope_depth += 1
+        try:
+            yield
+        finally:
+            self._scope_depth -= 1
+            if self._scope_depth == 0 and self._scope_lease:
+                from localm.inference import load_lease
+                keys, self._scope_lease = self._scope_lease, []
+                load_lease.release(keys)
+
+    @contextlib.contextmanager
+    def _admission_lease(self, name: str):
+        """Hold the GPU load lease (``localm.inference.load_lease``) while
+        *name* is admitted; inside a ``_load_scope()`` it is kept until that
+        scope ends. Raises ``LoadBusyError`` past
+        ``load_lease.LOAD_WAIT_TIMEOUT_S``. Caller must hold ``_lock``."""
+        from localm.inference import load_lease
+        keys = load_lease.acquire(load_lease.lease_keys(), purpose=f"loading {name}")
+        try:
+            yield
+        finally:
+            if self._scope_depth > 0:
+                self._scope_lease.extend(keys)
+            else:
+                load_lease.release(keys)
 
     def routing_latch(self):
         """The ``RoutingLatch`` recording which of this server's models failed
@@ -404,7 +440,7 @@ class EngineCache:
         instance's copy in use is not loaded while ``routing_latch()`` holds
         it: ModelLoadSkipped is raised before anything is evicted. The latch
         is read under the cache lock, after the route was planned."""
-        with self._lock:
+        with self._lock, self._load_scope():
             if name in self._peers and not self._peer_still_answers(name):
                 self.drop_peer(name)
             if skip_if_latched:
@@ -428,7 +464,7 @@ class EngineCache:
         """This server's own engine for *name* (see get), loaded before it is
         returned; one that fails to load is removed from the cache and the
         load error raised."""
-        with self._lock:
+        with self._lock, self._load_scope():
             return self._loaded(name, self.get(name))
 
     def load_here_instead_of(self, name: str, peer):
@@ -459,6 +495,8 @@ class EngineCache:
             engine.load()
         except ModelLoadCancelled:
             self._discard(name, engine)
+            raise
+        except LoadBusyError:
             raise
         except Exception as e:
             latch.record_failure(
@@ -589,13 +627,15 @@ class EngineCache:
                 # SAME object so the pulled engine is reused rather than silently
                 # replaced.
                 report_progress(LOADING_MODEL_STATUS)
-                self._make_room_for(name)
+                with self._admission_lease(name):
+                    self._make_room_for(name)
                 self._touch(name)
                 return engine
             report_progress(LOADING_MODEL_STATUS)
-            self._make_room_for(name)
-            _log(f"loading model {name}")
-            engine = self._factory(name)
+            with self._admission_lease(name):
+                self._make_room_for(name)
+                _log(f"loading model {name}")
+                engine = self._factory(name)
             self._engines[name] = engine
             self._touch(name)
             return engine
@@ -729,6 +769,14 @@ class EngineCache:
         by BUSY_WAIT_SECONDS of wall clock (the VRAM probe's own cost counts);
         past the bound the load is refused with ModelBusyError rather than
         stacked on top of the busy peer.
+
+        The shared embedder, reranker and speech model count as residents
+        (``residency.shared_residents``): when the model does not fit and no
+        idle chat model is left to evict, an idle one of them is released
+        (``residency.pick_shared_eviction_victim``), at most once each per
+        call, before the cache waits for a busy chat model or loads anyway.
+        With no chat model resident, the VRAM check runs only while one of
+        them is loaded.
         """
         from localm.config import load_config
         from localm.inference import residency
@@ -743,7 +791,8 @@ class EngineCache:
         # The resident set only changes through _evict, so the probe is taken
         # once per change, never once per poll of a busy peer.
         probe_pending = True
-        while self._lru:
+        shared_tried: set = set()
+        while self._lru or self._shared_to_try(shared_tried):
             over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
             # Only probe when the cap is satisfied: being over cap already means
             # room is needed regardless of what VRAM says. vram_ok stays None to
@@ -756,6 +805,17 @@ class EngineCache:
                 return
             victim = residency.pick_eviction_victim(
                 self._lru, self._engines, requested=name, pinned=pinned)
+            if victim is None and not over_cap:
+                shared = residency.pick_shared_eviction_victim(
+                    self._shared_to_try(shared_tried))
+                if shared is not None:
+                    shared_tried.add(shared.kind)
+                    if residency.evict_shared_resident(shared):
+                        _log(f"released the idle {shared.kind} to make room for {name}")
+                        probe_pending = True
+                    continue
+            if victim is None and not self._lru:
+                return
             if victim is None:
                 busy = [n for n in self._lru
                         if n != name and n not in pinned
@@ -795,6 +855,13 @@ class EngineCache:
                 return
             if self._evict(victim, loading=name):
                 probe_pending = True
+
+    @staticmethod
+    def _shared_to_try(tried: set) -> list:
+        """The loaded shared residents (``residency.shared_residents``) whose
+        kind is not in *tried*."""
+        from localm.inference import residency
+        return [r for r in residency.shared_residents() if r.kind not in tried]
 
     def _evict(self, victim: str, *, loading: str) -> bool:
         """Unload ``victim`` and wait for its VRAM to actually come back.
@@ -1181,6 +1248,9 @@ class MCPStdioServer:
             _progress_sink = self._progress_for(token)
             try:
                 result = spec["handler"](params.get("arguments", {}) or {})
+            except LoadBusyError as e:
+                _log(f"tool {name} refused: {e}")
+                result = _text_result(str(e), is_error=True)
             except Exception as e:
                 _log(f"tool {name} crashed: {e}")
                 result = _text_result(f"Tool failed: {e}", is_error=True)

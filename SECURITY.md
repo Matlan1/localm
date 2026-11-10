@@ -462,8 +462,8 @@ and search snippets are untrusted input to the model, and
   the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
   the moment they exist, then restricted to the current user: `chmod` on
-  POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
-  dropped) on Windows. Both are best-effort - a failure is logged as a
+  POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
+  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
   applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
@@ -579,6 +579,10 @@ the same signing keys described above, and/or a plain SHA256 digest - useful if
 you obtained the zip some other way than the recommended `git clone` install. The
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
+
+## Management log
+
+`logs/management.jsonl` in the data folder is an append-only record of management events, written in every session mode including privacy mode: key created or revoked (key id only), refused login (loopback or not), update applied (versions), settings saved (setting names only) and plugin installed or removed. It carries no key, setting value or conversation content. It is capped at 1 MB with one rotated file, and a failed write is logged as a warning without failing the operation recorded.
 
 ## Verifying a release
 
