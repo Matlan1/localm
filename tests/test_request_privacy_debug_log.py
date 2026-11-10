@@ -23,6 +23,10 @@ from fastapi.testclient import TestClient
 from localm import audit, debuglog
 from localm.audit import SESSION_MODE_HEADER
 from localm.inference.http_server import create_app
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 SECRET = "my bank PIN hint is my mother's maiden name Vandermeulen"
 REPLY = ("zebra", " quartz")
@@ -246,7 +250,7 @@ def _echo_engine(captured: dict):
 
     def _stream(messages, **kw):
         captured["messages"] = [dict(m) for m in messages]
-        return iter(["ok"])
+        yield "ok"
 
     engine.chat_stream.side_effect = _stream
     type(engine).loaded = property(lambda self: True)
@@ -265,8 +269,6 @@ def memory_app(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
-    from localm.plugins.builtin.memory import plug
-    monkeypatch.setattr(plug, "_embed_fn", lambda: None)
     captured: dict = {}
     app = create_app(_echo_engine(captured))
     mgr = app.state.plugin_manager
@@ -325,8 +327,9 @@ def test_a_privacy_request_cannot_write_through_the_memory_routes(memory_app):
 
 
 def test_the_memory_outlet_runs_inside_the_request_scope(memory_app, monkeypatch):
+    import sys
     app, _captured, _hdr = memory_app
-    from localm.plugins.builtin.memory import plug
+    plug = sys.modules["_localm_plugin_memory"]
     seen: list = []
     monkeypatch.setattr(plug, "_maybe_auto_consolidate",
                         lambda principal=None: seen.append(
