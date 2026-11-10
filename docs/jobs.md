@@ -112,7 +112,7 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server - jobs never stack model loads. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. A `localm job run` from a terminal is a separate process: a chat or memory job loads its model there, beside whatever the server has loaded. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or

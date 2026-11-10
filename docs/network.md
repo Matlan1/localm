@@ -27,7 +27,7 @@ one-time Whisper download) are consent by definition - but `net_mode off`
 still blocks them, with one exception: the admin-only
 `net_allow_model_downloads` setting (off by default) lets the downloads you
 trigger yourself (model pulls, HuggingFace search, the embedding-model and
-Whisper downloads) proceed under `off`. It never lifts `off` for anything a
+Whisper downloads, the native runtime downloads) proceed under `off`. It never lifts `off` for anything a
 model triggers. A one-time download like the last two
 is a single-call authorization, never written to config; it lets that one
 fetch through `ask`'s per-request friction, exactly like clicking "download

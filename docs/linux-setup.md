@@ -163,7 +163,7 @@ cd llama.cpp
 cmake -B build && cmake --build build --config Release -j
 
 # AMD ROCm (set your gfx target, e.g. gfx1030 for RDNA2):
-cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DGGML_HIP=ON -DGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 # NVIDIA CUDA:
@@ -213,8 +213,9 @@ or CPU as it does elsewhere.
 
 ### `pip install "localm[gpu]"` is Windows-only
 
-The `[gpu]` pip extra pins AMD ROCm torch wheels and can only resolve them on
-Windows. A pip extra cannot carry a custom package index, so on Linux
+The `[gpu]` pip extra pins AMD ROCm torch wheels for Windows; they come from
+AMD's package index, which a source checkout's uv configuration names and a
+plain `pip install` does not. A pip extra cannot carry a custom package index, so on Linux
 `pip install "localm[gpu]"` will NOT install a GPU torch build. On Linux use
 `setup.sh` (it picks the right `--torch-backend`) or the manual
 `uv pip install ... --torch-backend` command shown above.

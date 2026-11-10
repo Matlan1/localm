@@ -144,13 +144,13 @@ If you want to build `llama.dll` yourself from the llama.cpp source:
 ```bash
 git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp
-cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DGGML_HIP=ON -DGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j8
 ```
 
 Output: `build\bin\Release\llama.dll` and sibling `ggml*.dll` files.
 
-> `-DAMDGPU_TARGETS=gfx1030` targets RX 6000 (RDNA2). For another AMD GPU set it to
+> `-DGPU_TARGETS=gfx1030` targets RX 6000 (RDNA2). For another AMD GPU set it to
 > your card's gfx arch (e.g. `gfx1100` for RX 7000 / RDNA3). On Linux,
 > `localm setup-llama --backend hip` downloads upstream's prebuilt ROCm build,
 > which loads against the ROCm/HIP runtime installed on the system (it does not
@@ -160,12 +160,15 @@ Output: `build\bin\Release\llama.dll` and sibling `ggml*.dll` files.
 ### Verify GPU is being used
 
 Run with a 13B+ model and watch VRAM usage in Task Manager or `rocm-smi`.  
-localm prints at startup:
+Started with `--debug`, localm writes the runtime's start-up lines to the debug
+log (`<data dir>/logs/`). They begin with:
 
 ```
 ggml_cuda_init: found 1 ROCm devices (Total VRAM: 16368 MiB):
-  Device 0: AMD Radeon RX 6900 XT, gfx1030
 ```
+
+followed by one `Device N:` line per GPU, naming the card and its architecture
+(`gfx1030` for an RX 6000).
 
 To limit GPU layers (partial offload):
 ```bash

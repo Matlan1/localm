@@ -2361,10 +2361,10 @@ def stop_cmd(instance_id, stop_all, timeout):
     stop a specific instance, or --all to stop every running one.
 
     Requests the same clean shutdown the GUI's Settings page uses (model
-    unloaded, then the process exits). Without LOCALM_API_KEY set, a plain
-    local instance declines the unauthenticated request (by design), and if
-    the server does not confirm within --timeout for any reason, `stop` ends
-    the process directly instead.
+    unloaded, then the process exits), with the API key when one is set and
+    otherwise the instance's own local token. If the server refuses the
+    request or does not confirm within --timeout, `stop` ends the process
+    directly instead.
     """
     import time
 
@@ -2444,11 +2444,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                                      timeout=5, verify=tls.requests_verify(url),
                                      allow_redirects=False)
                 if resp.status_code in (401, 403):
-                    # The open-mode management gate refuses an unauthenticated POST
-                    # from a bare local client with no shell/API-key credential,
-                    # which is the DEFAULT case for a plain `localm
-                    # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
-                    # back to a direct kill rather than hard-failing.
+                    # The server refused the credential. Fall back to ending
+                    # the process directly.
                     graceful_denied = True
                 elif resp.status_code == 200:
                     deadline = time.monotonic() + timeout
@@ -2466,10 +2463,8 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         if not stopped:
             if graceful_denied:
-                console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
-                              f"unauthenticated shutdown request (set "
-                              f"LOCALM_API_KEY for a clean model-unload "
-                              f"shutdown) - ending the process directly.")
+                console.print(f"[dim]{escape(iid)}:[/dim] server refused the "
+                              f"shutdown request - ending the process directly.")
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path

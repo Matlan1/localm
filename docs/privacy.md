@@ -36,7 +36,7 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 
 | Mode | What it saves automatically |
 | --- | --- |
-| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
+| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below for the one exception, a server the coder starts without a terminal). This is the "no traces" mode. |
 | **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
@@ -175,6 +175,15 @@ in-memory activity list behind the status window in every mode, and to the debug
 log file only when the debug log is on. The Settings "Recent errors" list (the
 last five) is kept in the browser's memory in privacy mode and gone on reload; in
 `log` and `full` mode it is also kept in the browser's local storage.
+
+### A server the coder starts without a terminal
+
+When `localm coder` runs without a terminal (for example `-p` from a script)
+and has to start a server itself, that server's console output is written to
+a `localm-coder-autostart-*.log` file in the system temp folder, in every
+session mode, and localm does not delete it. It holds what the server would
+otherwise print in its console window: start-up lines, warnings and native
+runtime messages.
 
 ### "Keep diagnostics for bug reports" (`keep_diagnostics`)
 

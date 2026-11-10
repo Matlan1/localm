@@ -296,6 +296,19 @@ def test_refuse_downgrade_unaffected_by_the_new_comparable_signal(monkeypatch):
     updater._refuse_downgrade("0.1.6")         # plain newer: still allowed, unchanged
 
 
+@pytest.mark.parametrize("installed", ["unknown", "", "abc"])
+def test_refuse_downgrade_refuses_when_the_installed_version_is_unreadable(
+        monkeypatch, installed):
+    """With no readable installed version nothing can be confirmed as newer,
+    so a plain update is refused whatever version the build carries."""
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(_version, "read_version", lambda: installed)
+    with pytest.raises(LocalmError, match="installed localm version"):
+        updater._refuse_downgrade("0.0.1")
+    with pytest.raises(LocalmError, match="installed localm version"):
+        updater._refuse_downgrade("9.9.9")
+
+
 # ------------------------------ classify --------------------------------
 
 def test_classify_reboot_when_deps_unchanged(tmp_path):

@@ -239,9 +239,8 @@ CORE_FIELDS: list = [
                  step=1024),
     SettingField("unload_for_room", Widget.SELECT, "Unload other models to make room",
                  "always unloads this instance's idle models when a new model needs "
-                 "their VRAM; ask asks first; never keeps them (slower; a manual "
-                 "switch still asks). Another instance's model is always "
-                 "asked about.",
+                 "their VRAM. ask and never keep them (slower), but a manual switch "
+                 "asks. Another instance's model is only unloaded after asking.",
                  group="Engine", applies=Applies.LIVE,
                  options=["always", "ask", "never"]),
     SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
@@ -348,7 +347,7 @@ CORE_FIELDS: list = [
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
                  "(same order/length). Blank sizes each card's share from its "
-                 "free VRAM at load time.",
+                 "free VRAM at load time, or equally when free VRAM cannot be read.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
     # models" number input in the Live Tuning card (settings-perf.js
@@ -1952,7 +1951,8 @@ MEDIA_PLUGIN_FIELDS: list = [
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
-               "stable-diffusion.cpp build to use. auto picks the best one for this machine.",
+               "stable-diffusion.cpp build to use. auto uses the best installed build and "
+               "installs the recommended one only when none is installed.",
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
