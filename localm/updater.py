@@ -1030,7 +1030,8 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
 # Data dir entries an older build may read without the fields a newer one added,
 # and write back without them.
 _DOWNGRADE_DATA = ("config.json", "registry.json", "checkpoints", "memory", "plugins",
-                   "coder-hook-trust.json")
+                   "coder-hook-trust.json", "auth.json", "auth.kdf.json",
+                   "sessions.json", "jobs", "rag")
 
 
 def _backup_data_for_downgrade(new_version: str) -> Path:
