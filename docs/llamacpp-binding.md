@@ -752,7 +752,8 @@ when the per-device plan with it keeps the target's split and fits every device)
 with a target that has no GPU layers, or when it does not fit, it runs on the CPU, so it never costs the target layers or devices,
 and the usage of a reply that drafted reports `draft-on-cpu`. A draft model that is missing, is
 not a causal chat model by its metadata (a draft head, a diffusion,
-encoder-decoder, embedding, audio or image model; nothing is loaded), is not a
+encoder-decoder, embedding or reranker, speech, music, image or video model, or
+a text encoder for one; nothing is loaded), is not a
 GGUF file, fails to load, does not share the vocabulary, has recurrent layers,
 or whose context is refused leaves the model working without drafting, with the
 status naming why (`draft-model-missing`, `draft-not-gguf`,

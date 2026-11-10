@@ -703,7 +703,10 @@ that is already loaded is used, else the first by name. The response carries
 `verbose_json` are a `400`), takes WAV without any extra and other formats with the voice
 extra (`501` otherwise; this is the GGUF path, a HuggingFace-format audio model decodes with its own reader), accepts clips up to 10 minutes and 25 MB, decodes at 0.0
 temperature unless `temperature` is sent, passes `language` and `prompt` to the model as
-part of its instruction (a dedicated speech model such as Qwen3-ASR ignores them), and answers `413` when the clip does not fit the model's context
+part of its instruction (a dedicated speech model such as Qwen3-ASR ignores them), and answers `413` when the clip does not fit the model's context ceiling (a GGUF model
+loaded with `n_ctx_max` 0 and `ctx_auto` off has no ceiling: its context grows to hold
+the clip, and a context that cannot be created is a `502`; a HuggingFace-format model
+answers `413` only when it reports its window and counts the clip in its prompt tokens)
 and `502` when the transcript hit the reply limit instead of returning it cut short. The
 audio is not recorded in the audit log or the transcript.
 
