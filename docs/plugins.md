@@ -308,9 +308,9 @@ never registered as a coder tool.** That split is a real limitation of the
 current loader, not a convention: a plugin that wants both surfaces has to
 declare `entry` as well as `register`.
 
-A manifest with only `entry` works for the coder, but the plugin engine also sees
-it once it is installed and enabled, looks for a `plugin` module, and reports a load
-failure for it on the Plugins page (`module 'plugin' not found`).
+A manifest with only `entry` is a coder-tool plugin: the plugin engine lists it
+on the Plugins page and loads nothing for it. A manifest with neither `entry` nor
+`register` is reported there as a load failure.
 
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
