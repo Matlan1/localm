@@ -708,7 +708,7 @@ def generate_image(
         # Skipped when the caller decided the media model fits alongside the chat model
         # (swap=False), so the chat model stays hot.
         if swap:
-            _localm_unload(localm_url, instance_token)
+            _localm_unload(localm_url, instance_token, on_failure=_say, label="image")
 
         # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
         # FIRST (comfy_console_tail_start), so a partial-apply warning printed while
