@@ -1063,8 +1063,8 @@ def find_attachable(home: Path, root_dir: str,
             alive = False
         if alive:
             return entry
-        # Reap only when the process is also gone; never delete a live entry on a
-        # transient or identity probe miss.
+        # Reap only when the process is also gone or its pid now names another
+        # process; never delete a live entry on a transient or identity probe miss.
         if entry_process_state(entry)[0] in ("gone", "stale"):
             unregister_instance(entry.get("_path"))
     return None
