@@ -227,6 +227,43 @@ def test_a_failed_deps_step_says_how_to_try_again(install):
         "install folder")
 
 
+def _release_with_launchers():
+    files = _files("0.3.2", ["click", "rich"])
+    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
+    return _release(files)
+
+
+def test_a_deps_step_that_cannot_start_says_how_to_try_again(install):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def run(cmd):
+        raise OSError("no such program")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=run)
+    _assert_venv_is_031(site)
+    assert ei.value.summary == "the post-update step crashed; rolled back"
+    assert ei.value.reason.endswith(
+        f"no such program. To try again, close localm and run {_RETRY_CMD} update in the "
+        "localm install folder")
+
+
+def test_a_failed_rollback_after_the_deps_step_asks_for_no_retry(install, monkeypatch):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def broken(*a, **k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(updater, "_restore_all", broken)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    assert ei.value.summary == "the post-update step failed AND rollback failed - manual recovery needed"
+    assert "disk gone" in ei.value.reason
+    assert "To try again" not in ei.value.reason
+
+
 def test_a_failed_deps_step_without_a_launcher_script_names_only_the_failure(install):
     inst, site = install
     data, sig = _release_032(sd=None)
