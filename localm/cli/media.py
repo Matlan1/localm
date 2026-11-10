@@ -19,12 +19,12 @@ def _plugin_api_url(plugin: str) -> str:
     Resolved through the plugin's OWN backend, the same call its routes make, so
     the two agree by construction instead of through two copies of a precedence
     rule that already differs between the three media plugins. Falls back to the
-    shared default if that plugin is not importable."""
-    from importlib import import_module
-
+    shared default when that plugin is not installed and enabled, or not
+    importable."""
     from ..config import load_config
+    from ..plugins.lookup import plugin_api
     try:
-        backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
+        backend = plugin_api(plugin, "backend")
         url = backend.settings(load_config()).get("api_url")
         if url:
             return str(url)
@@ -33,6 +33,19 @@ def _plugin_api_url(plugin: str) -> str:
         logger.debug("could not resolve the %s plugin ComfyUI url (%s); using the shared default", plugin, exc)
     from ..media.comfy_client import default_api_url
     return default_api_url()
+
+def _media_plugin(plugin: str, submodule: str):
+    """The media plugin's *submodule*, or exit 1 with a message when the plugin
+    is not installed and enabled."""
+    from rich.markup import escape
+
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    try:
+        return plugin_api(plugin, submodule)
+    except PluginUnavailable as e:
+        console.print(f"[yellow]{escape(str(e))}[/yellow]")
+        sys.exit(1)
+
 
 def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
@@ -270,7 +283,6 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     terminal, you are offered to open it.
     """
     import time as _time
-    from importlib import import_module
 
     from rich.markup import escape
 
@@ -281,9 +293,8 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     if size:
         from fastapi import HTTPException
 
-        from ..plugins.builtin.image.plug import parse_image_size
         try:
-            parsed = parse_image_size(size)
+            parsed = _media_plugin("image", "plug").parse_image_size(size)
         except HTTPException as e:
             console.print(f"[red]{escape(str(e.detail))}[/red]")
             sys.exit(2)
@@ -293,7 +304,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
     _cfg = load_config()
-    image_backend = import_module("localm.plugins.builtin.image.backend")
+    image_backend = _media_plugin("image", "backend")
     s = image_backend.prepare_for_job(image_backend.settings(_cfg), _cfg)
     if s.get("backend") != "comfy":
         _via_backend(image_backend, s, prompt, out_path, "image",
@@ -427,7 +438,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from ..audit import SessionMode, effective_mode
     from ..config import load_config
     from ..music_gen import generate_music
-    from ..plugins.builtin.music import backend as music_backend
+    music_backend = _media_plugin("music", "backend")
     console = Console()
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
@@ -512,7 +523,6 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     generator - expect many minutes per clip; see docs/video.md for model setup.
     """
     import time as _time
-    from importlib import import_module
 
     from localm.console import SafeConsole as Console
     from rich.markup import escape
@@ -529,7 +539,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
     _cfg = load_config()
-    video_backend = import_module("localm.plugins.builtin.video.backend")
+    video_backend = _media_plugin("video", "backend")
     s = video_backend.prepare_for_job(video_backend.settings(_cfg), _cfg)
     if s.get("backend") != "comfy":
         _via_backend(video_backend, s, prompt, out_path, "video",

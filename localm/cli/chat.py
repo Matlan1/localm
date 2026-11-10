@@ -1172,12 +1172,16 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    try:
+        media_backend = plugin_api(spec["plugin"], "backend")
+    except PluginUnavailable as e:
+        console.print(f"[yellow]{escape(str(e))}[/yellow]")
+        return
     if spec["plugin"] in ("image", "video"):
         import time as _t
-        from importlib import import_module
 
         from ..audit import SessionMode, effective_mode
-        media_backend = import_module(f"localm.plugins.builtin.{spec['plugin']}.backend")
         out_dir = home_dir / spec["subdir"]
         out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
 
@@ -1199,7 +1203,7 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         import time as _t
 
         from ..audit import SessionMode, effective_mode
-        from ..plugins.builtin.music import backend as music_backend
+        music_backend = media_backend
         out_dir = home_dir / spec["subdir"]
         out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
 

@@ -217,9 +217,13 @@ def build(engines: EngineCache, coder_shell: bool = False,
 
         home = home_dir().resolve()
 
+        from localm.plugins.lookup import PluginUnavailable, plugin_api
         try:
-            from localm.plugins.builtin.image import backend as _image_backend
-            api_url = _image_backend.settings(load_config()).get("api_url") or None
+            image_backend = plugin_api("image", "backend")
+        except PluginUnavailable as e:
+            return _text_result(str(e), is_error=True)
+        try:
+            api_url = image_backend.settings(load_config()).get("api_url") or None
         except Exception as exc:                     # noqa: BLE001
             from localm.debuglog import logger
             logger.debug("could not resolve the image plugin ComfyUI url (%s); "
@@ -271,7 +275,6 @@ def build(engines: EngineCache, coder_shell: bool = False,
         # comfy.generate_image builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
-        from localm.plugins.builtin.image import backend as image_backend
         with _quiet_stdout():
             native = image_backend.generate_unless_comfy(
                 prompt, out,

@@ -2694,11 +2694,9 @@ class TestSessionExtras:
         EVERYONE - a scoped/restricted key must not trigger it, same rule as
         create_session's own optional model switch (plug.py:201-207)."""
         app, switched = coder_app
-        # The coder plugin is loaded under a synthetic sys.modules name, not
-        # localm.plugins.builtin.coder.plug (PluginManager._import_module) -
-        # patch THAT module object or the running route never sees it.
+        # The module the running route was loaded from.
         import sys
-        plug_mod = sys.modules["_localm_plugin_coder"]
+        plug_mod = sys.modules["localm.plugins.builtin.coder.plug"]
         monkeypatch.setattr(plug_mod, "_principal_from_request",
                             lambda request: (False, "scoped-principal"))
         monkeypatch.setattr("localm.inference.http_server.caller_grants",

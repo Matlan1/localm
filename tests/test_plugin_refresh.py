@@ -307,3 +307,39 @@ def test_enable_runs_the_store_code_when_the_conversion_fails(env, monkeypatch):
     with TestClient(app) as c:
         assert c.get("/api/ref9/val").json()["val"] == 2
     assert "could not be fully removed" in mgr.api_state()["errors"].get("ref9", "")
+
+
+def _link_dir(link, target):
+    """A directory link: a junction on Windows, a symlink elsewhere."""
+    import os
+    import sys
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_conversion_never_follows_or_removes_a_linked_folder(env):
+    """A folder in the old copy that links elsewhere (a junction or symlink) is
+    kept as it is: nothing behind it is deleted, and the link stays."""
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _valued_plugin(store, "lnk1", 2)
+    (store / "lnk1" / "static").mkdir()
+    (store / "lnk1" / "static" / "a.js").write_text("shipped", encoding="utf-8")
+    _valued_plugin(inst, "lnk1", 1)
+    outside = env / "outside"
+    (outside / "__pycache__").mkdir(parents=True)
+    (outside / "a.js").write_text("mine", encoding="utf-8")
+    (outside / "__pycache__" / "x.pyc").write_bytes(b"\0")
+    (outside / "empty").mkdir()
+    _link_dir(inst / "lnk1" / "static", outside)
+
+    assert PluginManager(None, store_root=store, installed_root=inst).refresh("lnk1") == ["lnk1"]
+
+    assert (outside / "a.js").read_text(encoding="utf-8") == "mine"
+    assert (outside / "__pycache__" / "x.pyc").is_file()
+    assert (outside / "empty").is_dir()
+    assert (inst / "lnk1" / "static" / "a.js").is_file()
+    assert not (inst / "lnk1" / "plug.py").exists()

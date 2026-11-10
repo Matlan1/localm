@@ -154,11 +154,9 @@ def test_generate_route_defers_settings_to_the_job_thread(
 # --------------------------------------------------------------------------- #
 
 def _installed_backend(plugin: str):
-    """The backend module the INSTALLED plugin actually uses. PluginManager
-    loads a plugin under a synthetic package name, so patching the canonical
-    localm.plugins.builtin.<x>.backend silently patches nothing the installed
-    plugin's own route code sees."""
-    mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
+    """The backend module the INSTALLED plugin actually uses: a first-party
+    plugin loads under its real name, ``localm.plugins.builtin.<plugin>``."""
+    mod = sys.modules.get(f"localm.plugins.builtin.{plugin}.backend")
     assert mod is not None, (
         f"the installed {plugin} plugin's backend module was not found - the "
         "plugin loader's naming changed and this test would silently patch nothing")

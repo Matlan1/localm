@@ -1461,7 +1461,7 @@ class PluginManager:
             return False
         leftovers = self._copied_files(dest, store_src)
         marker = _read_marker(dest)
-        if marker and marker.get("package") and not leftovers:
+        if marker and marker.get("package") and not any(leftovers.values()):
             return False
         _write_store_install(dest, store_src)
         failed, kept = [], []
@@ -1492,33 +1492,67 @@ class PluginManager:
         return True
 
     @staticmethod
-    def _copied_files(dest: Path, store_src: Path) -> dict:
-        """Every file under *dest* except its manifest and provenance marker,
-        mapped to True when it is copied code (a path *store_src* also has, or a
-        compiled file) and False when it is something else."""
-        out: dict = {}
+    def _is_link(entry) -> bool:
+        """True for a symlink or a Windows junction (never followed or removed
+        by the conversion)."""
         try:
-            files = [p for p in Path(dest).rglob("*") if p.is_file() or p.is_symlink()]
+            return entry.is_symlink() or os.path.isjunction(entry.path)
         except OSError:
-            return out
-        for p in files:
-            rel = p.relative_to(dest)
-            if rel.as_posix() in ("plugin.toml", _PLUGIN_MARKER):
+            return True
+
+    @classmethod
+    def _copied_files(cls, dest: Path, store_src: Path) -> dict:
+        """Every entry under *dest* except its manifest and provenance marker,
+        mapped to True when it is copied code (a file at a path *store_src* also
+        has, or a compiled file) and False when it is kept. A symlink or junction
+        is kept and not descended into."""
+        out: dict = {}
+        stack = [Path(dest)]
+        while stack:
+            try:
+                entries = list(os.scandir(stack.pop()))
+            except OSError:
                 continue
-            compiled = p.suffix == ".pyc" or "__pycache__" in rel.parts
-            out[p] = compiled or (Path(store_src) / rel).is_file()
+            for e in entries:
+                p = Path(e.path)
+                rel = p.relative_to(dest)
+                if cls._is_link(e):
+                    out[p] = False
+                    continue
+                try:
+                    is_dir = e.is_dir(follow_symlinks=False)
+                except OSError:
+                    out[p] = False
+                    continue
+                if is_dir:
+                    stack.append(p)
+                    continue
+                if rel.as_posix() in ("plugin.toml", _PLUGIN_MARKER):
+                    continue
+                compiled = p.suffix == ".pyc" or "__pycache__" in rel.parts
+                out[p] = compiled or (Path(store_src) / rel).is_file()
         return out
 
-    @staticmethod
-    def _prune_empty_dirs(root: Path) -> None:
-        """Remove every empty directory below *root*, deepest first."""
-        try:
-            dirs = sorted((p for p in Path(root).rglob("*")
-                           if p.is_dir() and not p.is_symlink()),
-                          key=lambda p: len(p.parts), reverse=True)
-        except OSError:
-            return
-        for d in dirs:
+    @classmethod
+    def _prune_empty_dirs(cls, root: Path) -> None:
+        """Remove every empty real directory below *root*, deepest first; a
+        symlink or junction is neither descended into nor removed."""
+        dirs: list = []
+        stack = [Path(root)]
+        while stack:
+            try:
+                entries = list(os.scandir(stack.pop()))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if cls._is_link(e) or not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                dirs.append(Path(e.path))
+                stack.append(Path(e.path))
+        for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
             try:
                 d.rmdir()
             except OSError:

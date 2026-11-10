@@ -34,8 +34,12 @@ def tool_generate_image(
     import os
 
     from localm.image_gen.comfy import generate_image
-    from localm.plugins.builtin.image import backend as image_backend
+    from localm.plugins.lookup import PluginUnavailable, plugin_api
 
+    try:
+        image_backend = plugin_api("image", "backend")
+    except PluginUnavailable as e:
+        return ToolResult.error(str(e))
     try:
         out_p = _confine(cwd, output_path)
         input_p = _confine(cwd, input_image) if input_image else None
