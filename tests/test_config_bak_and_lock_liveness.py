@@ -16,6 +16,8 @@ import time
 import pytest
 
 import localm.config as cfg
+import localm.storekit as storekit
+import localm.procid as procid
 
 
 @pytest.fixture()
@@ -128,7 +130,7 @@ def test_an_unreadable_primary_is_reported_once_through_the_logger(
         home, caplog, capsys):
     _config_with_bak()
     _corrupt_config()
-    cfg._warned_unreadable.clear()
+    storekit._warned_unreadable.clear()
     with caplog.at_level(logging.WARNING, logger="localm"):
         for _ in range(5):
             cfg._read_json_checked(cfg.CONFIG_FILE, {})
@@ -142,7 +144,7 @@ def test_an_unreadable_primary_is_reported_once_through_the_logger(
 # --------------------------------------------------------------------------- #
 
 pytestmark_identity = pytest.mark.skipif(
-    cfg._proc_start_identity(os.getpid()) is None,
+    procid.process_start_identity(os.getpid()) is None,
     reason="this platform cannot read a process start identity")
 
 _HOLDER = (
@@ -174,7 +176,7 @@ def _lockpath(target):
 @pytestmark_identity
 def test_a_killed_holder_is_reclaimed_at_once_whatever_the_stale_age(
         home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
     target = home / "store.json"
     proc = _spawn_holder(target)
     try:
@@ -193,7 +195,7 @@ def test_a_killed_holder_is_reclaimed_at_once_whatever_the_stale_age(
 
 @pytestmark_identity
 def test_a_live_holder_past_the_stale_age_keeps_the_lock(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     target = home / "store.json"
     proc = _spawn_holder(target)
     try:
@@ -211,7 +213,7 @@ def test_a_live_holder_past_the_stale_age_keeps_the_lock(home, monkeypatch):
 
 
 def test_a_token_without_a_start_identity_still_goes_stale_by_age(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     target = home / "store.json"
     lockpath = _lockpath(target)
     lockpath.write_bytes(b"4242:deadbeef")
@@ -224,8 +226,8 @@ def test_a_token_without_a_start_identity_still_goes_stale_by_age(home, monkeypa
 @pytestmark_identity
 def test_this_processs_leaked_token_under_a_reused_pid_is_dead(home):
     target = home / "store.json"
-    leaked = cfg._lock_token(os.getpid(), "abandoned")
-    assert cfg._lock_holder_state(leaked) == "dead"
+    leaked = storekit._lock_token(os.getpid(), "abandoned")
+    assert storekit._lock_holder_state(leaked) == "dead"
     _lockpath(target).write_bytes(leaked)
     with cfg._cross_process_lock(target, timeout=2.0):
         pass
@@ -235,7 +237,7 @@ def test_this_processs_leaked_token_under_a_reused_pid_is_dead(home):
 def test_a_token_held_by_this_process_is_alive(home):
     target = home / "store.json"
     with cfg._cross_process_lock(target):
-        assert cfg._lock_holder_state(_lockpath(target).read_bytes()) == "alive"
+        assert storekit._lock_holder_state(_lockpath(target).read_bytes()) == "alive"
 
 
 def test_assert_held_raises_when_the_lock_was_taken_over(home):
@@ -280,12 +282,12 @@ def test_assert_store_lock_held_is_a_no_op_without_a_lock(home):
 
 def test_set_api_key_waits_on_the_store_lock(home, monkeypatch):
     from localm import auth
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setattr(auth, "key_file", lambda: home / "auth.key")
     lockpath = _lockpath(home / "auth.key")
     lockpath.write_bytes(b"12345:foreign")
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
     try:
         with pytest.raises(cfg.ConfigLockTimeout):
             auth.set_api_key("abc-12345678")

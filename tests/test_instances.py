@@ -16,7 +16,7 @@ import uuid
 
 import pytest
 
-from localm import instances
+from localm import instances, procid
 
 
 # ------------------------------------------------------------------ #
@@ -350,9 +350,9 @@ def test_host_id_does_not_depend_on_the_host_name(monkeypatch):
         pytest.skip("no machine identifier is readable here")
     space = instances.pid_space_id()
     monkeypatch.setattr(platform, "node", lambda: "some-other-host-name")
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
-    monkeypatch.setattr(instances, "_HOST_ID", None)
-    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_HOST_ID", None)
+    monkeypatch.setattr(procid, "_HOST_ID_READ", False)
     assert instances.pid_space_id() != space
     assert instances.host_id() == host
 
@@ -360,8 +360,8 @@ def test_host_id_does_not_depend_on_the_host_name(monkeypatch):
 def test_host_id_is_none_without_a_machine_identifier(monkeypatch):
     for name in ("machine_guid", "linux_machine_id", "darwin_host_uuid"):
         monkeypatch.setattr(instances, name, lambda: "")
-    monkeypatch.setattr(instances, "_HOST_ID", None)
-    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(procid, "_HOST_ID", None)
+    monkeypatch.setattr(procid, "_HOST_ID_READ", False)
     assert instances.host_id() is None
 
 
@@ -369,18 +369,18 @@ def test_linux_host_id_is_none_when_the_pid_namespace_is_unreadable(
         monkeypatch, tmp_path):
     """Without the pid namespace two containers sharing a machine-id would
     share a host id, so none is given."""
-    monkeypatch.setattr(instances, "linux_machine_id", lambda: "a-machine-id")
-    monkeypatch.setattr(instances, "machine_guid", lambda: "")
-    monkeypatch.setattr(instances, "darwin_host_uuid", lambda: "")
-    monkeypatch.setattr(instances, "_HOST_ID", None)
-    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
-    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path / "absent"))
+    monkeypatch.setattr(procid, "linux_machine_id", lambda: "a-machine-id")
+    monkeypatch.setattr(procid, "machine_guid", lambda: "")
+    monkeypatch.setattr(procid, "darwin_host_uuid", lambda: "")
+    monkeypatch.setattr(procid, "_HOST_ID", None)
+    monkeypatch.setattr(procid, "_HOST_ID_READ", False)
+    monkeypatch.setattr(procid, "_LINUX_PID_NS", str(tmp_path / "absent"))
     monkeypatch.setattr(instances.sys, "platform", "linux")
     got = instances.host_id()
     monkeypatch.setattr(instances.sys, "platform", sys.platform)
     assert got is None
-    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
-    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path))
+    monkeypatch.setattr(procid, "_HOST_ID_READ", False)
+    monkeypatch.setattr(procid, "_LINUX_PID_NS", str(tmp_path))
     monkeypatch.setattr(instances.sys, "platform", "linux")
     got = instances.host_id()
     monkeypatch.undo()

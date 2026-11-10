@@ -18,7 +18,7 @@ from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threa
 # Budgets for run_in_threadpool_bounded() below. Each bounds only the
 # client-visible wait; the wrapped call keeps running.
 #   _CONFIG_RMW_TIMEOUT_S: sits just above update_config()'s own cross-process
-#     lock timeout (localm.config._CROSS_LOCK_TIMEOUT, 10s), so that more
+#     lock timeout (localm.storekit._CROSS_LOCK_TIMEOUT, 10s), so that more
 #     specific TimeoutError surfaces first.
 #   _COMFY_STATUS_TIMEOUT_S: _comfy_alive()'s own urlopen timeout is 1.0s.
 #   _COMFY_STOP_TIMEOUT_S: stop_comfy()'s worst case is interrupt_comfy (two

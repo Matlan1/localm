@@ -87,13 +87,23 @@ units = [
 
 [[tier]]
 name = "foundation"
-role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL and store mechanics, path and text helpers, ELF dependency inspection, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix, the standard-stream setup, the multipart upload parser, the transcription output formats, WAV reading, the KV cache element type, the full paths of the system's own programs, the status-bar sampler that tabs subscribe to."
+role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL helpers, path and text helpers, ELF dependency inspection, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix, the standard-stream setup, the multipart upload parser, the transcription output formats, WAV reading, the KV cache element type, the status-bar sampler that tabs subscribe to."
 units = [
-    "config", "debuglog", "console", "jsonl", "jsonreply", "storekit", "storeformat", "pathsafe", "pathscrub",
+    "config", "debuglog", "console", "jsonl", "jsonreply", "storeformat", "pathsafe", "pathscrub",
     "textguard", "textnorm", "elf_deps", "executor", "bindhost", "netlisten", "scopes",
     "readline_privacy", "_version", "_venvguard", "_mp_spawn", "stdio", "kv_cache",
-    "multipartform", "voice_formats", "wav_audio", "sysprog", "livefeed", "loopback_http",
+    "multipartform", "voice_formats", "wav_audio", "livefeed", "loopback_http",
 ]
+
+[[tier]]
+name = "stores"
+role = "Store mechanics every JSON and JSONL store shares: atomic writes, the checked read that tells a current file from a backup or an unreadable one, the owner-restricted write, and the cross-process store lock whose staleness follows whether the holder is still running. Below configuration, which keeps its settings through it."
+units = ["storekit"]
+
+[[tier]]
+name = "process"
+role = "Process and host identity (whether a pid is running, when a process or thread started, which pid table a pid belongs to) and the full paths of the system's own programs. Stdlib only, so the store lock, instance discovery and every liveness-based lock read one answer."
+units = ["procid", "sysprog"]
 
 [[tier]]
 name = "events"

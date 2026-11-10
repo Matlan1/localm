@@ -168,7 +168,7 @@ def _list_and_selected(media: str) -> tuple:
     Every route in make_workflow_router needs both together; calling them
     independently loads config.json TWICE per request - real cost on Windows,
     where a config read can hit the documented ~1s antivirus/indexer retry
-    (config.py's _replace_atomic doc)."""
+    (storekit.replace_atomic's doc)."""
     active = selected_name(media)
     return list_workflows(media, active=active), active
 
