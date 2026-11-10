@@ -2188,7 +2188,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     # Background-job registry, registered at KERNEL level so a headless
     # ``localm serve`` has one too. Every consumer reads app.state.jobs PER
     # REQUEST, so registration order inside attach_engine does not matter.
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     from localm.plugins.gui.routes import jobs as _job_routes
     app.state.jobs = JobManager()
     _job_routes.register(app, app.state.jobs)

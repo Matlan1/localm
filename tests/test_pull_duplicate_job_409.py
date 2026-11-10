@@ -45,7 +45,7 @@ def _no_real_downloads(monkeypatch):
         return _FakeJob()
 
     monkeypatch.setattr(
-        "localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        "localm.jobmanager.JobManager.start_cli", fake_start_cli)
     return started
 
 

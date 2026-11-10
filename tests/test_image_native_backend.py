@@ -642,7 +642,7 @@ def native_app(fake_native, tmp_path, monkeypatch, no_comfy):
 
     from localm.config import update_config
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     runner, s = fake_native
     model = s["native"]["model"]
     update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(

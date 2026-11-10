@@ -224,7 +224,7 @@ def gui_client(monkeypatch):
             model_manager.remove_model(args[1])
         return _FakeJob()
 
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
 
     async def switch_model(name):
         return {"status": "loaded", "model": name}
