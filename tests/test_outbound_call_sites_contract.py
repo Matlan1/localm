@@ -47,7 +47,6 @@ _CLASSIFIED = {
     ("inference/http_engine.py", "remote_model_identity"): "operator-cli",
     ("instances.py", "fetch_any_whoami"): "peer",
     ("media/comfy_client.py", "comfy_port_holder"): "comfy",
-    ("media/comfy_client.py", "_localm_unload"): "self",
     ("media/koboldcpp/server.py", "_Server.__init__"): "fixed-host",
     ("netpin.py", "pinned_session"): "fixed-host",
     ("plugins/coder/backends/http.py", "_post_with_retry"): "operator-cli",
