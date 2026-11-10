@@ -191,6 +191,7 @@ def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str])
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
     _require_auth = _hs._require_auth
+    chat_scope = [Depends(require_scope(scopes.CHAT))]
     read_models = [Depends(require_scope(scopes.MODELS_READ))]
     write_models = [Depends(require_scope(scopes.MODELS_WRITE))]
 
@@ -451,7 +452,7 @@ def register(app: FastAPI, ctx) -> None:
             return str(data.get("error") or data.get("detail") or "request failed")
         return "request failed"
 
-    @route("/api/chat", methods=["POST"], dependencies=[Depends(_require_auth)])
+    @route("/api/chat", methods=["POST"], dependencies=chat_scope)
     async def ollama_chat(req: P.OllamaChatRequest, request: Request):
         name = P.request_model_name(req)
         if not req.messages:
@@ -465,7 +466,7 @@ def register(app: FastAPI, ctx) -> None:
             return await _unload_after_reply(request, name, reply, P.unload_forced(req))
         return reply
 
-    @route("/api/generate", methods=["POST"], dependencies=[Depends(_require_auth)])
+    @route("/api/generate", methods=["POST"], dependencies=chat_scope)
     async def ollama_generate(req: P.OllamaGenerateRequest, request: Request):
         name = P.request_model_name(req)
         if not req.prompt and not req.images:

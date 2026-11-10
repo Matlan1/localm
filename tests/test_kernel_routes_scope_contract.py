@@ -19,9 +19,8 @@ from localm.inference.http_server import create_app
 #   - require_scope(...)'s returned closure (dep), used via
 #     ``dependencies=[Depends(require_scope(scopes.X))]`` at the route
 #     decorator - the normal case, most kernel routes.
-#   - _require_auth: the baseline "any valid key, no specific scope required"
-#     gate used by the chat-completions family (chat is the baseline scope,
-#     see localm/scopes.py).
+#   - _require_auth: the "any valid key, no specific scope required" gate
+#     (embeddings, rerank, job and activity reads).
 #   - require_fs_host: layers a host-filesystem-access check on top of the
 #     same base ``_enforce_request`` used by require_scope/_require_auth,
 #     used by /debug/stacks.

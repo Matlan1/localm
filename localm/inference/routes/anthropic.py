@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import localm.inference.http_server as _hs
-from localm import peer_routing
+from localm import peer_routing, scopes
 from localm.inference import anthropic_protocol as A
 from localm.inference.ollama_protocol import iter_sse_json
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
@@ -71,7 +71,7 @@ def _error(status: int, message: str, headers: Any = None) -> JSONResponse:
 
 
 def register(app: FastAPI, ctx) -> None:
-    _require_auth = _hs._require_auth
+    _require_chat = _hs.require_scope(scopes.CHAT)
 
     def route(path: str, **kwargs):
         def register_route(fn):
@@ -98,7 +98,7 @@ def register(app: FastAPI, ctx) -> None:
             return str(data.get("detail") or data.get("error") or "request failed")
         return "request failed"
 
-    @route("/v1/messages", dependencies=[Depends(_require_auth)])
+    @route("/v1/messages", dependencies=[Depends(_require_chat)])
     async def anthropic_messages(req: A.MessagesRequest, request: Request):
         want_thinking = A.thinking_enabled(req.thinking)
         body = A.plan_messages(req, req.model)
@@ -133,7 +133,7 @@ def register(app: FastAPI, ctx) -> None:
                                           want_thinking)
         return JSONResponse(reply, headers=headers)
 
-    @route("/v1/messages/count_tokens", dependencies=[Depends(_require_auth)])
+    @route("/v1/messages/count_tokens", dependencies=[Depends(_require_chat)])
     async def anthropic_count_tokens(req: A.CountTokensRequest, request: Request):
         body = A.plan_count(req, req.model)
         chat_req = _chat_request(body)
