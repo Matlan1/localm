@@ -413,7 +413,6 @@ class _PersistenceMixin:
         pathspec, not the whole tree); untracked new files (``??``, which
         ``git diff`` omits entirely) get a capped content snapshot appended so the
         session's actual output still appears. Best-effort - '' on any failure."""
-        from ..tools.base import run_subprocess
         from ..tools.git import repo_runs_programs, run_git
         parts: list[str] = []
         tracked = [p for p in paths if status.get(p, "") != "??"]
