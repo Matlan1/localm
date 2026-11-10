@@ -76,6 +76,16 @@ def test_csp_enforcing_and_locked_down():
     assert "huggingface.co" in csp
 
 
+def test_csp_frame_src_refuses_every_url():
+    """The artifact canvas is a srcdoc frame; frame-src 'none' leaves the GUI no
+    frame that may load or navigate to a URL, the localm origin included."""
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+    assert _directive(csp, "frame-src") == "'none'", csp
+    assert _directive(csp, "child-src") == "", csp
+
+
 def _directive(csp: str, name: str) -> str:
     """The source list for one CSP directive, or "" when it is absent.
 

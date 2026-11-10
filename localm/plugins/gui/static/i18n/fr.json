@@ -636,6 +636,7 @@
   "coder.usage.tokTurn": "{tokens} tok · tour {turn}",
   "common.advancedFold.setCount": "{n} défini(s)",
   "common.artifact.title": "Artefact ({lang})",
+  "common.artifact.navigated": "Cet artefact a tenté de charger une autre page, le canevas a donc été fermé. Utilisez Réafficher pour l'afficher à nouveau.",
   "common.codeBlock.canvas": "canevas",
   "common.codeBlock.canvasTitle": "Afficher ce {lang} dans un canevas isolé",
   "common.codeBlock.copied": "copié",
