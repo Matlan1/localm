@@ -547,6 +547,7 @@ def _resolve_backend(req: CreateSessionRequest, *, self_url: str,
         # usually ignores the bearer entirely; "localm" is the placeholder the
         # backend's own docstring names for that case.
         api_key=api_key or "localm",
+        gate_mode=session_mode,
         anthropic=(mode == "anthropic"),
         # localm_server stays FALSE for every mode here, including a URL that
         # happens to point at another localm. That costs grammar-constrained

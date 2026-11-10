@@ -39,6 +39,7 @@ from typing import Callable
 from typing import Optional
 
 from localm.debuglog import logger
+from localm.storeformat import StoreFormatTooNew, check_stamp
 
 ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
@@ -655,6 +656,12 @@ def _load_owner_kdf() -> list:
                        "the next successful verify", path, e)
         return []
     if not isinstance(data, dict):
+        return []
+    try:
+        check_stamp(data.get("v"), 1, path, "owner key record file")
+    except StoreFormatTooNew as e:
+        logger.warning("%s; its records are not used and a fresh derivation "
+                       "record is minted", e)
         return []
     recs = data.get("records")
     return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []

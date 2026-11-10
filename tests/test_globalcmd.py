@@ -239,3 +239,91 @@ def test_install_with_a_relative_root_writes_a_working_symlink(monkeypatch, tmp_
     assert link.exists()
     assert link.resolve() == target.resolve()
 
+
+
+# ----------- the shim slot is held by another clone's symlink ------------- #
+
+def _posix_clone(tmp_path, monkeypatch, name):
+    """A clone whose venv entry point exists, with the shared bin dir patched."""
+    bindir = tmp_path / "localbin"
+    monkeypatch.setattr(gc, "bin_dir", lambda root: bindir)
+    monkeypatch.setattr(gc, "shim_path", lambda root: bindir / "localm")
+    monkeypatch.setattr(gc, "_posix_ensure_on_path",
+                        lambda d, prepend=False: (False, None))
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)
+    clone = tmp_path / name
+    target = clone / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    return bindir, clone, target
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX symlink usually needs privilege on Windows")
+def test_install_leaves_another_clones_symlink_untouched(monkeypatch, tmp_path):
+    bindir, _, first_target = _posix_clone(tmp_path, monkeypatch, "first")
+    _, second, second_target = _posix_clone(tmp_path, monkeypatch, "second")
+    bindir.mkdir()
+    shim = bindir / "localm"
+    shim.symlink_to(first_target)
+    monkeypatch.setattr(gc, "_venv_localm", lambda root: second_target)
+    res = gc.install(second)
+    assert Path(os.path.realpath(shim)) == first_target.resolve()
+    assert res["shim_created"] is False
+    assert res["conflict"] == str(shim)
+    assert res["path_modified"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX symlink usually needs privilege on Windows")
+def test_install_leaves_a_dangling_foreign_symlink_untouched(monkeypatch, tmp_path):
+    bindir, clone, target = _posix_clone(tmp_path, monkeypatch, "clone")
+    bindir.mkdir()
+    shim = bindir / "localm"
+    gone = tmp_path / "removed" / ".venv" / "bin" / "localm"
+    shim.symlink_to(gone)
+    monkeypatch.setattr(gc, "_venv_localm", lambda root: target)
+    res = gc.install(clone)
+    assert os.readlink(shim) == str(gone)
+    assert res["shim_created"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX symlink usually needs privilege on Windows")
+def test_install_rerun_replaces_our_own_symlink(monkeypatch, tmp_path):
+    bindir, clone, target = _posix_clone(tmp_path, monkeypatch, "clone")
+    monkeypatch.setattr(gc, "_venv_localm", lambda root: target)
+    assert gc.install(clone)["shim_created"] is True
+    res = gc.install(clone)
+    assert res["shim_created"] is True
+    assert res["conflict"] is None
+    assert Path(os.path.realpath(bindir / "localm")) == target.resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shim path; Windows writes a .cmd shim")
+def test_install_leaves_a_real_file_at_the_shim_untouched(monkeypatch, tmp_path):
+    bindir, clone, target = _posix_clone(tmp_path, monkeypatch, "clone")
+    bindir.mkdir()
+    shim = bindir / "localm"
+    shim.write_text("#!/bin/sh\necho other\n", encoding="utf-8")
+    monkeypatch.setattr(gc, "_venv_localm", lambda root: target)
+    res = gc.install(clone)
+    assert not shim.is_symlink()
+    assert shim.read_text(encoding="utf-8") == "#!/bin/sh\necho other\n"
+    assert res["shim_created"] is False
+
+
+def test_install_cli_records_nothing_when_the_shim_slot_is_taken(monkeypatch, capsys):
+    """An occupied shim path exits 30, which setup.sh and installer/gui.py treat
+    as nothing installed, so no uninstall later removes the other command."""
+    monkeypatch.setattr(gc, "existing_localm", lambda shim, root=None: None)
+    monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
+        "path_dir": "/home/u/.local/bin", "shim": "/home/u/.local/bin/localm",
+        "path_modified": False, "conflict": "/home/u/.local/bin/localm",
+        "precedence": precedence, "path_note": None, "shim_created": False})
+    rc = gc.main(["install", "--root", "."])
+    out = capsys.readouterr().out
+    assert rc == 30
+    assert "left untouched" in out
+    assert "as you chose" not in out

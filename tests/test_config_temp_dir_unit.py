@@ -134,7 +134,7 @@ class TestTempDir:
         assert config.temp_dir(home) is None
         assert capsys.readouterr().err == (
             "[localm] WARNING: temp_location 'some/where' in config.json is not "
-            "'auto', 'data', 'system' or an absolute folder; using 'auto'.\n")
+            "'auto', 'data', 'system' or a local absolute folder; using 'auto'.\n")
 
     def test_the_default_home_is_the_active_data_dir(self, monkeypatch):
         seen = []

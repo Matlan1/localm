@@ -120,6 +120,12 @@ A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
 need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 (seconds as an integer, or a 5-field cron string), and the optional `model`,
 `cwd` (required for a `coder` job), `scope`, `collection`, `allow_shell`, and `enabled` fields.
+Creating a job needs the scope for its task kind as well as `jobs`: `chat`,
+`coder`, `memory` or `rag` (a `jobs`-only key gets `403`). At run time a job
+created by a key other than the owner key runs only while that key still exists
+and still holds that scope; a job whose creating key was revoked, expired or
+narrowed is not run and records an error result instead. Jobs created with the
+owner key, or in open mode, are not affected.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.

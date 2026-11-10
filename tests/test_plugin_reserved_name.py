@@ -5,9 +5,7 @@ rejected.
 The guard lives on the arbitrary-source install paths (install_external /
 set_installed_from_dir), not on parse_spec itself: built-in plugins legitimately
 carry names like "run"/"serve"/"coder" and install via the trusted store path
-(install()), and they are parsed through parse_spec too. Both the legacy CLI
-loader (loader.parse_manifest) and the engine loader - the one the live server
-uses - must reject a reserved name, or a third-party plugin installed from an
+(install()), and they are parsed through parse_spec too. The engine loader must reject a reserved name, or a third-party plugin installed from an
 arbitrary directory shadows a catalog/core command.
 """
 

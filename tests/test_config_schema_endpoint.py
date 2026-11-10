@@ -103,7 +103,7 @@ def test_never_leaks_a_secret_value(client, monkeypatch):
     # Inject a temporary secret field + a config value for it.
     secret_field = ss.SettingField(
         "fake_secret", ss.Widget.SECRET, "Fake secret",
-        group="Security", secret=True)
+        group="Security", secret=True, tier=ss.Tier.CONFIG_WRITE)
     monkeypatch.setattr(ss, "CORE_FIELDS", ss.CORE_FIELDS + [secret_field])
 
     def _cfg_with_secret():
