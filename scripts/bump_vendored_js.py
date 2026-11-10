@@ -29,7 +29,8 @@ are printed and nothing is touched):
 
 Each library's license text (vendor/LICENSE.marked, LICENSE.dompurify and
 LICENSE.dompurify-mpl, LICENSE.highlightjs, LICENSE.katex) is the release's own
-LICENSE file and is replaced when the release carries a different one.
+LICENSE file and is replaced when the release carries a different one; a
+release without it is refused.
 
 Library files are written exactly as the npm tarball carries them. A pinned hash
 is sha256, base64, over CRLF-normalised bytes.
@@ -482,6 +483,9 @@ def build_plan(lib: Lib, tag: str, tar_files: dict, tar_fonts: dict, shasum: str
     for member, dest in lib.extra_files:
         if member in tar_files:
             new_bytes[dest] = tar_files[member]
+        elif dest.startswith("LICENSE."):
+            raise Refused(f"the {lib.npm}@{new} tarball has no {member}; a release "
+                          "is not vendored without its license text")
 
     changes = []
     for dest, data in new_bytes.items():

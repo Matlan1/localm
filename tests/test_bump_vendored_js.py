@@ -394,6 +394,18 @@ def test_an_unchanged_licence_text_is_left_alone_whatever_its_line_endings(
     assert path.read_bytes() == crlf
 
 
+@pytest.mark.parametrize("key, member, dest", LICENCE_FILES)
+def test_a_release_without_its_licence_text_is_refused_and_nothing_is_edited(
+        bump, tree, capsys, key, member, dest):
+    before = {p: p.read_bytes() for p in sorted((tree / bump.VENDOR_REL).glob("*")) if p.is_file()}
+    files = release_files(tree, bump, key, NEWER[key])
+    del files[member]
+    reg = Registry(bump, bump.LIBS[key].npm, NEWER[key], make_tarball(files))
+    assert run(bump, ["--lib", key, "--tag", NEWER[key], "--write"], reg) == 1
+    assert f"has no {member}" in capsys.readouterr().out
+    assert {p: p.read_bytes() for p in before} == before
+
+
 def test_a_theme_missing_from_the_release_is_not_an_error(bump, tree):
     files = release_files(tree, bump, "highlight.js", NEW_HLJS)
     del files["package/styles/github-dark.min.css"]
