@@ -1331,6 +1331,9 @@ def rm(model, yes):
     from ..selfclient import remote_hold_reason
 
     reg = load_registry()
+    if model not in reg:
+        console.print(f"[red]Not found:[/red] {escape(model)}")
+        sys.exit(1)
     if model in reg:
         reason = remote_hold_reason(model)
         if reason is not None:
@@ -1375,7 +1378,8 @@ def rm(model, yes):
                 click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
         else:
             click.confirm(f"Remove '{model}'?", abort=True)
-    remove_model(model)
+    if not remove_model(model):
+        sys.exit(1)
 
 
 
@@ -1401,7 +1405,10 @@ def rm(model, yes):
               help="Bring PATH into <data dir>/models before registering it, "
                    "instead of registering it in place at its original location. "
                    "'copy' leaves the original untouched; 'move' relocates it.")
-def add(path, name, no_hash, fast, on_duplicate, type, store):
+@click.option("--mmproj", default=None, metavar="FILE",
+              help="A projector (mmproj) GGUF on disk to attach to the model, "
+                   "e.g. the speech stages of a text-to-speech model.")
+def add(path, name, no_hash, fast, on_duplicate, type, store, mmproj):
     """Register a local model file, a HuggingFace model directory, or a folder of them.
 
     Also reads where other tools keep models: the Hugging Face hub cache, an Ollama
@@ -1434,6 +1441,39 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
     model_type = None if type == "auto" else type
     if not add_local(path, name, on_duplicate=on_duplicate,
                      no_hash=no_hash, fast=fast, model_type=model_type, store=store):
+        sys.exit(1)
+    if mmproj:
+        from rich.markup import escape
+
+        from ..model_manager import attach_mmproj_after_add
+        ok, message = attach_mmproj_after_add(path, name, mmproj)
+        console.print(f"[green]{escape(message)}[/green]" if ok
+                      else f"[red]--mmproj was not applied:[/red] {escape(message)}")
+        if not ok:
+            sys.exit(1)
+
+
+@main.command("attach-mmproj")
+@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("mmproj")
+def attach_mmproj_cmd(model, mmproj):
+    """Attach a projector (mmproj) GGUF on disk to a registered model.
+
+    Records the projector without loading the model, replacing any projector
+    recorded before. Use it to pair a text-to-speech model with the speech
+    stages file, or a vision model with its projector, when the two files are
+    already on disk and sit in a folder with several projectors.
+
+    \b
+    Example:
+      localm attach-mmproj Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+    """
+    from rich.markup import escape
+
+    from ..model_manager import attach_mmproj
+    ok, message = attach_mmproj(model, mmproj)
+    console.print(f"[green]{escape(message)}[/green]" if ok else f"[red]{escape(message)}[/red]")
+    if not ok:
         sys.exit(1)
 
 
