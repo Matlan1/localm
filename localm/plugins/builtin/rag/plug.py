@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.debuglog import logger
 from localm.executor import get_plugin_executor
@@ -85,7 +85,7 @@ class RagAddRequest(BaseModel):
 
 class RagQueryRequest(BaseModel):
     query: str
-    k: int = 4
+    k: int = Field(4, ge=1)
     # Drop hits below the collection's absolute relevance floor
     # (Collection.query relevant_only).
     relevant_only: bool = False

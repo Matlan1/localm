@@ -629,7 +629,11 @@ Returns `{"object": "list", "data": [{"object": "embedding", "index": 0,
 "total_tokens": N}}`. `encoding_format` is `float` (default) or `base64` (each
 vector as little-endian float32 bytes, base64-encoded); anything else is a 400.
 A model registered as an embedding model (or the configured `embedding_model`)
-is served by the dedicated embedder, whose `usage` counts are 0.
+is served by the dedicated embedder, whose `usage` counts are an estimate
+(about one token per four characters). A request that names a chat model is
+embedded by the dedicated embedder too: `model` in the reply names that
+embedder, and the `x-localm-embedding-model` and `x-localm-requested-model`
+response headers name the embedder and the model the request asked for.
 
 Errors: 400 when `model` is empty and there is no active or startup chat model, or (dedicated embedder) for an input the tokenizer refuses; 422 when the loaded model cannot
 embed, when the embedding model is unavailable (`localm setup-embeddings`), or
@@ -837,6 +841,11 @@ initialised.
 ## Model lifecycle
 
 Scope: `models:write`.
+
+The model routes take `model` (and `force`, `media`, `new_name` where they apply)
+from the query string or from a JSON body (`{"model": "mymodel"}`); the query
+wins when both are given. A body that is not a JSON object, or that carries a
+key the route does not read, is a 400 naming the keys it reads.
 
 `POST /v1/models/unload?model=<name>` releases model(s) from VRAM (e.g.
 before image generation hands the GPU to ComfyUI; omit `model` to unload

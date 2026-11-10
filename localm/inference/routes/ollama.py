@@ -24,6 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
@@ -366,6 +367,26 @@ def register(app: FastAPI, ctx) -> None:
         return JSONResponse(P.reply_object(
             kind, name, done=True, reason="unload" if unload else "load"))
 
+    async def _unload_after_reply(request: Request, name: str, reply: Response,
+                                  force: bool) -> Response:
+        """Unload *name* once *reply* has been sent. A caller without the
+        unload permission is answered normally and the model stays loaded; the
+        reply says so in `x-localm-keep-alive`."""
+        try:
+            _require_unload_allowed(request)
+        except (P.OllamaError, HTTPException):
+            reply.headers["x-localm-keep-alive"] = "ignored: unloading needs models:write"
+            return reply
+        resolved = _canonical(name)
+        if peer_routing.get_route(resolved) is not None:
+            return reply
+
+        async def _unload() -> None:
+            await _hs.unload_one_model(resolved, force=force)
+
+        reply.background = BackgroundTask(_unload)
+        return reply
+
     async def _run_chat(request: Request, plan: P.Plan, kind: str, name: str):
         started = time.perf_counter()
         try:
@@ -426,7 +447,10 @@ def register(app: FastAPI, ctx) -> None:
                 force=P.unload_forced(req))
         plan = P.plan_chat(req, _canonical(name))
         _note_ignored(plan, req)
-        return await _run_chat(request, plan, "chat", name)
+        reply = await _run_chat(request, plan, "chat", name)
+        if P.keep_alive_is_zero(req.keep_alive):
+            return await _unload_after_reply(request, name, reply, P.unload_forced(req))
+        return reply
 
     @route("/api/generate", methods=["POST"], dependencies=[Depends(_require_auth)])
     async def ollama_generate(req: P.OllamaGenerateRequest, request: Request):
@@ -437,7 +461,10 @@ def register(app: FastAPI, ctx) -> None:
                 force=P.unload_forced(req))
         plan = P.plan_generate(req, _canonical(name))
         _note_ignored(plan, req)
-        return await _run_chat(request, plan, "generate", name)
+        reply = await _run_chat(request, plan, "generate", name)
+        if P.keep_alive_is_zero(req.keep_alive):
+            return await _unload_after_reply(request, name, reply, P.unload_forced(req))
+        return reply
 
     # ---------------------------------------------------------------- #
     #  Embeddings                                                       #

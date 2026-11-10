@@ -976,6 +976,12 @@ class Engine:
             "set net_mode=allow) to enable semantic search; memory and RAG use "
             "lexical BM25 until then.")
 
+    def embeds_via_dedicated(self) -> bool:
+        """True when :meth:`embed` serves vectors from the dedicated on-device
+        embedder rather than this engine's own model. For an HF checkpoint the
+        answer is only final once the weights are loaded."""
+        return getattr(self._backend, "can_embed", True) is False
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return embedding vectors for a list of texts.
 
