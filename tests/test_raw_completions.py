@@ -303,6 +303,9 @@ def test_the_hf_text_path_tokenises_the_raw_prompt_without_the_template(monkeypa
         def __iter__(self):
             return iter(())
 
+        def end(self):
+            pass
+
     fake = types.ModuleType("transformers")
     fake.TextIteratorStreamer = _FakeStreamer
     fake.StoppingCriteriaList = list
