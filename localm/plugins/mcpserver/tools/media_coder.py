@@ -306,7 +306,11 @@ def build(engines: EngineCache, coder_shell: bool = False,
         # The ComfyUI generator builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
-        from localm.plugins.builtin.image import backend as image_backend
+        from localm.plugins.lookup import PluginUnavailable, plugin_api
+        try:
+            image_backend = plugin_api("image", "backend")
+        except PluginUnavailable as e:
+            return _text_result(str(e), is_error=True)
 
         def _generate():
             with _quiet_stdout():

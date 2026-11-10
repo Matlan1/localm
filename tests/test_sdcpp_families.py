@@ -21,6 +21,14 @@ from localm.plugins.builtin.video.backends import native as video_native
 
 
 @pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
+@pytest.fixture(autouse=True)
 def _reference_box(monkeypatch):
     from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
     pin_rx6900xt(monkeypatch)

@@ -108,8 +108,8 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def plugin(home, monkeypatch):
-    """The voice plugin, installed. PluginManager imports it under a synthetic
-    package name, so the module objects the running route uses are these."""
+    """The voice plugin, installed. A first-party plugin loads under its real
+    module name, so the running route uses the same module objects as this file."""
     import sys
 
     import localm.voice as voice
@@ -122,9 +122,9 @@ def plugin(home, monkeypatch):
         if t.name == voice.PREFETCH_THREAD_NAME:
             t.join(timeout=10)
     loaded = SimpleNamespace(
-        app=app, tr=sys.modules["_localm_plugin_voice.transcriptions"],
-        audio=sys.modules["_localm_plugin_voice.audio_model"])
-    assert loaded.tr is not tr and loaded.audio is not audio_model
+        app=app, tr=sys.modules["localm.plugins.builtin.voice.transcriptions"],
+        audio=sys.modules["localm.plugins.builtin.voice.audio_model"])
+    assert loaded.tr is tr and loaded.audio is audio_model
     return loaded
 
 

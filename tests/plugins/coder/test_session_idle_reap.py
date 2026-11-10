@@ -14,6 +14,16 @@ from pathlib import Path
 
 from localm.plugins.coder.sessions import CoderSession, SessionManager, _IDLE_REAP_SECONDS
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 
 class _StubBackend:
     model_id = "stub-model"

@@ -17,6 +17,14 @@ from localm.memory import MemoryRecord, MemoryStore, run_consolidation
 from localm.memory.consolidate import (_parse_json_object, extract,
                                        summarize_session)
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 THINK_JSON = (
     "<think>We need to produce JSON. The user {Ada} likes {metric}. Let me "
     "reason about braces {{{ ... </think>\n"

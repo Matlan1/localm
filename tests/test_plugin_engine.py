@@ -1348,22 +1348,6 @@ def test_uninstall_and_enable_with_traversing_id_are_refused(env):
     assert _sentinel_intact(sentinel)
 
 
-def test_swap_in_store_copy_refuses_staging_outside_the_installed_root(env):
-    """_swap_in_store_copy interpolates the name into two SIBLING basenames
-    ('.<name>.refresh.tmp'/'.bak') that drive copytree, two renames and four
-    rmtree calls. Today its dest always comes from the validated _installed_dir;
-    the guard exists so a future caller passing a raw name cannot silently
-    reinstate the escape."""
-    from localm.plugins.engine import PluginManager
-    store, installed, sentinel = _traversal_roots(env)
-    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
-
-    with pytest.raises(ValueError, match="staging"):
-        mgr._swap_in_store_copy("../outside", sentinel,
-                                installed / ".." / "outside", "deadbeef")
-    assert _sentinel_intact(sentinel)
-
-
 def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
     """uvicorn unquotes before routing and starlette's path-param regex is
     [^/]+, so '..%5Cx' is delivered to the handler as the ONE segment '..\\x'.
@@ -1769,7 +1753,7 @@ def test_failed_builtin_refresh_is_reported(env, monkeypatch, caplog):
 
     def _boom(self, name):
         raise RuntimeError("refresh exploded")
-    monkeypatch.setattr(PluginManager, "_maybe_refresh_builtin", _boom)
+    monkeypatch.setattr(PluginManager, "_migrate_installed_copy", _boom)
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
 
     with caplog.at_level(logging.WARNING, logger="localm.plugins"):

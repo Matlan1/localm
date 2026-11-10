@@ -26,6 +26,14 @@ from localm.plugins.builtin.music import backend as music_backend
 from localm.plugins.builtin.music.backends import native
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 def _wav(seconds: float = 0.5, with_list: bool = True) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
