@@ -214,7 +214,7 @@ def key_set(key):
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the confirmation prompt (not for removing the last key).")
 def key_clear(yes):
-    """Remove the owner key, returning the server to open mode.
+    """Remove the owner key and every named key, returning the server to open mode.
 
     Removing the last key needs an interactive terminal and always asks, --yes
     included; piped input is refused."""

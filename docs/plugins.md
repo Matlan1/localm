@@ -40,7 +40,8 @@ localm plugin uninstall <name>  # remove from the installed folder (keeps data u
 localm plugin refresh [<name>]  # re-copy installed builtins whose store code changed
 ```
 
-A running GUI server picks up newly enabled HTTP plugins on its next start;
+A plugin installed or enabled from the terminal while a server is running is
+mounted the next time the GUI reads the plugin list (reload the page);
 toggling a plugin while the server runs (via the GUI Plugins page or the
 `/api/plugins/{name}/...` routes) mounts/unmounts it without a restart.
 
@@ -98,7 +99,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
                              # "module:attr" is also accepted
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
-capabilities = ["feature"]   # declared capabilities (parsed and stored; not surfaced anywhere yet)
+capabilities = ["feature"]   # declared capabilities; "inference-backend" is the one the engine reads (see Inference backends)
 data_subdir = "my_data"      # storage under the data dir (<data dir>/my_data); "" = none
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
@@ -161,6 +162,11 @@ A plugin whose `on_install` does real work (the bundled `voice` plugin prefetche
 its Whisper model there) must not assume it ran; use `on_first_use` for anything
 that has to happen regardless of install path.
 
+`on_uninstall` has the mirror-image limit: it runs only when the plugin is loaded
+at that moment, that is for an active plugin uninstalled through the GUI or
+`POST /api/plugins/{name}/uninstall`. `localm plugin uninstall`, the MCP
+`uninstall_plugin` tool and the uninstall of a disabled plugin never call it.
+
 ### The Host API
 
 | Method | Purpose |
@@ -205,8 +211,11 @@ def unregister():
 
 Every plugin declares a `scope` (default: its name). `mount_router` gates all of
 the plugin's routes behind that scope, enforced per-request when an API key is
-configured (the server is fail-open with no key, unless `LOCALM_REQUIRE_AUTH`
-or the `require_auth` setting forces fail-closed). Scopes keep a plugin's reach explicit and let a key be
+configured. With no key the scope is not checked, but the open-mode gate still
+applies: a state-changing request, and any GET under `/api/` or `/v1/`, needs
+this instance's shell token (the GUI has it) or attach token, so mount routes
+under `/api/<plugin>/`. `LOCALM_REQUIRE_AUTH` or the `require_auth` setting
+refuses keyless use altogether. Scopes keep a plugin's reach explicit and let a key be
 issued for a subset of capabilities. A third-party plugin cannot claim a scope
 localm reserves (a kernel scope, a first-party plugin scope or `coder:full`) or
 one another installed plugin already uses.
@@ -263,8 +272,8 @@ built-in tts block, which ships a fixed schema). This is the seam
 ## Shipping client-side assets
 
 Set `assets_dir` and `client_entry` in `[surface]`. The engine serves the dir at
-`/plugins/<name>/`, and the SPA fetches `/api/plugins`, then `import()`s each
-active plugin's `client_entry` module and calls its exported `register(ctx)`.
+`/plugins/<name>/`, and the SPA fetches `/api/capabilities`, then `import()`s each
+active plugin's `client_entry` module (only the plugins the current key's scopes grant) and calls its exported `register(ctx)`.
 This lets a plugin add browser-side behaviour with no tab and no Python backend.
 
 The `tts` plugin is the worked example: it ships `static/tts.js`, which loads
@@ -299,6 +308,10 @@ never registered as a coder tool.** That split is a real limitation of the
 current loader, not a convention: a plugin that wants both surfaces has to
 declare `entry` as well as `register`.
 
+A manifest with only `entry` is a coder-tool plugin: the plugin engine lists it
+on the Plugins page and loads nothing for it. A manifest with neither `entry` nor
+`register` is reported there as a load failure.
+
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
 keyword. Three optional attributes describe it to the model:
@@ -315,10 +328,10 @@ declare itself asks for confirmation rather than silently acting.
 Registered names are namespaced `plugin_<plugin>_<export>`, with hyphens in the
 plugin name converted to underscores, so an export cannot shadow a built-in.
 
-One current limit worth knowing: an exported tool cannot mark its output as
-untrusted. The built-in network tools are recognised by name rather than by a
-flag, so a plugin tool that returns fetched content is not put through the
-untrusted-content handling that `fetch_url` gets.
+An exported tool that returns fetched or otherwise external content should
+return a `ToolResult` with `untrusted_output=True`; the coder then gives it the
+untrusted-content handling that `fetch_url` gets. A plain string return is
+treated as trusted tool output, and there is no manifest-level switch.
 
 For the built-in tools the coder already has, see the table in
 [cli.md](cli.md#built-in-tools).

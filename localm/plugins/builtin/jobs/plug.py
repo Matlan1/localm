@@ -474,7 +474,8 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
                 return None
             return _run_job(job, engine=engine)
 
-    result = await loop.run_in_executor(None, _run_guarded)
+    from localm.audit import carry_request_privacy
+    result = await loop.run_in_executor(None, carry_request_privacy(_run_guarded))
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
