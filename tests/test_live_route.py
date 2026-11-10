@@ -286,7 +286,7 @@ def test_a_disconnected_tab_lets_the_sampler_stop(app, server, gpu):
 # ------------------------------------------------------------- activity
 
 def _inject(app, *, owner=None, label="Model pull owner/repo"):
-    from localm.plugins.gui.jobs import Job
+    from localm.jobmanager import Job
     j = Job(id=uuid.uuid4().hex[:12], kind="pull", argv=["secret"], owner=owner,
             label=label)
     j.status = "running"

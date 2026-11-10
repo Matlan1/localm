@@ -48,6 +48,11 @@ role = "Model inference (engine, backends, the HTTP server and its routes) and G
 units = ["inference", "discover"]
 
 [[tier]]
+name = "jobs"
+role = "The background job manager: job subprocesses, their event stream, the job registry and the exit-time child cleanup. Below the server, the engine and every plugin that reports progress, above the model registry whose progress markers it parses."
+units = ["jobmanager"]
+
+[[tier]]
 name = "models"
 role = "The model registry (selection, pull, scan) and the ComfyUI generation backends. Peers: the three generators share the media runtime below and never import each other or the registry at module level."
 units = ["model_manager", "image_gen", "music_gen", "video_gen"]
