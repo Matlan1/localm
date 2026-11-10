@@ -5,7 +5,7 @@ These are the heaviest routes - they read the live engine and inference semaphor
 from the http_server module globals, the session-scoped audit/transcript from
 ctx, and call the streaming/completion helpers that stay on http_server
 (_stream_sse, _stream_sse_completion, _complete, _audit_exchange,
-_messages_prompt_text, _protocol_messages_to_dicts).
+_protocol_messages_to_dicts).
 
 NOTE on the local ``ctx``: each handler builds its own per-request
 ``ChatHookContext`` named ``ctx`` (the chat-pipeline turn context), so the
@@ -31,8 +31,9 @@ from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
-    EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    PretokenizerUnsafeInputError, RerankerHeadMissingError, RerankInputError,
+    RAW_PROMPT_UNSUPPORTED_MESSAGE, EmbedBatchTooLargeError, GrammarUnsupportedError,
+    InvalidGrammarError, PretokenizerUnsafeInputError, RerankerHeadMissingError,
+    RerankInputError,
     TriggerValidatorUnavailableError, messages_contain_audio, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
@@ -85,7 +86,6 @@ def register(app: FastAPI, ctx) -> None:
     _stream_sse_completion = _hs._stream_sse_completion
     _complete = _hs._complete
     _generate_full = _hs._generate_full
-    _messages_prompt_text = _hs._messages_prompt_text
     _audit_exchange = _hs._audit_exchange
     _pin_engine = _hs._pin_engine
     _memory_used_header = _hs._memory_used_header
@@ -947,9 +947,10 @@ def register(app: FastAPI, ctx) -> None:
         try:
             _touch_activity(engine.display_name)
 
-            # Wrap the prompt as a single user message so raw completions flow through
-            # the same chat-pipeline hooks and audit/transcript as
-            # /v1/chat/completions.
+            # The prompt reaches the model as sent: no chat template and no inlet
+            # hooks. *messages* is the exchange as audit and transcript record it.
+            if not getattr(engine, "supports_raw_prompt", False):
+                raise HTTPException(400, RAW_PROMPT_UNSUPPORTED_MESSAGE)
             messages = [{"role": "user", "content": prompt}]
             sampling = _sampling_kwargs(req)
             _check_sampling(engine, sampling)
@@ -969,8 +970,6 @@ def register(app: FastAPI, ctx) -> None:
                 )
                 ctx.state["client_id"] = request.headers.get("x-client-id", "")
                 ctx.state["capacity"] = engine.context_capacity()
-                if pipeline.has("inlet"):
-                    messages = await pipeline.run_inlet(messages, ctx)
             n_logprobs = logprobs_of(req)
             if n_logprobs is not None:
                 _check_logprobs(engine, pipeline if req.stream else None)
@@ -988,6 +987,7 @@ def register(app: FastAPI, ctx) -> None:
                 stop=req.stop,
                 logprobs=n_logprobs,
                 cache_prompt=False if req.cache_prompt is False else None,
+                raw_prompt=prompt,
                 **sampling,
             )
             gen_kwargs: dict[str, Any] = {k: v for k, v in gen_kwargs.items()
@@ -1039,12 +1039,12 @@ def register(app: FastAPI, ctx) -> None:
                         503, f"Grammar validation failed: the model worker "
                         f"faulted ({e}).") from e
 
-            # Count tokens on the (possibly inlet-transformed) messages, matching the
-            # chat path. Off the event loop: count_tokens is a native tokenizer call.
+            # Count the prompt's tokens off the event loop: count_tokens is a native
+            # tokenizer call.
             loop = asyncio.get_running_loop()
             try:
                 prompt_tokens = await loop.run_in_executor(
-                    None, engine.count_tokens, _messages_prompt_text(messages))
+                    None, engine.count_tokens, prompt)
             except PretokenizerUnsafeInputError as e:
                 raise HTTPException(400, str(e)) from e
 
@@ -1077,6 +1077,7 @@ def register(app: FastAPI, ctx) -> None:
 
             gen_error: Exception | None = None
             lp_records: list = []
+            timing: dict = {}
             _hs._admit_generation(sem, engine)
             async with sem:
                 # Cancelable on client disconnect: an aborted request releases the
@@ -1085,6 +1086,7 @@ def register(app: FastAPI, ctx) -> None:
                 # else falls through to the generic backstop.
                 try:
                     text = await _generate_full(engine, messages, request,
+                                                timing=timing,
                                                 on_logprobs=lp_records.extend,
                                                 **gen_kwargs)
                 except LoadBusyError:
@@ -1104,8 +1106,16 @@ def register(app: FastAPI, ctx) -> None:
                     text = _hs.inference_error_text(e, _hs.path_formatter(request))
 
             generated = text
+            stopped = False
             if gen_error is None and req.stop:
-                text, _stopped = apply_stop(text, req.stop)
+                text, stopped = apply_stop(text, req.stop)
+            if gen_error is not None:
+                finish_reason = "error"
+            elif stopped:
+                finish_reason = "stop"
+            else:
+                finish_reason = _hs._outcome(timing.get("outcome", {}),
+                                             "finish_reason", engine)
             visible = text
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
@@ -1117,7 +1127,7 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_caller_recorder(request), None, messages, text,
                             outcome=outcome)
-            _hs._log_chat_reply(text, finish_reason="error" if gen_error is not None else "stop")
+            _hs._log_chat_reply(text, finish_reason=finish_reason)
 
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,
@@ -1128,9 +1138,7 @@ def register(app: FastAPI, ctx) -> None:
             choice: dict[str, Any] = {
                 "text": (prompt + text) if req.echo and gen_error is None else text,
                 "index": 0,
-                # "error", not "stop", when generation failed, matching the
-                # terminal frame the streaming twin emits.
-                "finish_reason": "error" if gen_error is not None else "stop"}
+                "finish_reason": finish_reason}
             if n_logprobs is not None:
                 choice["logprobs"] = (
                     _hs.completion_text_logprobs(generated, lp_records, n_logprobs,
