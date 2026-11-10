@@ -323,7 +323,7 @@ def consume_pull_grant(app, spec: str, token: str) -> bool:
     return True
 
 
-def _set_session_cookies(response, key: str, *, secure: bool) -> None:
+def _set_session_cookies(response, key: str, *, secure: bool, cookie_name: str = "") -> None:
     """Establish the auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
     ``localm_session`` cookie to the SESSION ID (never the key, so it never
@@ -336,6 +336,7 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     from localm.auth import (_hash_key, _is_owner_key, fs_access_for,
                              rag_roots_for, verify)
     from localm.inference.http_server import SESSION_COOKIE, SESSION_MAX_AGE
+    cookie_name = cookie_name or SESSION_COOKIE
     held = verify(key)
     if held is None:
         return
@@ -356,7 +357,7 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
         _dbg.warning("could not establish a browser session (auto-seed): %s; "
                      "serving the shell unauthenticated (the key gate will show)", e)
         return
-    response.set_cookie(SESSION_COOKIE, sid, httponly=True, secure=secure,
+    response.set_cookie(cookie_name, sid, httponly=True, secure=secure,
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
 
 
@@ -854,8 +855,10 @@ def attach_gui(
             clean = request.url.path + (("?" + urlencode(q)) if q else "")
             resp = RedirectResponse(url=clean, status_code=303, headers=headers)
             from fastapi.concurrency import run_in_threadpool
+            from localm.inference.http_server import session_cookie_name
             await run_in_threadpool(_set_session_cookies, resp, key,
-                                    secure=request.url.scheme == "https")
+                                    secure=request.url.scheme == "https",
+                                    cookie_name=session_cookie_name(request))
             return resp
         # There is no keyed auto-seed branch: a credential-free GET / on a keyed
         # instance is served without a session, and the page shows its key gate.
