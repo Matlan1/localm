@@ -2097,7 +2097,8 @@ def _same_process(recorded: dict, current: Optional[dict]) -> Optional[bool]:
             return None
         return rb == cb and rt == ct
     rc, cc = recorded.get("created"), current.get("created")
-    if type(rc) in (int, float) and type(cc) in (int, float):
+    if (isinstance(rc, (int, float)) and not isinstance(rc, bool)
+            and isinstance(cc, (int, float)) and not isinstance(cc, bool)):
         if math.isfinite(rc) and math.isfinite(cc):
             return abs(rc - cc) <= 1.0
     return None
