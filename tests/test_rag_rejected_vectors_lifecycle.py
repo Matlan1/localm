@@ -193,7 +193,7 @@ def test_the_scheduled_job_reports_the_degrade_it_would_have_hidden(base, docs,
     # The scheduled path confines indexing to the owner's allowed folders and a
     # pytest tmp dir is outside them, so the policy is disabled here and the run
     # really re-indexes. This test is about what the run REPORTS.
-    monkeypatch.setattr("localm.rag.store.indexing_policy", lambda: None)
+    monkeypatch.setattr("localm.rag.store.indexing_policy", lambda **kw: None)
     _degrade_it(rag, docs)
     (docs / "a.txt").write_text("alpha turbines maintenance, revised",
                                 encoding="utf-8")

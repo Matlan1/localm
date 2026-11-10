@@ -591,10 +591,9 @@ CORE_FIELDS: list = [
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("allowed_hosts", Widget.TEXT, "Allowed host names",
-                 "Extra names this server answers to, for a reverse proxy or your own "
-                 "DNS name. Blank = only this machine's own names and addresses; "
-                 'comma-separated list; "*.example.com" covers one level; or "*" for '
-                 "any name, which turns the DNS-rebinding check off.",
+                 "Extra names this server answers to (reverse proxy, own DNS name), "
+                 'comma-separated; "*.example.com" covers one level; "*" allows any '
+                 "name and turns the DNS-rebinding check off.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # A rename needs a restart: the name is also written into the HTTPS
     # certificate's SANs, so it is not display-only.
