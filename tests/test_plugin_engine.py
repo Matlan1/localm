@@ -186,21 +186,14 @@ def test_unknown_manifest_key_warned_but_plugin_loads(env):
         assert c.get("/api/alpha/ping").json() == {"pong": True}
 
 
-def test_host_scope_methods_fail_loudly(env):
-    """The host has no request context, so has_scope/require_scope cannot check
-    anything. They must raise instead of silently allowing - a plugin guard built
-    on a silent no-op can never fire."""
-    from unittest.mock import MagicMock
-
+def test_host_has_no_scope_stubs(env):
+    """The host has no request context, so it exposes no has_scope/require_scope
+    that could only raise or silently allow."""
+    from localm.plugins.contract import Host
     from localm.plugins.engine import PluginHost
-
-    spec = MagicMock()
-    spec.name = "alpha"
-    host = PluginHost(MagicMock(), MagicMock(), spec)
-    with pytest.raises(NotImplementedError):
-        host.has_scope("alpha")
-    with pytest.raises(NotImplementedError):
-        host.require_scope("alpha")
+    for member in ("has_scope", "require_scope"):
+        assert not hasattr(PluginHost, member)
+        assert not hasattr(Host, member)
 
 
 def test_on_install_hook_fires(env):
@@ -692,7 +685,8 @@ def test_load_failure_after_partial_register_leaves_nothing_live(env, tmp_path):
         assert c.get("/api/flaky/ping").status_code == 200
 
 
-def test_protected_plugin_cannot_be_disabled(env):
+def test_protected_plugin_cannot_be_disabled(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
@@ -811,7 +805,8 @@ def test_set_installed_state_unknown_raises(env):
         mgr.set_installed_state("nope", True)
 
 
-def test_set_installed_state_protected_cannot_uninstall(env):
+def test_set_installed_state_protected_cannot_uninstall(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -821,7 +816,8 @@ def test_set_installed_state_protected_cannot_uninstall(env):
         mgr.set_installed_state("core", False)
 
 
-def test_set_enabled_state_protected_cannot_disable(env):
+def test_set_enabled_state_protected_cannot_disable(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -831,7 +827,8 @@ def test_set_enabled_state_protected_cannot_disable(env):
         mgr.set_enabled_state("core", False)
 
 
-def test_uninstall_protected_raises(env):
+def test_uninstall_protected_raises(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -1901,13 +1898,14 @@ def test_a_staging_folder_from_a_killed_install_is_neither_listed_nor_blocks_rei
 
 def test_a_staging_folder_is_not_scanned_as_a_plugin_by_the_other_scanners(env, monkeypatch):
     from localm.plugins import loader, media_config
+    from localm.plugins.engine import PluginManager
     root = env / "installed"
     staging = root / ".killed.install.tmp"
     staging.mkdir(parents=True)
     (staging / "plugin.toml").write_text(
         '[plugin]\nname = "killed"\nscope = "killed"\nregister = "plug"\n', encoding="utf-8")
-    manifests, errors, _warns = loader._scan(root)
-    assert manifests == [] and errors == []
+    mgr = PluginManager(None, installed_root=root, store_root=root / "no-store")
+    assert "killed" not in mgr.discover() and mgr._discover_errors == {}
     monkeypatch.setattr(loader, "plugins_dir", lambda: root)
     assert media_config.active_plugins({"plugins_enabled": ["killed", ".killed.install.tmp"]}) == set()
 
