@@ -231,13 +231,8 @@ def _require_writable() -> None:
 def memory_add(text: str, kind: str, importance: float) -> None:
     """Save a fact yourself, without going through a chat turn.
 
-    Produces the SAME record `POST /api/memory/append` does - kind semantic,
-    source user, importance 0.8, and the same cap refusal.
-    `MemoryRecord.__post_init__` silently coerces an unknown kind to "semantic"
-    and an unknown source to "synth", so different values here would file the
-    user's own assertion as machine-synthesised at a lower weight and prune's
-    user-fact eviction reporting would stop seeing it. Both coercions are silent,
-    so the choices here are constrained rather than free text.
+    Stored like a fact added in the app: source user, with the kind and
+    importance given here. Refused once memory is at its record cap.
     """
     _require_writable()
     if not text.strip():

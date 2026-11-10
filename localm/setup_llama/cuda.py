@@ -286,12 +286,12 @@ _CUDA_RUNTIME_PYPI_PACKAGES = {
 _CUDA_RUNTIME_PIN = {
     "nvidia-cuda-runtime-cu12": ("12.9.79",
         "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3"),
-    "nvidia-cublas-cu12": ("12.9.2.10",
-        "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
-    "nvidia-cuda-runtime": ("13.4.92",
-        "9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5"),
-    "nvidia-cublas": ("13.8.2.12",
-        "21721774d8e7044debec3034ecc1a8cd22e173eb6dae5d7f5f8a014852382894"),
+    "nvidia-cublas-cu12": ("12.9.3.13",
+        "d7d51055f161b317c7105ddaae90e71eda059026074ffef93cf7cde2886bfe72"),
+    "nvidia-cuda-runtime": ("13.5.37",
+        "df2b79a8852f10d1fef8c848489c49eebb5754051bf870202a862831412b179d"),
+    "nvidia-cublas": ("13.10.0.20",
+        "dcc6d63884c53d07e267ce7e6feac17b2538cebaafec5db865736c3e28e4dc84"),
 }
 
 

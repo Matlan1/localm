@@ -26,7 +26,7 @@ always present; several are conditional (marked below).
 | `system_stats` | Live CPU/RAM/VRAM/GPU load, for judging model/quant fit | read-only |
 | `search_models` | Search HuggingFace for GGUF repos | read-only |
 | `list_model_files` | A repo's GGUF files with quant, size, and VRAM-fit | read-only |
-| `pull_model` | Download, register, and (by default) load a GGUF | |
+| `pull_model` | Download, register, and (by default) load a GGUF. The repo must be the source of an already-registered model or one of a short built-in list; any other repo is refused with the `localm pull` command to run on the host | |
 | `setup_embeddings` | Install the on-device embedding model | |
 | `remove_model` | Remove a model and delete its file if under the models dir | **destructive** |
 | `run_doctor` | Run `localm doctor` and return the report | read-only |
@@ -35,7 +35,7 @@ always present; several are conditional (marked below).
 | `enable_plugin` | Enable an installed plugin | |
 | `disable_plugin` | Disable an installed plugin | |
 | `uninstall_plugin` | Uninstall a plugin (and its data with `delete_data`) | **destructive** |
-| `embed` | Embedding vectors from the local model (only when the backend can embed) | |
+| `embed` | Embedding vectors from the local model (only when the default model's backend can embed or an embedding model is registered, for example after `localm setup-embeddings`) | |
 | `rerank` | Rank documents by relevance to a query with a registered reranker model | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
 | `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`) | |
@@ -52,7 +52,7 @@ the server itself does not prompt. Coverage is deliberately narrow: only those t
 carry `destructiveHint`. Other state-changing tools (for example `pull_model`,
 `setup_embeddings`, the plugin install/enable/disable tools, and the conditional
 `run_coder_task`, `generate_image`, and `memory_append`, which run code, write
-files, or write to your durable memory) carry no annotation, so an
+files, or write to your durable memory) carry no hint, so an
 annotation-only client cannot tell they mutate. localm's own coder client
 (below) does not read these hints from remote servers; it gates on the
 `trusted` config flag instead.
@@ -158,8 +158,9 @@ The tool appears in the tool call panel with the model's response.
 
 ## Quick start: Claude Code (Agent Plugin)
 
-This repo carries a `plugin.json`, `.mcp.json`, a `localm` skill, and a
-`marketplace.json` at its root, so Claude Code can load the MCP server as a
+This repo carries `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json`, a root `.mcp.json`, and a `localm` skill
+(`skills/localm/`), so Claude Code can load the MCP server as a
 plugin instead of a manual config paste. Either option below needs
 localm's own `mcp` plugin installed and enabled first:
 

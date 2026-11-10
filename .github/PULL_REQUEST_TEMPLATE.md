@@ -10,7 +10,7 @@
       a DROPPED line must be one you meant to remove or reword, not a sibling PR's
       bullet lost around a rebase; a DUPLICATED bullet is usually one restored that
       was never actually lost, so delete the extra copy, not every copy
-- [ ] `pytest -m "not integration"` passes
+- [ ] The tests for the changed area pass (`python scripts/affected_tests.py --why` lists them; run with `-m "not integration"`)
 - [ ] `ruff check .` reviewed (no new lint regressions)
 - [ ] Defaults are project-relative or user-config; no absolute or
       machine-specific paths
