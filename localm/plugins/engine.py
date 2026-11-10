@@ -379,16 +379,19 @@ class PluginHost:
             return
         from fastapi import Depends
         from localm.inference.http_server import require_scope
-        outside = [getattr(r, "path", "") for r in router.routes
-                   if not str(getattr(r, "path", "")).startswith(_ROUTE_PREFIXES)]
-        if outside:
-            raise ValueError(
-                f"plugin {self._spec.name!r}: route path(s) {outside!r} are outside "
-                f"/api/ and /v1/")
         before = {id(r) for r in self._app.router.routes}
         self._app.include_router(
             router, dependencies=[Depends(require_scope(self._spec.scope))])
         new = [r for r in self._app.router.routes if id(r) not in before]
+        outside = [str(getattr(r, "path", "")) for r in new
+                   if not str(getattr(r, "path", "")).startswith(_ROUTE_PREFIXES)]
+        if outside:
+            for r in new:
+                self._app.router.routes.remove(r)
+            self._app.openapi_schema = None
+            raise ValueError(
+                f"plugin {self._spec.name!r}: route path(s) {outside!r} are outside "
+                f"/api/ and /v1/")
         # include_router appends, and the GUI's catch-all StaticFiles mount at
         # '/' matches every path, so Starlette would return that first.
         # Relocate the plugin's routes to just before the catch-all.
