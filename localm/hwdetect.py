@@ -382,7 +382,7 @@ def _hardware_install_backend(d: Detection) -> str:
     if "nvidia" in d.vendors:
         return "cuda"
     if d.vendors == ["amd"]:
-        if sys.platform == "win32":
+        if sys.platform == "win32" and amd_gfx_family(d.gpu_names) == "gfx103x":
             return "amd-rocm"
         if _rocm_toolkit_present():
             return "hip"
