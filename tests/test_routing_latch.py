@@ -876,7 +876,7 @@ class TestAPeerRoutedModelIsNotSkipped:
                 return iter([b'{"model": "big", "choices": []}'])
 
         def fake_post(url, data=None, headers=None, stream=None, timeout=None,
-                      verify=None):
+                      verify=None, allow_redirects=None):
             sent.append(json.loads(data))
             return Resp()
 
