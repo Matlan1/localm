@@ -772,21 +772,22 @@ async def imagine_move(name: str, req: MoveFileRequest, request: Request):
     ownership, not authority over the host filesystem."""
     path = _image_path(name)
     dest_dir = media_paths.confined_move_dest(request, req.dest)
+    show = path_formatter(request)
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {e}") from e
+        raise HTTPException(400, f"Cannot create destination: {show(e)}") from e
     if not dest_dir.is_dir():
-        raise HTTPException(400, f"Not a directory: {req.dest}")
+        raise HTTPException(400, f"Not a directory: {show(req.dest)}")
     target = dest_dir / path.name
     if target.exists():
-        raise HTTPException(409, f"Already exists: {target}")
+        raise HTTPException(409, f"Already exists: {show(target)}")
     shutil.move(str(path), str(target))
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
         shutil.move(str(sidecar), str(dest_dir / sidecar.name))
     gallery.forget_owner("image", name)     # left the gallery dir
-    return {"status": "moved", "path": path_formatter(request)(target)}
+    return {"status": "moved", "path": show(target)}
 
 
 @_router.post("/api/imagine/file/{name}/rename",
