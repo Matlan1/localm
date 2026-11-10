@@ -30,6 +30,10 @@ from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 4 * 1024 ** 3
 
+SUPPORTS_STEPS = True
+SUPPORTS_JOB_OPTIONS = True
+EMBEDS_OUTPUT_METADATA = True
+
 MIN_SIDE = 64
 MAX_SIDE = 1920
 MAX_FRAMES = 241
@@ -187,11 +191,7 @@ def _runtime_choice(s: dict) -> str:
 
 
 def _ensure_runtime(s: dict, say) -> sd_runtime.Runtime:
-    choice = _runtime_choice(s)
-    rt = sd_runtime.resolve(choice)
-    if rt is not None:
-        return rt
-    return sd_runtime.provision(choice, on_progress=say)
+    return sd_runtime.ensure(_runtime_choice(s), on_progress=say)
 
 
 def _pyav_problem() -> Optional[str]:
@@ -645,8 +645,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
         say("Freeing VRAM: unloading the chat model...")
-        if _localm_unload(self_url, instance_token, media=False) is None:
-            say("Could not unload the chat model - the video model may run low on VRAM.")
+        _localm_unload(self_url, instance_token, media=False, on_failure=say, label="video")
     relay = _event_relay(say, on_preview, cancel_check)
     runner = shared.runner
     if seed is None or seed < 0:

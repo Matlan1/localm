@@ -404,7 +404,7 @@ def _media_app(tmp_path, monkeypatch, plugin):
 
 def _installed_backend(plugin: str):
     import sys
-    mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
+    mod = sys.modules.get(f"localm.plugins.builtin.{plugin}.backend")
     assert mod is not None, (
         f"the installed {plugin} plugin's backend module was not found - the "
         "plugin loader's naming changed and this test would silently patch nothing")

@@ -283,6 +283,6 @@ def test_the_cors_origin_pattern_admits_only_literal_localhost_and_127_0_0_1(
 
 
 def test_the_voice_and_cors_regexes_use_the_one_pattern():
-    from localm.plugins.builtin.voice import transcriptions
-    assert transcriptions._LOCAL_ORIGIN_RE.pattern == (
+    from localm.inference.app_assembly import security
+    assert security._LOCAL_ORIGIN_RE.pattern == (
         f"^{bindhost.LOCAL_ORIGIN_PATTERN}$")

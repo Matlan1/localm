@@ -130,7 +130,9 @@ class TestToolConfinement:
 
     def test_seed_forwarded(self, tmp_path):
         from localm.plugins.coder.tools import tool_generate_image
-        with patch("localm.plugins.coder.tools.os.environ", {"FLUX_API_URL": "http://x"}):
+        with patch("localm.plugins.coder.tools.os.environ", {"FLUX_API_URL": "http://x"}), \
+             patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up")), \
+             patch("localm.image_gen.comfy.free_comfy_vram"):
             with patch("localm.image_gen.comfy.generate_image",
                        return_value=(True, "Image saved to out.png (seed 42)")) as gen:
                 res = tool_generate_image(tmp_path, prompt="x", seed=42)

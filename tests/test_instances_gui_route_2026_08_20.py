@@ -110,6 +110,11 @@ def _write_entry(home, **kw):
                     started="2026-08-20T00:00:00+00:00")
     defaults.update(kw)
     defaults["token"] = defaults["token"] or instances.new_token()
+    defaults.setdefault("pid_space", instances.pid_space_id())
+    if "start_identity" not in defaults:
+        pid = defaults["pid"]
+        defaults["start_identity"] = (instances.process_start_identity(pid)
+                                      if isinstance(pid, int) and pid > 0 else None)
     path = instances.registry_path(home, defaults["instance_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(defaults, indent=2), encoding="utf-8")
@@ -386,6 +391,7 @@ class TestStopRealHttp:
         rs = _start_real_server()
         try:
             iid = "realtargetserver01"
+            rs.app.state.instance_id = iid
             _write_entry(home, instance_id=iid, pid=999999999, host="127.0.0.1",
                         port=rs.port, root_dir="/proj/real", mode="api",
                         token=rs.app.state.instance_token)
@@ -427,6 +433,7 @@ class TestStopGracefulDeclined:
             iid = "declinedtarget001"
             _write_entry(home, instance_id=iid, pid=proc.pid, host="127.0.0.1",
                         port=59986, root_dir="/proj/declined", mode="api")
+            monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
             fake_401 = SimpleNamespace(status_code=401, ok=False,
                                        json=lambda: {}, text="")
             with patch("requests.request", return_value=fake_401):
@@ -505,6 +512,8 @@ class TestStopUnconfirmed:
         _write_entry(home, instance_id="neverconfirmed001", pid=999999998,
                   port=dead_port)
         monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: False)
+        monkeypatch.setattr(instances, "entry_process_state",
+                            lambda e: ("same", ""))
         with TestClient(app) as c:
             r = c.post("/api/instances/neverconfirmed001/stop",
                        headers=_hdr(_admin_key()))

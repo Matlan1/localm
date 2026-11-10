@@ -1194,6 +1194,17 @@ export function openArtifact(code, lang) {
   frame.setAttribute("sandbox", "allow-scripts");   // NO allow-same-origin
   frame.setAttribute("referrerpolicy", "no-referrer");
   frame.srcdoc = artifactSrcdoc(code, lang);
+  // The first load is the srcdoc; any later load means the artifact navigated
+  // its frame, so the frame is torn down and the pane says why.
+  let loads = 0;
+  frame.addEventListener("load", () => {
+    loads += 1;
+    if (loads < 2 || !frame.isConnected) return;
+    const note = document.createElement("p");
+    note.className = "artifact-navigated";
+    note.textContent = t("common.artifact.navigated");
+    body.replaceChildren(note);
+  });
   body.appendChild(frame);
   const title = pane.querySelector(".artifact-title");
   if (title) title.textContent = t("common.artifact.title", { lang });

@@ -22,6 +22,7 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 from tests.test_sysstats import VRAM_POLL_DEADLINE
 from tests._shared_model_guard import no_shared_model_left_resident  # noqa: F401
+from tests.media_bytes import flac_bytes, mp4_bytes, png_bytes
 
 
 # ------------------------------------------------------------------ #
@@ -2694,11 +2695,9 @@ class TestSessionExtras:
         EVERYONE - a scoped/restricted key must not trigger it, same rule as
         create_session's own optional model switch (plug.py:201-207)."""
         app, switched = coder_app
-        # The coder plugin is loaded under a synthetic sys.modules name, not
-        # localm.plugins.builtin.coder.plug (PluginManager._import_module) -
-        # patch THAT module object or the running route never sees it.
+        # The module the running route was loaded from.
         import sys
-        plug_mod = sys.modules["_localm_plugin_coder"]
+        plug_mod = sys.modules["localm.plugins.builtin.coder.plug"]
         monkeypatch.setattr(plug_mod, "_principal_from_request",
                             lambda request: (False, "scoped-principal"))
         monkeypatch.setattr("localm.inference.http_server.caller_grants",
@@ -5045,7 +5044,7 @@ class TestImageGeneration:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"\x89PNG fake")
+            Path(out_path).write_bytes(png_bytes())
             return True, f"Image saved to {out_path}"
         monkeypatch.setattr(comfy, "generate_image", fake_gen)
 
@@ -5373,7 +5372,7 @@ class TestMusicPlugin:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
-            Path(out_path).write_bytes(b"FLACfake")
+            Path(out_path).write_bytes(flac_bytes())
             return True, f"Track saved to {out_path}"
         monkeypatch.setattr(music_gen, "generate_music", fake_gen)
 
@@ -5547,7 +5546,7 @@ class TestVideoEndpoints:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"fake mp4")
+            Path(out_path).write_bytes(mp4_bytes())
             return True, f"Clip saved to {out_path}"
         monkeypatch.setattr(video_gen, "generate_video", fake_gen)
 

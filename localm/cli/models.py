@@ -1671,15 +1671,15 @@ def _rename_on_running_server(old_name: str, new_name: str):
     server kept its loaded engine keyed under the OLD name, so the server would
     serve a model the registry no longer lists.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -1688,7 +1688,8 @@ def _rename_on_running_server(old_name: str, new_name: str):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
     try:
         resp = requests.post(f"{url}/v1/models/rename", headers=headers,
                              params={"model": old_name, "new_name": new_name},
@@ -1786,10 +1787,12 @@ def rename(old_name, new_name):
     done = _rename_on_running_server(old_name, new_name)
     if done is not None:
         sys.exit(0 if done else 1)
-    from ..plugins.builtin.chat.plug import rename_notes as _chat_rename
-    from ..plugins.builtin.jobs.plug import rename_notes as _jobs_rename
-    register_rename_hook("saved chats", _chat_rename)
-    register_rename_hook("scheduled jobs", _jobs_rename)
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    for hook_name, plugin in (("saved chats", "chat"), ("scheduled jobs", "jobs")):
+        try:
+            register_rename_hook(hook_name, plugin_api(plugin, "plug").rename_notes)
+        except PluginUnavailable:
+            continue
     if not rename_model(old_name, new_name):
         sys.exit(1)
 
@@ -2272,15 +2275,15 @@ def unload_cmd(model, force):
     set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
     requires one.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -2293,12 +2296,12 @@ def unload_cmd(model, force):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    # Owner key (env, else persisted auth.key) wins; else the discovered
-    # instance's own attach token (0600 per-instance registry file), which the
-    # open-mode management gate accepts in place of a key. The token is only
-    # available when the server was found via discovery; an explicit LOCALM_URL
-    # override has no registry entry to read one from.
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    # Owner key (env, else persisted auth.key) wins; else the instance's own
+    # attach token (0600 per-instance registry file), which the open-mode
+    # management gate accepts in place of a key: the discovered entry's, or for
+    # a LOCALM_URL override the registry entry at exactly that address.
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
 
     try:
         params = {}
@@ -2457,7 +2460,10 @@ def stop_cmd(instance_id, stop_all, timeout):
         sys.exit(1)
 
     home = home_dir()
-    instances.reap_stale(home)
+    # Removes only entries whose process is gone; the loop below reports
+    # and removes stale ones.
+    instances.reap_stale(
+        home, is_alive=lambda e: instances.entry_process_state(e)[0] != "gone")
     entries = instances.list_entries(home)
 
     if stop_all:
@@ -2481,6 +2487,16 @@ def stop_cmd(instance_id, stop_all, timeout):
             sys.exit(1)
     else:
         root = instances.resolve_root_dir()
+        for e in entries:
+            if instances._canon(e.get("root_dir", "")) != instances._canon(root):
+                continue
+            state, reason = instances.entry_process_state(e)
+            if state == "stale":
+                if e.get("_path"):
+                    instances.unregister_instance(e["_path"])
+                console.print(f"[yellow]{escape(str(e.get('instance_id', ''))[:8])}:"
+                              f"[/yellow] this entry was stale: {escape(reason)} "
+                              f"Removed the entry and stopped nothing.")
         entry = instances.find_attachable(home, root)
         if entry is None:
             console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
@@ -2515,7 +2531,21 @@ def stop_cmd(instance_id, stop_all, timeout):
                           f"{escape(replaced_by[:8])}. Removed the entry and "
                           f"stopped nothing.")
             continue
-        if is_own_address(dial):
+        state, reason = instances.entry_process_state(entry)
+        if state == "stale":
+            path = entry.get("_path")
+            if path:
+                instances.unregister_instance(path)
+            console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was stale: "
+                          f"{escape(reason)} Removed the entry and stopped nothing.")
+            continue
+        # The shutdown request is sent only to a server whose /whoami names
+        # this entry's instance id.
+        verified = is_own_address(dial) and instances.default_probe(entry, timeout=2.0)
+        if is_own_address(dial) and not verified:
+            logger.debug("stop: %s does not answer /whoami as instance %s; not "
+                         "sending a shutdown request", url, entry.get("instance_id"))
+        if verified:
             try:
                 resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
                                      timeout=5, verify=tls.requests_verify(url),
@@ -2533,18 +2563,40 @@ def stop_cmd(instance_id, stop_all, timeout):
                             time.sleep(0.25)
             except requests.RequestException:
                 pass  # server unreachable (hung / already gone) - fall through to a direct kill
-        else:
+        elif not is_own_address(dial):
             logger.warning(
                 "stop: registry entry's host %r is not an address this "
                 "machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
-            if graceful_denied:
+            state, reason = instances.entry_process_state(entry)
+            if state == "stale":
+                path = entry.get("_path")
+                if path:
+                    instances.unregister_instance(path)
+                console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was "
+                              f"stale: {escape(reason)} Removed the entry and "
+                              f"stopped nothing.")
+                continue
+            if state == "unknown":
+                console.print(f"[red]{escape(iid)}:[/red] did not end pid {pid}: "
+                              f"{escape(reason)} If that server is still running, "
+                              f"close it from its own window or terminal. If it is "
+                              f"not, delete its entry file "
+                              f"{escape(str(entry.get('_path') or ''))}.")
+                any_failed = True
+                continue
+            if graceful_denied and state == "same":
                 console.print(f"[dim]{escape(iid)}:[/dim] server refused the "
                               f"shutdown request (set LOCALM_API_KEY to its key for "
                               f"a clean model-unload shutdown) - ending the process "
                               f"directly.")
-            stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
+            if state == "gone":
+                stopped = True
+            else:
+                stopped = instances.kill_pid(
+                    int(pid or -1), timeout=timeout,
+                    start_identity=entry.get("start_identity"))
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path
                 # (_do_shutdown), which normally clears the crash marker, so it

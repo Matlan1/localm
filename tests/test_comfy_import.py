@@ -11,6 +11,14 @@ from localm.media import native_workflows as nw
 from localm.media.sdcpp import sampling
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 def _flux_api():
     return {
         "10": {"class_type": "UNETLoader",

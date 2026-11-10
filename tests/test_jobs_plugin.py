@@ -875,11 +875,9 @@ def test_list_jobs_surfaces_scheduler_warning(home, monkeypatch):
     mgr = PluginManager(app, store_root=store_root, installed_root=installed)
     mgr.install("jobs")
 
-    # install() runs plug.py under a synthetic module name (_localm_plugin_jobs),
-    # a SEPARATE module object from localm.plugins.builtin.jobs.plug - reach the
-    # module the route actually bound its closures to via sys.modules.
+    # The module the route bound its closures to.
     import sys
-    jobs_plug = sys.modules["_localm_plugin_jobs"]
+    jobs_plug = sys.modules["localm.plugins.builtin.jobs.plug"]
     with TestClient(app) as c:
         assert c.get("/api/jobs").json()["scheduler_warning"] is None
 

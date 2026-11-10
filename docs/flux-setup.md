@@ -173,9 +173,12 @@ Features handled for you:
 - **VRAM handover**: before generation, localm unloads the LLM so FLUX gets
   the full VRAM budget, then reloads it after ComfyUI releases its models.
   The `localm image` CLI does this only when the `LOCALM_URL` environment
-  variable holds a running localm server's API base, including the `/v1`
-  suffix (for example `http://127.0.0.1:8642/v1`), and that server has an API
-  key the command can read; a server with no API key refuses the request.
+  variable holds a running localm server, as its address
+  (`http://127.0.0.1:8642`) or its API base (`http://127.0.0.1:8642/v1`). It
+  authenticates with an API key the command can read, or, for a server with no
+  API key started from the same data folder, with that server's instance token
+  when `LOCALM_URL` uses the address the server registered. A refused or failed
+  unload prints one line naming the reason (for example `HTTP 403`).
 - **Fail-fast probe**: ComfyUI is probed before the LLM is unloaded, so an
   unreachable server costs nothing. With `comfy_launch_cmd` set, localm
   starts ComfyUI itself and waits for it to come up.
