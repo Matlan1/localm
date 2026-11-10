@@ -96,7 +96,7 @@ export const I18N_EN = {
   "common.modelDownload.searchFailed":
     "Could not search Hugging Face for '{filename}'. Check your connection and try again, or add the file to your ComfyUI installation's matching models folder.",
   "common.modelDownload.searchOffline":
-    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Network.",
+    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Server & network.",
   "common.modelDownload.searching":
     "Searching…",
   "common.modelDownload.unknownFolder":
@@ -121,7 +121,7 @@ export const I18N_EN = {
   "common.modelDownload.progressItem": "Downloading {index} of {count}: {filename} from {repo}…",
   "common.modelDownload.allDone": "Downloaded: {names}.",
   "common.modelDownload.declined": "Nothing was downloaded. {names} must be downloaded before this can generate.",
-  "common.modelDownload.blockedOff": "Cannot download {names}: network access is off. Turn it on, or allow model downloads only, in Settings → Network.",
+  "common.modelDownload.blockedOff": "Cannot download {names}: network access is off. Turn it on, or allow model downloads only, in Settings → Server & network.",
   "common.modelDownload.pressGenerate": "Download finished. Press Generate again.",
   "common.modelDownload.source": "Source: {repo} / {file}",
   "common.modelDownload.starting": "Starting…",
@@ -207,7 +207,7 @@ export const I18N_EN = {
   "chat.none": "(none)",
   "chat.parameters": "parameters",
   "chat.params.intro":
-    "Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings › Chat</b> (system prompt, sampling); set one here to override it for this conversation only.",
+    "Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings › Model</b> (system prompt, sampling); set one here to override it for this conversation only.",
   "chat.persistHint": "history saved on this machine",
   "chat.persistHint.title":
     "Conversations are stored in the localm data directory (chats/) because the server runs in log or full mode. They survive browser reloads and profile wipes.",
@@ -304,7 +304,7 @@ export const I18N_EN = {
   "chat.cancel": "Cancel",
   "chat.switchedTo": "switched to {model}",
   "chat.systemPrompt": "System prompt",
-  "chat.systemPrompt.hint": "(blank = your Settings › Chat default)",
+  "chat.systemPrompt.hint": "(blank = your Settings › Model default)",
   "chat.systemPrompt.placeholder": "Blank = use your default from Settings",
   "chat.temperature": "Temperature",
   "chat.topK": "Top-k",
@@ -350,7 +350,7 @@ export const I18N_EN = {
   "chat.tool.notice.note": "A note about web access was added for the model.",
   "chat.tool.notice.duplicate": "Already looked up in this message, so it was not run again.",
   "chat.tool.notice.denied": "You declined this web request, so nothing was looked up.",
-  "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Chat).",
+  "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Model).",
   "chat.tool.notice.ignored": "Only the first web request in that reply ran.",
   "chat.web.unfinished": "the model asked for more web lookups; none were run",
   "chat.reply.cut": "cut off - the reply stream ended before the model finished; reply “continue” to resume",
@@ -1424,7 +1424,7 @@ export const I18N_EN = {
     "From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.",
   "models.pull.namePlaceholder": "name (optional)",
   "models.pull.netOffHint":
-    "(if this failed because network access is off: turn it on, or allow downloads only, in Settings → Network)",
+    "(if this failed because network access is off: turn it on, or allow downloads only, in Settings → Server & network)",
   "models.pull.noVisionProjector": "No vision projector",
   "models.pull.pauseButton": "Pause",
   "models.pull.pauseTitle": "Stop the download and keep what has been downloaded so far. Resume continues from there.",
@@ -2331,7 +2331,7 @@ export const I18N_EN = {
   "settings.tts.downloadNow": "Download voice model now",
   "settings.tts.cacheCheckFailed": "Could not check voice model cache: {message}",
   "settings.tts.downloading": "Downloading voice model...",
-  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Network) - the TTS plugin has not finished starting up to offer its own confirmation.",
+  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Server & network) - the TTS plugin has not finished starting up to offer its own confirmation.",
   "settings.tts.modelReady": "Voice model ready in browser",
   "settings.tts.setupFailed": "Voice model setup failed: {message}",
   "settings.tts.savedUnreadable": "Saved, but the server's reply could not be read - reloading the settings to show what is actually stored",

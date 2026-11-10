@@ -139,7 +139,7 @@
       <div id="chat-messages"></div>
       <div class="composer-wrap">
         <div id="params">
-          <div class="full sub" style="margin:2px 0 8px" data-i18n-rich="chat.params.intro">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Chat</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
+          <div class="full sub" style="margin:2px 0 8px" data-i18n-rich="chat.params.intro">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Model</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
           <div class="full"><label data-i18n="chat.persona.label">Persona - a saved system prompt + sampling defaults</label>
             <div class="row">
               <select id="p-persona"><option value="" data-i18n="chat.none">(none)</option></select>
@@ -150,7 +150,7 @@
                       title="Delete the selected persona" data-i18n-title="chat.persona.deleteTitle">delete</button>
             </div>
           </div>
-          <div class="full"><label data-i18n="chat.systemPrompt">System prompt <span class="sub" data-i18n="chat.systemPrompt.hint">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings" data-i18n-placeholder="chat.systemPrompt.placeholder"></textarea></div>
+          <div class="full"><label data-i18n="chat.systemPrompt">System prompt <span class="sub" data-i18n="chat.systemPrompt.hint">(blank = your Settings &rsaquo; Model default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings" data-i18n-placeholder="chat.systemPrompt.placeholder"></textarea></div>
           <div><label data-i18n="chat.temperature">Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default" data-i18n-placeholder="chat.default"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy; under net_mode=ask every request the model makes must be approved first). Off = fully offline chat." data-i18n-title="chat.web.title" data-i18n="chat.web"><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
           <div class="full check-row"><label title="Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings)." data-i18n-title="chat.pinModel.title" data-i18n="chat.pinModel"><input type="checkbox" id="p-pin-model"> <span class="lbl-ic" data-icon="pin"></span> Pin this chat to <b id="p-pin-model-name"></b></label></div>
