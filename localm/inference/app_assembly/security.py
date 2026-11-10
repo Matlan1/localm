@@ -734,7 +734,7 @@ class HostHeaderGuard:
             lock = st.host_policy_lock = asyncio.Lock()
         async with lock:
             current = getattr(st, "host_policy", None)
-            if current is kept:
+            if current is None or current is kept:
                 import anyio
                 policy = await anyio.to_thread.run_sync(
                     build_host_policy, bind_host, getattr(st, "tls_certfile", None),
