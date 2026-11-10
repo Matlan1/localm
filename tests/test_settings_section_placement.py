@@ -87,7 +87,7 @@ VISIBLE_FIELD_GROUP = {
     "hf_token": "Models", "civitai_api_key": "Models",
     "chat_system_prompt": "Chat", "temperature": "Chat", "top_p": "Chat",
     "top_k": "Chat", "repeat_penalty": "Chat", "max_tokens": "Chat",
-    "chat_tool_grammar": "Chat", "chat_web_max_lookups": "Chat",
+    "chat_tool_grammar": "Chat", "chat_web_max_lookups": "Chat", "chat_style_note": "Chat",
     "gui_preview_enabled": "Chat", "gui_preview_owner_only": "Chat",
     "port": "Server", "bind_host": "Server", "tls_enabled": "Server",
     "tls_cert": "Server", "tls_key": "Server", "cors_origins": "Server",
