@@ -32,7 +32,8 @@ from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
 from localm.plugins.builtin.jobs.scheduler import JobScheduler
-from localm.plugins.builtin.jobs.store import Job, JobStore, cwd_unc_error
+from localm.plugins.builtin.jobs.store import (TASK_KIND_SCOPES, Job, JobStore,
+                                              cwd_unc_error)
 
 
 def _run_job(job, *, engine=None):
@@ -159,6 +160,12 @@ def _caller_can_allow_shell(request: Request) -> bool:
     from localm import scopes as S
     from localm.inference.http_server import caller_grants
     return caller_grants(request, S.CODER_FULL)
+
+
+def _caller_has_scope(request: Request, scope: str) -> bool:
+    """True in open mode, or when the caller's key grants *scope*."""
+    from localm.inference.http_server import caller_grants
+    return caller_grants(request, scope)
 
 
 def _caller_is_owner_key(request: Request) -> bool:
@@ -302,6 +309,7 @@ def _job_dict(job: Job) -> dict:
     d = job.to_dict()
     d.pop("owner", None)        # internal principal binding; never sent to the client
     d.pop("owner_is_owner_key", None)     # ditto: how that binding is re-validated
+    d.pop("claim", None)                  # ditto: the run claim
     return d
 
 
@@ -345,6 +353,11 @@ async def create_job(req: JobCreate, request: Request):
         raise HTTPException(
             403, "allow_shell needs the owner key or a coder:full key; a scheduled "
             "coder job otherwise runs restricted (read + confined edit, no shell).")
+    required = TASK_KIND_SCOPES.get(req.task_kind)
+    if required is not None and not _caller_has_scope(request, required):
+        raise HTTPException(
+            403, f"a {req.task_kind} job needs the {required!r} scope as well as "
+            "'jobs'.")
     _check_model_name(req.model)
     _check_cwd(req.cwd)
     # Shape checked above; AUTHORITY checked here. A caller not allowed to choose a
@@ -472,7 +485,14 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
         with run_slot() as got_slot:
             if not got_slot:
                 return None
-            return _run_job(job, engine=engine)
+            claimed = store.claim(job_id)
+            if claimed is None:
+                return None
+            try:
+                return _run_job(claimed, engine=engine)
+            except BaseException:
+                store.release_claim(job_id, claimed.claim)
+                raise
 
     from localm.audit import carry_request_privacy
     result = await loop.run_in_executor(None, carry_request_privacy(_run_guarded))

@@ -157,9 +157,11 @@ _AUTH_HEADER_RE = re.compile(
     r"[\"']?\s*(?:[,}\]]|$))"
     r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
     r"|\[[^\]\r\n]*\]?"
-    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
-    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*)|[^\s,]+)"
-    r"(?:(?:,[ \t]*|[ \t]+)[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*))*)"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
+    r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"|[^\s,]+)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
 # _JSON_SECRET_RE in localm/bugreport/scrub.py.

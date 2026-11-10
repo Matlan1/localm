@@ -227,7 +227,8 @@ def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
     ('Authorization: Digest username="u", realm="Restricted Area", nonce="n", '
      'uri="/a", response="CANARYRESP9"', "CANARYRESP9", "Authorization: <redacted>"),
     ("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host "
-     "Signature=CANARYSPACED10", "CANARYSPACED10", "Authorization: <redacted>"),
+     "Signature=CANARYSPACED10", "CANARYSPACED10",
+     "Authorization: <redacted> Signature=<redacted>"),
     ("Authorization: Token CANARYONE11 then the request failed", "CANARYONE11",
      "Authorization: <redacted> then the request failed"),
     ("Authorization: Bearer\nCANARYNEXTLINE12", "CANARYNEXTLINE12",
@@ -283,10 +284,26 @@ def test_scrub_secrets_bearer_word_never_hides_the_credential_after_it(text):
      "headers: Authorization: <redacted>, Accept: */*, User-Agent: x"),
     ("Authorization: Token CANARYPROSE4, retrying in 5s",
      "Authorization: <redacted>, retrying in 5s"),
+    ("level=error Authorization: Bearer CANARYPROSE5 status=401 path=/v1/chat duration=3ms",
+     "level=error Authorization: <redacted> status=401 path=/v1/chat duration=3ms"),
 ])
 def test_scrub_secrets_authorization_redaction_keeps_the_text_after_the_value(
         line, expected):
     assert bugreport._scrub_secrets(line) == expected
+
+
+@pytest.mark.parametrize("text, canary", [
+    ('{"msg":"Authorization: Digest username=\\"u\\", realm=\\"Restricted Area\\", '
+     'response=\\"CANARYESCQ1\\""}', "CANARYESCQ1"),
+    ('{"msg":"Authorization: Digest username=\\"u, v\\", response=\\"CANARYESCQ2\\""}',
+     "CANARYESCQ2"),
+    ("Authorization: Token\nCANARYNEXT3", "CANARYNEXT3"),
+    ("Authorization: ApiKey\r\nCANARYNEXT4", "CANARYNEXT4"),
+])
+def test_scrub_secrets_redacts_escaped_digest_params_and_a_lone_token_scheme(text, canary):
+    out = bugreport._scrub_secrets(text)
+    assert canary not in out, out
+    assert bugreport._scrub_secrets(out) == out
 
 
 def test_scrub_secrets_authorization_redaction_ends_with_the_line():
@@ -1252,6 +1269,8 @@ def _scrub_seconds(text: str, samples: int = 5) -> float:
     pytest.param(lambda n: 'Authorization: "' + "\\" * n, id="auth-backslash-run"),
     pytest.param(lambda n: '"Authorization":' + " " * n + "null,", id="auth-flag-after-spaces"),
     pytest.param(lambda n: "Authorization: [" * n, id="auth-many-arrays"),
+    pytest.param(lambda n: 'Authorization: Digest a=\\"' + "\\x" * n, id="auth-escaped-param-run"),
+    pytest.param(lambda n: 'Authorization: a=b' + ', a=\\"' * n, id="auth-escaped-param-list"),
     pytest.param(lambda n: '"token":' + " " * n + "<redacted>", id="json-space-run"),
     pytest.param(lambda n: "bearer " + "+/=" * n, id="bearer-base64-run"),
     pytest.param(lambda n: "bearer " * n, id="bearer-name-run"),
