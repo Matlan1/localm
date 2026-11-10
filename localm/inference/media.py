@@ -113,7 +113,8 @@ def decode_image_url(url: str, budget: ImageBudget | None = None):
     Raises ImageLimitError for an image over ``MAX_IMAGE_PIXELS`` or in a
     format outside ``IMAGE_FORMATS``, and, when *budget* is given, for one that
     takes the request past its image count or pixel limits. All are checked
-    before the image is decoded.
+    before the image is decoded. Raises VisionInputError, with the decoder's
+    reason, for bytes that are not a readable image or a malformed data URI.
 
     A remote (http/https) URL is fetched through localm.netpolicy so a chat
     'image_url' content part cannot turn the server into an SSRF proxy: the
@@ -145,14 +146,37 @@ def decode_image_url(url: str, budget: ImageBudget | None = None):
         # data:image/jpeg;base64,<bytes>
         match = re.match(r"data:[^;]+;base64,(.+)", url, re.DOTALL)
         if not match:
-            raise ValueError(f"Malformed data URI: {url[:60]}")
-        raw = base64.b64decode(match.group(1))
-        return _open_bounded(Image, raw, budget)
+            raise _unreadable_image(ValueError(f"malformed data URI: {url[:60]}"))
+        try:
+            raw = base64.b64decode(match.group(1))
+        except ValueError as e:
+            raise _unreadable_image(e) from e
+        return _open_decoded(Image, raw, budget)
 
     from localm.netpolicy import safe_fetch_bytes
     _final_url, _content_type, raw = safe_fetch_bytes(
         url, max_bytes=_IMAGE_MAX_BYTES)
-    return _open_bounded(Image, raw, budget)
+    return _open_decoded(Image, raw, budget)
+
+
+def _unreadable_image(error: BaseException):
+    from localm.inference.backends.base import VisionInputError
+    return VisionInputError(
+        f"The attached image could not be read: {type(error).__name__}: "
+        f"{str(error)[:200]}")
+
+
+def _open_decoded(Image, raw: bytes, budget):
+    """:func:`_open_bounded`, with a failure to decode the bytes reported as a
+    ``VisionInputError`` carrying the decoder's reason. Limit and capability
+    refusals (``UnsupportedInputError`` subclasses) pass through unchanged."""
+    from localm.inference.backends.base import UnsupportedInputError
+    try:
+        return _open_bounded(Image, raw, budget)
+    except UnsupportedInputError:
+        raise
+    except Exception as e:
+        raise _unreadable_image(e) from e
 
 
 def decode_audio(b64: str, fmt: str) -> tuple[np.ndarray, int]:
