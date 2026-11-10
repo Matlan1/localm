@@ -121,3 +121,13 @@ def test_missing_store_is_simply_empty(_home):
     # A never-created store is absent -> no sessions, no error (fresh install).
     assert not sessions.sessions_file().exists()
     assert sessions.lookup("anything") is None
+
+
+@pytest.mark.parametrize("content", ['{"a": 1}', "5", "null", '"text"'])
+def test_a_store_that_is_not_a_list_is_refused_not_emptied(_home, monkeypatch, content):
+    sessions.sessions_file().write_text(content, encoding="utf-8")
+    monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+    assert sessions.lookup("anything") is None
+    with pytest.raises(ValueError, match="does not hold a list"):
+        sessions.create(scopes={"admin"}, key_hash="KH")
+    assert sessions.sessions_file().read_text(encoding="utf-8") == content

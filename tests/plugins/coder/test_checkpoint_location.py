@@ -222,3 +222,16 @@ def test_checkpoint_info_reports_unreadable_checkpoint_beside_a_project_map(
     cp.write_text("{not valid json", encoding="utf-8")
 
     assert checkpoint_info(proj) == {"unreadable": True}
+
+
+def test_a_checkpoint_stamped_newer_than_understood_is_refused_and_named(tmp_path, caplog):
+    import json
+    import logging
+    from localm.plugins.coder.agent.checkpoint import _read_checkpoint
+    p = tmp_path / "ck.json"
+    p.write_text(json.dumps({"version": 2, "messages": []}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert _read_checkpoint(p) is None
+    assert str(p) in caplog.text and "newer" in caplog.text
+    p.write_text(json.dumps({"version": 1, "messages": []}), encoding="utf-8")
+    assert _read_checkpoint(p) == {"version": 1, "messages": []}
