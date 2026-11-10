@@ -36,6 +36,7 @@ from fastapi.security import HTTPBearer
 
 from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
+from localm.audit import carry_request_privacy
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
     AudioInputError,
@@ -5002,7 +5003,7 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     # start reconciles those rows to "interrupted", which is the honest word for
     # a server that stopped while work was in flight.
     try:
-        from localm.plugins.gui.jobs import terminate_children_for_exit
+        from localm.jobmanager import terminate_children_for_exit
         _killed = terminate_children_for_exit()
         if _killed:
             from localm.debuglog import logger as _dbg
@@ -5302,7 +5303,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # start reconciles those rows to "interrupted", which is the honest word for
     # a server that stopped while work was in flight.
     try:
-        from localm.plugins.gui.jobs import terminate_children_for_exit
+        from localm.jobmanager import terminate_children_for_exit
         _killed = terminate_children_for_exit()
         if _killed:
             from localm.debuglog import logger as _dbg
@@ -6114,7 +6115,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:
         mounting.add_api_landing(app)
-    transport.add_client_left_answer(app)   # innermost
+    transport.add_request_privacy(app)      # innermost
+    transport.add_client_left_answer(app)
     diagnostics.add_request_logging(app)     # debug mode only
     diagnostics.add_debug_stacks(app)
     cors_cfg = security.add_cors(app)
@@ -7058,7 +7060,7 @@ async def _stream_sse_body(
 
         gen_start = time.perf_counter()
         first_token_at: float | None = None
-        t = threading.Thread(target=_generate, daemon=True)
+        t = threading.Thread(target=carry_request_privacy(_generate), daemon=True)
         t.start()
 
         completion_parts: list[str] = []
@@ -7356,7 +7358,7 @@ async def _stream_sse_completion_body(
     async with sem:
         gen_start = time.perf_counter()
         first_token_at: float | None = None
-        t = threading.Thread(target=_generate, daemon=True)
+        t = threading.Thread(target=carry_request_privacy(_generate), daemon=True)
         t.start()
 
         completion_parts: list[str] = []
@@ -7804,13 +7806,13 @@ async def _compact_for_capacity(engine, messages: list, request=None
         return not _needs_compaction(capacity, n, ms, encoder_decoder=encoder_decoder,
                                      reply_reserve=reserve)
 
-    fut = loop.run_in_executor(None, functools.partial(
+    fut = loop.run_in_executor(None, carry_request_privacy(functools.partial(
         compact_messages, messages, _gen_for_compact,
         limit_tokens=capacity,
         count_tokens=_count_for_budget,
         target_tokens=int(capacity * COMPACT_TARGET),
         cache=_compaction_cache(engine), namespace=str(engine.display_name),
-        fits=_fits))
+        fits=_fits)))
 
     async def _watch() -> None:
         try:
@@ -8051,7 +8053,7 @@ async def _generate_full(engine, messages: list, request=None, *,
             raise RuntimeError(residency.SERVER_CANCEL_TEXT)
         return "".join(parts)
 
-    fut = loop.run_in_executor(None, _run)
+    fut = loop.run_in_executor(None, carry_request_privacy(_run))
 
     async def _watch_disconnect() -> None:
         # The poll is a non-blocking peek (it cancels the receive immediately), so
