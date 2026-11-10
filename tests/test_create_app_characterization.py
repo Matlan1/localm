@@ -165,7 +165,7 @@ _KERNEL_ROUTES = {
     ("api", "GET", "/api/session"): (),
     ("api", "POST", "/api/session"): (),
     ("api", "POST", "/api/session/logout"): (),
-    ("api", "POST", "/api/auth/key/clear"): ("scope:config:write",),
+    ("api", "POST", "/api/auth/key/clear"): ("scope:admin",),
     ("api", "POST", "/api/auth/key/rotate"): ("scope:admin",),
     # routes/config.py
     ("api", "GET", "/v1/config"): ("scope:config:read",),
