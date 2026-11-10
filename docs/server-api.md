@@ -4,7 +4,7 @@ localm's inference server exposes an OpenAI-compatible REST API plus a small
 set of localm-specific management endpoints.
 
 ```bash
-localm serve <model>          # default 127.0.0.1:8642, auto-bumps when busy
+localm serve [model]          # default 127.0.0.1:8642, auto-bumps when busy
 ```
 
 Authentication: open (no key required) until an API key exists - the
@@ -37,6 +37,17 @@ Ollama.
 
 The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
 on the same port; see [ollama-api.md](ollama-api.md).
+
+The server answers only to its own names: `localhost`, loopback addresses and,
+on a network bind, its IP addresses, host name, mDNS and Tailscale names and
+certificate names. A request with any other `Host` gets `400` with
+`{"detail": ..., "error": ...}` (both carry the same message, which names the
+refused host and the fix) before any route runs. A client that reaches localm
+under another name, such as a container calling `http://host.docker.internal:8642`
+or a reverse proxy that forwards its own host name, needs that name in the
+`allowed_hosts` setting or the `LOCALM_ALLOWED_HOSTS` environment variable,
+then a restart; see [docker.md](docker.md#a-client-in-a-container-hostdockerinternal)
+and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
 
 Open mode does not open the management routes. With no key configured, every
 state-changing request and every `GET` under `/api/` or `/v1/` outside the
@@ -625,7 +636,11 @@ Returns `{"object": "list", "data": [{"object": "embedding", "index": 0,
 "total_tokens": N}}`. `encoding_format` is `float` (default) or `base64` (each
 vector as little-endian float32 bytes, base64-encoded); anything else is a 400.
 A model registered as an embedding model (or the configured `embedding_model`)
-is served by the dedicated embedder, whose `usage` counts are 0.
+is served by the dedicated embedder, whose `usage` counts are an estimate
+(about one token per four characters). A request that names a chat model is
+embedded by the dedicated embedder too: `model` in the reply names that
+embedder, and the `x-localm-embedding-model` and `x-localm-requested-model`
+response headers name the embedder and the model the request asked for.
 
 Errors: 400 when `model` is empty and there is no active or startup chat model, or (dedicated embedder) for an input the tokenizer refuses; 422 when the loaded model cannot
 embed, when the embedding model is unavailable (`localm setup-embeddings`), or
@@ -834,6 +849,11 @@ initialised.
 
 Scope: `models:write`.
 
+The model routes take `model` (and `force`, `media`, `new_name` where they apply)
+from the query string or from a JSON body (`{"model": "mymodel"}`); the query
+wins when both are given. A body that is not a JSON object, or that carries a
+key the route does not read, is a 400 naming the keys it reads.
+
 `POST /v1/models/unload?model=<name>` releases model(s) from VRAM (e.g.
 before image generation hands the GPU to ComfyUI; omit `model` to unload
 everything currently loaded); `POST /v1/models/load?model=<name>` reloads one
@@ -954,7 +974,7 @@ Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. These settings widen a trust boundary and are hidden from, and refused for, a
 non-owner `config:write` key - only an `admin`-scoped key or the open-mode
-owner may read or change them: `allow_network_drives`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
+owner may read or change them: `allow_network_drives`, `allowed_hosts`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write
@@ -1247,7 +1267,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for

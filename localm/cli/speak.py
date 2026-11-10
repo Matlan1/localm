@@ -102,7 +102,7 @@ def speak_cmd(text, output, text_file, model, voice, voice_file, language, seed,
         raise click.UsageError("use either --voice or --voice-file, not both")
     try:
         mtmd_gen.resolve_language(language)
-        target = speech.resolve_speech_model(model)
+        target = speech.resolve_speech_model(model, where="--model")
         if voice_file:
             reference = Path(voice_file).read_bytes()
         else:

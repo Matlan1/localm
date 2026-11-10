@@ -2,7 +2,7 @@
 
 LocaLM runs large language models on your own machine: GGUF models through
 llama.cpp and HuggingFace models through transformers, on AMD, NVIDIA, Intel,
-Apple Silicon or CPU. It ships a chat GUI, an OpenAI-compatible API, a coding
+Apple Silicon (experimental) or CPU. It ships a chat GUI, an OpenAI-compatible API, a coding
 agent, RAG over your own documents and an MCP server, with every online
 feature off by default. The only thing it does online without being asked is
 a periodic update check, which you can turn off too ([network](network.md)).

@@ -19,7 +19,9 @@ can reach the network include: `search_models` and `list_model_files`
 false); `generate_image` (it downloads the native image runtime when none is
 installed, and with the ComfyUI backend it sends the prompt and any
 `input_image` to the configured ComfyUI address, which can be another host);
-and `run_coder_task`, whose agent has web tools (`fetch_url`, `web_search`, and
+`memory_recall`, and `embed` when `model` names the configured embedding model
+(the first use downloads that model once if it is not installed, unless
+`net_mode` is `off` and `net_allow_model_downloads` is not on); and `run_coder_task`, whose agent has web tools (`fetch_url`, `web_search`, and
 the browser when it is enabled). A delegated coder run has no confirmation
 prompt, so those web tools either run or are refused; setting localm's network
 access (`net_mode`) to `off` refuses them.

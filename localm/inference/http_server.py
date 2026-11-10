@@ -2649,6 +2649,36 @@ def plan_capability_route(model_name: str | None, messages: list,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
+def _forget_removed_model(name: str) -> bool:
+    """Drop this process's state for *name* when it left the registry and its
+    model file is gone (``localm rm`` ran in another process). A model that is
+    loaded, whose file still exists, or whose path is not an absolute file path
+    (a hub repo id) is kept. Returns whether anything was
+    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
+    from pathlib import Path
+    engine = _engines.get(name)
+    if engine is not None and engine.loaded:
+        return False
+    path = getattr(engine, "model_path", None)
+    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
+        return False
+    _engines.pop(name, None)
+    if name in _engines_lru:
+        _engines_lru.remove(name)
+    _inference_sems.pop(name, None)
+    _last_activity_per_model.pop(name, None)
+    if _active_model_name == name:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+    if _last_active_model_name == name:
+        _last_active_model_name = None
+    if _default_model_name == name:
+        _default_model_name = None
+    return True
+
+
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
                      on_status: Optional[Callable[[str], None]] = None,
@@ -2703,6 +2733,11 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             name = name or _default_model_name
             if name != _default_model_name and name not in _engines:
                 raise HTTPException(503, "No model loaded. Please load a model first.")
+
+    if registry:
+        unnamed = not (model_name or "").strip() or (model_name or "").strip() == "localm"
+        while name and name not in registry and _forget_removed_model(name):
+            name = _resolve_unnamed_model_name() if unnamed else name
 
     # Only enforce registration check if the registry is not empty
     if registry:
@@ -6205,6 +6240,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_keyless_network_gate(app)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
+    security.add_host_header_guard(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # outermost; only when enabled
 
@@ -8748,6 +8784,10 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     from an instance whose GUI had been mounted live), the variable is removed
     from the environment and the GUI is mounted onto *app* once the instance is
     advertised, before serving starts.
+
+    Turns on the Host header guard (``app.state.host_header_guard``,
+    ``security.HostHeaderGuard``) and records *ssl_certfile* in
+    ``app.state.tls_certfile`` for it.
     """
     from localm import instances, portmux
     from localm.config import home_dir
@@ -8756,6 +8796,8 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     # watchdog inherits os.environ. See
     # test_run_advertised_removes_the_gui_mount_flag_before_serving.
     remount_gui = os.environ.pop(_GUI_MOUNTED_ENV, None) == "1"
+    app.state.host_header_guard = True
+    app.state.tls_certfile = ssl_certfile
     if log_level is None:
         from localm.debuglog import uvicorn_log_level
         log_level = uvicorn_log_level()

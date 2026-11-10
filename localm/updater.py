@@ -478,7 +478,8 @@ def _check_selected_version(new_version: str, requested: str) -> None:
 
 
 def _refuse_downgrade(new_version: str) -> None:
-    """Raise unless *new_version* is strictly newer than the running version.
+    """Raise unless *new_version* is strictly newer than the running version,
+    or when the running version cannot be read.
 
     The anti-rollback check: the signature proves authenticity, not freshness, and
     an OLD release's build.zip is still validly signed. This adds freshness."""
@@ -486,6 +487,12 @@ def _refuse_downgrade(new_version: str) -> None:
     current = _version.read_version()
     if not new_version:
         raise LocalmError("the update has no VERSION", reason="cannot confirm it is newer")
+    if not _version._leading_digit(current):
+        raise LocalmError(
+            "cannot read the installed localm version",
+            reason="without it an update cannot be confirmed as newer; choose the "
+                   "version to install (Settings > Updates, or 'localm update "
+                   "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
             f"refusing to 'update' to {new_version}: not newer than the installed {current}",
