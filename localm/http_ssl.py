@@ -66,7 +66,10 @@ MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 def read_bounded(resp, max_bytes: int = MAX_METADATA_BYTES) -> bytes:
     """Read the whole body of *resp*, at most *max_bytes* long. Raises
     :class:`BodyTooLarge` (an ``OSError``) when the body is longer."""
-    return resp.read()
+    data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise BodyTooLarge(f"the response is larger than {max_bytes} bytes")
+    return data
 
 
 def copy_bounded(resp, out, max_bytes: int = MAX_DOWNLOAD_BYTES, *,
@@ -81,6 +84,8 @@ def copy_bounded(resp, out, max_bytes: int = MAX_DOWNLOAD_BYTES, *,
         if not chunk:
             return total
         total += len(chunk)
+        if total > max_bytes:
+            raise BodyTooLarge(f"the response is larger than {max_bytes} bytes")
         out.write(chunk)
 
 
@@ -122,7 +127,7 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is not None and (
                 (urllib.parse.urlsplit(req.get_full_url()).hostname or "").lower()
-                == (urllib.parse.urlsplit(newurl).hostname or "").lower()):
+                != (urllib.parse.urlsplit(newurl).hostname or "").lower()):
             new_req.headers = {k: v for k, v in new_req.headers.items()
                                if k.lower() in _REDIRECT_KEPT_HEADERS}
             new_req.unredirected_hdrs = {}

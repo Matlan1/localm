@@ -51,7 +51,10 @@ def is_wildcard_host(host: str) -> bool:
     h = normalise_host(host)
     if not h:
         return False
-    return False
+    try:
+        return ipaddress.ip_address(h).is_unspecified
+    except ValueError:
+        return False
 
 
 def is_local_dial_host(host: str) -> bool:
