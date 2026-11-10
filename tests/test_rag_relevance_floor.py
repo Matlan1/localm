@@ -327,7 +327,7 @@ def rag_app(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", localm_home / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", localm_home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", localm_home / "registry.json")
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     app = FastAPI()
     PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
     app.state.jobs = JobManager()

@@ -963,7 +963,7 @@ def media_app(flux_set, runner, tmp_path, monkeypatch):
     from localm.config import update_config
     from localm.media import backend_choice
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     monkeypatch.setattr(backend_choice, "managed_comfy_active", lambda cfg=None: False)
     monkeypatch.setattr(cc, "is_comfy_confirmed", lambda api_url=None: False)
     monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=3.0: False)

@@ -191,7 +191,8 @@ def build(engines: EngineCache) -> dict[str, dict]:
 
     def setup_embeddings(args: dict) -> dict:
         model = args.get("model")
-        from localm.config import load_registry, update_config
+        from localm.config import load_registry
+        from localm.config_write import set_global_config_key
         from localm.inference.embedder import (KNOWN_EMBEDDING_MODELS,
                                           resolve_embedding_model_path)
         # `model` is a free-form string chosen by the MCP CLIENT, and this
@@ -211,7 +212,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "'localm setup-embeddings <path>' or the GUI to point it at a "
                     "GGUF of your own.",
                     is_error=True)
-            update_config(lambda c: c.update({"embedding_model": model}))
+            set_global_config_key("embedding_model", model, is_owner=True)
 
         from ..server import report_progress
         with _quiet_stdout():

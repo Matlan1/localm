@@ -148,12 +148,14 @@ not exist does, and the two kinds of id look identical, so the path you call is
 what decides which registry answers.
 
 `GET /api/activity` is how you find those in-flight operations without already
-holding an id. It answers `{"now": <server clock>, "operations": [...]}`, where
+holding an id. It answers `{"now": <server clock>, "operations": [...], "stalls": [...]}`, where
 each entry carries `id`, `kind`, `status`, `created_at`, `finished_at` (null
-while it runs), `cancellable`, a `label` that is set for a model pull, a
-ComfyUI setup or update, a llama.cpp runtime setup or update, and system
-diagnostics (other kinds fall back to `kind`), and `pct`/`phase` once the
-operation has something real to report. `pct` is absent, never `0`, before then. Compute an
+while it runs), `cancellable`, a `label` (null unless the operation has one: a model pull, a
+ComfyUI setup or update, a llama.cpp runtime setup or update, system
+diagnostics, a browser session, view or download, and text-to-speech; show
+`kind` when it is null), and `pct`/`phase` once the
+operation has something real to report, with `detail` when the last progress
+report carried one. `pct` is absent, never `0`, before then. Compute an
 age as `now - created_at`, using the server's `now` rather than your own clock.
 It is deliberately not under `/api/jobs`, so that one prefix does not mean two
 things. `localm status` and the MCP activity tool read this same route; on a
@@ -173,9 +175,9 @@ as a generated image, leaves nothing under `activity/` and is not listed after a
 restart.
 
 For a caller using a key without the owner scope, every text in an operation's
-row and event stream has local paths replaced (`<data>`, `<install>`, `~`, and
-`<path>` for the folders of any other path on the machine), as in the other
-routes such a key reaches.
+row and event stream has local paths replaced (`<data>`, `<install>`, `<env>`, `~`, `<redacted>` for another account's
+name, and `<path>` for the folders of any other path on the machine), as in the
+other routes that report local paths to such a key in messages and errors.
 
 What it does not promise beyond that: a finished operation is dropped about an
 hour after it finishes, and only when some new operation starts, so an idle

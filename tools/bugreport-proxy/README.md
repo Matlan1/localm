@@ -80,8 +80,10 @@ This keeps users account-less, which a baked-in token cannot do safely.
    The token is a PUBLIC, low-value client token (like a Sentry DSN), not a secret: it
    only gates the endpoint against drive-by spam and can never read the repo. If you
    redeploy to a different Worker or rotate `SHARED_SECRET`, update the two defaults in
-   `localm/config.py` to match. To opt a build OUT of the hosted channel, set either
-   key to `""` in `config.json` (a report then just saves to a file / opens email).
+   `localm/config.py` to match. To opt a build OUT of the hosted channel, set
+   `bugreport_upload_url` to `""` in `config.json` (a report then just saves to a file /
+   opens email). Emptying only the token leaves the channel on, and the Worker
+   answers every request with 401.
 
 ## Spam / abuse control
 
@@ -147,6 +149,10 @@ GET  /update[?client=V][&channel=prerelease]
                             -> 200 { ok, version, name, notes, published_at, prerelease,
                                      asset:{id,name,size}, signature }
                                (version null when there are no releases yet)
+                               without client: nothing newer than the last release a
+                               legacy updater can apply is offered (reply carries
+                               legacy_ceiling); a client older than the next ceiling is
+                               offered nothing newer than it (reply carries client_ceiling)
 GET  /update/releases       -> 200 { ok, releases: [{ version, name, published_at,
                                prerelease, notes, asset, signed }] }   (newest first)
 GET  /update/release?version=V
@@ -163,7 +169,10 @@ proxy needs redeploying.
 
 `/issues` items are trimmed to `{number, title, state, created_at, closed_at,
 html_url, labels}` and PR entries are filtered out. `/update*` use the separate
-Contents:read token and require `SHARED_SECRET`.
+Contents:read token and require `SHARED_SECRET`: 503 when the Worker has none, 401 for a
+wrong header, 500 when the update token or the repository is not configured. `POST /` also
+answers 401 without the token, 400 for invalid JSON or an empty body, and 502 when GitHub
+rejects the issue; `POST /report` is the same route.
 
 ## Releases (for the updater)
 
@@ -171,7 +180,9 @@ The updater offers a build when the latest **GitHub Release** tag is newer than 
 running `VERSION`, and verifies the shipped `.sig` (a signature envelope from 0.3.1 on;
 the 0.3.0 `.sig` is a bare signature for 0.2.0 clients) against the
 key set pinned in `localm/updater.py`, or a newer one an earlier update installed, before
-applying. Releases are built, signed with the Ed25519 release key and published
+applying. A version chosen with `localm update --to` is checked the same way; when its
+signature does not verify it is installed only after the user confirms that exact build,
+and it may be older than the running version. Releases are built, signed with the Ed25519 release key and published
 by the maintainer's release tooling, which is not part of this repository.
 `scripts/verify_release.py` checks a published build.
 

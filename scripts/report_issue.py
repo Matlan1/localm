@@ -119,7 +119,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 #  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
@@ -146,20 +146,35 @@ _QUERY_SECRET_RE = re.compile(
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
+)
+# An Authorization value under any scheme. Byte-identical to _AUTH_HEADER_RE
+# in localm/bugreport/scrub.py.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*)|[^\s,]+)"
+    r"(?:(?:,[ \t]*|[ \t]+)[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*))*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
 # _JSON_SECRET_RE in localm/bugreport/scrub.py.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
-    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
+    r"(?=\S)(?!<redacted>)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)"
 )
 # The account segment under a well-known home root. The Windows separator is
 # one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
@@ -366,12 +381,14 @@ def scrub(text: str) -> str:
     text = re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
     # Strip user:pass@ credentials from any URL-ish value.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+    # Bearer tokens anywhere in the text.
+    text = _BEARER_RE.sub(r"\1<redacted>", text)
     # Credential-named query params, header lines and JSON keys.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
-    # Bearer tokens and API keys anywhere in the text.
-    text = _BEARER_RE.sub(r"\1<redacted>", text)
+    # API keys anywhere in the text.
     text = _APIKEY_RE.sub("<redacted>", text)
     # Email addresses, except the maintainer's.
     text = _EMAIL_RE.sub(_email_replacement, text)

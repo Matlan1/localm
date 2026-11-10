@@ -563,11 +563,28 @@ def _role_word_inlet(messages, ctx):
     return messages
 
 
+def rename_notes(old_name: str, new_name: str) -> list[str]:
+    """The rename hook: re-pin saved chats from *old_name* to *new_name* and
+    return the notes to show the user."""
+    notes: list[str] = []
+    migrated, failed = relabel_pinned_model(old_name, new_name)
+    if migrated:
+        notes.append(f"Updated {len(migrated)} saved chat(s) pinned to it")
+    if failed:
+        notes.append(
+            "Could not update the saved chat(s) "
+            f"{', '.join(failed)}: they are still pinned to '{old_name}'")
+    return notes
+
+
 def register(host) -> None:
+    from localm.model_manager import register_rename_hook
     host.mount_router(_router)
     host.register_chat_hook("inlet", _thinking_inlet)
     host.register_chat_hook("inlet", _role_word_inlet)
+    register_rename_hook("saved chats", rename_notes)
 
 
 def unregister() -> None:
-    pass
+    from localm.model_manager import unregister_rename_hook
+    unregister_rename_hook("saved chats")

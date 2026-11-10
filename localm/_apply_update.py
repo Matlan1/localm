@@ -48,6 +48,9 @@ PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 # The provisioned llama.cpp runtime, relative to the install root.
 RUNTIME_LIB = PRESERVE_WITHIN[0]
 
+#: The extras the dependency step of an update installs.
+DEPS_EXTRAS = ("coder", "voice", "monitor")
+
 # The file :func:`backup` writes last, inside the backup:
 # ``{"names": the swap set, "files": every file it copied}``.
 BACKUP_RECORD = ".localm-backup.json"
@@ -479,14 +482,17 @@ def swap_with_backup(staged_root, installed, backup_dir) -> list:
 def post_swap_command(klass: str, backend: Optional[str] = None,
                       uv: Optional[str] = None) -> Optional[list]:
     """The extra command (argv list) an update class needs after the file swap, or
-    None for a pure ``reboot``. ``deps`` reinstalls editable with the uv at *uv*
-    (required for that class; see :func:`localm.uv_tool.find_uv`); ``runtime``
+    None for a pure ``reboot``. ``deps`` installs localm and its dependencies plus
+    :data:`DEPS_EXTRAS` from the release's ``uv.lock`` into ``.venv`` with the uv
+    at *uv* (required for that class; see :func:`localm.uv_tool.find_uv` and
+    :func:`localm.pyinstall.sync_command`), run from the install root; ``runtime``
     re-provisions the native binaries; ``setup`` is handled by the user (no
     in-process command)."""
     if klass == "deps":
         if not uv:
             raise ValueError("the deps update class needs the path of the uv to run")
-        return [uv, "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
+        from localm import pyinstall
+        return pyinstall.sync_command(uv, DEPS_EXTRAS)
     if klass == "runtime":
         # Re-invoke through the current interpreter: a bare "localm" argv[0]
         # resolves back to the LocaLM.exe launcher itself on Windows.

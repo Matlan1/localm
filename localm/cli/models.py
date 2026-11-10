@@ -1737,11 +1737,15 @@ def rename(old_name, new_name):
     Example:
       localm rename gemma3-12b daily-driver
     """
-    from ..model_manager import rename_model
+    from ..model_manager import register_rename_hook, rename_model
 
     done = _rename_on_running_server(old_name, new_name)
     if done is not None:
         sys.exit(0 if done else 1)
+    from ..plugins.builtin.chat.plug import rename_notes as _chat_rename
+    from ..plugins.builtin.jobs.plug import rename_notes as _jobs_rename
+    register_rename_hook("saved chats", _chat_rename)
+    register_rename_hook("scheduled jobs", _jobs_rename)
     if not rename_model(old_name, new_name):
         sys.exit(1)
 
