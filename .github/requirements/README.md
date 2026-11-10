@@ -1,14 +1,15 @@
 # CI requirement sets
 
-The workflows install Python packages only with `pip install --require-hashes`.
+The workflows install Python packages only with `pip install --require-hashes`, except
+`macos-smoke.yml`, which runs the user-facing `setup.sh` install on purpose.
 
 - Most jobs build the set at run time: `uv export --locked --no-emit-project --extra ...`
   writes the hash-locked list for the extras the job needs from the committed `uv.lock`,
   and `pip install --require-hashes --no-deps -r` installs it. There is nothing to
   regenerate; Dependabot's `uv` updates keep `uv.lock` current.
 - Three sets are committed because `uv.lock` does not hold them:
-  - `torch-cpu.txt`: the optional-stacks job needs the CPU builds of torch and torchvision, while `uv.lock`
-    resolves the CUDA wheels, so that job exports with `--prune torch` and installs this
+  - `torch-cpu.txt`: the lint and optional-stacks jobs need the CPU builds of torch and torchvision, while `uv.lock`
+    resolves the CUDA wheels, so those jobs export with `--prune torch` and install this
     file first. The file leaves out `setuptools`, which comes from `uv.lock`. Dependabot
     ignores both, so they change only by hand, and `torchvision` moves to the release
     paired with the torch pin.

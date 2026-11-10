@@ -15,7 +15,7 @@ directory ships empty.
 ## Provisioning
 
 ```
-localm setup-llama                         # download the default prebuilt
+localm setup-llama                         # detect the GPU, download the matching prebuilt
 localm setup-llama --from <build-dir>      # copy from your own llama.cpp build
 localm setup-llama --url <zip-url>         # a different prebuilt
 ```
@@ -34,7 +34,8 @@ directories to the DLL search path, so a build that bundles only `llama.dll` +
 
 ## Where the gfx1030 binaries come from
 
-The default prebuilt is the lemonade-sdk gfx103X (RDNA2) Windows ROCm build.
+The `amd-rocm` backend (what auto-detection picks for an RX 6000 on Windows) is
+the lemonade-sdk gfx103X (RDNA2) Windows ROCm build.
 For a from-source build see `rocm-canary-forge/windows-native`
 (`build_llamacpp_gfx1030.bat`, Ninja + AMD clang-cl, `-DGGML_HIP=ON
 -DGPU_TARGETS=gfx1030`, compiled against the venv's rocm-sdk).
