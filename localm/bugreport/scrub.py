@@ -122,10 +122,11 @@ _HEADER_SECRET_RE = re.compile(
 # (``b'...'``), goes whole (to the closing quote, or to the end of the line
 # when there is none) and the text after the closing quote is kept; so does a
 # ``[...]`` array. Any other value is an optional scheme word, one credential,
-# and every further ``name=value`` parameter after a comma or spaces (Digest
-# and AWS4-HMAC-SHA256 carry several, with quoted values that may hold
-# spaces); text after that is kept. One of the scheme words Bearer, Basic,
-# Digest, Negotiate or NTLM alone on its line takes the next line's token. A
+# and every further ``name=value`` parameter after a comma (Digest and
+# AWS4-HMAC-SHA256 carry several, with quoted values, plain or backslash-
+# escaped, that may hold spaces); text after that is kept. One of the scheme
+# words Bearer, Basic, Digest, Negotiate, NTLM, Token or ApiKey alone on its
+# line takes the next line's token. A
 # value that already reads ``<redacted>`` and a flag literal (``null``,
 # ``false``, ...) are left as they are.
 # ``Proxy-Authorization`` and ``X-Authorization`` end in the same name and are
@@ -137,9 +138,11 @@ _AUTH_HEADER_RE = re.compile(
     r"[\"']?\s*(?:[,}\]]|$))"
     r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
     r"|\[[^\]\r\n]*\]?"
-    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
-    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*)|[^\s,]+)"
-    r"(?:(?:,[ \t]*|[ \t]+)[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*))*)"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
+    r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"|[^\s,]+)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 
 
