@@ -60,7 +60,7 @@ def _files(version, *, sd=None, kobold=None, comfy=None, uv=None, pyproject=None
              "localm/setup_llama/pins.py": _LLAMA_PINS,
              "localm/setup_llama/cli.py": 'opt = "--keep-choice"\n',
              "localm/cli/comfy.py": 'opt = "--reinstall-requirements"\n',
-             "pyproject.toml": pyproject or _PYPROJECT_031}
+             "pyproject.toml": pyproject or _PYPROJECT_031, "uv.lock": "version = 1\n"}
     if sd:
         files["localm/media/sdcpp/pins.py"] = _sd_pins(sd)
     if kobold:

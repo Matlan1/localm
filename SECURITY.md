@@ -336,7 +336,10 @@ this section states the security properties and, more importantly, their edges.
   downloads you trigger yourself proceed under `off`: model pulls and
   HuggingFace search, the vision-projector, voice, embedding-model, browser-build
   and TTS model fetches, and the native runtime downloads (`localm setup-llama`,
-  `localm setup-sdcpp`, `localm setup-music`). It never applies to model-initiated access (the
+  `localm setup-sdcpp`, `localm setup-music`), and the Python package installs localm
+  starts (a plugin's dependencies, the managed ComfyUI's packages, the PyTorch step of an
+  update; an update's own dependency step also runs under `update_ignore_net_policy`).
+  It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
   bug-report upload (sent only when you press Send), and requests to your
@@ -423,7 +426,11 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   build. An update can carry a new set of keys (for example a new release key); it
   is accepted only when it is numbered higher than the set in use and signed by two
   of the three current recovery keys, and is then kept in the data directory
-  (`updates/trust.json`) and used from then on. A lower-numbered set is refused, so
+  (`updates/trust.json`, with the sets accepted before it in `updates/trust-chain.json`)
+  and used from then on. Each time it is read, the saved set is checked again from the
+  built-in keys forward: every step must be signed by two recovery keys of the set
+  before it, and a saved set that does not chain to the built-in keys stops updates
+  with an error naming the file. A lower-numbered set is refused, so
   a replaced key cannot be brought back by replaying an old one. A refused update
   leaves the keys in use unchanged (an older version installed by choice saves a
   correctly signed new set during its signature check, before its other checks),
@@ -448,6 +455,25 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   uses the `uv` this install found instead.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.
+- **Python dependencies come from the release's lock.** When an update changes
+  localm's dependencies, its dependency step installs them with `uv sync --frozen`
+  from the `uv.lock` the signed build carries: exact versions, and each downloaded file
+  is checked against the SHA-256 the lock records. A plugin's dependencies are
+  installed the same way (`--require-hashes`, at the locked versions) when the install
+  has a `uv.lock` and uv. Installs no lock covers use the package index over HTTPS
+  without hash checking: a plugin dependency install with no `uv.lock` or no uv (it
+  says so as it runs), the managed ComfyUI's packages (ComfyUI's own requirements and
+  PyTorch from the PyTorch index), the PyTorch step setup runs and an update repeats,
+  and the first install by `setup.bat` / `setup.sh`, which resolves from the
+  `pyproject.toml` minimum versions.
+- **Native runtime downloads.** The llama.cpp runtime archives of the release localm
+  pins are checked against SHA-256 values compiled into localm; when the release
+  listing reports a different digest for one of them, the download is refused. For a
+  release localm does not pin (`localm setup-llama --tag ...`) the digest comes from
+  the same release listing as the file, and when the listing has none the download is
+  installed with a warning that it is unverified (pass `--sha256` to pin one). The
+  stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
+  against pinned SHA-256 values.
 - **Your data is never in the swap.** The updater never touches the venv, `.git`,
   your data directory (models, config, sessions), or `.localcoder`; provisioned
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
