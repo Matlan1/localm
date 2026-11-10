@@ -1273,6 +1273,23 @@ def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
     return None
 
 
+def rag_roots_for_key_hash(key_hash: Optional[str]) -> Optional[list]:
+    """The per-key RAG folder allowlist of the LIVE keystore key with this sha256
+    *key_hash*: its normalised ``rag_roots``, ``[]`` when it has none, or None
+    when no live key matches (missing, expired, or an unreadable keystore). Same
+    liveness rules as ``scopes_for_key_hash``; does not resolve the owner key."""
+    if not key_hash:
+        return None
+    now = time.time()
+    for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            if exp is not None and now > float(exp):
+                return None
+            return norm_rag_roots(r.get("rag_roots", []))
+    return None
+
+
 def _keystore_configured() -> bool:
     """True when the scoped keystore should count as 'auth in effect'.
 
