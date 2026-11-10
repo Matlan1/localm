@@ -1240,6 +1240,98 @@ class TestGenerateImageSafety:
         mock_gen.assert_not_called()
         assert victim.read_bytes() == b"do not overwrite me"
 
+    @pytest.mark.parametrize("name", [
+        "auth.key", "config.json", "registry.json", "auth", "config", "registry",
+    ])
+    @pytest.mark.parametrize("form", ["relative", "absolute"])
+    def test_output_path_cannot_name_a_data_dir_file(self, name, form):
+        """output_path naming a credential or config file of the data dir, as
+        a bare name or by its full path, is refused before any backend runs,
+        and the file and its would-be sidecar stay byte-identical."""
+        from localm.config import home_dir
+        server, _ = _server()
+        home = home_dir()
+        home.mkdir(parents=True, exist_ok=True)
+        victims = {home / n: f"keep {n}".encode()
+                   for n in ("auth.key", "config.json", "registry.json",
+                             "auth.json")}
+        for path, data in victims.items():
+            path.write_bytes(data)
+        raw = name if form == "relative" else str(home / name)
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": raw})
+        assert r["result"]["isError"] is True, r["result"]
+        mock_gen.assert_not_called()
+        body = r["result"]["content"][0]["text"]
+        assert str(home) not in body, body
+        for path, data in victims.items():
+            assert path.read_bytes() == data, path
+
+    @pytest.mark.parametrize("raw", [
+        "../auth.png", "../gui_images/../auth.png", "x.txt", "x.png.json", "x",
+    ])
+    def test_output_path_escape_or_non_image_is_refused(self, raw):
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": raw})
+        assert r["result"]["isError"] is True, r["result"]
+        mock_gen.assert_not_called()
+
+    @pytest.mark.parametrize("existing", ["image", "sidecar"])
+    def test_output_path_never_replaces_an_existing_file(self, existing):
+        from localm.config import home_dir
+        server, _ = _server()
+        target = home_dir().resolve() / "mcp-images" / "taken.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        present = (target if existing == "image"
+                   else target.with_name("taken.png.json"))
+        present.write_bytes(b"earlier output")
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": "taken.png"})
+        assert r["result"]["isError"] is True, r["result"]
+        mock_gen.assert_not_called()
+        assert present.read_bytes() == b"earlier output"
+
+    @pytest.mark.parametrize("form", ["relative", "absolute-mcp", "absolute-gallery"])
+    def test_output_path_in_a_media_folder_is_accepted(self, form):
+        """The refusals above must not be a policy that refuses everything: a
+        new image file in mcp-images or the image gallery reaches the backend
+        at exactly that path."""
+        from localm.config import home_dir
+        server, _ = _server()
+        home = home_dir().resolve()
+        raw, expected = {
+            "relative": ("sub/cat.png", home / "mcp-images" / "sub" / "cat.png"),
+            "absolute-mcp": (str(home / "mcp-images" / "cat.webp"),
+                             home / "mcp-images" / "cat.webp"),
+            "absolute-gallery": (str(home / "gui_images" / "cat.jpg"),
+                                 home / "gui_images" / "cat.jpg"),
+        }[form]
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": raw})
+        assert r["result"].get("isError") is not True, r["result"]
+        mock_gen.assert_called_once()
+        assert mock_gen.call_args.args[1] == expected
+
+    def test_default_output_paths_are_distinct_new_files(self):
+        """Two calls without output_path in the same second get two names."""
+        from types import SimpleNamespace
+        from localm.config import home_dir
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen, \
+             patch("localm.plugins.mcpserver.tools.media_coder.time",
+                   SimpleNamespace(time=lambda: 1_700_000_000)):
+            self._call(server, {"prompt": "x"})
+            self._call(server, {"prompt": "x"})
+        first, second = (c.args[1] for c in mock_gen.call_args_list)
+        assert first != second
+        assert first.parent == second.parent == home_dir().resolve() / "mcp-images"
+
     @pytest.mark.parametrize("secret_name",
                              ["auth.key", "auth.json", "sessions.json"])
     def test_input_image_cannot_name_the_credential_store(self, secret_name):
@@ -2655,7 +2747,7 @@ _PATH_ARG_GUARDS = {
     ("list_model_files", "repo"): "hf-repo-id",
     ("pull_model", "repo"): "hf-repo-id",
     ("pull_model", "file"): "hf-repo-file",
-    ("generate_image", "output_path"): "confined-to-data-dir",
+    ("generate_image", "output_path"): "new-image-in-media-folders",
     ("generate_image", "input_image"): "input-image-allowlist",
     ("run_coder_task", "cwd"): "unc-refused-and-coder-root",
 }
