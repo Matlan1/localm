@@ -33,32 +33,32 @@ def _events(home):
 
 
 def test_record_writes_one_line_with_only_the_given_fields(home):
-    assert mgmt_events.record("plugin_installed", plugin="demo", version_to="1.2") is True
+    assert mgmt_events.record("plugin_installed", home=home, plugin="demo", version_to="1.2") is True
     (ev,) = _events(home)
     assert set(ev) == {"ts", "kind", "plugin", "version_to"}
     assert ev["kind"] == "plugin_installed" and ev["plugin"] == "demo"
 
 
 def test_config_saved_keeps_key_names_not_values(home):
-    mgmt_events.record("config_saved", keys=["b_key", "a_key"])
+    mgmt_events.record("config_saved", home=home, keys=["b_key", "a_key"])
     (ev,) = _events(home)
     assert ev["keys"] == ["a_key", "b_key"]
 
 
 def test_unknown_kind_raises_and_writes_nothing(home):
     with pytest.raises(ValueError):
-        mgmt_events.record("key_exploded")
+        mgmt_events.record("key_exploded", home=home)
     assert _events(home) == []
 
 
 def test_every_kind_is_accepted(home):
     for kind in sorted(mgmt_events.KINDS):
-        assert mgmt_events.record(kind) is True
+        assert mgmt_events.record(kind, home=home) is True
     assert [e["kind"] for e in _events(home)] == sorted(mgmt_events.KINDS)
 
 
 def test_text_fields_are_length_capped(home):
-    mgmt_events.record("plugin_installed", plugin="x" * 5000)
+    mgmt_events.record("plugin_installed", home=home, plugin="x" * 5000)
     (ev,) = _events(home)
     assert len(ev["plugin"]) == 200
 
@@ -66,7 +66,7 @@ def test_text_fields_are_length_capped(home):
 def test_rotation_keeps_one_previous_file(home, monkeypatch):
     monkeypatch.setattr(mgmt_events, "MAX_BYTES", 300)
     for _ in range(40):
-        mgmt_events.record("config_saved", keys=["k"])
+        mgmt_events.record("config_saved", home=home, keys=["k"])
     logs = home / "logs"
     assert sorted(p.name for p in logs.iterdir()) == [
         "management.jsonl", "management.jsonl.1"]
@@ -77,7 +77,7 @@ def test_rotation_keeps_one_previous_file(home, monkeypatch):
 def test_write_failure_returns_false_and_warns(home, monkeypatch, caplog):
     (home / "logs").write_text("a file where the directory should be")
     with caplog.at_level("WARNING", logger="localm"):
-        assert mgmt_events.record("key_minted", principal="x") is False
+        assert mgmt_events.record("key_minted", home=home, principal="x") is False
     assert any("management event log" in r.getMessage() for r in caplog.records)
 
 

@@ -69,11 +69,11 @@ class TestNetworkMode:
         assert not (home / "config.json").exists()
         assert network_mode() == "ask"
 
-    def test_a_good_backup_keeps_the_stored_mode(self, home):
+    def test_a_good_backup_is_not_the_current_mode(self, home):
         _store(home, net_mode="allow")
         (home / "config.json.bak").write_bytes((home / "config.json").read_bytes())
         (home / "config.json").write_bytes(UNDECODABLE)
-        assert network_mode() == "allow"
+        assert network_mode() == "off"
 
     def test_the_env_override_still_wins(self, home, monkeypatch):
         _corrupt(home)
@@ -139,9 +139,9 @@ class TestRequireAuth:
         assert not (home / "config.json").exists()
         assert auth.require_auth_enabled() is False
 
-    def test_a_good_backup_keeps_the_stored_flag(self, home):
+    def test_a_good_backup_is_not_the_current_flag(self, home):
         _store(home, require_auth=False)
         (home / "config.json.bak").write_bytes((home / "config.json").read_bytes())
         (home / "config.json").write_bytes(UNDECODABLE)
-        assert auth.require_auth_enabled() is False
+        assert auth.require_auth_enabled() is True
 

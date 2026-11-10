@@ -48,9 +48,10 @@ def register(app: FastAPI, ctx) -> None:
         # verify() reads the keystore and can take the cross-process lock on it
         # (last-used stamping, legacy-row marking), so it runs off the event loop.
         def _record_failed():
-            from localm import mgmt_events
+            from localm import config, mgmt_events
             host = request.client.host if request.client else ""
-            mgmt_events.record("login_failed", loopback=_is_loopback(host))
+            mgmt_events.record("login_failed", home=config.HOME_DIR,
+                               loopback=_is_loopback(host))
 
         if not presented:
             await run_in_threadpool(_record_failed)

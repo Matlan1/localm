@@ -442,7 +442,7 @@ def test_speech_load_failure_owner_keeps_a_host_folder(home, tmp_path, outside,
                                                        monkeypatch):
     from localm.inference import speech
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     target = outside / "tts.gguf"
     models = home / "models"
     models.mkdir(parents=True, exist_ok=True)

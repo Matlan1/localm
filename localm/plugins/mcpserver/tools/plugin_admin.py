@@ -51,7 +51,10 @@ def build() -> dict[str, dict]:
             return err
         dep_result = None
         with _quiet_stdout():
-            with_deps = args.get("with_deps", True)
+            with_deps = args.get("with_deps")
+            if with_deps is None:
+                from localm.config import load_config
+                with_deps = bool(load_config().get("auto_install_plugin_deps", True))
             if with_deps and mgr.plugin_missing_deps(plugin):
                 dep_result = mgr.install_plugin_deps(plugin)
         if dep_result is not None and not dep_result.ok:
@@ -140,7 +143,7 @@ def build() -> dict[str, dict]:
                 "type": "object",
                 "properties": {
                     "plugin": {"type": "string", "description": "Plugin name to install"},
-                    "with_deps": {"type": "boolean", "description": "Also install pip dependencies (default true)"}
+                    "with_deps": {"type": "boolean", "description": "Also install pip dependencies (default: the auto_install_plugin_deps setting, true unless changed)"}
                 },
                 "required": ["plugin"],
             },

@@ -101,12 +101,16 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     assert "unreadable" not in err, "a transient, recovered blip must not warn"
 
 
-def test_read_json_corrupt_falls_back_without_retry(home, capsys):
+def test_read_json_corrupt_falls_back_without_retry(home, capsys, caplog):
     """A genuinely corrupt (non-transient) file falls back immediately."""
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     cfg.CONFIG_FILE.write_text("{ not json", encoding="utf-8")
     out = cfg._read_json(cfg.CONFIG_FILE, {"fallback": True})
     assert out == {"fallback": True}
-    assert "unreadable" in capsys.readouterr().err.lower()
+    assert any("unreadable" in r.getMessage().lower() for r in caplog.records)
+    assert capsys.readouterr().err == ""
 
 
 def test_replace_atomic_rides_out_a_real_file_lock(home):

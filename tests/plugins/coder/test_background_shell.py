@@ -740,10 +740,15 @@ def test_unattended_one_shot_gate_covers_the_background_variant():
     assert _SHELL_EXEC_TOOLS == frozenset({"run_shell", "run_shell_background"})
     # The CLI builds its Agent and resolves its config through the runner, so
     # both gates live there.
+    from localm.plugins.coder.agent.constants import EXECUTES_PROJECT_CODE, confirm_forced
+    from localm.plugins.coder.tools.registry import TOOL_REGISTRY
+    for name in _SHELL_EXEC_TOOLS:
+        assert TOOL_REGISTRY[name].executes_project_code is True, name
+        assert confirm_forced({EXECUTES_PROJECT_CODE}, name, TOOL_REGISTRY[name]), name
     src = inspect.getsource(runner)
-    assert "always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)" in src, (
+    assert "always_confirm = set(always_confirm) | {EXECUTES_PROJECT_CODE}" in src, (
         "the R19a unattended gate no longer covers the whole shell-exec family")
-    assert "always_confirm.update(_SHELL_EXEC_TOOLS)" in src, (
+    assert "always_confirm.add(EXECUTES_PROJECT_CODE)" in src, (
         "--interactive-confirm no longer covers the whole shell-exec family")
 
 

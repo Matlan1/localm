@@ -89,6 +89,14 @@ class ToolDef:
     # Separate from destructive, which also triggers dry-run-skip and an undo
     # snapshot.
     ask_by_default: bool = False
+    # Marks a tool that runs code the project controls (a shell command, a test
+    # suite, an external MCP server's tool). Such a tool always asks unless
+    # auto-approved, and the always_confirm entry EXECUTES_PROJECT_CODE
+    # (agent/constants.py) keeps it asking under auto_approve too.
+    executes_project_code: bool = False
+    # Marks a tool that asks before every call, under auto_approve too, as if it
+    # were listed in always_confirm.
+    confirm_always: bool = False
 
 
 # The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an
@@ -244,6 +252,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "timeout": {"type": "int",    "description": "Timeout in seconds", "required": False},
         },
         destructive=True,
+        executes_project_code=True,
     ),
     "run_shell_background": ToolDef(
         name="run_shell_background",
@@ -259,6 +268,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "command": {"type": "string", "description": "Shell command", "required": True},
         },
         destructive=True,
+        executes_project_code=True,
     ),
     "check_shell_job": ToolDef(
         name="check_shell_job",
@@ -645,6 +655,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "path":       {"type": "string", "description": "Limit run to a file or directory (default: whole project)", "required": False},
             "extra_args": {"type": "string", "description": "Extra arguments appended to the test command", "required": False},
         },
+        executes_project_code=True,
     ),
     "git_commit": ToolDef(
         name="git_commit",

@@ -70,7 +70,7 @@ class _Backend:
 @pytest.fixture
 def image_app(home, monkeypatch):
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     app = FastAPI()
     PluginManager(app, external_root=home / "noplugins").install("image")
     app.state.jobs = JobManager()
@@ -548,7 +548,7 @@ class TestKernelOriginGate:
     def kernel_client(self, home, monkeypatch):
         from localm.inference.http_server import create_app
         from localm.plugins.engine import PluginManager
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         app = create_app(None)
         PluginManager(app, external_root=home / "noplugins").install("image")
         app.state.jobs = JobManager()

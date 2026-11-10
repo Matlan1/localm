@@ -366,7 +366,7 @@ def _capture_start_cli(monkeypatch):
         captured["args"] = list(cli_args)
         return _FakeJob()
 
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
     return captured
 
 

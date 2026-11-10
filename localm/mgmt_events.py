@@ -1,6 +1,6 @@
 """Append-only log of management events, written in every session mode.
 
-One JSON line per event is appended to ``<data dir>/logs/management.jsonl``.
+One JSON line per event is appended to ``<data dir>/logs/management.jsonl``; the caller passes the data directory.
 A line holds the time, the event kind, and only these optional fields:
 ``principal`` (a key id or a fixed label, never a key), ``keys`` (the NAMES of
 the config keys a save changed, never their values), ``plugin``,
@@ -42,21 +42,21 @@ _MAX_TEXT = 200
 _LOCK = threading.Lock()
 
 
-def log_path() -> Path:
-    """The management log file under the current data directory."""
-    from localm.config import HOME_DIR
-    return Path(HOME_DIR) / "logs" / FILE_NAME
+def log_path(home) -> Path:
+    """The management log file under the data directory *home*."""
+    return Path(home) / "logs" / FILE_NAME
 
 
 def _text(value) -> str:
     return str(value)[:_MAX_TEXT]
 
 
-def record(kind: str, *, principal: Optional[str] = None,
+def record(kind: str, *, home, principal: Optional[str] = None,
            keys: Optional[Iterable[str]] = None, plugin: Optional[str] = None,
            version_from: Optional[str] = None, version_to: Optional[str] = None,
            loopback: Optional[bool] = None) -> bool:
-    """Append one event line. Returns True when written, False when the write failed.
+    """Append one event line under the data directory *home*. Returns True when
+    written, False when the write failed.
 
     Raises ValueError for a *kind* outside ``KINDS``. Never raises for an I/O
     failure. Thread-safe; lines are appended whole.
@@ -78,7 +78,7 @@ def record(kind: str, *, principal: Optional[str] = None,
         event["loopback"] = bool(loopback)
     try:
         line = json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n"
-        path = log_path()
+        path = log_path(home)
         with _LOCK:
             path.parent.mkdir(parents=True, exist_ok=True)
             try:

@@ -270,9 +270,9 @@ def test_revoked_admin_scoped_keystore_key_still_loses_shell(
     assert auth.revoke_key(created["id"]) is True
     captured.clear()
     result = runner.run_job(_stored(job_id), engine=None)
-    assert result["status"] == "ok"     # downgraded, not failed/skipped
-    assert captured["restricted"] is True, (
-        "a REVOKED admin-scoped keystore key must still lose shell (LM-DA-014)")
+    assert result["status"] == "error"     # skipped: the creating key is gone
+    assert "restricted" not in captured, (
+        "a REVOKED admin-scoped keystore key's job must not run at all")
 
 
 def test_revoked_coder_full_key_still_loses_shell_after_owner_rotation(
@@ -292,8 +292,8 @@ def test_revoked_coder_full_key_still_loses_shell_after_owner_rotation(
     auth.regenerate_key()               # owner rotation must not re-authorize it
 
     result = runner.run_job(_stored(job_id), engine=None)
-    assert result["status"] == "ok"
-    assert captured["restricted"] is True
+    assert result["status"] == "error"
+    assert "restricted" not in captured
 
 
 def _cookie_request(sid):
@@ -475,10 +475,10 @@ def test_a_keystore_key_session_is_not_stamped_and_still_loses_shell(
 
     assert auth.revoke_key(created["id"]) is True
     captured.clear()
-    assert runner.run_job(_stored(job_id), engine=None)["status"] == "ok"
-    assert captured["restricted"] is True, (
-        "a REVOKED admin-scoped keystore key kept shell through its cookie "
-        "session (LM-DA-014)")
+    assert runner.run_job(_stored(job_id), engine=None)["status"] == "error"
+    assert "restricted" not in captured, (
+        "a REVOKED admin-scoped keystore key's job ran through its cookie "
+        "session")
 
 
 def test_the_owner_login_records_the_stamp_and_a_scoped_login_does_not(jobs_app):
@@ -776,10 +776,10 @@ def test_unauthorized_shell_downgrade_is_surfaced_not_silent(home, tmp_path,
     with caplog.at_level("WARNING"):
         result = runner.run_job(job, engine=None)
 
-    assert result["status"] == "ok"
-    assert "shell" in result["output"].lower()
-    assert any("shell" in r.message.lower() for r in caplog.records), \
-        "the downgrade must be logged, not swallowed"
+    assert result["status"] == "error"
+    assert "could not be re-confirmed" in result["error"]
+    assert any("not run" in r.message.lower() for r in caplog.records), \
+        "the refusal must be logged, not swallowed"
 
 
 def test_authorized_run_adds_no_downgrade_note(home, tmp_path, monkeypatch):
@@ -839,8 +839,8 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
     # The autonomous scheduler alone cannot repair this: no request in sight to
     # prove ownership from.
     result = runner.run_job(store.get(legacy.id), engine=None)
-    assert result["status"] == "ok"
-    assert captured["restricted"] is True, (
+    assert result["status"] == "error"
+    assert "restricted" not in captured, (
         "premise broken: the scheduler should not be able to repair a pre-roll "
         "legacy job with no caller in sight")
     assert store.get(legacy.id).owner_is_owner_key is False
@@ -891,9 +891,10 @@ def test_run_now_by_owner_does_not_restamp_another_principals_job(
     with TestClient(jobs_app) as c:
         r = c.post(f"/api/jobs/{job_id}/run", headers=_h(KEY_ONE))
     assert r.status_code == 200, r.text
-    assert captured["restricted"] is True, (
-        "a wrongful re-stamp let a revoked scoped key's job keep shell "
-        "(LM-DA-014, via the repair path)")
+    assert r.json()["status"] == "error"
+    assert "restricted" not in captured, (
+        "a wrongful re-stamp let a revoked scoped key's job run "
+        "(via the repair path)")
     assert _stored(job_id).owner_is_owner_key is False, (
         "the owner upgraded ANOTHER principal's job to permanent owner-key "
         "shell just by running it")
@@ -958,8 +959,8 @@ def test_update_job_by_owner_does_not_restamp_another_principals_job(
     assert _stored(job_id).owner_is_owner_key is False
 
     result = runner.run_job(_stored(job_id), engine=None)
-    assert result["status"] == "ok"
-    assert captured["restricted"] is True
+    assert result["status"] == "error"
+    assert "restricted" not in captured
 
 
 def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
@@ -981,8 +982,8 @@ def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
     auth.regenerate_key()                        # rolled before it ever ran once
 
     result = runner.run_job(job, engine=None)
-    assert result["status"] == "ok"
-    out = result["output"]
+    assert result["status"] == "error"
+    out = result["error"]
     assert "is no longer authorized (revoked or expired)" not in out, (
         "the downgrade note still asserts revoked-or-expired as a bare fact")
     assert "may have been revoked or expired" in out

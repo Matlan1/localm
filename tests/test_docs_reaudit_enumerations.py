@@ -137,7 +137,8 @@ def test_cli_md_builtin_tool_table_matches_the_tool_registry():
     assert f"The agent ships {len(TOOL_REGISTRY)} built-in tools" in _collapsed("docs/cli.md")
     for name, (confirms, restricted) in rows.items():
         tool = TOOL_REGISTRY[name]
-        assert (confirms == "yes") == bool(tool.destructive or tool.ask_by_default), name
+        assert (confirms == "yes") == bool(tool.destructive or tool.ask_by_default
+                                             or tool.executes_project_code), name
         assert (restricted == "yes") == (name in SAFE_RESTRICTED_TOOLS), name
 
 
