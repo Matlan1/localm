@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **The chat's Markdown renderer is updated to marked 18.1.3 (from 18.1.2).** It fixes a batch of Markdown edge cases, among them a heading underline followed by a tab, a task list item with a tab after its checkbox, escaped brackets and quotes in links, and block quotes and list items that end at a lazy line.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
