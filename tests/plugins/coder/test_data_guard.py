@@ -8,7 +8,6 @@ explicit approval of that exact call, and is denied when no one can be asked.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
