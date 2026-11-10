@@ -313,7 +313,7 @@ class _SessionMixin:
             self._audit.close()
             if self.parent is None:
                 unregister_coder_session_mode(self.mode)
-        if self.mode == SessionMode.FULL and not self.restricted:
+        if self.mode == SessionMode.FULL and not getattr(self, "restricted", False):
             return self._write_session_markdown()
         return None
 
