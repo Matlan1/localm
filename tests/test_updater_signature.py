@@ -637,3 +637,109 @@ def test_saved_trust_file_with_a_revoked_key_is_refused(trust, home, monkeypatch
     monkeypatch.setattr(updater, "_REVOKED_KEYS", frozenset({pub_hex(r2)}))
     e = _refused(DATA, envelope(DATA, [r2]))
     assert "revoked key" in e.reason
+
+
+# ------------------------ saved key set is re-verified ----------------------
+
+def _chain_file(home):
+    return home / "updates" / "trust-chain.json"
+
+
+def _write_saved(home, ks):
+    f = _trust_file(home)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(ks), encoding="utf-8")
+    return f
+
+
+def test_saved_keyset_not_signed_by_the_pinned_recovery_keys_is_refused(trust, home):
+    """A trust file anyone could write, with a higher seq and its own keys, is
+    not trusted: its signatures must verify against the pinned recovery keys."""
+    attacker = [Ed25519PrivateKey.generate() for _ in range(3)]
+    evil_release = Ed25519PrivateKey.generate()
+    f = _write_saved(home, keyset(2, [evil_release], attacker, signers=attacker[:2]))
+    e = _refused(DATA, envelope(DATA, [evil_release]))
+    assert str(f) in e.reason and "recovery keys" in e.summary
+    e = _refused(DATA, envelope(DATA, [trust.r]))
+    assert str(f) in e.reason
+
+
+def test_saved_keyset_with_no_signatures_is_refused(trust, home):
+    """The trust file alone, with an empty signatures list, cannot install a key."""
+    evil_release = Ed25519PrivateKey.generate()
+    _refused(DATA, envelope(DATA, [evil_release]))
+    ks = keyset(2, [evil_release], [Ed25519PrivateKey.generate() for _ in range(3)])
+    f = _write_saved(home, {**ks, "signatures": []})
+    e = _refused(DATA, envelope(DATA, [evil_release]))
+    assert str(f) in e.reason
+
+
+def test_saved_keyset_with_one_pinned_recovery_signature_is_refused(trust, home):
+    r2 = Ed25519PrivateKey.generate()
+    _write_saved(home, keyset(2, [r2], trust.recovery, signers=[trust.recovery[0]]))
+    _refused(DATA, envelope(DATA, [r2]))
+
+
+def test_saved_keyset_signed_by_the_pinned_recovery_keys_still_verifies(trust, home):
+    a, b, _c = trust.recovery
+    r2 = Ed25519PrivateKey.generate()
+    _write_saved(home, keyset(2, [r2], trust.recovery, signers=[a, b]))
+    assert updater.verify_signature(DATA, envelope(DATA, [r2])) is None
+    _refused(DATA, envelope(DATA, [trust.r]))
+
+
+def test_a_forged_chain_file_does_not_make_a_saved_keyset_trusted(trust, home):
+    attacker = [Ed25519PrivateKey.generate() for _ in range(3)]
+    evil_release = Ed25519PrivateKey.generate()
+    mid = keyset(2, [evil_release], attacker, signers=attacker[:2])
+    top = keyset(3, [evil_release], attacker, signers=attacker[:2])
+    _write_saved(home, top)
+    _chain_file(home).write_text(json.dumps({"keysets": [mid, top]}), encoding="utf-8")
+    _refused(DATA, envelope(DATA, [evil_release]))
+
+
+def test_a_corrupt_chain_file_is_refused_and_named(trust, home):
+    a, b, _c = trust.recovery
+    r2 = Ed25519PrivateKey.generate()
+    _write_saved(home, keyset(2, [r2], trust.recovery, signers=[a, b]))
+    _chain_file(home).write_text("{nope", encoding="utf-8")
+    e = _refused(DATA, envelope(DATA, [r2]))
+    assert str(_chain_file(home)) in e.reason
+
+
+def test_two_rotations_in_a_row_keep_verifying_from_the_pinned_set(
+        tmp_path, trust, apply_cfg, home, monkeypatch):
+    """Key set 2 is signed by the pinned recovery keys, key set 3 by key set 2's;
+    after both updates the install still verifies and updates with key set 3."""
+    a, b, _c = trust.recovery
+    rec2 = [Ed25519PrivateKey.generate() for _ in range(3)]
+    r2, r3 = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    ks2 = keyset(2, [r2], rec2, signers=[a, b])
+    ks3 = keyset(3, [r3], rec2, signers=rec2[1:])
+    inst = _fake_install(tmp_path)
+    data = _build_zip_bytes("0.2.0")
+    _apply(inst, data, envelope(data, [r2], keyset=ks2))
+    monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
+    data = _build_zip_bytes("0.3.0")
+    _apply(inst, data, envelope(data, [r3], keyset=ks3))
+    assert json.loads(_trust_file(home).read_text(encoding="utf-8")) == ks3
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.0")
+    data = _build_zip_bytes("0.4.0")
+    _apply(inst, data, envelope(data, [r3]))
+    assert (inst / "VERSION").read_text().strip() == "0.4.0"
+    _refused(DATA, envelope(DATA, [r2]))
+
+
+def test_an_install_with_a_legitimately_saved_keyset_still_updates(
+        tmp_path, trust, apply_cfg, home):
+    """A trust file saved before the chain file existed (key set 2, signed by the
+    pinned recovery keys, no trust-chain.json) keeps working."""
+    a, b, _c = trust.recovery
+    r2 = Ed25519PrivateKey.generate()
+    ks2 = keyset(2, [r2], trust.recovery, signers=[a, b])
+    _write_saved(home, ks2)
+    assert not _chain_file(home).exists()
+    inst = _fake_install(tmp_path)
+    data = _build_zip_bytes("0.2.0")
+    _apply(inst, data, envelope(data, [r2]))
+    assert (inst / "VERSION").read_text().strip() == "0.2.0"

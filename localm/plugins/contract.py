@@ -16,6 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
+#: The sentence shown at every place a third-party plugin is installed.
+UNSANDBOXED_NOTICE = ("Third-party plugins run unsandboxed in-process, so "
+                      "install only code you trust.")
+
 #: Host<->plugin contract version. Bump on breaking changes; a plugin declares
 #: the api_version it targets and the engine refuses incompatible plugins.
 API_VERSION = 1
@@ -153,6 +157,8 @@ class PluginSpec:
     surface: Surface = field(default_factory=Surface)
     cli_entry: str = ""                      # legacy "module:attr" Click command
     register_entry: str = ""                 # "module:attr" -> register(host)
+    entry: str = ""                          # legacy "module:attr" entry module that
+                                             # holds the [tools] exports
     tool_exports: list = field(default_factory=list)      # [tools] exports: coder
                                              # agent tools a third-party plugin
                                              # exports (loader.PluginManifest's
@@ -162,6 +168,12 @@ class PluginSpec:
     def __post_init__(self) -> None:
         if not self.scope:
             self.scope = self.name
+
+    @property
+    def tools_only(self) -> bool:
+        """True when the manifest declares ``entry`` and no ``register``: the
+        coder's tool loader owns it and the engine has nothing to load."""
+        return bool(self.entry) and not self.register_entry
 
     def compatible(self) -> bool:
         """True when this plugin targets an api_version the engine supports."""
@@ -186,11 +198,6 @@ class Host(Protocol):
     # refused. name is optional and defaults to the plugin's own.
     def plugin_config(self, name: Optional[str] = ...) -> dict: ...
     def save_plugin_config(self, name: Optional[str] = ..., cfg: Optional[dict] = ...) -> None: ...
-    # Host-side scope checks are NOT implemented: scopes are enforced
-    # per-request on the routes mounted via mount_router. Both raise
-    # NotImplementedError.
-    def has_scope(self, scope: str) -> bool: ...
-    def require_scope(self, scope: str) -> None: ...
     def caller_is_owner(self, request: Any) -> bool:
         """True when the caller of *request* (a route's ``Request``) is the
         owner: open mode, or an ADMIN/owner key or session."""
@@ -207,7 +214,14 @@ class Host(Protocol):
         ...
     def engine(self) -> Any: ...                          # inference engine handle
     def audit(self, event: str, data: dict) -> None: ...
-    def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker
+    def browse_dirs(self, path: str, request: Any) -> dict:
+        """Server-side folder picker. Raises PermissionError unless the caller of
+        *request* has host filesystem access."""
+        ...
+    def track(self, stop_callable: Callable[[], None]) -> None:
+        """Run *stop_callable* when this plugin is unmounted (disable, uninstall
+        or a failed load). Use it to stop a thread or timer the plugin started."""
+        ...
     def register_model_role(self, descriptor: ModelRoleDescriptor) -> None:
         """Declare a model slot this plugin needs, by registry ``model_type``.
 
@@ -260,6 +274,13 @@ class Host(Protocol):
         fine). Lower *priority* runs first; ties keep registration order. A hook
         that raises is logged and skipped, never breaking the turn. The engine
         removes this plugin's hooks automatically on disable/uninstall.
+
+        Hooks are transforms, not controls: a hook that raises is skipped, and
+        only the ``/v1/chat/completions`` and ``/v1/completions`` handlers run
+        them (not the ``localm run`` REPL, a turn forwarded to a peer, jobs, the
+        MCP chat tool, the coder's own engine calls, background generation or
+        the Ollama-compatible routes). Do not rely on a hook to enforce a
+        privacy or security rule.
 
         Hooks see scrubbed content text, not model control markers. In a
         streaming turn the outlet runs after all chunks have been sent (for

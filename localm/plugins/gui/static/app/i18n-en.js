@@ -96,7 +96,7 @@ export const I18N_EN = {
   "common.modelDownload.searchFailed":
     "Could not search Hugging Face for '{filename}'. Check your connection and try again, or add the file to your ComfyUI installation's matching models folder.",
   "common.modelDownload.searchOffline":
-    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Network.",
+    "Could not search for '{filename}': network access is off. Turn it on, or allow downloads only, in Settings → Server & network.",
   "common.modelDownload.searching":
     "Searching…",
   "common.modelDownload.unknownFolder":
@@ -121,7 +121,7 @@ export const I18N_EN = {
   "common.modelDownload.progressItem": "Downloading {index} of {count}: {filename} from {repo}…",
   "common.modelDownload.allDone": "Downloaded: {names}.",
   "common.modelDownload.declined": "Nothing was downloaded. {names} must be downloaded before this can generate.",
-  "common.modelDownload.blockedOff": "Cannot download {names}: network access is off. Turn it on, or allow model downloads only, in Settings → Network.",
+  "common.modelDownload.blockedOff": "Cannot download {names}: network access is off. Turn it on, or allow model downloads only, in Settings → Server & network.",
   "common.modelDownload.pressGenerate": "Download finished. Press Generate again.",
   "common.modelDownload.source": "Source: {repo} / {file}",
   "common.modelDownload.starting": "Starting…",
@@ -207,7 +207,7 @@ export const I18N_EN = {
   "chat.none": "(none)",
   "chat.parameters": "parameters",
   "chat.params.intro":
-    "Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings › Chat</b> (system prompt, sampling); set one here to override it for this conversation only.",
+    "Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings › Model</b> (system prompt, sampling); set one here to override it for this conversation only.",
   "chat.persistHint": "history saved on this machine",
   "chat.persistHint.title":
     "Conversations are stored in the localm data directory (chats/) because the server runs in log or full mode. They survive browser reloads and profile wipes.",
@@ -304,7 +304,7 @@ export const I18N_EN = {
   "chat.cancel": "Cancel",
   "chat.switchedTo": "switched to {model}",
   "chat.systemPrompt": "System prompt",
-  "chat.systemPrompt.hint": "(blank = your Settings › Chat default)",
+  "chat.systemPrompt.hint": "(blank = your Settings › Model default)",
   "chat.systemPrompt.placeholder": "Blank = use your default from Settings",
   "chat.temperature": "Temperature",
   "chat.topK": "Top-k",
@@ -350,7 +350,7 @@ export const I18N_EN = {
   "chat.tool.notice.note": "A note about web access was added for the model.",
   "chat.tool.notice.duplicate": "Already looked up in this message, so it was not run again.",
   "chat.tool.notice.denied": "You declined this web request, so nothing was looked up.",
-  "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Chat).",
+  "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Model).",
   "chat.tool.notice.ignored": "Only the first web request in that reply ran.",
   "chat.web.unfinished": "the model asked for more web lookups; none were run",
   "chat.reply.cut": "cut off - the reply stream ended before the model finished; reply “continue” to resume",
@@ -1119,7 +1119,7 @@ export const I18N_EN = {
   "plugins.external.empty.hint": "Install one from the catalog above to add capabilities.",
   "plugins.external.empty.text": "No external plugins installed",
   "plugins.externalIntro":
-    "A third-party plugin is a folder with a <code>plugin.toml</code> manifest under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the coder agent. Installation is a local directory copy.",
+    "A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it into the plugins folder of this installation. It can add a CLI command and export tools to the coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.",
   "plugins.firstParty": "First-party plugins",
   "plugins.install": "Install",
   "plugins.installDependencies": "Install dependencies",
@@ -1424,7 +1424,7 @@ export const I18N_EN = {
     "From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.",
   "models.pull.namePlaceholder": "name (optional)",
   "models.pull.netOffHint":
-    "(if this failed because network access is off: turn it on, or allow downloads only, in Settings → Network)",
+    "(if this failed because network access is off: turn it on, or allow downloads only, in Settings → Server & network)",
   "models.pull.noVisionProjector": "No vision projector",
   "models.pull.pauseButton": "Pause",
   "models.pull.pauseTitle": "Stop the download and keep what has been downloaded so far. Resume continues from there.",
@@ -1435,7 +1435,7 @@ export const I18N_EN = {
     "Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.",
   "models.pull.shortcutPlaceholder": "Curated shortcuts…",
   "models.pull.shortcutTitle":
-    "Curated small models that work even with network access set to Off - picks a known-good quant and fills in the fields below",
+    "Curated small models - picks a known-good quant and fills in the fields below. The list shows even with network access set to Off; the download itself needs network access or the model-downloads allowance.",
   "models.pull.specNoDash":
     "A model spec can't start with '-'. Use owner/repo, owner/repo:file.gguf, or an https URL.",
   "models.pull.specPlaceholder":
@@ -1760,7 +1760,7 @@ export const I18N_EN = {
   "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once (network access is set to \"ask\", so it is not fetched automatically).",
   "memory.modal.title": "Memory - what the model knows about you",
   "memory.modal.writable": "Durable facts localm remembers about you, added to the prompt while the memory toggle is on. Memory grows automatically as you chat; edit freely - one fact per line; Save replaces the list.",
-  "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is still recalled while the memory toggle is on.",
+  "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is recalled only if \"Allow memory recall in privacy mode\" is on.",
   "memory.saved": "Memory saved",
   "memory.saveFailed": "Save failed: {message}",
   "memory.corrections.head": "Suggested corrections ({count}) - nothing changes until you choose",
@@ -1883,7 +1883,7 @@ export const I18N_EN = {
   "settings.field.ctxReserve.label": "Context window (minimum)",
   "settings.field.ctxReserve.help": "Every load keeps a window of at least this many tokens usable. MoE models keep more experts in system RAM to hold it on the GPU; the coding agent asks for 32768.",
   "settings.field.unloadForRoom.label": "Unload other models to make room",
-  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a new model needs their VRAM; ask asks first; never keeps them and uses the VRAM that is left (slower). Another instance's model is always asked about.",
+  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a new model needs their VRAM; ask asks first; never keeps them (slower; a manual switch still asks). Another instance's model is always asked about.",
   "settings.field.kvCacheType.label": "KV cache type",
   "settings.field.kvCacheType.help": "f16 is the default. q8_0 stores the KV cache in about half the memory, so about 1.9x the context fits in VRAM, with slightly slower decoding. q8_0 needs flash attention.",
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
@@ -2105,7 +2105,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Network
   "settings.field.netMode.label": "Network access",
-  "settings.field.netMode.help": "Model-initiated web access: off = refused (model downloads too, unless allowed); ask = chat and coder ask first, jobs and API clients do not; allow = no prompt. The SSRF guard always applies.",
+  "settings.field.netMode.help": "Model-initiated web access: off = refused (model downloads too, unless allowed); ask = chat and coder ask first, jobs and API clients do not; allow = no prompt. The SSRF guard applies in every mode.",
   "settings.field.netAllow.label": "Allowed domains",
   "settings.field.netAllow.help": "Domains localm may reach, model requests and model downloads alike. Empty = any. e.g. example.com (also covers *.example.com). A list must also name the hosts you pull models from.",
   "settings.field.netDeny.label": "Denied domains",
@@ -2331,7 +2331,7 @@ export const I18N_EN = {
   "settings.tts.downloadNow": "Download voice model now",
   "settings.tts.cacheCheckFailed": "Could not check voice model cache: {message}",
   "settings.tts.downloading": "Downloading voice model...",
-  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Network) - the TTS plugin has not finished starting up to offer its own confirmation.",
+  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Server & network) - the TTS plugin has not finished starting up to offer its own confirmation.",
   "settings.tts.modelReady": "Voice model ready in browser",
   "settings.tts.setupFailed": "Voice model setup failed: {message}",
   "settings.tts.savedUnreadable": "Saved, but the server's reply could not be read - reloading the settings to show what is actually stored",

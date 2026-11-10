@@ -138,9 +138,11 @@ def _home() -> Path:
 def _persist_enabled() -> bool:
     """Memory recall AND writes are off in privacy mode (the default). Unlike the
     rest of the app, memory treats privacy as FULLY off: this gates recall too, so
-    no past facts are injected in privacy mode (not just "no new traces")."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    no past facts are injected in privacy mode (not just "no new traces"). A
+    request that carries privacy mode to a server in another mode
+    (``audit.request_is_privacy``) counts as privacy mode."""
+    from localm.audit import SessionMode, effective_mode, request_is_privacy
+    return not request_is_privacy() and effective_mode("chat") != SessionMode.PRIVACY
 
 
 def _recall_enabled() -> bool:
@@ -282,9 +284,13 @@ async def _off_loop(fn, *, embedder_bound: bool = True):
     timeout. Pass embedder_bound=False only for a call that never resolves the
     embedder (e.g. memory_delete), so it never queues behind an unrelated
     embedder load. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
+
+    *fn* runs inside the caller's ``audit.request_privacy`` scope, if any.
     """
+    from localm.audit import carry_request_privacy
     from localm.rag.collection_lock import CollectionLockedError
     loop = asyncio.get_running_loop()
+    fn = carry_request_privacy(fn)
     try:
         if embedder_bound:
             from localm.inference import http_server as _hs
@@ -1283,6 +1289,12 @@ def _auto_interval() -> float:
         return MEMORY_AUTO_MIN_INTERVAL
 _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
+_stop = _threading.Event()            # set on unload: no new background pass starts
+
+
+def _request_stop() -> None:
+    """Stop scheduling background passes; a pass already running finishes."""
+    _stop.set()
 
 
 def _auto_marker() -> Path:
@@ -1317,6 +1329,8 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     from localm.debuglog import logger, debug_content_enabled
     deferred = False
     try:
+        if _stop.is_set():
+            return
         # Resolved once here, at thread start, and reused for the whole pass, so the
         # engine cannot swap out from under consolidation while it is mid-run.
         eng = _live_engine()
@@ -1404,7 +1418,7 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
     interval = _auto_interval()
     now = _time.time()
     with _auto_lock:
-        if _auto_running:
+        if _auto_running or _stop.is_set():
             return
         if now - _auto_last_run() < interval:
             return
@@ -1467,6 +1481,8 @@ def _backfill_sweep_bg() -> None:
     global _sweep_running
     from localm.debuglog import logger
     try:
+        if _stop.is_set():
+            return
         from localm.memory.backfill import backfill_all
         res = backfill_all(_memory_root(), _embed_fn())
         if res["embedded"]:
@@ -1513,7 +1529,7 @@ def _maybe_sweep_backfill() -> None:
         interval = BACKFILL_SWEEP_MIN_INTERVAL
     now = _time.time()
     with _sweep_lock:
-        if _sweep_running:
+        if _sweep_running or _stop.is_set():
             return
         if now - _sweep_last_run() < interval:
             return
@@ -1856,6 +1872,8 @@ async def _memory_inlet_hook(messages, ctx):
 
 def register(host) -> None:
     global _HOST
+    _stop.clear()
+    host.track(_request_stop)
     host.mount_router(_router)
     host.register_chat_hook("inlet", _memory_inlet_hook)
     # Outlet: after each turn, grow the memory unattended (debounced, background,
@@ -1868,4 +1886,4 @@ def register(host) -> None:
 
 
 def unregister() -> None:
-    pass
+    _request_stop()

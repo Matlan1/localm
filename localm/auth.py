@@ -39,6 +39,7 @@ from typing import Callable
 from typing import Optional
 
 from localm.debuglog import logger
+from localm.storeformat import StoreFormatTooNew, check_stamp
 
 ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
@@ -264,11 +265,12 @@ def set_api_key(key: Optional[str]) -> None:
             "'localm key generate' produces). Spaces, punctuation, and non-English "
             "letters cannot be sent reliably in an HTTP Authorization header, so "
             "most clients would fail to authenticate with such a key.")
-    from localm.config import ensure_dirs
+    from localm.config import _cross_process_lock, ensure_dirs
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_private(path, key.strip() + "\n")
+    with _cross_process_lock(path):
+        _atomic_write_private(path, key.strip() + "\n", retrying=True)
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
@@ -644,6 +646,12 @@ def _load_owner_kdf() -> list:
                        "the next successful verify", path, e)
         return []
     if not isinstance(data, dict):
+        return []
+    try:
+        check_stamp(data.get("v"), 1, path, "owner key record file")
+    except StoreFormatTooNew as e:
+        logger.warning("%s; its records are not used and a fresh derivation "
+                       "record is minted", e)
         return []
     recs = data.get("records")
     return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []

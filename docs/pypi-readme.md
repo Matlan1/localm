@@ -51,7 +51,7 @@ use.
 
 Online features (web access for the coder, cloud model providers) are
 opt-in. The one request LocaLM makes on its own is a periodic check for a
-new release, which sends no version number or chat content - turn it off
+new release, which sends the installed LocaLM version and no chat content - turn it off
 with `localm config net_mode off`, or clear the update endpoint. Details:
 <https://github.com/Matlan1/localm/blob/master/docs/privacy.md#4-update-checks-network-policy-not-a-persistence-mode>
 

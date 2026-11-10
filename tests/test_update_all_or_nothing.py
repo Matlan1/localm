@@ -47,7 +47,7 @@ def _sd_pins(tag):
 def _files(version, deps, sd=None):
     files = {"VERSION": version, "localm/__init__.py": f"# {version}",
              "localm/setup_llama/pins.py": '_ROCM_TAG = "b1355"\n_PINNED_TAG = "b11928"\n',
-             "pyproject.toml": _pyproject(deps)}
+             "pyproject.toml": _pyproject(deps), "uv.lock": "version = 1\n"}
     if sd:
         files["localm/media/sdcpp/pins.py"] = _sd_pins(sd)
     return files
@@ -206,6 +206,72 @@ def test_a_failed_deps_step_puts_the_venv_and_install_record_back(install):
     _assert_venv_is_031(site)
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert ei.value.summary == "the post-update step failed; rolled back"
+
+
+_RETRY_CMD = "localm.bat" if sys.platform == "win32" else "./localm.sh"
+
+
+def test_a_failed_deps_step_says_how_to_try_again(install):
+    inst, site = install
+    files = _files("0.3.2", ["click", "rich"])
+    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
+    data, sig = _release(files)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert ei.value.summary == "the post-update step failed; rolled back"
+    assert ei.value.reason.endswith(
+        f"exited 2. To try again, close localm and run {_RETRY_CMD} update in the localm "
+        "install folder")
+
+
+def _release_with_launchers():
+    files = _files("0.3.2", ["click", "rich"])
+    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
+    return _release(files)
+
+
+def test_a_deps_step_that_cannot_start_says_how_to_try_again(install):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def run(cmd):
+        raise OSError("no such program")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=run)
+    _assert_venv_is_031(site)
+    assert ei.value.summary == "the post-update step crashed; rolled back"
+    assert ei.value.reason.endswith(
+        f"no such program. To try again, close localm and run {_RETRY_CMD} update in the "
+        "localm install folder")
+
+
+def test_a_failed_rollback_after_the_deps_step_asks_for_no_retry(install, monkeypatch):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def broken(*a, **k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(updater, "_restore_all", broken)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    assert ei.value.summary == "the post-update step failed AND rollback failed - manual recovery needed"
+    assert "disk gone" in ei.value.reason
+    assert "To try again" not in ei.value.reason
+
+
+def test_a_failed_deps_step_without_a_launcher_script_names_only_the_failure(install):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    assert ei.value.reason.endswith("exited 2")
+    assert "To try again" not in ei.value.reason
 
 
 def test_a_failed_component_after_the_deps_step_puts_the_venv_back(install, home):
@@ -902,6 +968,21 @@ def test_a_failed_repair_puts_the_packages_back(install):
         updater_parts.repair(installed=inst, runner=run)
     assert "previous ones were put back" in ei.value.summary
     assert _state(site) == {"localm": "0.1.5", "click": "8.0"}
+
+
+def test_a_failed_repair_says_how_to_try_again(install):
+    from localm import updater_parts
+    inst, site = install
+    (inst / "localm.bat").write_text("@echo off\r\n", encoding="utf-8")
+    (inst / "localm.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    _uninstall(site, "localm")
+    _localm_dist(site, "0.1.5")
+    with pytest.raises(LocalmError) as ei:
+        updater_parts.repair(installed=inst, runner=lambda cmd: 2)
+    assert _state(site) == {"localm": "0.1.5", "click": "8.0"}
+    assert ei.value.reason.endswith(
+        f"exited 2. To try again, close localm and run {_RETRY_CMD} update --repair in the "
+        "localm install folder")
 
 
 def test_a_repairs_runtime_failure_during_the_restart_rolls_nothing_back(install, monkeypatch):

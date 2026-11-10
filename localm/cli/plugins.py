@@ -27,7 +27,7 @@ def plugin() -> None:
 # (builtin/ + external dirs) and the user's installed set; enable/disable toggles
 # an installed plugin active/inactive. A PluginManager with no app is enough to
 # flip config (no routes are mounted from the CLI - a running GUI server picks
-# HTTP routes up on its next start, while stdio plugins like mcp take effect
+# HTTP routes up the next time it reads the plugin list, while stdio plugins like mcp take effect
 # immediately). Nothing is installed by default: only what the user selects.
 
 def _engine_manager():
@@ -108,20 +108,32 @@ def _resolve_with_deps(flag) -> bool:
 @click.option("--with-deps/--no-deps", "with_deps", default=None,
               help="Also install the plugin's pip extras on this machine "
                    "(default: the auto_install_plugin_deps setting).")
-def plugin_install_engine(target, force, with_deps):
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Do not ask for confirmation when installing from a directory.")
+def plugin_install_engine(target, force, with_deps, assume_yes):
     """Install a plugin and enable it.
 
     TARGET is either a first-party plugin NAME from the bundled store
     (e.g. ``localm plugin install coder``) or a path to a DIRECTORY containing a
     plugin.toml (a third-party plugin). A first-party plugin's pip extras are
     installed for you unless you pass --no-deps (or turn the setting off).
+
+    Third-party plugins run unsandboxed in-process, so install only code you
+    trust; installing from a directory asks for confirmation first.
     """
     from rich.markup import escape
+
+    from localm.plugins.contract import UNSANDBOXED_NOTICE
 
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     src = Path(target)
     if src.is_dir() and (src / "plugin.toml").is_file():
+        console.print(f"[yellow]{escape(UNSANDBOXED_NOTICE)}[/yellow]")
+        if not assume_yes and not click.confirm(
+                f"Install the plugin in {src} ?", default=False):
+            console.print("[red]Not installed.[/red]")
+            sys.exit(1)
         try:
             spec = mgr.set_installed_from_dir(src, force=force)
         except ValueError as e:
@@ -225,7 +237,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
-    (coder, image/music/video, rag, web, voice, tts, mcp). Run by the installer
+    (coder, browser, image/music/video, rag, web, memory, voice, tts, jobs, mcp). Run by the installer
     after dependencies are in place, and any time afterwards. Plugins that need a
     pip extra have it installed for you (you are asked once; --with-deps/--no-deps
     or the auto_install_plugin_deps setting decide non-interactively).

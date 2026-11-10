@@ -19,7 +19,7 @@ from typing import Optional
 from .base import (
     _MAX_OUTPUT, RESTRICTED_UNWRITABLE_MESSAGE, ToolResult, _confine, _truncate,
     has_other_hard_link, inside_unwritable_dir, unwritable_component,
-    unwritable_redirects,
+    unwritable_file_name, unwritable_redirects,
 )
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
@@ -1471,6 +1471,8 @@ def tool_search_replace(
             rel = fp
         if _restricted and (
                 unwritable_component(rel.parts) is not None
+                or unwritable_file_name(fp.name)
+                or unwritable_file_name(fp.resolve().name)
                 or inside_unwritable_dir(cwd_resolved, fp.resolve(), redirects)
                 or has_other_hard_link(fp.resolve())):
             locked.append(str(rel))

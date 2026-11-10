@@ -211,7 +211,17 @@ def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = Non
     only hands it over once the process exits. The reader thread only does line I/O
     and calls the best-effort progress sink (``_emit``, which never raises); the
     timeout is enforced in THIS thread via ``proc.wait(timeout=...)``, so a hung child
-    is killed."""
+    is killed.
+
+    A ``pip install`` whose package indexes the network policy refuses
+    (:func:`localm.pyinstall.check_command`) is not started: (False, reason)."""
+    from localm import pyinstall
+    if pyinstall.is_install_command(cmd):
+        try:
+            pyinstall.check_command(cmd)
+        except pyinstall.InstallRefused as e:
+            _emit(on_progress, str(e))
+            return False, str(e)
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.Popen(

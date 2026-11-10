@@ -168,6 +168,22 @@ _MAX_SHELL_SCOPE_FLAGS = 3
 # gates.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
+# An always_confirm entry that stands for every tool whose ToolDef sets
+# executes_project_code, including tools registered after the set was built.
+EXECUTES_PROJECT_CODE = "@executes_project_code"
+
+
+def confirm_forced(always_confirm, name: str, tool_def) -> bool:
+    """Whether *always_confirm* requires confirming *name* even under
+    auto_approve: the name is listed, or :data:`EXECUTES_PROJECT_CODE` is listed
+    and *tool_def* sets ``executes_project_code``. ``ToolDef.confirm_always`` is
+    a separate check."""
+    confirmed = always_confirm or ()
+    if name in confirmed:
+        return True
+    return (EXECUTES_PROJECT_CODE in confirmed
+            and getattr(tool_def, "executes_project_code", False) is True)
+
 # Tools that block on a child process or a render of their own and are handed
 # the run's cancel token (``_cancel``), so a cancelled run stops that work
 # instead of waiting it out.
@@ -271,6 +287,7 @@ _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
 _NETWORK_TOOLS: frozenset[str] = frozenset({
     "fetch_url", "web_search",
     "browser_navigate", "browser_click", "browser_fill",
+    "git_push",
 })
 
 # Task-list tools (tools/tasks.py). They read and write THIS session's todo

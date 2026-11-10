@@ -44,6 +44,9 @@ exchange goes to files opened for the new mode, or to none in privacy mode.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import json
 import os
 import threading
@@ -173,7 +176,8 @@ def adopt_shared_coder_privacy(value) -> None:
 
 def any_coder_session_is_privacy() -> bool:
     """True while at least one coder session is running in PRIVACY mode,
-    including one pinned there only by its project's .localcoder/config.toml.
+    including one pinned there only by its project's .localcoder/config.toml,
+    or while a :func:`request_privacy` block is open.
     In a worker child this follows the parent's count; an unreadable shared
     value counts as privacy."""
     if _active_coder_privacy_count > 0:
@@ -185,6 +189,52 @@ def any_coder_session_is_privacy() -> bool:
         return inherited.value > 0
     except Exception:   # noqa: BLE001 - an unreadable count must fail closed
         return True
+
+
+_REQUEST_PRIVACY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "localm_request_privacy", default=False)
+
+
+@contextlib.contextmanager
+def request_privacy(private: bool = True):
+    """Mark the work done inside this block, in this thread or task, as part of
+    a request whose own session mode is privacy when *private* is true; a false
+    *private* changes nothing. While such a block is open,
+    :func:`request_is_privacy` is True inside it and
+    :func:`any_coder_session_is_privacy` is True process-wide and in the worker
+    children that follow the count."""
+    if not private:
+        yield
+        return
+    token = _REQUEST_PRIVACY.set(True)
+    register_coder_session_mode(SessionMode.PRIVACY)
+    try:
+        yield
+    finally:
+        unregister_coder_session_mode(SessionMode.PRIVACY)
+        _REQUEST_PRIVACY.reset(token)
+
+
+def request_is_privacy() -> bool:
+    """True inside a :func:`request_privacy` block, in the thread or task that
+    entered it and in work started through :func:`carry_request_privacy`."""
+    return _REQUEST_PRIVACY.get()
+
+
+def carry_request_privacy(fn):
+    """*fn* for another thread (``threading.Thread``, ``run_in_executor``):
+    when called from inside a :func:`request_privacy` block, the returned
+    callable runs *fn* inside a block of its own, whichever thread runs it and
+    whether or not the caller's block has ended by then. Outside one it is *fn*
+    itself."""
+    if not request_is_privacy():
+        return fn
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with request_privacy(True):
+            return fn(*args, **kwargs)
+    return run
 
 
 def effective_mode(surface: str, cwd=None) -> SessionMode:
@@ -224,9 +274,12 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
             return SessionMode.PRIVACY
 
     try:
-        from localm.config import load_config
+        from localm.config import load_config, load_config_checked
         cfg = load_config()
+        read_ok = load_config_checked()[1]
     except Exception:
+        return SessionMode.PRIVACY
+    if not read_ok:
         return SessionMode.PRIVACY
 
     if surface in ("chat", "coder"):

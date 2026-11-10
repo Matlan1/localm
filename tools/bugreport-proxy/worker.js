@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// localm proxy - a tiny Cloudflare Worker giving 1-2 private-repo testers three
+// localm proxy - a tiny Cloudflare Worker giving localm installs three
 // account-less surfaces, each backed by a SERVER-SIDE GitHub token:
 //
 //   POST /                       file a bug report      [GitHub App or GITHUB_TOKEN, Issues:write]
@@ -13,7 +13,7 @@
 //
 // No token ships in the app. The issue token cannot read code; the SEPARATE update
 // token can read releases/contents but cannot write. The shared secret gates the
-// routes and is MANDATORY for the update routes (they serve private builds).
+// routes and is MANDATORY for the update routes (they serve release builds).
 //
 // Deploy + secrets: see README.md.
 
