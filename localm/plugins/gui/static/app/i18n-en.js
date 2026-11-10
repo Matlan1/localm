@@ -1119,7 +1119,7 @@ export const I18N_EN = {
   "plugins.external.empty.hint": "Install one from the catalog above to add capabilities.",
   "plugins.external.empty.text": "No external plugins installed",
   "plugins.externalIntro":
-    "A third-party plugin is a folder with a <code>plugin.toml</code> manifest under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the coder agent. Installation is a local directory copy.",
+    "A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it into the plugins folder of this installation. It can add a CLI command and export tools to the coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.",
   "plugins.firstParty": "First-party plugins",
   "plugins.install": "Install",
   "plugins.installDependencies": "Install dependencies",

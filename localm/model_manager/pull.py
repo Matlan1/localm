@@ -4829,7 +4829,7 @@ def _civitai_registry_unreadable() -> bool:
     """True when registry.json exists but neither it nor its backup can be read,
     which ``load_registry`` reports as an empty registry."""
     from .. import config
-    return not config._read_json_checked(config.REGISTRY_FILE, {})[1]
+    return config._read_json_state(config.REGISTRY_FILE, {})[1] == config.READ_UNREADABLE
 
 
 _CIVITAI_REGISTRY_STEP = "Fix or remove registry.json, then pull again."

@@ -190,7 +190,8 @@ def test_a_failed_restriction_still_persists_the_key_and_never_raises(
 
     assert auth.get_api_key() == KEY
     key_path = str(auth.key_file())
-    assert key_path + ".tmp" in calls, "the temp file was never restricted"
+    assert any(c.startswith(key_path + ".") and c.endswith(".tmp") for c in calls), (
+        "the temp file was never restricted")
     assert key_path in calls, (
         "the destination was not retried after the temp attempt reported "
         "failure - one failure would then be the single point of failure")

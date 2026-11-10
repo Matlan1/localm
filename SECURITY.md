@@ -178,6 +178,9 @@ no CDN origin is allowed or needed.
 Some capabilities reach the host filesystem and process by design, bounded by the
 localm process's own permissions rather than a sandbox:
 
+- **`jobs`** schedules work of the kinds `chat`, `coder`, `memory` and `rag`; creating
+  a job needs the scope of its kind as well (`chat`, `coder`, `memory` or `rag`), and a
+  job whose creating key was revoked, expired or lost that scope is skipped when it comes due.
 - **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
   narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
   scope is restricted - read plus confined file edits within the scope, no shell. A
@@ -245,8 +248,10 @@ localm process's own permissions rather than a sandbox:
   (`localm plugin install <path>` / `POST /api/plugins/install-external`)
   refuses a source tree containing any symlink or Windows junction, so a
   malicious plugin source cannot smuggle a file's contents out through a link
-  or drive a large copy through a self-referencing cycle. (A plugin installed
-  by its store name is copied from localm's own shipped files.)
+  or drive a large copy through a self-referencing cycle. Third-party plugins
+  run unsandboxed in-process, so install only code you trust. The install
+  route refuses a UNC or device path, and needs host filesystem access or a
+  server bound to loopback; a plugin's routes must sit under `/api/` or `/v1/`.
 - **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
   are privileged and are never granted implicitly: a `POST /v1/keys` call made
   with the owner key (or a key holding `admin`), or `localm key create --allow-privileged` from this
