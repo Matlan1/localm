@@ -492,7 +492,7 @@ def post_swap_command(klass: str, backend: Optional[str] = None,
         if not uv:
             raise ValueError("the deps update class needs the path of the uv to run")
         from localm import pyinstall
-        return pyinstall.sync_command(uv, DEPS_EXTRAS)
+        return [uv, "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
     if klass == "runtime":
         # Re-invoke through the current interpreter: a bare "localm" argv[0]
         # resolves back to the LocaLM.exe launcher itself on Windows.
