@@ -92,5 +92,5 @@ units = [
     "config", "debuglog", "console", "jsonl", "jsonreply", "storekit", "storeformat", "pathsafe", "pathscrub",
     "textguard", "textnorm", "elf_deps", "executor", "bindhost", "netlisten", "scopes",
     "readline_privacy", "_version", "_venvguard", "_mp_spawn", "stdio", "kv_cache",
-    "multipartform", "voice_formats", "wav_audio", "sysprog", "livefeed",
+    "multipartform", "voice_formats", "wav_audio", "sysprog", "livefeed", "loopback_http",
 ]

@@ -20,13 +20,13 @@ def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
     import urllib.error
     import urllib.request
 
-    from localm.http_ssl import verified_urlopen
+    from localm.http_ssl import read_bounded, verified_urlopen
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         # verified_urlopen (see localm/http_ssl.py) - native cert store first,
         # certifi as fallback.
         with verified_urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+            return resp.status, read_bounded(resp)
     except urllib.error.HTTPError as e:
         detail = b""
         try:

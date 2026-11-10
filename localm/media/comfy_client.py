@@ -1545,9 +1545,6 @@ def is_own_comfy_process(api_url: str, pid: Optional[int]) -> bool:
         return False
 
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
-
-
 def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
     """Who holds the TCP port of a local *api_url*, or ``None``.
 
@@ -1567,9 +1564,10 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError:
         return None
-    if host not in _LOOPBACK_HOSTS:
+    from localm.bindhost import is_local_dial_host, self_connect_host
+    if not is_local_dial_host(host):
         return None
-    probe_host = "127.0.0.1" if host in ("localhost", "0.0.0.0") else host
+    probe_host = self_connect_host(host)
     try:
         with socket.create_connection((probe_host, port), timeout=timeout):
             pass
@@ -1924,18 +1922,21 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
         holder = comfy_port_holder(api_url)
         if holder is not None:
             return False, comfy_port_held_message(api_url, holder)
-    interrupt_comfy(api_url)                       # abort render + clear queue
-    try:
-        free_comfy_vram(api_url)
-    except Exception:
-        pass
+    interrupted = interrupt_comfy(api_url)         # abort render + clear queue
+    freed = free_comfy_vram(api_url)
     proc = _take_spawned(api_url)
     if proc is None:
         if _comfy_alive(api_url, timeout=2.0):
             mark_comfy_alive(api_url)   # localm did not launch it and did not stop it
-            return True, ("Aborted the in-flight render and cleared the queue. "
-                          "localm did not launch this ComfyUI, so its process was "
-                          "left running - stop it where you started it.")
+            left = ("localm did not launch this ComfyUI, so its process was "
+                    "left running - stop it where you started it.")
+            if not interrupted:
+                return False, ("ComfyUI did not accept the request to abort its "
+                               "render, so a render may still be running. " + left)
+            vram = ("Freed its VRAM." if freed else
+                    "It did not free its VRAM (no /free on this build, or the "
+                    "request failed).")
+            return True, f"Aborted the in-flight render. {vram} {left}"
         return True, "ComfyUI is not running."
     try:
         if proc.poll() is not None:
@@ -1988,9 +1989,9 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
         not_ours_and_still_alive = not launched_by_us and is_comfy_confirmed(url)
     if not_ours_and_still_alive:
         return True, (
-            "Aborted the in-flight render and cleared the queue, but localm "
-            "did not launch this ComfyUI, so nothing was restarted - restart "
-            "it where you started it."
+            "Aborted the in-flight render, but localm did not launch this "
+            "ComfyUI, so nothing was restarted - restart it where you started "
+            "it."
         )
     return ensure_comfy(api_url=api_url, on_progress=on_progress,
                         wait_seconds=wait_seconds, launch_cmd=launch_cmd,
