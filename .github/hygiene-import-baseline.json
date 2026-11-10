@@ -101,7 +101,6 @@
     "vram -> selfclient": 2
   },
   "builtin_plugin_imports": {
-    "localm/cli/chat.py -> music": 1,
     "localm/cli/media.py -> image": 1,
     "localm/cli/media.py -> music": 1,
     "localm/cli/models.py -> chat": 1,
@@ -113,7 +112,7 @@
     "localm/plugins/builtin/tts/speech_route.py -> voice": 1,
     "localm/plugins/coder/tools/media.py -> image": 1,
     "localm/plugins/gui/routes/models/acquisition.py -> music": 2,
-    "localm/plugins/mcpserver/tools/media_coder.py -> image": 2,
+    "localm/plugins/mcpserver/tools/media_coder.py -> image": 1,
     "localm/settings_schema.py -> tts": 4
   }
 }

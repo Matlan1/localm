@@ -154,7 +154,8 @@ def resolve_speech_model(model: Optional[str], *,
         raise SpeechModelError(
             f"Model {name!r} needs its mmproj (the file holding the speech "
             "stages), and none is attached. Pull the model again so its mmproj is "
-            "fetched, or attach one with 'localm pull --mmproj'.", 422)
+            f"fetched, or attach a file you already have with 'localm attach-mmproj "
+            f"{name} FILE'.", 422)
     return SpeechModel(name, path, mmproj)
 
 

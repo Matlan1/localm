@@ -810,5 +810,8 @@ def test_advertise_isolated_is_invisible(tmp_path):
         # /whoami still works (state set) but nothing is in the registry
         assert app.state.instance_id
         assert instances.list_entries(tmp_path) == []
-        assert info["path"] is None
+        # Only a hold marker is written, which discovery never lists.
+        assert info["path"] is not None and info["path"].endswith(".hold")
+        assert os.path.isfile(info["path"])
     assert instances.list_entries(tmp_path) == []
+    assert not os.path.exists(info["path"])

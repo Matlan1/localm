@@ -574,19 +574,18 @@ def _plugin_install_state(name):
 
 def _attached_server():
     """``(url, headers, None)`` for a running localm serving this directory, or
-    ``(None, None, reason)``. LOCALM_URL targets a different instance, in which
-    case there is no registry entry to read an attach token from and only an
-    owner key (LOCALM_API_KEY / the persisted one) authenticates - the same
-    trade `localm unload` documents."""
-    import os
-
+    ``(None, None, reason)``. LOCALM_URL (a server root or a ``/v1`` base)
+    targets another instance: the owner key (LOCALM_API_KEY / the persisted
+    one) authenticates, else the attach token of this home's registry entry
+    at exactly that address, the same as `localm unload`."""
     from .. import instances
     from ..auth import resolve_bearer_headers
     from ..config import home_dir
+    from ..localm_url import env_root, registry_token
 
-    override = os.environ.get("LOCALM_URL", "").rstrip("/")
+    override = env_root()
     if override:
-        return override, resolve_bearer_headers(None), None
+        return override, resolve_bearer_headers(registry_token(override)), None
     entry = instances.find_attachable(home_dir(), instances.resolve_root_dir())
     if entry is None:
         return None, None, "no running localm server was found for this directory"
