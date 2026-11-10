@@ -222,10 +222,10 @@ _SLOW_JOB_STAMP = (
     "from localm.plugins.builtin.jobs.store import JobStore\n"
     "store = JobStore()\n"
     "real = store._write_all\n"
-    "def slow(jobs):\n"
+    "def slow(jobs, *extra):\n"
     "    print('READ', flush=True)\n"
     "    time.sleep(1.5)\n"
-    "    real(jobs)\n"
+    "    real(jobs, *extra)\n"
     "store._write_all = slow\n"
     "store.record_result(sys.argv[1], {'status': 'ok', 'finished': 1.0, 'output': 'x'})\n"
 )

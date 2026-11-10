@@ -157,6 +157,7 @@ def test_a_project_pin_can_only_tighten_a_scheduled_job(
 
 def test_a_project_pin_that_would_loosen_a_job_is_logged(
         home, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
     _write_config(home, coder_mode="log")
     proj = _project(tmp_path, 'mode = "full"\n')
     runner, captured = _capture_agent(monkeypatch)
@@ -170,7 +171,8 @@ def test_a_project_pin_that_would_loosen_a_job_is_logged(
 
 
 def test_resolve_task_config_unattended_ignores_a_loosening_project_mode(
-        home, tmp_path):
+        home, tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
     from localm.plugins.coder.runner import resolve_task_config
     proj = _project(tmp_path, 'mode = "full"\n')
 
@@ -225,7 +227,7 @@ def test_a_confined_job_uses_the_pin_of_the_directory_it_runs_in(
     elsewhere = _project(tmp_path, 'mode = "full"\n')
     monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: str(root))
     auth.set_api_key("owner-key-privacy-pin-0123456789")
-    created = auth.create_key("bot", ["jobs"], allow_privileged=False)
+    created = auth.create_key("bot", ["jobs", "coder"], allow_privileged=False)
     job = Job(name="x", task_kind="coder", prompt="p", cwd=str(elsewhere),
               schedule_kind="interval", schedule=60,
               owner=auth._hash_key(created["key"]))

@@ -369,7 +369,7 @@ def video_app(fake_video, tmp_path, monkeypatch):
 
     from localm.config import update_config
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     runner, s = fake_video
     update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
         "video", {}).update({"native": dict(s["native"])}))

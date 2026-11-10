@@ -168,6 +168,21 @@ RESTRICTED_UNWRITABLE_MESSAGE = (
     "configuration, and a restricted session cannot create or change anything "
     "inside one, through a link to one, or through a hard link to any file")
 
+# File names a restricted session may not create or change at any depth of the
+# project: the project memory later coder sessions inject.
+RESTRICTED_UNWRITABLE_FILES: frozenset[str] = frozenset({"localcoder.md"})
+
+RESTRICTED_UNWRITABLE_FILE_MESSAGE = (
+    "LOCALCODER.md is the project memory later coder sessions read, and a "
+    "restricted session cannot create or change it")
+
+
+def unwritable_file_name(name: str) -> bool:
+    """Whether the file name *name* folds onto a ``RESTRICTED_UNWRITABLE_FILES``
+    entry (case-insensitively, ignoring trailing dots and spaces)."""
+    return str(name).rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_FILES
+
+
 # Largest .git or commondir file followed; git accepts the same size.
 _GIT_POINTER_MAX_BYTES = 1 << 20
 
@@ -349,7 +364,8 @@ def restricted_write_refusal(cwd: Path, path: str, *,
 
     Refused: a path whose own components relative to *cwd* name a
     ``RESTRICTED_UNWRITABLE_DIRS`` entry (checked before anything collapses
-    ``a/../.localcoder/x`` or a backslash-separated spelling); a location
+    ``a/../.localcoder/x`` or a backslash-separated spelling); a file named, or
+    resolving to a file named, a ``RESTRICTED_UNWRITABLE_FILES`` entry; a location
     :func:`_confine` resolves inside one, or inside a folder such an entry
     anywhere in the project redirects to; an existing file with another hard
     link; and any path when the project walk itself fails. A path ``_confine``
@@ -370,10 +386,14 @@ def restricted_write_refusal(cwd: Path, path: str, *,
                 continue
     if unwritable_component(lexical) is not None:
         return RESTRICTED_UNWRITABLE_MESSAGE
+    if raw.parts and unwritable_file_name(raw.parts[-1]):
+        return RESTRICTED_UNWRITABLE_FILE_MESSAGE
     try:
         resolved = _confine(cwd, str(path))
     except PermissionError:
         return None
+    if unwritable_file_name(resolved.name):
+        return RESTRICTED_UNWRITABLE_FILE_MESSAGE
     cwd_resolved = cwd.resolve()
     if walk_memo is not None and "outcome" in walk_memo:
         outcome = walk_memo["outcome"]

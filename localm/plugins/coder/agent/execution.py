@@ -44,7 +44,7 @@ from .constants import (
     _CANCELLABLE_SUBPROCESS_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
-    HOOK_RUN_TOOL,
+    HOOK_RUN_TOOL, confirm_forced,
 )
 from .planmode import INTERACTION_TOOLS, plan_mode_refusal
 from .scope import _scope_pattern
@@ -639,8 +639,9 @@ class _ExecutionMixin:
         # approval of this exact call, under auto_approve too.
         data_hit = self._data_guard_verdict(call)
 
-        # Dry-run: show destructive calls but don't execute them
-        if self.dry_run and tool_def.destructive:
+        # Dry-run: show destructive and code-running calls but don't execute them
+        if self.dry_run and (tool_def.destructive
+                             or getattr(tool_def, "executes_project_code", False) is True):
             result = ToolResult.success(
                 f"[dry-run] {call.name} - skipped",
                 summary=f"[dry-run] {call.name}",
@@ -695,19 +696,46 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
-        gated = tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+        executes_code = getattr(tool_def, "executes_project_code", False) is True
+        gated = (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+                 or executes_code)
         lenient_call = isinstance(call, ToolCall) and call.lenient
-        needs_confirm = shell_unchecked or data_hit is not None or (
-            gated and (
-                not self.auto_approve or call.name in self.always_confirm
-                or lenient_call
-            )
+        # Confirmation always_confirm requires, which a session allow never waives.
+        configured = confirm_forced(self.always_confirm, call.name, tool_def)
+        forced = configured or getattr(tool_def, "confirm_always", False) is True
+        # A tool that runs project code beside the shell pair faces the hook-run
+        # gate: refused when run_shell is disabled while writes run unconfirmed,
+        # asked about when run_shell itself would ask.
+        if executes_code and call.name not in _SHELL_EXEC_TOOLS:
+            code_gate = self._hook_run_gate()
+            if code_gate == "refuse":
+                result = ToolResult.error(
+                    f"{call.name} was not run: it runs code the project controls, "
+                    "run_shell is disabled for this session and file writes run "
+                    "unconfirmed.")
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._audit.notice("code_execution_refused", result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="refused: run_shell is disabled")
+                return result
+            if code_gate == "confirm":
+                forced = configured = True
+        # After an untrusted tool result, destructive, network and code-running
+        # tools ask again until the next user message.
+        tainted = (
+            getattr(self, "_untrusted_in_context", False) is True
+            and getattr(self, "taint_rearms_confirm", True) is True
+            and (tool_def.destructive or call.name in _NETWORK_TOOLS or executes_code)
+        )
+        needs_confirm = shell_unchecked or data_hit is not None or tainted or (
+            gated and (not self.auto_approve or forced or lenient_call)
         )
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
         lenient_only = (
             lenient_call and gated and not shell_unchecked and data_hit is None
-            and self.auto_approve and call.name not in self.always_confirm
+            and not tainted and self.auto_approve and not forced
         )
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
@@ -715,7 +743,7 @@ class _ExecutionMixin:
         allow_key = self._session_allow_key(call)
         session_allowable = (
             allow_key is not None and not shell_unchecked and not lenient_call
-            and data_hit is None and call.name not in self.always_confirm
+            and data_hit is None and not configured and not tainted
         )
         # session_allowable already excludes a failed shell check, a lenient
         # call and always_confirm, which the read-only shortcut honours too.
@@ -748,7 +776,7 @@ class _ExecutionMixin:
                 # that can be session-allowed. A GUI handler never sets the
                 # answer flags, so consuming them there reads False and "".
                 with offering_session_allow(session_allowable), \
-                        requiring_exact_approval(data_hit is not None):
+                        requiring_exact_approval(data_hit is not None or tainted):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())
@@ -772,6 +800,13 @@ class _ExecutionMixin:
                         "needs an explicit approval of this exact call, and this "
                         "run is non-interactive with no approval handler - denied.")
                     reason = "localm-data"
+                elif tainted and not (gated and (not self.auto_approve or forced)):
+                    result = ToolResult.error(
+                        f"{call.name} requires confirmation: this run has read "
+                        "untrusted content (a web page, search result, MCP or "
+                        "skill output) since the last user message, and this "
+                        "run is non-interactive with no approval handler - denied.")
+                    reason = "untrusted-content"
                 elif lenient_only:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: the call was not "
@@ -984,26 +1019,32 @@ class _ExecutionMixin:
         without confirmation (under auto_approve, or allowed for the session
         with "a" or GUI "always allow") but run_shell does not, a hook run is
         gated: "refuse" when run_shell is disabled, else "confirm" unless
-        run_shell runs without confirmation too. None when trust is enough."""
+        run_shell runs without confirmation too. None when trust is enough.
+        The same answer gates the verify step and every tool other than the
+        shell pair that sets ``executes_project_code``."""
         disabled = self.disabled_tools
         confirmed = set(self.always_confirm)
         allowed = self._session_allowed_tools()
+        registry = _agent.TOOL_REGISTRY
 
         def unconfirmed(name: str) -> bool:
             if name in disabled:
                 return False
             if name in allowed:
                 return True
-            return self.auto_approve and name not in confirmed
+            td = registry.get(name)
+            return self.auto_approve and not (
+                confirm_forced(confirmed, name, td)
+                or getattr(td, "confirm_always", False) is True)
 
         writes_unconfirmed = any(
             td.destructive and name not in _SHELL_EXEC_TOOLS and unconfirmed(name)
-            for name, td in _agent.TOOL_REGISTRY.items())
+            for name, td in registry.items())
         if not writes_unconfirmed:
             return None
         if "run_shell" in disabled:
             return "refuse"
-        if "run_shell" in allowed or (self.auto_approve and "run_shell" not in confirmed):
+        if unconfirmed("run_shell"):
             return None
         return "confirm"
 
@@ -1054,6 +1095,24 @@ class _ExecutionMixin:
             consume_confirm_always()
             return None if approved else "the user declined to run it"
         return _permit
+
+    def _verify_refusal(self, label: str, interactive: bool) -> Optional[str]:
+        """Whether the verify command *label* may run, decided by the hook-run
+        gate exactly as for one hook run: None to run it, else the reason it
+        does not."""
+        permit = self._hook_permit(interactive)
+        if permit is None:
+            return None
+
+        class _VerifySpec:
+            def __init__(self, text: str):
+                self.label = "verify"
+                self._text = text
+
+            def command_text(self, limit: int) -> str:
+                return self._text[:limit]
+
+        return permit(_VerifySpec(label))
 
     def _hook_project_dir(self, hooks) -> Path:
         """The folder hooks run in for this agent: the project folder, or, for a

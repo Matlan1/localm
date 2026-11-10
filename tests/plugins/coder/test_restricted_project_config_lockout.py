@@ -193,7 +193,8 @@ class TestRestrictedSessionLoadsNoExternalCode:
             TOOL_REGISTRY.pop(reg_name, None)
             sys.modules.pop(f"_localm_plugin_{name}", None)
 
-    def test_no_project_skill_is_discovered(self, tmp_path):
+    def test_no_project_skill_is_discovered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
         skill = tmp_path / ".localcoder" / "skills" / "demo"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(
@@ -213,7 +214,9 @@ class TestToolsRegisteredLaterStayDenied:
     """The restricted denial is read off the live registry: a tool another
     session registers after this one was built is refused too."""
 
-    def test_a_plugin_and_skill_tool_registered_later_are_refused(self, tmp_path):
+    def test_a_plugin_and_skill_tool_registered_later_are_refused(self, tmp_path,
+                                                                  monkeypatch):
+        monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted", lambda cwd: True)
         from localm.config import home_dir
         name = f"lmsp{uuid.uuid4().hex[:8]}"
         pdir = home_dir() / "plugins" / name

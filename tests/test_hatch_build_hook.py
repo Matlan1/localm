@@ -19,6 +19,7 @@ except ImportError:
         sys.modules[_name] = types.ModuleType(_name)
     sys.modules["hatchling.metadata.plugin.interface"].MetadataHookInterface = object
 import hatch_build  # noqa: E402
+from tests._exe_stub import write_exe_stub  # noqa: E402
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="locks by share mode")
 SCRIPTS = {"localm": "localm.cli:console_main", "localcoder": "x:y"}
@@ -84,6 +85,33 @@ def test_a_locked_launcher_leaves_the_build_and_its_record(install, monkeypatch,
     assert "\r\n" in text
     assert exe.read_bytes() == b"launcher"
     assert len(told) == 1 and f"{held}.exe" in told[0]
+
+
+@windows_only
+def test_a_running_launcher_is_left_out_of_the_build(install, monkeypatch):
+    """``Scripts/localm.exe`` running as a program, as when ``localm update`` or the
+    global command starts the update."""
+    told = []
+    monkeypatch.setattr(hatch_build, "_tell_console", told.append)
+    venv = install / ".venv"
+    exe = venv / "Scripts" / "localm.exe"
+    write_exe_stub(exe)
+    (venv / "pyvenv.cfg").write_text(
+        f"home = {Path(sys._base_executable).parent}\ninclude-system-site-packages = false\n",
+        encoding="utf-8")
+    proc = subprocess.Popen([str(exe), "-c", "import sys, time; print('up', flush=True); "
+                             "time.sleep(120)"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        assert proc.stdout.readline().strip() == b"up"
+        got = hatch_build.scripts_for_this_build(install, SCRIPTS)
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+    assert got == {"localcoder": "x:y"}
+    text = _record(install)
+    assert "Scripts/localm.exe" not in text and "Scripts/localcoder.exe" in text
+    assert len(told) == 1 and "localm.exe" in told[0]
 
 
 @windows_only

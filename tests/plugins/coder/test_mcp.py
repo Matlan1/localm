@@ -272,6 +272,8 @@ class TestRegistration:
             assert names == ["mcp_fake_add"]
             td = TOOL_REGISTRY["mcp_fake_add"]
             assert td.destructive is True          # untrusted by default
+            assert td.executes_project_code is True
+            assert td.confirm_always is True
             assert "[MCP:fake]" in td.description
             assert td.params["a"]["required"] is True
             res = td.fn(tmp_path, a=20, b=22)

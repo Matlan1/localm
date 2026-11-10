@@ -25,6 +25,10 @@ compaction_flush = false                  # skip the durable-notes pass before
 auto_allow_read_only_shell = true         # run provably read-only shell commands
                                           # inside the project without asking
 
+``auto_approve``, ``verify``, ``model`` and a ``mode`` that records more than
+the user's own coder mode take effect only once the project is trusted
+(hook_trust.py).
+
 Tables read by their own loaders rather than by load_project_config:
 ``[mcp.servers.*]`` (mcp.py) and ``[[hooks.pre_tool_use]]`` /
 ``[[hooks.post_tool_use]]`` (hooks.py).
@@ -87,7 +91,19 @@ def read_project_config_file(path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_project_config(cwd: Path) -> dict[str, Any]:
+def mode_widens(value: Any) -> bool:
+    """Whether a project ``mode`` of *value* records more than the coder mode
+    resolved without any project config. False for a value that is not a valid
+    mode."""
+    from localm.audit import _MODE_PERSISTENCE, SessionMode, effective_mode
+    try:
+        mode = SessionMode(str(value).strip().lower())
+    except ValueError:
+        return False
+    return _MODE_PERSISTENCE[mode] > _MODE_PERSISTENCE[effective_mode("coder")]
+
+
+def load_project_config(cwd: Path, *, trusted: bool | None = None) -> dict[str, Any]:
     """
     Load .localcoder/config.toml nearest to cwd.
 
@@ -109,6 +125,11 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
 
     Unknown keys are still ignored silently: that is forward compatibility, not
     a failure.
+
+    While the project is not trusted (``hook_trust.project_trusted``; *trusted*
+    overrides that lookup), ``auto_approve``, ``verify`` and ``model`` are left
+    out, and so is a ``mode`` that records more than the coder mode resolved
+    without the project.
     """
     path = find_project_config(cwd)
     if path is None:
@@ -119,4 +140,21 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
               "memory_file", "max_tokens", "temperature", "mode",
               "seed", "verify", "diagnostics", "auto_allow_read_only_shell",
               "compaction_flush"}
-    return {k: v for k, v in raw.items() if k in _KNOWN}
+    cfg = {k: v for k, v in raw.items() if k in _KNOWN}
+    gated = [k for k in ("auto_approve", "verify", "model") if k in cfg]
+    widening = "mode" in cfg and mode_widens(cfg["mode"])
+    if not gated and not widening:
+        return cfg
+    if trusted is None:
+        from .hook_trust import project_trusted
+        trusted = project_trusted(cwd)
+    if trusted:
+        return cfg
+    for k in gated:
+        del cfg[k]
+    if widening:
+        del cfg["mode"]
+    from localm.debuglog import logger
+    logger.debug("project config %s is not trusted; ignoring %s", path,
+                 ", ".join(gated + (["mode"] if widening else [])))
+    return cfg
