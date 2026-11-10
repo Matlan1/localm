@@ -315,6 +315,32 @@ def test_a_child_agent_inherits_the_taint(tmp_path):
     assert child.taint_rearms_confirm is True
 
 
+def test_untrusted_content_read_by_a_child_taints_its_parent(tmp_path, untrusted_reader):
+    project = _fresh(tmp_path, "proj")
+    pm, audit, mem = _patched()
+    with pm as MockPM, audit, mem:
+        MockPM.build.return_value.file_count.return_value = 0
+        parent = _build(project, ["Done."])
+        child = _build(project, [_xml_call("fake_fetch"), "Read it."])
+        child.parent = parent
+        assert parent._untrusted_in_context is False
+        child.run_task("read the page")
+    assert child._untrusted_in_context is True
+    assert parent._untrusted_in_context is True, "a child's untrusted read did not reach the parent"
+
+
+def test_dry_run_skips_run_tests(tmp_path):
+    project = _fresh(tmp_path, "proj")
+    marker = tmp_path / "CONFTEST_RAN"
+    (project / "conftest.py").write_text(_conftest_marker_source(marker), encoding="utf-8")
+
+    def setup(agent):
+        agent.dry_run = True
+
+    _run(project, [_xml_call("run_tests", runner="pytest"), "Done."], yes=True, setup=setup)
+    assert not marker.exists(), "run_tests executed project code under --dry-run"
+
+
 # --------------------------------------------------------------------------
 # git_push
 # --------------------------------------------------------------------------

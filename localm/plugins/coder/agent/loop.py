@@ -1853,8 +1853,8 @@ class _LoopMixin:
         """The <tool_result> XML for a finished tool call, provenance-tagged.
 
         A result that :func:`provenance.taints_session` names sets
-        ``_untrusted_in_context``, which re-arms confirmation until the next
-        user message.
+        ``_untrusted_in_context`` on this agent and every agent above it, which
+        re-arms confirmation until each one's next user message.
 
         Results from untrusted (network / MCP) tools are re-framed as
         data-not-instructions with a hardened boundary (provenance.py); trusted
@@ -1865,7 +1865,10 @@ class _LoopMixin:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         from ..provenance import build_result_block, is_untrusted_tool, taints_session
         if taints_session(call.name, TOOL_REGISTRY.get(call.name), result):
-            self._untrusted_in_context = True
+            agent = self
+            while agent is not None:
+                agent._untrusted_in_context = True
+                agent = getattr(agent, "parent", None)
         if not getattr(self, "_untrusted_provenance", True):
             return result.to_xml(call.name)
         untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name), result)

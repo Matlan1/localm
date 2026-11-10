@@ -639,8 +639,9 @@ class _ExecutionMixin:
         # approval of this exact call, under auto_approve too.
         data_hit = self._data_guard_verdict(call)
 
-        # Dry-run: show destructive calls but don't execute them
-        if self.dry_run and tool_def.destructive:
+        # Dry-run: show destructive and code-running calls but don't execute them
+        if self.dry_run and (tool_def.destructive
+                             or getattr(tool_def, "executes_project_code", False) is True):
             result = ToolResult.success(
                 f"[dry-run] {call.name} - skipped",
                 summary=f"[dry-run] {call.name}",
