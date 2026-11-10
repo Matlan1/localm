@@ -11,7 +11,7 @@ its own display.
 
 Confirmed HTTP-reachable with no auth by default: POST /api/models/pull
 (localm/plugins/gui/routes/models/acquisition.py) takes req.spec/req.mmproj verbatim and
-spawns `localm pull -- <spec>` as a subprocess (localm/plugins/gui/jobs.py),
+spawns `localm pull -- <spec>` as a subprocess (localm/jobmanager.py),
 whose stdout lines - every console.print() call in this file - are re-pushed
 into the GUI's job/activity log verbatim (job.push({"type": "line", ...})).
 

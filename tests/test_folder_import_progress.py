@@ -15,7 +15,7 @@ import pytest
 
 from localm import model_manager as mm
 from localm.model_manager import _shared
-from localm.plugins.gui import jobs as gj
+from localm import jobmanager as gj
 
 _REPO = Path(__file__).resolve().parent.parent
 

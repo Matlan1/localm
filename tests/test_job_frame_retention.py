@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
-from localm.plugins.gui.jobs import FRAME_EVENT, Job
+from localm.jobmanager import FRAME_EVENT, Job
 
 
 def _job() -> Job:

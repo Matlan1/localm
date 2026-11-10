@@ -64,6 +64,46 @@ _CORPUS = [
     "python main.py --api-key sk-proj-" + SECRET,
     "localm-sk-" + SECRET + " in a log",
     "OPENAI_API_KEY=" + SECRET + " require_auth=1",
+    # Authorization under any scheme, quoted JS-object values, JSON header keys,
+    # multi-part JSON key names and a standard-base64 bearer token.
+    "Authorization: Token " + SECRET,
+    "Authorization: ApiKey " + SECRET + " then the call failed",
+    "Authorization: AWS4-HMAC-SHA256 Credential=AKIA" + SECRET
+    + "/20261110/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature="
+    + SECRET,
+    'Authorization: Digest username="u", realm="r", response="' + SECRET + '"',
+    "{ Authorization: 'Token " + SECRET + "', n: 1 }",
+    'headers = { Authorization: "Basic ' + SECRET + '" }',
+    '{"headers":{"Authorization":"Basic ' + SECRET + '"}}',
+    '{"X-Auth-Token":"' + SECRET + '"}',
+    "{'x-api-token': '" + SECRET + "'}",
+    '{"AWS_SECRET_ACCESS_KEY": "' + SECRET + '", "n": 1}',
+    '{"authorization": null, "has_auth_token": false, "_key": "a"}',
+    "curl -H 'Bearer abcdefgh+ijkl/" + SECRET + "=='",
+    "Bearer abcdefgh~" + SECRET,
+    'Authorization: Digest username="u", realm="Restricted Area", response="' + SECRET + '"',
+    "Authorization: Token " + SECRET + " then the call failed, retrying",
+    "headers: Authorization: Bearer " + SECRET + ", Accept: */*",
+    "X-Api-Key: Bearer " + SECRET,
+    '{"Authorization":["Bearer ' + SECRET + '"], "n": 1}',
+    '"Authorization": Bearer ' + SECRET,
+    '{"Authorization":"Digest username=\\"u\\", response=\\"' + SECRET + '\\""}',
+    '{"password": "a\\"b ' + SECRET + '", "n": 1}',
+    "{ Authorization: <redacted>, n: 1 }",
+    "{'Authorization': b'Bearer " + SECRET + "', 'n': 1}",
+    '{"X-Auth-Token": b"Basic ' + SECRET + '"}',
+    '{ Authorization: "Digest username=\\"u\\", response=\\"' + SECRET + '\\"" }',
+    '"Authorization": Token ' + SECRET,
+    'call("Authorization": "Basic ' + SECRET + '") done; "token":<redacted>; x',
+    '{"token": (Bearer ' + SECRET + ")}",
+    "token=bearer " + SECRET,
+    "auth_scheme=bearer api_key=abc!" + SECRET,
+    "scheme: Bearer password=Sup3r!" + SECRET,
+    "login ok, type=Bearer token=abc:" + SECRET + " expires=3600",
+    "expected Bearer X-Api-Key: " + SECRET,
+    "X-Api-Key: (bearer " + SECRET + ")",
+    "Bearer QUJDREVGR0hJ==",
+    '{"Authorization": false, "proxy_authorization": "none"}',
     # URL credentials and email.
     "https://u:" + SECRET + "@comfy.example.org/api",
     "contact bob.builder@example.com about it",
@@ -110,7 +150,8 @@ def test_doubled_backslash_path_keeps_its_structure():
 
 def test_python_standalone_patterns_are_byte_identical_to_in_app():
     assert ri._USER_ROOT_PATTERN == pathscrub._USER_ROOT_PATTERN
-    for name in ("_QUERY_SECRET_RE", "_HEADER_SECRET_RE", "_JSON_SECRET_RE",
+    for name in ("_QUERY_SECRET_RE", "_HEADER_SECRET_RE", "_AUTH_HEADER_RE",
+                 "_JSON_SECRET_RE",
                  "_BEARER_RE", "_APIKEY_RE", "_EMAIL_RE",
                  "_UNC_HOST_RE"):
         assert getattr(ri, name).pattern == getattr(br_scrub, name).pattern, name

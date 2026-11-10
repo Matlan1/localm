@@ -65,7 +65,7 @@ import queue
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -75,7 +75,9 @@ from localm.plugins.coder.backends.base import ModelSwitchUnsupported
 from localm.plugins.coder.sessions import CoderSession, SessionUnavailable
 from localm.executor import get_plugin_executor
 
-_router = APIRouter()
+_safe_router = APIRouter()
+_session_router = APIRouter()
+_owner_router = APIRouter()
 
 # SSE keepalive interval - must beat proxy/browser idle timeouts.
 _KEEPALIVE_S = 15
@@ -295,6 +297,26 @@ def _get_session(request: Request, session_id: str):
     if not is_owner and session.principal != principal:
         raise HTTPException(404, f"No such session: {session_id}")
     return session
+
+
+def _bind_session(request: Request, session_id: str) -> None:
+    """Router dependency of the session-scoped tier: resolves the session the
+    caller may touch (404 for an unknown id or another principal's session) and
+    hands it to the handler as ``request.state.coder_session``."""
+    request.state.coder_session = _get_session(request, session_id)
+
+
+_session_router.dependencies.append(Depends(_bind_session))
+
+
+def _owner_only(status: int, detail: str):
+    """Dependency for one owner-only route: refuses a non-owner caller with
+    *status* and *detail* before the handler runs."""
+    def _require_owner(request: Request) -> None:
+        is_owner, _ = _principal_from_request(request)
+        if not is_owner:
+            raise HTTPException(status, detail)
+    return Depends(_require_owner)
 
 
 # ------------------------------------------------------------------ #
@@ -623,7 +645,7 @@ def _set_session_model(session: CoderSession, model: str,
 #  Session lifecycle                                                  #
 # ------------------------------------------------------------------ #
 
-@_router.get("/api/coder/sessions")
+@_safe_router.get("/api/coder/sessions")
 async def list_sessions(request: Request):
     mgr = _sessions(request)
     is_owner, principal = _principal_from_request(request)
@@ -632,7 +654,7 @@ async def list_sessions(request: Request):
             "active_model": request.app.state.active_model()}
 
 
-@_router.post("/api/coder/sessions")
+@_safe_router.post("/api/coder/sessions")
 async def create_session(req: CreateSessionRequest, request: Request):
     mgr = _sessions(request)
     active_model = request.app.state.active_model
@@ -861,11 +883,11 @@ async def create_session(req: CreateSessionRequest, request: Request):
     return {**session.info(), "resumed": resumed, "notes": notes}
 
 
-@_router.get("/api/coder/sessions/{session_id}/events")
+@_session_router.get("/api/coder/sessions/{session_id}/events")
 async def session_events(session_id: str, request: Request, replay: bool = False):
     """SSE event stream. ``?replay=true`` first re-sends the session's
     event history (so a reloaded page rebuilds its feed), then goes live."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     loop = asyncio.get_running_loop()
 
     async def _stream():
@@ -899,18 +921,18 @@ async def session_events(session_id: str, request: Request, replay: bool = False
     )
 
 
-@_router.post("/api/coder/sessions/{session_id}/undo")
+@_session_router.post("/api/coder/sessions/{session_id}/undo")
 async def session_undo(session_id: str, request: Request):
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     summary = session.undo()
     if summary is None:
         raise HTTPException(409, "Nothing to undo (or agent is busy)")
     return {"status": "undone", "summary": summary}
 
 
-@_router.post("/api/coder/sessions/{session_id}/compact")
+@_session_router.post("/api/coder/sessions/{session_id}/compact")
 async def session_compact(session_id: str, request: Request):
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     loop = asyncio.get_running_loop()
     compacted = await loop.run_in_executor(get_plugin_executor(), session.compact)
     if not compacted:
@@ -918,10 +940,10 @@ async def session_compact(session_id: str, request: Request):
     return {"status": "compacted"}
 
 
-@_router.get("/api/coder/sessions/{session_id}/log")
+@_session_router.get("/api/coder/sessions/{session_id}/log")
 async def session_log(session_id: str, request: Request):
     """Parsed JSONL audit log (log/full modes only)."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     path = session.audit_log_path()
     if path is None or not Path(path).is_file():
         raise HTTPException(404, "No audit log for this session "
@@ -935,9 +957,9 @@ async def session_log(session_id: str, request: Request):
     return {"path": str(path), "entries": entries}
 
 
-@_router.post("/api/coder/sessions/{session_id}/message")
+@_session_router.post("/api/coder/sessions/{session_id}/message")
 async def session_message(session_id: str, req: MessageRequest, request: Request):
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not req.text.strip():
         raise HTTPException(400, "Empty message")
     status = session.send_message(req.text)
@@ -948,7 +970,7 @@ async def session_message(session_id: str, req: MessageRequest, request: Request
     return {"status": status}
 
 
-@_router.post("/api/coder/sessions/{session_id}/estimate")
+@_session_router.post("/api/coder/sessions/{session_id}/estimate")
 async def session_estimate(session_id: str, req: EstimateRequest, request: Request):
     """Plan a task without running it: the web form of the CLI's --estimate.
 
@@ -966,7 +988,7 @@ async def session_estimate(session_id: str, req: EstimateRequest, request: Reque
 
     The plan is pushed into the session feed as well as returned, so every open
     tab sees it - the same contract every other session event has."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not req.text.strip():
         raise HTTPException(400, "Empty task")
     loop = asyncio.get_running_loop()
@@ -986,7 +1008,7 @@ async def session_estimate(session_id: str, req: EstimateRequest, request: Reque
     return result
 
 
-@_router.get("/api/coder/sessions/{session_id}/result")
+@_session_router.get("/api/coder/sessions/{session_id}/result")
 async def session_result(session_id: str, request: Request):
     """The last finished task's machine-readable result.
 
@@ -995,13 +1017,13 @@ async def session_result(session_id: str, request: Request):
     ``verify_state`` and ``changed_files``), readable by a client that is not
     holding the SSE stream open. 404 while no task has finished yet - an empty
     body would be indistinguishable from a task that produced nothing."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.last_result is None:
         raise HTTPException(404, "No finished task in this session yet")
     return session.last_result
 
 
-@_router.get("/api/coder/sessions/{session_id}/patch")
+@_session_router.get("/api/coder/sessions/{session_id}/patch")
 async def session_patch(session_id: str, request: Request):
     """The unified diff a patch-mode session has captured instead of writing.
 
@@ -1011,7 +1033,7 @@ async def session_patch(session_id: str, request: Request):
     and be empty ever after. 409 when the session is not in patch mode, because
     an empty diff there means "everything was written to disk", which is the
     opposite of what this endpoint reports."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not session.patch_mode:
         raise HTTPException(
             409, "This session is not in patch mode - its writes went to disk. "
@@ -1021,7 +1043,7 @@ async def session_patch(session_id: str, request: Request):
     return {"patch": patch, "empty": not patch}
 
 
-@_router.get("/api/coder/sessions/{session_id}/patch/download")
+@_session_router.get("/api/coder/sessions/{session_id}/patch/download")
 async def session_patch_download(session_id: str, request: Request):
     """The same patch as a .patch attachment - the web form of the CLI's
     ``--patch-mode FILE``, where the file lands on the CLIENT's disk because
@@ -1029,7 +1051,7 @@ async def session_patch_download(session_id: str, request: Request):
 
     Streamed from memory, never through a server-side temp file: the whole point
     of patch mode is that this content did not touch a disk."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not session.patch_mode:
         raise HTTPException(
             409, "This session is not in patch mode - its writes went to disk.")
@@ -1046,9 +1068,9 @@ async def session_patch_download(session_id: str, request: Request):
     )
 
 
-@_router.post("/api/coder/sessions/{session_id}/confirm")
+@_session_router.post("/api/coder/sessions/{session_id}/confirm")
 async def session_confirm(session_id: str, req: ConfirmRequest, request: Request):
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not session.answer_confirm(req.confirm_id, req.approved,
                                   always_allow=req.always_allow):
         raise HTTPException(409, "No matching pending confirmation")
@@ -1056,20 +1078,20 @@ async def session_confirm(session_id: str, req: ConfirmRequest, request: Request
             "always_allow": req.approved and req.always_allow}
 
 
-@_router.get("/api/coder/sessions/{session_id}/files")
+@_session_router.get("/api/coder/sessions/{session_id}/files")
 async def session_files(session_id: str, request: Request):
     """Files the agent has changed this session, with change counts."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     return {"files": session.changed_files()}
 
 
-@_router.get("/api/coder/sessions/{session_id}/files/diff")
+@_session_router.get("/api/coder/sessions/{session_id}/files/diff")
 async def session_files_diff(session_id: str, request: Request, path: str = ""):
     """Cumulative unified diff of session changes (?path= for one file).
 
     Diffs only files the agent's tracker recorded - arbitrary paths
     cannot be read through this endpoint."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     loop = asyncio.get_running_loop()
     diff = await loop.run_in_executor(
         get_plugin_executor(), session.session_diff, path or None)
@@ -1078,7 +1100,7 @@ async def session_files_diff(session_id: str, request: Request, path: str = ""):
     return {"diff": diff}
 
 
-@_router.get("/api/coder/sessions/{session_id}/files/download")
+@_session_router.get("/api/coder/sessions/{session_id}/files/download")
 async def session_file_download(session_id: str, request: Request, path: str = ""):
     """Download one file the agent created/changed this session.
 
@@ -1086,7 +1108,7 @@ async def session_file_download(session_id: str, request: Request, path: str = "
     the session's change tracker recorded AND confined to the session root, so
     it is NOT an arbitrary-file-read primitive - an untracked path, an escaping
     path, or a since-deleted file is refused."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if not path:
         raise HTTPException(400, "path is required")
     tracked = {f["path"] for f in session.changed_files()}
@@ -1105,14 +1127,14 @@ async def session_file_download(session_id: str, request: Request, path: str = "
                         media_type="application/octet-stream")
 
 
-@_router.post("/api/coder/sessions/{session_id}/stop")
+@_session_router.post("/api/coder/sessions/{session_id}/stop")
 async def session_stop(session_id: str, request: Request):
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     session.stop()
     return {"status": "stopping"}
 
 
-@_router.post("/api/coder/sessions/{session_id}/model")
+@_session_router.post("/api/coder/sessions/{session_id}/model")
 async def session_set_model(session_id: str, req: SetModelRequest, request: Request):
     """Repoint an existing session's pinned model.
 
@@ -1129,7 +1151,7 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     session) - mirrored here rather than factored out, since the "did the
     caller actually ask for a change" gate differs (there it is optional and
     compared against active_model(); here it is the whole point of the call)."""
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.busy:
         # Fail fast, before the (expensive, globally-visible) switch_model call
         # below - session.set_model()'s own lock-protected busy check is the
@@ -1163,7 +1185,7 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     return session.info()
 
 
-@_router.post("/api/coder/sessions/{session_id}/settings")
+@_session_router.post("/api/coder/sessions/{session_id}/settings")
 async def session_settings(session_id: str, req: SessionSettingsRequest,
                            request: Request):
     """Change auto-approve, scope or verification on a LIVE session.
@@ -1181,7 +1203,7 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
     for. Tightening a scope is the same shape. These are attribute writes read
     at the next tool dispatch, not state a running turn can tear.
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
     sent = req.model_fields_set
@@ -1209,7 +1231,7 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
     return {**session.info(), "changed": changed}
 
 
-@_router.post("/api/coder/sessions/{session_id}/cwd")
+@_session_router.post("/api/coder/sessions/{session_id}/cwd")
 async def session_set_cwd(session_id: str, req: SessionCwdRequest,
                           request: Request):
     """Move a live session to another project directory (the REPL's /cd).
@@ -1229,7 +1251,7 @@ async def session_set_cwd(session_id: str, req: SessionCwdRequest,
     system prompt, so applying it under a running turn would change the prompt
     out from under a request already in flight.
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
     if session.restricted:
@@ -1265,7 +1287,7 @@ async def session_set_cwd(session_id: str, req: SessionCwdRequest,
     return session.info()
 
 
-@_router.get("/api/coder/sessions/{session_id}/memory")
+@_session_router.get("/api/coder/sessions/{session_id}/memory")
 async def session_memory(session_id: str, request: Request):
     """The project-memory file (LOCALCODER.md) this session injects.
 
@@ -1276,11 +1298,11 @@ async def session_memory(session_id: str, request: Request):
     already read and rewrite (SAFE_RESTRICTED_TOOLS). Gating it would refuse
     through the front door what stays open at the side, which is theatre.
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     return session.memory()
 
 
-@_router.post("/api/coder/sessions/{session_id}/memory")
+@_session_router.post("/api/coder/sessions/{session_id}/memory")
 async def session_remember(session_id: str, req: MemoryRequest, request: Request):
     """Append a bullet to the project memory (the REPL's /remember).
 
@@ -1290,7 +1312,7 @@ async def session_remember(session_id: str, req: MemoryRequest, request: Request
     without reaching the running session, taking effect only next session. This
     goes through the agent, so the system prompt is rebuilt now.
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
     text = req.text.strip()
@@ -1302,7 +1324,7 @@ async def session_remember(session_id: str, req: MemoryRequest, request: Request
         raise HTTPException(500, f"Could not write the memory file: {e}") from e
 
 
-@_router.post("/api/coder/sessions/{session_id}/memory/forget")
+@_session_router.post("/api/coder/sessions/{session_id}/memory/forget")
 async def session_forget(session_id: str, req: MemoryForgetRequest,
                          request: Request):
     """Drop memory bullets matching a substring (the REPL's /forget).
@@ -1311,7 +1333,7 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
     can tell "there is no memory file" from "no entry matched" - both leave the
     memory unchanged, and they call for different next steps.
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     if session.closed:
         raise HTTPException(409, "Session is closed")
     pattern = req.pattern.strip()
@@ -1323,7 +1345,7 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
         raise HTTPException(500, f"Could not rewrite the memory file: {e}") from e
 
 
-@_router.get("/api/coder/sessions/{session_id}/background")
+@_session_router.get("/api/coder/sessions/{session_id}/background")
 async def session_background(session_id: str, request: Request):
     """Background jobs THIS session started (the REPL's /bg).
 
@@ -1338,13 +1360,12 @@ async def session_background(session_id: str, request: Request):
     scoped key. ``supported`` is reported because a restricted session has no
     background tools at all, and "none yet" must not look the same as "never".
     """
-    session = _get_session(request, session_id)
+    session = request.state.coder_session
     return {**session.background(), "supported": not session.restricted}
 
 
-@_router.delete("/api/coder/sessions/{session_id}")
+@_session_router.delete("/api/coder/sessions/{session_id}")
 async def session_delete(session_id: str, request: Request):
-    _get_session(request, session_id)   # principal check: 404 unless it is the caller's
     # remove() -> CoderSession.close() -> agent.close() is BLOCKING work: a
     # checkpoint write, the audit close, and - for a session that ran run_shell -
     # _detect_shell_changes(), which shells out to `git status --porcelain`
@@ -1381,7 +1402,7 @@ async def session_delete(session_id: str, request: Request):
 # ones from before a server restart - left behind. Privacy mode writes no logs,
 # so the list is simply empty.
 
-@_router.get("/api/coder/history")
+@_safe_router.get("/api/coder/history")
 async def coder_history(request: Request):
     # Past session logs are the OWNER's audit trail (other coder sessions' commands
     # and file contents). They are not tagged per-key, so a scoped/shared key sees
@@ -1414,13 +1435,10 @@ async def coder_history(request: Request):
             "authorized": True, "logs": items}
 
 
-@_router.get("/api/coder/history/{name}")
+@_owner_router.get("/api/coder/history/{name}", dependencies=[_owner_only(404, "No such log")])
 async def coder_history_entries(name: str, request: Request):
     # Reading a past log would expose the owner's coder transcript (commands, file
     # contents); a scoped/shared key may not (the logs are not per-key tagged).
-    is_owner, _ = _principal_from_request(request)
-    if not is_owner:
-        raise HTTPException(404, "No such log")
     from localm import audit as _audit
     # Only coder logs are listed by coder_history; reading a chat/server log
     # ("_server.jsonl"/"_chat.jsonl") through the coder endpoint makes no sense
@@ -1437,7 +1455,7 @@ async def coder_history_entries(name: str, request: Request):
     return {"path": str(path), "entries": entries}
 
 
-@_router.get("/api/coder/resumable")
+@_safe_router.get("/api/coder/resumable")
 async def coder_resumable(request: Request, cwd: str = ""):
     """Is there a saved conversation to resume for *cwd*?
 
@@ -1502,7 +1520,7 @@ def _dormant_for(path_str: str) -> list:
         return []
 
 
-@_router.get("/api/coder/dormant")
+@_safe_router.get("/api/coder/dormant")
 async def coder_dormant(request: Request, cwd: str = ""):
     """Past coder conversations, grouped by project, resumable by id.
 
@@ -1598,7 +1616,7 @@ async def _saved_session_op(fn, failure: str):
         raise HTTPException(500, f"{failure}: {type(e).__name__}: {e}") from e
 
 
-@_router.delete("/api/coder/checkpoints")
+@_owner_router.delete("/api/coder/checkpoints", dependencies=[_owner_only(403, "Owner only")])
 async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest):
     """Delete ONE past session: the checkpoint file a /api/coder/dormant row
     names. Owner-only. Not reversible.
@@ -1606,8 +1624,6 @@ async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest
     409 while a live session holds that checkpoint. 404 when there is no such
     saved session. Success is reported only after the file is confirmed gone.
     """
-    if not _is_owner(request):
-        raise HTTPException(403, "Owner only")
     root = _local_path(req.cwd, "cwd")
     from localm.plugins.coder.agent.checkpoint import (
         delete_checkpoint, is_valid_checkpoint_id,
@@ -1629,7 +1645,7 @@ async def coder_checkpoint_delete(request: Request, req: CheckpointTargetRequest
     return await _saved_session_op(_delete, "Could not delete the saved session")
 
 
-@_router.delete("/api/coder/projects")
+@_owner_router.delete("/api/coder/projects", dependencies=[_owner_only(403, "Owner only")])
 async def coder_project_delete(request: Request, req: ProjectTargetRequest):
     """Remove ONE project from the coder's list and delete every saved session
     for it. Owner-only. Not reversible.
@@ -1640,8 +1656,6 @@ async def coder_project_delete(request: Request, req: ProjectTargetRequest):
     has any saved session. Success is reported only after the list entry and
     every saved session are confirmed gone.
     """
-    if not _is_owner(request):
-        raise HTTPException(403, "Owner only")
     root = _local_path(req.path, "path")
     live = _live_sessions(request)
 
@@ -1728,7 +1742,7 @@ async def _episode_op(fn):
             500, f"Episode store operation failed: {type(e).__name__}: {e}") from e
 
 
-@_router.get("/api/coder/episodes")
+@_safe_router.get("/api/coder/episodes")
 async def coder_episodes(request: Request, cwd: str = ""):
     """The episodic-memory lessons stored for *cwd*: the CLI's ``--episodes``.
 
@@ -1772,7 +1786,7 @@ async def coder_episodes(request: Request, cwd: str = ""):
     return {"episodes": episodes, "cwd": str(root)}
 
 
-@_router.get("/api/coder/episodes/archive")
+@_safe_router.get("/api/coder/episodes/archive")
 async def coder_episodes_archive(request: Request, cwd: str = ""):
     """Lessons this project has DROPPED and can get back: ``--episodes-archive``.
 
@@ -1802,7 +1816,7 @@ async def coder_episodes_archive(request: Request, cwd: str = ""):
     return {"archived": rows, "cwd": str(root)}
 
 
-@_router.post("/api/coder/episodes/{episode_id}/forget")
+@_owner_router.post("/api/coder/episodes/{episode_id}/forget", dependencies=[_owner_only(404, "No such episode")])
 async def coder_episode_forget(episode_id: str, request: Request,
                                req: EpisodeTargetRequest):
     """Drop ONE lesson from recall: ``--forget-episode``.
@@ -1812,8 +1826,6 @@ async def coder_episode_forget(episode_id: str, request: Request,
     archiving half failed, the lesson is still gone from recall, so that is
     reported as a caveat on a real outcome rather than swallowed.
     """
-    if not _is_owner(request):
-        raise HTTPException(404, "No such episode")
     root = _episode_root(req.cwd)
 
     def _forget():
@@ -1836,7 +1848,7 @@ async def coder_episode_forget(episode_id: str, request: Request,
     }
 
 
-@_router.post("/api/coder/episodes/{episode_id}/restore")
+@_owner_router.post("/api/coder/episodes/{episode_id}/restore", dependencies=[_owner_only(404, "No such episode")])
 async def coder_episode_restore(episode_id: str, request: Request,
                                 req: EpisodeTargetRequest):
     """Put an archived lesson back into recall: ``--restore-episode``.
@@ -1846,8 +1858,6 @@ async def coder_episode_restore(episode_id: str, request: Request,
     been updated (so the lesson is live AND still listed as forgotten), and a
     store at its cap may have evicted it again immediately.
     """
-    if not _is_owner(request):
-        raise HTTPException(404, "No such episode")
     root = _episode_root(req.cwd)
 
     def _restore():
@@ -1883,7 +1893,7 @@ async def coder_episode_restore(episode_id: str, request: Request,
     return out
 
 
-@_router.delete("/api/coder/episodes")
+@_owner_router.delete("/api/coder/episodes", dependencies=[_owner_only(403, "Owner only")])
 async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
     """Erase ALL episodic memory for a project, archive included:
     ``--forget-episodes``.
@@ -1893,8 +1903,6 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
     The counts are read BEFORE the erase so the response can
     say what was actually destroyed - afterwards there is nothing left to count.
     """
-    if not _is_owner(request):
-        raise HTTPException(403, "Owner only")
     root = _episode_root(req.cwd)
 
     def _clear():
@@ -1918,7 +1926,7 @@ async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
     return await _episode_op(_clear)
 
 
-@_router.post("/api/coder/episodes/consolidate")
+@_owner_router.post("/api/coder/episodes/consolidate", dependencies=[_owner_only(403, "Owner only")])
 async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest):
     """Ask the model to merge related lessons into one: ``--consolidate-episodes``.
 
@@ -1930,8 +1938,6 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
     mutating silently, and a group whose merge came back unusable is counted as
     skipped and left alone.
     """
-    if not _is_owner(request):
-        raise HTTPException(403, "Owner only")
     root = _episode_root(req.cwd)
     self_url = getattr(request.app.state, "self_url", None)
     active_model = getattr(request.app.state, "active_model", None)
@@ -1998,7 +2004,7 @@ def _load_hooks(root: Path):
         raise HTTPException(422, f"Project config could not be read: {e}") from e
 
 
-@_router.get("/api/coder/hooks")
+@_safe_router.get("/api/coder/hooks")
 async def coder_hooks(request: Request, cwd: str = ""):
     """The tool hooks and MCP servers the project config nearest *cwd*
     declares, and whether they are trusted: the web form of the REPL's
@@ -2050,7 +2056,7 @@ async def coder_hooks(request: Request, cwd: str = ""):
     return await _hooks_op(_read)
 
 
-@_router.post("/api/coder/hooks/trust")
+@_owner_router.post("/api/coder/hooks/trust", dependencies=[_owner_only(404, "No tool hooks")])
 async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
     """Trust and remember the project's tool hooks and MCP servers: the web
     form of ``--trust-hooks`` / ``/hooks trust``.
@@ -2059,8 +2065,6 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
     shown), so only what the user saw is trusted. A running session whose
     hooks were untrusted picks the trust up at its next matching call, and
     starts MCP servers it held back when its next task starts."""
-    if not _is_owner(request):
-        raise HTTPException(404, "No tool hooks")
     root = _episode_root(req.cwd)
 
     def _trust():
@@ -2082,15 +2086,13 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
     return await _hooks_op(_trust)
 
 
-@_router.post("/api/coder/hooks/forget")
+@_owner_router.post("/api/coder/hooks/forget", dependencies=[_owner_only(404, "No tool hooks")])
 async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
     """Withdraw the remembered trust for the project's tool hooks and MCP
     servers: the web form of ``/hooks forget``. Running sessions that trusted
     the hooks through the store stop them at their next matching tool call;
     MCP servers already started keep running until their session ends, and
     later sessions start none."""
-    if not _is_owner(request):
-        raise HTTPException(404, "No tool hooks")
     root = _episode_root(req.cwd)
 
     def _forget():
@@ -2105,6 +2107,12 @@ async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
             raise HTTPException(500, f"The hook trust record could not be read: {e}") from e
 
     return await _hooks_op(_forget)
+
+
+_router = APIRouter()
+_router.include_router(_safe_router)
+_router.include_router(_session_router)
+_router.include_router(_owner_router)
 
 
 def register(host) -> None:
