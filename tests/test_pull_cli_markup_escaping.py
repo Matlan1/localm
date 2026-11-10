@@ -371,6 +371,10 @@ class TestPullHfSnapshotTagInjection:
             def model_info(self, repo_id, files_metadata=True):
                 raise RuntimeError("offline")
 
+            def repo_info(self, repo_id):
+                return __import__("types").SimpleNamespace(
+                    sha="0123456789abcdef0123456789abcdef01234567")
+
             def list_repo_files(self, repo_id, **kw):
                 return []
 

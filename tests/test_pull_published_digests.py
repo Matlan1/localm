@@ -256,7 +256,7 @@ class TestSnapshot:
         monkeypatch.setattr(mm, "_register_with_dedup",
                             lambda *a, **k: registered.append(a[0]) or True)
         state = SimpleNamespace(served=dict(self.FILES), revisions=[], registered=registered,
-                                listing=True, names_listing=True, sha="main", extra=[],
+                                listing=True, names_listing=True, sha="main", extra=[], listed_at=[],
                                 models_dir=models_dir)
 
         def siblings():
@@ -275,7 +275,11 @@ class TestSnapshot:
                     raise OSError("offline")
                 return SimpleNamespace(siblings=siblings(), sha=state.sha)
 
+            def repo_info(self, repo_id):
+                return SimpleNamespace(sha=state.sha)
+
             def list_repo_files(self, repo_id, revision=None):
+                state.listed_at.append(revision)
                 if not state.names_listing:
                     raise OSError("offline")
                 return list(state.served) + list(state.extra)
@@ -314,9 +318,17 @@ class TestSnapshot:
     def test_without_digests_the_pull_goes_ahead_and_says_it_was_not_checked(
             self, snap, capsys):
         snap.listing = False
+        snap.sha = COMMIT
         assert mm._pull_hf_snapshot("o/bert", None) is True
         assert "not checked against them" in capsys.readouterr().out
-        assert snap.revisions == [None]
+        assert snap.listed_at == [COMMIT] and snap.revisions == [COMMIT]
+
+    def test_without_digests_or_a_commit_the_pull_is_refused(self, snap, capsys):
+        snap.listing = False
+        snap.sha = "main"
+        assert mm._pull_hf_snapshot("o/bert", None) is False
+        assert "file list could not be read" in " ".join(capsys.readouterr().out.split())
+        assert snap.revisions == []
 
     @pytest.mark.parametrize("bad", [
         "a:b.json", "con.json", "NUL", "aux.tar.gz", "trail.json.", "trail.json ",
@@ -333,6 +345,7 @@ class TestSnapshot:
 
     def test_names_read_without_digests_are_checked_too(self, snap, capsys):
         snap.listing = False
+        snap.sha = COMMIT
         snap.extra = ["model.safetensors:hidden"]
         assert mm._pull_hf_snapshot("o/bert", None) is False
         assert "not a plain file name" in " ".join(capsys.readouterr().out.split())
@@ -348,6 +361,7 @@ class TestSnapshot:
             self, snap, capsys):
         snap.listing = False
         snap.names_listing = False
+        snap.sha = COMMIT
         assert mm._pull_hf_snapshot("o/bert", None) is False
         assert "file list could not be read" in " ".join(capsys.readouterr().out.split())
         assert snap.revisions == [] and snap.registered == []

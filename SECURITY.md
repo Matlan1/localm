@@ -298,8 +298,8 @@ project notes, and a skill whose file or folder is a link is refused.
   space (which Windows silently strips). This applies to `localm pull`, the
   same-repo vision-projector auto-attach, and `--mmproj`. A full-repository
   pull checks every file name (each folder in it too) against the
-  repository's file list before anything is downloaded, and is refused when
-  that list cannot be read.
+  repository's file list, read at the commit it then downloads, before
+  anything is downloaded, and is refused when that list cannot be read.
 - **Routing a chat request to a model loaded on another localm instance on
   this machine** verifies the target before forwarding anything: accepting a
   peer offer (Models page, when another running instance already has the
@@ -335,7 +335,7 @@ this section states the security properties and, more importantly, their edges.
   targets a link-local / cloud-metadata address is refused
   (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, fd00:ec2::/32, and a
   link-local IPv4 address in IPv4-mapped, IPv4-compatible, NAT64
-  (64:ff9b::/96) or 6to4 form, which the search backend refuses too. The
+  (64:ff9b::/96, 64:ff9b:1::/48) or 6to4 form, which the search backend refuses too. The
   connection itself refuses any HTTP redirect outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
   steer the request elsewhere. Loopback and LAN are both
   normal, unchecked ComfyUI deployments - treat the policy as governing the

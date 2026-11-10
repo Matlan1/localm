@@ -295,22 +295,23 @@ def is_search_backend_origin(url: str, cfg: dict) -> bool:
 
 
 _METADATA_V6_NETS = (ipaddress.ip_network("fd00:ec2::/32"),)
-_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_NETS = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 _IPV4_COMPATIBLE_NET = ipaddress.ip_network("::/96")
 
 
 def _embedded_ipv4(ip) -> Optional[ipaddress.IPv4Address]:
     """The IPv4 address an IPv6 address *ip* carries in IPv4-mapped
     (``::ffff:0:0/96``), IPv4-compatible (``::/96``, except ``::`` and ``::1``),
-    NAT64 well-known prefix (``64:ff9b::/96``) or 6to4 (``2002::/16``) form, or
-    None (also for an IPv4 *ip*)."""
+    NAT64 (``64:ff9b::/96``, and ``64:ff9b:1::/48`` read in its last 32 bits) or
+    6to4 (``2002::/16``) form, or None (also for an IPv4 *ip*)."""
     if ip.version != 6:
         return None
     if ip.ipv4_mapped is not None:
         return ip.ipv4_mapped
     if ip.sixtofour is not None:
         return ip.sixtofour
-    if ip in _NAT64_NET or (ip in _IPV4_COMPATIBLE_NET and int(ip) > 1):
+    if any(ip in net for net in _NAT64_NETS) or (
+            ip in _IPV4_COMPATIBLE_NET and int(ip) > 1):
         return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return None
 
@@ -318,8 +319,8 @@ def _embedded_ipv4(ip) -> Optional[ipaddress.IPv4Address]:
 def is_link_local_or_metadata_ip(ip) -> bool:
     """True for a link-local address (169.254.0.0/16, fe80::/10), the cloud
     metadata range fd00:ec2::/32, and an IPv6 address carrying a link-local
-    IPv4 address in IPv4-mapped, IPv4-compatible, NAT64 (64:ff9b::/96) or 6to4
-    form (:func:`_embedded_ipv4`)."""
+    IPv4 address in IPv4-mapped, IPv4-compatible, NAT64 (64:ff9b::/96,
+    64:ff9b:1::/48) or 6to4 form (:func:`_embedded_ipv4`)."""
     if ip.is_link_local:
         return True
     if ip.version != 6:

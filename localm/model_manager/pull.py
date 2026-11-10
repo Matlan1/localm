@@ -3335,17 +3335,25 @@ def _snapshot_unsafe_name(dest: Path, names) -> Optional[str]:
     return None
 
 
-def _snapshot_listing_names(repo_id: str, repo_siblings, commit) -> Optional[list]:
-    """The file names of *repo_id* at *commit*: from *repo_siblings* when the
-    listing was read, else from ``list_repo_files``. None when neither could be
-    read."""
+def _snapshot_listing_names(repo_id: str, repo_siblings,
+                            commit: Optional[str]) -> tuple[Optional[list], Optional[str]]:
+    """``(names, commit)``: the file names of *repo_id* and the commit they were
+    read at. From *repo_siblings* (read at *commit*) when the listing was read;
+    else from ``list_repo_files`` at *commit*, or, without one, at the commit
+    ``repo_info`` reports for the default branch. ``(None, None)`` when no list
+    can be read, or no commit is known for it."""
     if repo_siblings is not None:
-        return [str(getattr(s, "rfilename", "") or "") for s in repo_siblings]
+        return [str(getattr(s, "rfilename", "") or "") for s in repo_siblings], commit
     try:
-        return list(_hf_api().list_repo_files(repo_id, **_revision_kwargs(commit)))
+        api = _hf_api()
+        if commit is None:
+            commit = _valid_commit(getattr(api.repo_info(repo_id), "sha", None))
+        if commit is None:
+            return None, None
+        return list(api.list_repo_files(repo_id, revision=commit)), commit
     except Exception as e:
         logger.debug("could not list the files of %s: %s", repo_id, e)
-        return None
+        return None, None
 
 
 def _pull_hf_snapshot_locked(
@@ -3533,13 +3541,14 @@ def _pull_hf_snapshot_locked(
                                  max(0, total_size - _disk_bytes())):
         return False
 
-    names = _snapshot_listing_names(repo_id, repo_siblings, commit)
+    names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
     if names is None:
         console.print(
             f"[red]Refusing to pull {escape(repo_id)}:[/red] its file list could not be "
             "read from Hugging Face, so the file names it would write cannot be "
             "checked. Retry when Hugging Face answers.")
         return False
+    commit = listed_at
     unsafe = _snapshot_unsafe_name(dest, names)
     if unsafe is not None:
         console.print(

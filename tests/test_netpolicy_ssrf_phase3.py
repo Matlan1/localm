@@ -161,6 +161,7 @@ _METADATA_V6_FORMS = [
     "::ffff:169.254.169.254",   # IPv4-mapped
     "::a9fe:a9fe",              # IPv4-compatible
     "64:ff9b::a9fe:a9fe",       # NAT64 well-known prefix
+    "64:ff9b:1::a9fe:a9fe",     # NAT64 local-use prefix
     "2002:a9fe:a9fe::1",        # 6to4
     "fe80::1",                  # IPv6 link-local (control)
 ]
