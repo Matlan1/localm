@@ -14,6 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import mgmt_events
+
 
 _warned_unconfigured_home = False
 _warned_unreadable_home_cfg: set = set()
@@ -1928,7 +1930,25 @@ def save_config(cfg: dict) -> None:
     exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
-        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
+        delta = _user_delta(cfg)
+        previous = _read_json(CONFIG_FILE, {})
+        _atomic_write_json(CONFIG_FILE, delta)
+    _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
+
+
+def _changed_config_keys(before: dict, after: dict) -> list:
+    """Names of the top-level keys whose value differs between *before* and *after*."""
+    return sorted(k for k in set(before) | set(after) if before.get(k, _MISSING) != after.get(k, _MISSING))
+
+
+_MISSING = object()
+
+
+def _record_config_saved(before: dict, after: dict) -> None:
+    """Record a config save in the management log (key NAMES only); nothing when no key changed."""
+    changed = _changed_config_keys(before, after)
+    if changed:
+        mgmt_events.record("config_saved", home=HOME_DIR, keys=changed)
 
 
 # update_config()/update_registry() are read-modify-write: read the file, let a
@@ -2438,12 +2458,14 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
                 f"defaults; refused. Fix or remove {CONFIG_FILE.name} (the "
                 f"{CONFIG_FILE.name}.bak next to it may hold a good copy).")
         _merge_stored_config(cfg, stored)
+        before = copy.deepcopy(cfg)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()
         _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
-        return cfg
+    _record_config_saved(before, cfg)
+    return cfg
 
 
 def load_registry() -> dict:

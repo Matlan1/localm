@@ -560,6 +560,10 @@ you obtained the zip some other way than the recommended `git clone` install. Th
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
 
+## Management log
+
+`logs/management.jsonl` in the data folder is an append-only record of management events, written in every session mode including privacy mode: key created or revoked (key id only), refused login (loopback or not), update applied (versions), settings saved (setting names only) and plugin installed or removed. It carries no key, setting value or conversation content. It is capped at 1 MB with one rotated file, and a failed write is logged as a warning without failing the operation recorded.
+
 ## Verifying a release
 
 Every release carries build provenance that proves which workflow built a file and
