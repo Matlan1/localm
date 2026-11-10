@@ -728,9 +728,10 @@ load output says so:
 ```
 
 Reads then come from disk until the pages are cached, which is why the first
-tokens are slower. (When what does not fit includes MoE experts kept in system
-RAM or a draft model on the CPU, the warning described below is printed before
-the load instead of this line.) A model split between GPU and CPU, a load on a machine with
+tokens are slower. (When MoE experts kept in system RAM or a draft model on the
+CPU are part of it and the weights the CPU reads while generating do not fit
+either, the warning described below is printed before the load instead of this
+line.) A model split between GPU and CPU, a load on a machine with
 no GPU, and a load where available RAM cannot be read use llama.cpp's own
 default instead, which memory-maps the file wherever the device supports it.
 Such a load stays memory-mapped whatever the RAM. When the weights the CPU reads
