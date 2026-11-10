@@ -84,6 +84,9 @@ _CORPUS = [
     'Authorization: Digest username="u", realm="Restricted Area", response="' + SECRET + '"',
     "Authorization: Token " + SECRET + " then the call failed, retrying",
     "headers: Authorization: Bearer " + SECRET + ", Accept: */*",
+    '{"msg":"Authorization: Digest username=\\"u, v\\", realm=\\"R A\\", response=\\"'
+    + SECRET + '\\""}',
+    "level=error Authorization: Bearer " + SECRET + " status=401 path=/v1/chat",
     "X-Api-Key: Bearer " + SECRET,
     '{"Authorization":["Bearer ' + SECRET + '"], "n": 1}',
     '"Authorization": Bearer ' + SECRET,
