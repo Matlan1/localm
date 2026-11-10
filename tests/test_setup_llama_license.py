@@ -128,11 +128,12 @@ def test_a_second_archive_never_overwrites_an_existing_license_file(tmp_path):
 
 
 def test_the_top_level_license_is_llama_cpps(tmp_path):
-    """A nested vendor LICENSE does not take llama.cpp's name from the archive's own."""
+    """A nested vendor LICENSE (in a folder that sorts before it) does not take
+    llama.cpp's name from the archive's own; it is named after its folder."""
     src = tmp_path / "src"
-    (src / "vendor" / "lib").mkdir(parents=True)
+    (src / "Abseil").mkdir(parents=True)
     _fake_binary(src)
-    (src / "vendor" / "lib" / "LICENSE").write_bytes(b"VENDOR TEXT")
+    (src / "Abseil" / "LICENSE").write_bytes(b"VENDOR TEXT")
     (src / "LICENSE").write_bytes(b"TOP TEXT")
     target = tmp_path / "lib"
     target.mkdir()
@@ -140,7 +141,36 @@ def test_the_top_level_license_is_llama_cpps(tmp_path):
     _copy_binaries(src, target)
 
     assert (target / "LICENSE.llama-cpp").read_bytes() == b"TOP TEXT"
-    assert (target / "LICENSE.llama-cpp.1").read_bytes() == b"VENDOR TEXT"
+    assert (target / "LICENSE.abseil").read_bytes() == b"VENDOR TEXT"
+
+
+def test_a_nested_vendor_license_alone_still_gets_the_mit_notice(tmp_path):
+    src = tmp_path / "src"
+    (src / "_deps" / "json").mkdir(parents=True)
+    _fake_binary(src)
+    (src / "_deps" / "json" / "LICENSE.txt").write_bytes(b"VENDOR TEXT")
+    target = tmp_path / "lib"
+    target.mkdir()
+
+    _copy_binaries(src, target)
+
+    assert (target / "LICENSE.json").read_bytes() == b"VENDOR TEXT"
+    assert (target / "LICENSE.llama-cpp").read_text(encoding="utf-8") == _LLAMA_CPP_MIT_NOTICE
+
+
+def test_a_tarball_license_beside_its_libraries_is_llama_cpps(tmp_path):
+    """Upstream's tarballs wrap everything in one folder: llama-<tag>/LICENSE sits
+    at the same depth as the libraries."""
+    src = tmp_path / "src"
+    (src / "llama-b1").mkdir(parents=True)
+    _fake_binary(src / "llama-b1")
+    (src / "llama-b1" / "LICENSE").write_bytes(b"UPSTREAM MIT")
+    target = tmp_path / "lib"
+    target.mkdir()
+
+    _copy_binaries(src, target)
+
+    assert (target / "LICENSE.llama-cpp").read_bytes() == b"UPSTREAM MIT"
 
 
 @pytest.mark.parametrize("name, expected", [

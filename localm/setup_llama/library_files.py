@@ -283,19 +283,28 @@ def _place_license_file(src: Path, target: Path, base: str) -> bool:
 
 def _copy_license_files(src_dir: Path, target: Path) -> int:
     """Copy the license and notice files of *src_dir* into *target*, each under
-    the name :func:`_license_dest_name` gives it, without overwriting a license
+    the name :func:`_license_dest_name` gives it (a bare ``LICENSE`` deeper than
+    the shallowest library is named after its folder instead, as it belongs to
+    something vendored there), without overwriting a license
     file already in *target* (one placed by an earlier archive into the same
     folder). Then writes the bundled llama.cpp/ggml MIT notice as
     :data:`LLAMA_CPP_LICENSE` when *target* has no such file. Returns the number
     of files written."""
-    found = sorted((f for f in src_dir.rglob("*")
-                    if _safe_is_file(f)
-                    and any(f.name.lower().startswith(k) for k in _LICENSE_NAME_PREFIXES)),
+    files = [f for f in src_dir.rglob("*") if _safe_is_file(f)]
+    found = sorted((f for f in files
+                    if any(f.name.lower().startswith(k) for k in _LICENSE_NAME_PREFIXES)),
                    key=lambda f: (len(f.relative_to(src_dir).parts), str(f)))
+    bin_depth = min((len(f.relative_to(src_dir).parts) for f in files if _is_wanted(f)),
+                    default=None)
     written = 0
     for f in found:
+        base = _license_dest_name(f.name)
+        depth = len(f.relative_to(src_dir).parts)
+        if (base.endswith(".llama-cpp") and bin_depth is not None and depth > bin_depth):
+            folder = re.sub(r"[^a-z0-9]+", "-", f.parent.name.lower()).strip("-")
+            base = f"{base.rsplit('.', 1)[0]}.{folder or 'vendor'}"
         try:
-            if _place_license_file(f, target, _license_dest_name(f.name)):
+            if _place_license_file(f, target, base):
                 written += 1
         except OSError as e:
             logger.warning("could not copy the license file %s into %s: %s", f, target, e)
