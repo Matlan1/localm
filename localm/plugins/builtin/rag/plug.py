@@ -44,10 +44,10 @@ import base64
 import json
 from pathlib import Path
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.debuglog import logger
 from localm.executor import get_plugin_executor
@@ -85,7 +85,7 @@ class RagAddRequest(BaseModel):
 
 class RagQueryRequest(BaseModel):
     query: str
-    k: int = 4
+    k: int = Field(4, ge=1)
     # Drop hits below the collection's absolute relevance floor
     # (Collection.query relevant_only).
     relevant_only: bool = False
@@ -731,6 +731,7 @@ async def rag_delete(name: str, request: Request):
 async def rag_add(name: str, req: RagAddRequest, request: Request):
     from localm.rag import CollectionLockedError
     coll = _get_collection_unloaded(name)
+    _require_rag_confinement(name, request)
     paths = [Path(p).expanduser() for p in req.paths if p.strip()]
     if not paths:
         raise HTTPException(400, "No paths given")
@@ -846,9 +847,14 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     front (MAX_REQUEST_BODY_BYTES, from Content-Length before buffering); per-file
     and per-request caps are then checked on the base64 STRING length BEFORE
     decoding, so no oversized payload is ever materialized in memory; a zip bomb is
-    caught during extraction."""
+    caught during extraction.
+
+    A key with its own rag_roots allowlist is refused (403) on a collection that
+    holds documents from outside those roots, as on every other collection
+    route; the uploaded documents themselves are not path-confined."""
     from localm.rag import CollectionLockedError
     coll = _get_collection_unloaded(name)
+    _require_rag_confinement(name, request)
     if not req.files:
         raise HTTPException(400, "No files given")
     if len(req.files) > 50:
@@ -1073,9 +1079,19 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
     "0 re-indexed" as if it had fixed something; a MIXED collection proceeds on
     what it can rebuild and the job log names how many upload-only documents were
     left untouched.
+
+    For any caller but the owner, every recorded source is re-checked against
+    that caller's indexing policy (the folder policy, or the key's own
+    rag_roots), the same one ``/add`` applies; a refused source is skipped with
+    a job line naming the reason. The owner's repair keeps the hard floor only,
+    as ``localm rag repair`` does.
     """
     coll = await _get_collection_off_loop(name)
-    _require_rag_confinement(name, request)
+    key_roots = _require_rag_confinement(name, request)
+    from localm.rag.store import indexing_policy
+    import localm.inference.http_server as _hs
+    policy = (None if _hs.caller_is_operator(request)
+              else indexing_policy(key_roots=key_roots))
     docs = coll.documents()
     if not docs:
         detail = (f"'{name}' index is corrupt and has no indexed documents to "
@@ -1121,11 +1137,18 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
                 f"{upload_only} document(s) here were added via upload and "
                 "have no server-side source - they cannot be rebuilt and are "
                 "left as-is.")})
-        from localm.rag.store import _network_drives_allowed_fresh, floor_refusal
+        from localm.rag.store import (ConfinementError,
+                                      _network_drives_allowed_fresh,
+                                      confine_index_path, floor_refusal)
         allow_net = _network_drives_allowed_fresh()
         sources = []
         for src in repairable:
             reason = floor_refusal(src, allow_net)
+            if not reason and policy is not None:
+                try:
+                    confine_index_path(src, policy)
+                except ConfinementError as e:
+                    reason = str(e)
             if reason:
                 job.push({"type": "line", "text": f"skipping {src}: {reason}"})
             else:
@@ -1139,7 +1162,8 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
             result = coll.add_paths(
                 sources, force=True, embed_fn=embed_fn,
                 classify_fn=self_classify, describe_image_fn=self_describe,
-                model_name=model_name, on_progress=_job_progress(job))
+                model_name=model_name, policy=policy,
+                on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
             job.push({"type": "line", "text": f"error: {e}"})
             return False
@@ -1371,9 +1395,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")
-    import localm.inference.http_server as _hs
-    is_owner = _hs.caller_is_operator(request)
-    if not is_owner:
+    if not _host.caller_is_owner(request):
         raise HTTPException(
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "
@@ -1394,7 +1416,6 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     jobs = _require_jobs(request)
 
     def _setup(job):
-        from localm.config_write import set_global_config_key
         from localm.inference.embedder import (
             get_embedder, last_error, reset_embedder, resolve_embedding_model_path)
 
@@ -1403,7 +1424,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
         # Persist the choice and drop any cached embedder so the running server
         # switches to the new model without a restart.
-        set_global_config_key("embedding_model", model, is_owner=is_owner)
+        _host.set_global_config(request, "embedding_model", model)
         reset_embedder()
         line(f"Selected embedding model: {model}")
         # Resolve, downloading an internal key if it is not on disk yet (the
@@ -1424,13 +1445,19 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "internal default (bge-small-en-v1.5).")
             return False
         # Load and probe via the shared embedder, so it stays loaded for real use.
-        # get_embedder records the load error rather than raising it; it is surfaced
-        # verbatim below.
+        # get_embedder records a load error rather than raising it (surfaced
+        # verbatim below) and raises LoadBusyError while another load holds the GPU.
         line("Loading and testing the model…")
         # on_progress=line forwards get_embedder's stage announcements to the job,
         # since this call can run for minutes. _emit_stage swallows anything the
         # sink raises, so a push failure cannot fail a working load.
-        emb = get_embedder(on_progress=line)
+        from localm.inference.load_lease import LoadBusyError
+        try:
+            emb = get_embedder(on_progress=line)
+        except LoadBusyError as e:
+            line(f"error: '{model}' is selected but not loaded yet: {e} Run the "
+                 "setup again once the other load has finished.")
+            return False
         if emb is None:
             why = last_error() or "the model could not be loaded"
             line(f"error: '{model}' could not produce embeddings ({why}). It may "
@@ -1484,8 +1511,8 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
     from localm.inference.http_server import principal_id
     # Refuse a second concurrent setup instead of queueing it behind the first:
-    # get_embedder's `with _LOAD_LOCK:` / `with _LOCK:` are bare acquires with no
-    # timeout, so the loser would wait silently for as long as the winner takes.
+    # the loser would wait in get_embedder for the winner's load, up to
+    # load_lease.LOAD_WAIT_TIMEOUT_S, with no progress of its own.
     #
     # This check-then-act is atomic only because it sits in an `async def` on the
     # single event loop with no `await` between the check and start_fn below.
@@ -1556,7 +1583,12 @@ async def rag_extract(req: RagExtractRequest):
             "truncated": len(text) > max_chars}
 
 
+_host: Any = None
+
+
 def register(host) -> None:
+    global _host
+    _host = host
     host.mount_router(_router)
 
 

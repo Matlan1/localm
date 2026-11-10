@@ -329,8 +329,11 @@ def build(engines: EngineCache) -> dict[str, dict]:
         "pull_model": {
             "description": (
                 "Download a GGUF file from HuggingFace, register it under 'name', "
-                "and (by default) load it - blocks until ready. Use search_models "
-                "+ list_model_files first to pick repo/file/quant."
+                "and (by default) load it - blocks until ready. Accepts only a repo "
+                "that an already-registered model came from, or one on the short "
+                "built-in list; any other repo is refused until it is pulled once on "
+                "the host with 'localm pull'. Use list_model_files to pick the "
+                "file/quant."
             ),
             "inputSchema": {
                 "type": "object",

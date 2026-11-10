@@ -23,7 +23,8 @@ open-mode exemptions are exact paths too, so `/api/embed` being callable by
 local apps does not extend to the GUI's `/api/embedding/warmup`.
 
 Chat and generate requests are translated to a `/v1/chat/completions` request
-and answered by the same code path, so capability routing, routing to another
+(a generate request with `raw: true` to a `/v1/completions` request) and
+answered by the same code path, so capability routing, routing to another
 instance, context compaction, audit and the per-model request queue behave
 exactly as they do on `/v1`.
 
@@ -76,12 +77,18 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `format` | `"json"` constrains the reply to a JSON object. A JSON schema constrains it to that schema: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, integer `minimum` and `maximum`, `format` (`date`, `time`, `date-time`, `uuid`), `anyOf`, `oneOf`, `allOf` and local `$ref` (recursive schemas included). Properties come out in the order the schema lists them, and an object with listed properties has no others unless `additionalProperties` allows it. A keyword the grammar cannot enforce (`pattern`, `multipleOf`, `not`, number bounds, ...) is a 400 naming it. |
 | `tools` | `/api/chat` only. Function tools, as Ollama sends them. The model's calls come back in `message.tool_calls` (`function.name`, `function.arguments` as an object, `id`, `function.index`); a streamed call is its own line before the `done` line, and `done_reason` is `stop`. An earlier turn's `assistant` message with `tool_calls` and the `tool` messages after it are given back to the model; they are matched to the calls by order, so `tool_name` is accepted and not needed. The rules in [Tool calling](server-api.md#tool-calling) apply, with `tool_choice` always `auto`. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
-| `keep_alive` | On `/api/chat` with no messages, or `/api/generate` with no prompt and no images: a zero (`0`, `"0"`, or a zero duration such as `"0s"`) unloads the model, anything else loads it. The reply is `{"model", "created_at", "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "unload"}` (`"load"` for a load; `"response": ""` in place of `message` on generate). A model that another instance serves is left to that instance: a load answers as usual, an unload is a 409 naming the other instance. Unloading needs `models:write` (a 403 without it; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`), an unknown model is a 404, and a model still in use (a chat model after a short grace period) a 409 that leaves it loaded. Add `"force": true` (a localm extension) to the unload request to stop the model's requests in flight and unload it anyway; a reply in progress is cut off. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
+| `keep_alive` | On `/api/chat` with no messages, or `/api/generate` with no prompt and no images: a zero (`0`, `"0"`, or a zero duration such as `"0s"`) unloads the model, anything else loads it. The reply is `{"model", "created_at", "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "unload"}` (`"load"` for a load; `"response": ""` in place of `message` on generate). A model that another instance serves is left to that instance: a load answers as usual, an unload is a 409 naming the other instance. Unloading needs `models:write` (a 403 without it; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`), an unknown model is a 404, and a model still in use (a chat model after a short grace period) a 409 that leaves it loaded. Add `"force": true` (a localm extension) to the unload request to stop the model's requests in flight and unload it anyway; a reply in progress is cut off. On a normal request with a zero `keep_alive`, the model is unloaded once the reply has been sent (needs `models:write`; a caller without it gets the reply and the model stays loaded, with an `x-localm-keep-alive` response header saying so). Any other `keep_alive` on a normal request is ignored; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
 
-Refused with a 400 on `/api/generate`, rather than silently dropped: `raw`,
-`suffix`, a request-level `template`, and a non-empty `context` (`/api/chat`
-has no such fields and ignores them like any unknown key). Also a 400: a missing
+`raw: true` on `/api/generate` sends `prompt` to the model exactly as given,
+with no chat template, as `POST /v1/completions` does. `system`, `template` and
+`think` have nothing to apply to then and are ignored (named in the debug log);
+`images` with `raw: true` is a 400.
+
+Refused with a 400 on `/api/generate`, rather than silently dropped: `suffix`,
+a request-level `template` (without `raw`), and a non-empty `context`
+(`/api/chat` has no such fields and ignores them like any unknown key). Also a
+400: a missing
 `model`, a `format` string other than `"json"`, an `options.stop` that is not a
 string or a list of strings, a `think` that is not a boolean or a string, a
 message with a role other than `system`, `user`, `assistant` or `tool`,

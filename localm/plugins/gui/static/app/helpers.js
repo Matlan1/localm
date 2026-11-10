@@ -1126,15 +1126,13 @@ export function artifactSrcdoc(code, lang) {
       + "</head><body>" + code + "</body></html>";
   }
   if (/<!doctype\s+html/i.test(code) || /<html[\s>]/i.test(code)) {
-    // Full document: the CSP meta must be parsed BEFORE any executable node, or
-    // a <script> the artifact placed before its own <head> runs pre-CSP and can
-    // still hit the network (R41-D4). Anchor on <html> FIRST: inject our own
-    // <head> carrying the CSP immediately after the <html ...> tag, so the CSP
-    // precedes anything between <html> and the artifact's own <head>. Only fall
-    // back to splicing an existing <head> (no <html> tag) or prepending.
-    if (/<html[^>]*>/i.test(code)) return code.replace(/<html([^>]*)>/i, "<html$1><head>" + csp + "</head>");
-    if (/<head[\s>]/i.test(code)) return code.replace(/<head([^>]*)>/i, "<head$1>" + csp);
-    return csp + code;
+    // Full document: our own <head> carrying the CSP comes first in the string,
+    // before any artifact markup, so it is parsed before any artifact node. The
+    // artifact's <html>/<body> attributes merge onto ours and its head elements
+    // join our head after the CSP. A doctype is emitted only when the artifact
+    // has one, so a document without one keeps its rendering mode.
+    const doctype = /<!doctype\s+html/i.test(code) ? "<!doctype html>" : "";
+    return doctype + "<html><head><meta charset=\"utf-8\">" + csp + "</head>" + code;
   }
   // A fragment: wrap it in a minimal document.
   return "<!doctype html><html><head><meta charset=\"utf-8\">" + csp + "</head><body>"

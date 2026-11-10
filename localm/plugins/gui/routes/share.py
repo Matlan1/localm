@@ -53,8 +53,8 @@ def _memory_inbox(app) -> dict:
 
 
 def _privacy_mode() -> bool:
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("server") == SessionMode.PRIVACY
+    from localm.audit import automatic_write_allowed
+    return not automatic_write_allowed("server")
 
 
 def _memory_inbox_bytes(store: dict) -> int:

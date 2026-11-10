@@ -48,11 +48,13 @@ def git_argv(*args: str) -> list[str]:
 
 def git_env(env: Optional[dict] = None) -> dict:
     """Environment for a hardened git: *env* (default ``os.environ``) copied,
-    with the system config ignored and program-naming variables removed."""
+    with program-naming variables removed. The system and global config stay in
+    effect (line endings, credential helper, symlinks); the ``-c`` settings in
+    :func:`git_argv` override them for every hardened key. See
+    test_system_line_ending_config_still_applies."""
     out = dict(os.environ if env is None else env)
     for name in _DROPPED_ENV:
         out.pop(name, None)
-    out["GIT_CONFIG_NOSYSTEM"] = "1"
     return out
 
 

@@ -154,6 +154,14 @@ _GOOD_HEADER_CTX_V3 = _GOOD_HEADER_CTX_V2.replace(
     "    enum ggml_type type_v;\n    size_t moe_cache_size;\n",
 )
 
+# context_params after upstream b12191 inserted moe_cache_cpu_share directly
+# after moe_cache_size - localm's context_params V4 layout. Native size
+# 168 -> 176.
+_GOOD_HEADER_CTX_V4 = _GOOD_HEADER_CTX_V3.replace(
+    "    size_t moe_cache_size;\n",
+    "    size_t moe_cache_size;\n    float  moe_cache_cpu_share;\n",
+)
+
 
 def test_embedded_headers_are_the_three_real_layouts():
     """Guards the fixtures themselves: if the V2 or V3 edit above stopped
@@ -168,7 +176,9 @@ def test_embedded_headers_are_the_three_real_layouts():
     assert abichk._header_context_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V2) == "v2"
     assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V3) == "v3"
+    assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V4) == "v4"
     assert _GOOD_HEADER_CTX_V3 != _GOOD_HEADER_CTX_V2
+    assert _GOOD_HEADER_CTX_V4 != _GOOD_HEADER_CTX_V3
 
 
 @pytest.mark.parametrize("struct", ["llama_model_params", "llama_context_params", "llama_batch"])
@@ -250,10 +260,41 @@ def test_context_params_v2_and_v3_are_not_interchangeable():
     assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v3") > 0
 
 
+def test_context_params_v4_header_matches_the_v4_class_field_for_field(capsys):
+    """Every upstream field of the moe_cache_cpu_share header resolves to the
+    same offset and size in LlamaContextParamsV4, including the further 8-byte
+    shift (the float plus its alignment pad) of everything from abort_callback
+    on."""
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V4, "v1", "v4") == 0
+    out = capsys.readouterr().out
+    assert "upstream native size: 176" in out
+    for line in ("moe_cache_size                 offset 112 size 8",
+                 "moe_cache_cpu_share            offset 120 size 4",
+                 "abort_callback                 offset 128 size 8",
+                 "abort_callback_data            offset 136 size 8",
+                 "embeddings                     offset 144 size 1",
+                 "samplers                       offset 152 size 8",
+                 "ctx_other                      offset 168 size 8"):
+        assert line in out, line
+
+
+def test_context_params_v3_and_v4_are_not_interchangeable(capsys):
+    """A moe_cache_cpu_share header against the V3 class is what the binding
+    did before V4 existed; it must fail, and so must the reverse."""
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V4, "v1", "v3") > 0
+    out = capsys.readouterr().out
+    assert "upstream field 'moe_cache_cpu_share' at offset 120 missing in localm" in out
+    assert "abort_callback: upstream offset 128 != localm offset 120" in out
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V3, "v1", "v4") > 0
+    assert "abort_callback: upstream offset 120 != localm offset 128" in (
+        capsys.readouterr().out)
+
+
 def test_pinned_refs_cover_every_context_params_layout():
-    """The default run must reach a moe_cache_size header, or the
-    seen_context_layouts gate in main() fails every run."""
+    """The default run must reach a moe_cache_size and a moe_cache_cpu_share
+    header, or the seen_context_layouts gate in main() fails every run."""
     assert "ctx_v3" in abichk.LLAMA_ABI_REFS
+    assert "ctx_v4" in abichk.LLAMA_ABI_REFS
 
 
 def test_layout_natural_alignment():
@@ -680,10 +721,27 @@ def _state_v3_headers() -> str:
     assert text.count("n_voices") == 1 and "voice;" not in text
     return text + (
         "MTMD_API const char * mtmd_gen_audio_voice_name(const mtmd_context * ctx, int32_t idx);\n"
-        "MTMD_API mtmd_bitmap * mtmd_gen_audio_get_voice(const mtmd_context * ctx, const char * name);\n")
+        "MTMD_API mtmd_bitmap * mtmd_gen_audio_get_voice(const mtmd_context * ctx, const char * name);\n"
+        "MTMD_API struct mtmd_helper_gen_audio_inp mtmd_helper_gen_audio_inp_default(void);\n")
 
 
 _MTMD_STATE_V3 = _state_v3_headers()
+
+_V4_SEED_LINE = "    uint32_t seed; // UINT32_MAX for random (default: random)\n"
+_V4_TEMP_LINE = ("    float    temp; // audio frame temperature if the model supports it, "
+                 "< 0 = model default, 0 = greedy\n")
+
+
+def _state_v4_headers() -> str:
+    """The b12219 change: temp inserted before seed in the helper input, no
+    new function."""
+    assert _MTMD_STATE_V3.count(_V4_SEED_LINE) == 1
+    text = _MTMD_STATE_V3.replace(_V4_SEED_LINE, _V4_TEMP_LINE + _V4_SEED_LINE)
+    assert text.count("float    temp;") == 1
+    return text
+
+
+_MTMD_STATE_V4 = _state_v4_headers()
 
 _MTMD_LEGACY = _MTMD_SPEECH_COMMON + """
 struct mtmd_helper_gen_audio_inp {
@@ -733,6 +791,7 @@ MTMD_API int32_t mtmd_gen_audio_process(mtmd_context * ctx,
 @pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
                                              (_MTMD_STATE_V2, "state_v2"),
                                              (_MTMD_STATE_V3, "state_v3"),
+                                             (_MTMD_STATE_V4, "state_v4"),
                                              (_MTMD_LEGACY, "legacy")])
 def test_speech_binding_matches_each_interface(text, interface, capsys):
     seen = set()
@@ -745,6 +804,7 @@ def test_speech_binding_matches_each_interface(text, interface, capsys):
 @pytest.mark.parametrize("text, interface", [(_MTMD_STATE, "state"),
                                              (_MTMD_STATE_V2, "state_v2"),
                                              (_MTMD_STATE_V3, "state_v3"),
+                                             (_MTMD_STATE_V4, "state_v4"),
                                              (_MTMD_LEGACY, "legacy")])
 def test_the_headers_are_classified_by_their_interface_marker(text, interface):
     assert abichk._header_speech_interface(text) == interface
@@ -821,6 +881,34 @@ def test_a_state_v3_field_removed_upstream_fails(field, line, capsys):
     assert abichk.check_speech(shrunk, "fixture", set()) > 0
     out = capsys.readouterr().out
     assert "FAIL  fields differ" in out and field in out
+
+
+def test_the_state_v3_binding_fails_against_the_state_v4_headers(monkeypatch, capsys):
+    v3 = abichk._localm_speech_binding("state_v3")
+    monkeypatch.setattr(abichk, "_localm_speech_binding", lambda interface: v3)
+    assert abichk.check_speech(_MTMD_STATE_V4, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out
+    assert "FAIL  size: upstream 72 != localm 64" in out
+
+
+def test_the_state_v4_binding_fails_against_the_state_v3_headers(monkeypatch, capsys):
+    v4 = abichk._localm_speech_binding("state_v4")
+    monkeypatch.setattr(abichk, "_localm_speech_binding", lambda interface: v4)
+    assert abichk.check_speech(_MTMD_STATE_V3, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out
+    assert "FAIL  size: upstream 64 != localm 72" in out
+
+
+def test_the_state_v4_temp_must_sit_before_the_seed(capsys):
+    moved = _MTMD_STATE_V4.replace(_V4_TEMP_LINE + _V4_SEED_LINE,
+                                   _V4_SEED_LINE + _V4_TEMP_LINE)
+    assert moved != _MTMD_STATE_V4
+    assert abichk.check_speech(moved, "fixture", set()) > 0
+    out = capsys.readouterr().out
+    assert "FAIL  fields differ" in out
+    assert "FAIL  temp: upstream offset 60" in out
 
 
 def test_a_voice_field_back_in_the_state_v3_helper_input_fails(capsys):
@@ -988,8 +1076,8 @@ def test_a_void_function_bound_with_a_result_fails(monkeypatch, capsys):
 def offline_main(monkeypatch):
     """main() with the llama.h half stubbed: every pinned ref passes and the
     layouts it reports cover every layout, so only the speech half decides."""
-    layouts = iter(["v1", "v2", "v3", "v3"] * 4)
-    ctx_layouts = iter(["v1", "v2", "v3", "v3"] * 4)
+    layouts = iter(["v1", "v2", "v3", "v3", "v3"] * 4)
+    ctx_layouts = iter(["v1", "v2", "v2", "v3", "v4"] * 4)
     monkeypatch.setattr(abichk, "_fetch_header", lambda ref: "")
     monkeypatch.setattr(abichk, "_header_model_params_layout", lambda h: next(layouts))
     monkeypatch.setattr(abichk, "_header_context_params_layout",
@@ -1014,7 +1102,8 @@ def test_the_default_run_checks_every_speech_interface(offline_main):
     assert offline_main([], {refs["legacy"]: _MTMD_LEGACY,
                              refs["state"]: _MTMD_STATE,
                              refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3}) == 0
+                             refs["state_v3"]: _MTMD_STATE_V3,
+                             refs["state_v4"]: _MTMD_STATE_V4}) == 0
     assert sorted(offline_main.fetched) == sorted(refs.values())
 
 
@@ -1023,7 +1112,8 @@ def test_the_default_run_fails_when_an_interface_goes_unchecked(offline_main, ca
     assert offline_main([], {refs["legacy"]: _MTMD_STATE,
                              refs["state"]: _MTMD_STATE,
                              refs["state_v2"]: _MTMD_STATE_V2,
-                             refs["state_v3"]: _MTMD_STATE_V3}) == 1
+                             refs["state_v3"]: _MTMD_STATE_V3,
+                             refs["state_v4"]: _MTMD_STATE_V4}) == 1
     assert "expected to check every speech generation interface" in (
         capsys.readouterr().out)
 

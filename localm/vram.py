@@ -644,7 +644,9 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
     instance_token``), forwarded to ``self_request`` so the call authenticates
     in OPEN mode too - see ``selfclient.self_request``'s docstring. Without it
     this round trip 403s on every keyless (default) server, which is a
-    permanent no-op of the exact VRAM collision this module exists to prevent."""
+    permanent no-op of the exact VRAM collision this module exists to prevent.
+    Sets ``job.chat_already_unloaded`` to True when the server reports that no
+    chat model was loaded, so ``restore_chat_after_media`` reloads nothing."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
         from localm.selfclient import self_request
@@ -663,6 +665,7 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
             # body falls through to the generic message below.
             pass
         if data.get("status") == "already_unloaded":
+            job.chat_already_unloaded = True
             job.push({"type": "line", "text":
                       "No chat model was loaded - VRAM already free."})
             return True
@@ -1084,17 +1087,21 @@ def restore_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                              *, swapped: bool = True):
     """Wrap the part of a media job body that runs after the chat model may have
     been unloaded. On leaving the block, whether it finished, failed or was
-    cancelled, run ``reload_chat_after_media`` once when *swapped*.
+    cancelled, run ``reload_chat_after_media`` once when *swapped* and the unload
+    did not find the chat model already unloaded (``job.chat_already_unloaded``).
 
     When the block raised, the reload is best effort: its own failure is logged to
     *job* and the block's exception propagates. After a clean exit a failing reload
     raises, so the job's ``mark_outcome`` decides the reported status. When not
     *swapped* and the job's reload-after setting is off, a reload an earlier job
     left to it is dropped (see ``reload_chat_after_media``)."""
+    def _owed() -> bool:
+        return swapped and getattr(job, "chat_already_unloaded", False) is not True
+
     try:
         yield
     except BaseException:
-        if swapped:
+        if _owed():
             try:
                 reload_chat_after_media(job, self_url, s, backend, media_label,
                                         instance_token)
@@ -1103,7 +1110,7 @@ def restore_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                           f"Reload deferred to the next message ({e})."})
         raise
     else:
-        if swapped:
+        if _owed():
             reload_chat_after_media(job, self_url, s, backend, media_label,
                                     instance_token)
         elif not s["reload_after"]:

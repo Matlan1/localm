@@ -115,7 +115,7 @@ def test_avif_decodes_when_pillow_has_it():
 def test_a_listed_format_this_pillow_lacks_is_skipped(monkeypatch):
     monkeypatch.setattr(media, "IMAGE_FORMATS", ("NOSUCHFORMAT",) + media.IMAGE_FORMATS)
     assert decode_image_url(_small_png()).size == (10, 10)
-    with pytest.raises(Image.UnidentifiedImageError):
+    with pytest.raises(VisionInputError, match="UnidentifiedImageError"):
         decode_image_url(_data_uri(b"not an image at all"))
 
 
@@ -128,9 +128,21 @@ def test_ico_is_refused_without_decoding_its_pixels(load_calls):
     assert load_calls["n"] == 0
 
 
-def test_bytes_no_format_recognises_keep_pillows_own_error():
-    with pytest.raises(Image.UnidentifiedImageError):
+def test_bytes_no_format_recognises_are_a_vision_input_error_with_pillows_reason():
+    with pytest.raises(VisionInputError, match="could not be read: UnidentifiedImageError") as ei:
         decode_image_url(_data_uri(b"not an image at all"))
+    assert not isinstance(ei.value, ImageLimitError)
+
+
+@pytest.mark.parametrize("url", [
+    "data:image/png;base64,AAAA",
+    "data:image/png;base64,!!!not base64!!!",
+    "data:image/png,rawnotbase64",
+])
+def test_a_corrupt_or_malformed_data_uri_is_a_vision_input_error(url):
+    with pytest.raises(VisionInputError, match="could not be read") as ei:
+        decode_image_url(url)
+    assert not isinstance(ei.value, ImageLimitError)
 
 
 def test_pillow_decompression_bomb_is_an_image_limit_error(monkeypatch):

@@ -594,6 +594,18 @@ class TestWorkerInProcess:
         with pytest.raises(GrammarUnsupportedError):
             list(w.chat_stream(HI, grammar="root ::= \"a\""))
 
+    def test_a_raw_prompt_is_tokenised_without_the_template(self, tmp_path, fakes):
+        w = _worker(_model_dir(tmp_path / "m", EXL3_QUANT), "exl3")
+        assert "".join(w.chat_stream([], raw_prompt="def f():", max_tokens=64)) == "Hello there!"
+        job = next(e for e in fakes.events() if e["event"] == "job")
+        assert job["n_prompt"] == len("def f():")
+
+    def test_an_empty_raw_prompt_is_refused(self, tmp_path, fakes):
+        w = _worker(_model_dir(tmp_path / "m", EXL3_QUANT), "exl3")
+        with pytest.raises(UnsupportedInputError):
+            list(w.chat_stream([], raw_prompt=""))
+        assert not any(e["event"] == "job" for e in fakes.events())
+
     def test_text_parts_render_through_the_template(self, tmp_path, fakes):
         w = _worker(_model_dir(tmp_path / "m", EXL3_QUANT), "exl3")
         parts = [{"role": "user", "content": [{"type": "text", "text": "a"},
@@ -668,6 +680,10 @@ class TestRealWorkerProcess:
             assert "".join(b.chat_stream(HI, max_tokens=64)) == "Hello there!"
             assert b.last_finish_reason == "stop"
             assert b.count_tokens("abcd") == 4
+            assert b.supports_raw_prompt is True
+            assert "".join(b.chat_stream([], raw_prompt="abc", max_tokens=64)) == "Hello there!"
+            jobs = [e for e in backend_env.events() if e["event"] == "job"]
+            assert jobs[-1]["n_prompt"] == len("abc")
 
             backend_env.set_mode("endless")
             stream = b.chat_stream(HI, max_tokens=500)

@@ -186,6 +186,55 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     return path
 
 
+def hold_marker_path(home: Path, instance_id: str) -> Path:
+    return run_dir(home) / f"{instance_id}.hold"
+
+
+def register_hold_marker(home: Path, *, instance_id: str, port: int,
+                         host: str, token: str, scheme: str = "http") -> Path:
+    """Write the hold-check-only marker of an ``--isolated`` server. It lets a
+    CLI sharing this home ask the server which model files it holds, and is
+    invisible to discovery: it is not a ``.json`` registry entry, so
+    ``list_entries``, ``snapshot`` and attach never see it."""
+    d = run_dir(home)
+    _lock_down_dir(d)
+    entry = {
+        "instance_id": instance_id,
+        "pid": os.getpid(),
+        "port": port,
+        "host": host,
+        "scheme": scheme,
+        "token": token,
+    }
+    path = hold_marker_path(home, instance_id)
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(entry, indent=2))
+    return path
+
+
+def list_hold_markers(home: Path) -> list[dict]:
+    """Readable hold markers of LIVE isolated servers (each gains ``alive``).
+    A marker whose process is gone, or that is unreadable, is removed."""
+    d = run_dir(home)
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    for f in sorted(d.glob("*.hold")):
+        entry = read_entry(f)
+        living = False
+        if entry is not None:
+            try:
+                living = pid_alive(int(entry.get("pid", -1) or -1))
+            except (TypeError, ValueError):
+                living = False
+        if not living:
+            unregister_instance(f)
+            continue
+        entry["alive"] = True
+        out.append(entry)
+    return out
+
+
 def unregister_instance(path) -> None:
     """Remove a registry entry - call only with the path THIS process wrote
     (ownership-tracked cleanup; never delete another instance's file)."""
@@ -1247,6 +1296,11 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
             home, instance_id=instance_id, port=port, host=host,
             root_dir=root_dir, mode=mode, token=token, scheme=scheme,
         )
+        _OWN_PATHS[instance_id] = path
+    else:
+        path = register_hold_marker(
+            home, instance_id=instance_id, port=port, host=host,
+            token=token, scheme=scheme)
         _OWN_PATHS[instance_id] = path
     try:
         yield {"instance_id": instance_id, "root_dir": root_dir, "port": port,
