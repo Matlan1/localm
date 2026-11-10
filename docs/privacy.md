@@ -222,7 +222,10 @@ equivalent (`report_issue.ps1`) when even that cannot run. It needs a git
 clone of the repo, so it is not available after `pip install localm`; if
 localm will not start at all on a pip install, file an
 [Issue](https://github.com/Matlan1/localm/issues) directly instead, since
-`localm bug-report` itself needs a working localm to run.
+`localm bug-report` itself needs a working localm to run. The Python standalone reporter attaches the same
+log digest as the in-app reporter, with the records that carry chat content
+left out (no log at all when it cannot load that filter), and the
+PowerShell one attaches no log tail when the log holds such a record.
 
 **In the GUI and the standalone reporter you see the full report before
 anything is sent, and sending needs your explicit OK.** `localm bug-report`
