@@ -442,8 +442,8 @@ and search snippets are untrusted input to the model, and
   the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
   the moment they exist, then restricted to the current user: `chmod` on
-  POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
-  dropped) on Windows. Both are best-effort - a failure is logged as a
+  POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
+  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
   applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
