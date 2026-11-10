@@ -654,7 +654,8 @@ def test_generate_image_threads_instance_token_to_unload(stub, tmp_path, monkeyp
         )
 
     assert ok, msg
-    unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+    unload_spy.assert_called_once()
+    assert unload_spy.call_args.args == ("http://127.0.0.1:9/v1", "tok-abc")
 
 
 def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
