@@ -30,7 +30,7 @@ settings render under **Settings > Privacy & data**, not on the Plugins page.
 Memory only *grows* in `log` or `full` session mode. The default mode is
 `privacy`, which writes nothing and, by default, recalls nothing (see
 [Privacy](#privacy-what-runs-in-each-mode) below). To actually accumulate a
-memory, set the mode to `log` or `full` (Settings > Privacy in the app, `--mode
+memory, set the mode to `log` or `full` (Settings > Privacy & data in the app, `--mode
 log` on `localm gui` / `serve`, or the `LOCALM_MODE` environment variable). See
 [privacy.md](privacy.md) for the full mode reference.
 

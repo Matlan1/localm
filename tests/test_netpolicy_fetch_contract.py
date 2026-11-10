@@ -854,6 +854,7 @@ class TestPinnedRequest:
             return session
 
         monkeypatch.setattr(netpolicy, "_session_for", fake)
+        monkeypatch.setattr(netpolicy, "check_url", lambda *a, **k: None)
         return calls, session
 
     def test_the_default_asks_for_a_session_without_the_search_backend_flag(
@@ -875,7 +876,7 @@ class TestPinnedRequest:
         (method, url, kw), = session.requests
         assert (method, url) == ("POST", "http://Example.com:8080/x")
         assert kw == {"headers": {"X-A": "1", "Host": "example.com:8080"},
-                      "timeout": 3}
+                      "timeout": 3, "allow_redirects": False}
         assert resp._localm_pin_session is session
 
     def test_a_call_without_headers_still_sends_the_host_header(self, monkeypatch):
