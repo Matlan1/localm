@@ -62,22 +62,33 @@ class RequestPrivacyMiddleware:
     ``X-Localm-Session-Mode``, or its ``X-Client-Id`` surface) inside
     ``audit.request_privacy``, from the route handler to the last byte of the
     response. A mode that cannot be resolved counts as privacy and is logged
-    as a warning. A request with neither header is passed through unread."""
+    as a warning. The mode is resolved off the event loop, and only for a
+    request that sends ``X-Localm-Session-Mode`` or names the chat or coder
+    surface in ``X-Client-Id``; any other request has the server's mode."""
 
     def __init__(self, app) -> None:
         self.app = app
 
     @staticmethod
+    def _may_narrow(scope) -> bool:
+        from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER, _CALLER_SURFACES
+        mode_name = SESSION_MODE_HEADER.lower().encode()
+        client_name = CLIENT_ID_HEADER.lower().encode()
+        for name, value in scope.get("headers") or ():
+            if name == mode_name:
+                return True
+            if name == client_name and (
+                    value.decode("latin-1").strip().lower() in _CALLER_SURFACES):
+                return True
+        return False
+
+    @staticmethod
     def _is_privacy(scope) -> bool:
-        from localm.audit import (CLIENT_ID_HEADER, SESSION_MODE_HEADER,
-                                  SessionMode)
-        names = (CLIENT_ID_HEADER.lower().encode(), SESSION_MODE_HEADER.lower().encode())
-        if not any(name in names for name, _value in scope.get("headers") or ()):
-            return False
+        from localm.audit import SessionMode
         try:
             from starlette.requests import Request
             return _hs.request_session_mode(Request(scope)) == SessionMode.PRIVACY
-        except Exception as e:   # noqa: BLE001 - an unknown mode must fail closed
+        except Exception as e:   # noqa: BLE001
             from localm.debuglog import logger as _dbg
             _dbg.warning("could not resolve the session mode of a request (%s: %s); "
                          "treating it as privacy mode", type(e).__name__, e)
@@ -87,8 +98,11 @@ class RequestPrivacyMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        from fastapi.concurrency import run_in_threadpool
         from localm.audit import request_privacy
-        with request_privacy(self._is_privacy(scope)):
+        private = (self._may_narrow(scope)
+                   and await run_in_threadpool(self._is_privacy, scope))
+        with request_privacy(private):
             await self.app(scope, receive, send)
 
 

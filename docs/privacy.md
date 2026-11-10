@@ -335,7 +335,8 @@ The guarantee follows each chat, not only the server. A privacy-mode session
 that attaches to a server running in `log` or `full` mode with the debug log on
 (`localm run MODEL --mode privacy`, or a coder session in privacy mode) has
 none of its messages, replies or raw model output written to that server's
-debug log, and its messages are neither stored in nor answered from memory.
+debug log, and memory treats it as privacy mode (nothing stored, and nothing
+recalled unless you opted into read-only recall in privacy mode).
 While such a request is being answered, the debug log holds back the content
 of every other chat on that server as well.
 
