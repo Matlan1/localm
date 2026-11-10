@@ -1505,7 +1505,9 @@ class IsolatedEmbedder(VramSizingMixin):
         not running. Must not be called with ``_rpc_lock`` held."""
         from localm.inference import load_lease
         from localm.inference.engine import _LOAD_LOCK
-        with load_lease.held(purpose="restarting the embedding model"), \
+        cpu = self.gpu_fallback_reason is not None or self.n_gpu_layers == 0
+        with load_lease.held(load_lease.lease_keys(n_gpu_layers=0 if cpu else None),
+                             purpose="restarting the embedding model"), \
                 load_lease.bounded(_LOAD_LOCK, what="restarting the embedding model"):
             runner = self._runner
             if runner is not None and runner.is_alive():
@@ -1978,7 +1980,9 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
 
 
 def embed_texts(texts: list[str]) -> Optional[list[list[float]]]:
-    """Embed *texts* with the shared embedder, or None when unavailable."""
+    """Embed *texts* with the shared embedder, or None when unavailable.
+    Raises :class:`~localm.inference.load_lease.LoadBusyError` as
+    :func:`get_embedder`."""
     emb = get_embedder()
     if emb is None:
         return None

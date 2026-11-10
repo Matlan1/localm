@@ -1424,13 +1424,19 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "internal default (bge-small-en-v1.5).")
             return False
         # Load and probe via the shared embedder, so it stays loaded for real use.
-        # get_embedder records the load error rather than raising it; it is surfaced
-        # verbatim below.
+        # get_embedder records a load error rather than raising it (surfaced
+        # verbatim below) and raises LoadBusyError while another load holds the GPU.
         line("Loading and testing the model…")
         # on_progress=line forwards get_embedder's stage announcements to the job,
         # since this call can run for minutes. _emit_stage swallows anything the
         # sink raises, so a push failure cannot fail a working load.
-        emb = get_embedder(on_progress=line)
+        from localm.inference.load_lease import LoadBusyError
+        try:
+            emb = get_embedder(on_progress=line)
+        except LoadBusyError as e:
+            line(f"error: '{model}' is selected but not loaded yet: {e} Run the "
+                 "setup again once the other load has finished.")
+            return False
         if emb is None:
             why = last_error() or "the model could not be loaded"
             line(f"error: '{model}' could not produce embeddings ({why}). It may "

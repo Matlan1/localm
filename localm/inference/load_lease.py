@@ -342,7 +342,10 @@ def _try_take(root: Path, keys: list[str], purpose: str) -> tuple[bool, str]:
             for k in keys:
                 final = root / (k + LEASE_SUFFIX)
                 if final.is_dir():
-                    continue
+                    rec = _read_owner(final)
+                    if isinstance(rec, dict) and rec.get("token") == _TOKEN:
+                        continue
+                    return False, f"the {k} lease of {_describe(rec)} could not be removed"
                 tmp = root / f"{_TMP_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
                 tmp.mkdir()
                 try:

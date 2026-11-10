@@ -292,6 +292,7 @@ class HFReranker:
     def __init__(self, path: str, device: Optional[str] = None) -> None:
         from localm.inference.backends.hf import HFBackend
         self.model_path = path
+        self.device = device
         self.active_requests = 0
         self._call_lock = threading.Lock()
         self._backend = HFBackend(path, device=device, task="rerank")
@@ -378,7 +379,8 @@ class HFReranker:
         this reranker is no longer the resident one."""
         from localm.inference import load_lease
         from localm.inference.engine import _LOAD_LOCK
-        with load_lease.held(purpose="restarting a reranker"), \
+        with load_lease.held(load_lease.lease_keys(device=getattr(self, "device", None)),
+                             purpose="restarting a reranker"), \
                 load_lease.bounded(_LOAD_LOCK, what="restarting a reranker"):
             if self._backend.loaded:
                 return
@@ -492,7 +494,9 @@ def _get_resident(path: str, purpose: str):
         if _RERANKER is not None and _RERANKER_KEY == key:
             return _RERANKER
     from localm.inference import load_lease
-    lease = load_lease.acquire(load_lease.lease_keys(), purpose="loading a reranker")
+    lease = load_lease.acquire(
+        load_lease.lease_keys(n_gpu_layers=emb._explicit_embedder_gpu_layers(load_config())),
+        purpose="loading a reranker")
     try:
         hf_device: Optional[str] = None
         pooling: object = emb.POOLING_AUTO

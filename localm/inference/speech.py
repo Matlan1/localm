@@ -452,8 +452,12 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
         _raise_latched(key)
     if on_progress is not None:
         on_progress({"stage": "loading"})
+    from localm.config import load_config
     from localm.inference import load_lease
-    lease = load_lease.acquire(load_lease.lease_keys(), purpose="loading a speech model")
+    configured = load_config().get("n_gpu_layers", 99)
+    lease = load_lease.acquire(
+        load_lease.lease_keys(n_gpu_layers=configured if type(configured) is int else None),
+        purpose="loading a speech model")
     try:
         from localm.inference.backends.llamacpp.mtmd_gen import DEFAULT_N_CTX
         ngl, reason = _choose_gpu_layers(model, DEFAULT_N_CTX)

@@ -781,20 +781,44 @@ class _SwitchLease:
         self.name = name
         self.keys: Optional[tuple] = None
 
-    async def take(self, loop) -> None:
-        """Take the lease of the current config's keys, once; raises
-        ``LoadBusyError`` past ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
+    async def take(self, loop, *, timeout: Optional[float] = None) -> None:
+        """Take the lease of the current config's keys, once, waiting at most
+        *timeout* seconds (default ``load_lease.LOAD_WAIT_TIMEOUT_S``); raises
+        ``LoadBusyError`` past it. A take whose caller is cancelled while it
+        waits releases the lease once the wait ends."""
         if self.keys is not None:
             return
         purpose = f"loading {self.name}"
-        self.keys = await loop.run_in_executor(
-            None, lambda: load_lease.acquire(load_lease.lease_keys(), purpose=purpose))
+        fut = loop.run_in_executor(
+            None, lambda: load_lease.acquire(load_lease.lease_keys(), purpose=purpose,
+                                             timeout=timeout))
+        try:
+            self.keys = await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            fut.add_done_callback(_release_late_lease)
+            raise
+
+    async def try_take(self, loop) -> bool:
+        """``take`` with a single attempt; False when another process holds
+        the lease."""
+        try:
+            await self.take(loop, timeout=0)
+        except LoadBusyError:
+            return False
+        return True
 
     async def drop(self, loop) -> None:
         """Release the lease when it was taken."""
         keys, self.keys = self.keys, None
         if keys:
             await loop.run_in_executor(None, load_lease.release, keys)
+
+
+def _release_late_lease(fut) -> None:
+    """Release the keys an abandoned ``_SwitchLease.take`` acquired."""
+    if fut.cancelled() or fut.exception() is not None:
+        return
+    load_lease.release(fut.result())
 
 
 async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
@@ -845,7 +869,11 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
             if heal_budget is not None:
-                await lease.take(loop)
+                try:
+                    await lease.take(loop)
+                except LoadBusyError:
+                    resident.reserve_context(previous_reserve)
+                    raise
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
             if (_engines.get(name) is resident and _is_reusable(resident)
@@ -871,8 +899,13 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
                     _postpone_placement_recheck(resident)
+            if heal_budget is not None and not await lease.try_take(loop):
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: not reloading '%s' for a better placement while "
+                          "another load holds the GPU, it is used as loaded", name)
+                _postpone_placement_recheck(resident)
+                heal_budget = None
             if heal_budget is not None:
-                await lease.take(loop)
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
                 fits = (heal_probe.probe_ok and heal_probe.measurable
@@ -7719,8 +7752,11 @@ async def grow_context_window(engine, tokens: int, *,
     ``context_grow_failed``, set here). When the reload raises, *engine* is
     registered again and loaded with its earlier window, and returned, the
     active model again when it was before the reload and no other model became
-    active meanwhile; the error is raised only when that fails too. Logs at
-    INFO (a failed reload at WARNING)."""
+    active meanwhile; the error is raised only when that fails too. A reload
+    refused with ``LoadBusyError`` (another load holds the GPU) does not set
+    ``context_grow_failed``; it is raised while *engine* is still loaded with
+    its earlier window, else *engine* is loaded again as above. Logs at INFO
+    (a failed reload at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or can() is not True:
@@ -7746,6 +7782,18 @@ async def grow_context_window(engine, tokens: int, *,
     try:
         await switch_engine(name, None, preempt=False, activate=False,
                             reserve_ctx=target, on_status=on_status, own_pins=1)
+    except LoadBusyError:
+        if _engines.get(name) is engine and engine.loaded:
+            raise
+        reserve = getattr(engine, "reserve_context", None)
+        if callable(reserve):
+            reserve(previous)
+        if _engines.get(name) is None:
+            engine.unloading = False
+            _engines[name] = engine
+        await switch_engine(name, None, preempt=False,
+                            activate=was_active and _active_model_name in (None, name),
+                            on_status=on_status)
     except Exception as exc:
         _dbg.warning("context: reloading '%s' with a %s-token window failed (%s: %s); "
                      "loading it again with its earlier window", name, target,

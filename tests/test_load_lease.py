@@ -561,3 +561,113 @@ def test_shared_residents_lists_an_unreadable_module_as_unknown(monkeypatch):
                    residency.SharedResident("reranker model", 0)]
     assert residency.pick_shared_eviction_victim(got).kind == "embedding model"
     assert residency.pick_shared_eviction_victim(got[1:]) is None
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+def test_a_lease_whose_reclaim_failed_is_not_counted_as_taken(tmp_path, monkeypatch):
+    from localm import instances
+    root = tmp_path / "lease"
+    _write_lease(root, "gpu0", {"pid": _dead_pid(), "space": instances.pid_space_id(),
+                                "start": None, "token": "gone"})
+    monkeypatch.setattr(load_lease, "_remove_dir", lambda d: None)
+    caught = None
+    try:
+        load_lease.acquire(["gpu0"], timeout=0, root=root)
+    except BaseException as e:      # noqa: BLE001 - the type is asserted below
+        caught = e
+    assert type(caught) is load_lease.LoadBusyError
+    assert "could not be removed" in str(caught)
+    assert json.loads((root / "gpu0.lease" / "owner.json").read_text())["token"] == "gone"
+
+
+def _foreign_holder(home: Path) -> Path:
+    root = home / "run" / "gpu-lease"
+    from localm import instances
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             creationflags=_NO_WINDOW)
+    _write_lease(root, load_lease.ALL_DEVICES,
+                 {"pid": child.pid, "space": instances.pid_space_id(),
+                  "start": load_lease._start_identity(child.pid), "token": "other"})
+    return child
+
+
+def test_switch_try_take_answers_false_while_another_process_holds_the_gpu():
+    from localm import config
+    from localm.inference import http_server as hs
+    child = _foreign_holder(config.HOME_DIR)
+    try:
+        lease = hs._SwitchLease("m")
+
+        async def go():
+            return await lease.try_take(asyncio.get_running_loop())
+
+        started = time.monotonic()
+        assert asyncio.run(go()) is False
+        assert time.monotonic() - started < 5
+        assert lease.keys is None
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_cancelled_switch_take_releases_the_lease_it_got_late(tmp_path):
+    from localm.inference import http_server as hs
+    gate = threading.Event()
+    real = load_lease.acquire
+
+    def slow_acquire(*a, **k):
+        gate.wait(5)
+        return real(*a, **k)
+
+    lease = hs._SwitchLease("m")
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(lease.take(loop))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        gate.set()
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if load_lease.held_keys() == {}:
+                break
+
+    with patch.object(load_lease, "acquire", slow_acquire):
+        asyncio.run(go())
+    assert load_lease.held_keys() == {}
+
+
+def test_a_busy_context_grow_is_not_latched_as_a_failed_grow(monkeypatch):
+    from localm.inference import http_server as hs
+    engine = MagicMock()
+    engine.can_reserve_context.return_value = True
+    engine.context_capacity.return_value = 4096
+    engine.loaded = True
+    engine.unloading = False
+    engine.context_grow_failed = None
+    monkeypatch.setitem(hs._engines, "grow-m", engine)
+    monkeypatch.setattr(hs, "engine_context_limit", lambda e: (None, None))
+
+    async def busy(*a, **k):
+        raise load_lease.LoadBusyError("Busy: a model is loading.")
+
+    monkeypatch.setattr(hs, "switch_engine", busy)
+    caught = None
+    try:
+        asyncio.run(hs.grow_context_window(engine, 9000))
+    except BaseException as e:      # noqa: BLE001 - the type is asserted below
+        caught = e
+    assert engine.context_grow_failed is None
+    assert type(caught) is load_lease.LoadBusyError
+
+
+def test_cpu_only_shared_loads_take_no_gpu_lease():
+    assert load_lease.lease_keys({"n_gpu_layers": 0}, n_gpu_layers=0) == ()
+    assert load_lease.lease_keys({}, device="cpu") == ()
+    assert load_lease.lease_keys({}, n_gpu_layers=None) == (load_lease.ALL_DEVICES,)
