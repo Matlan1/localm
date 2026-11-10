@@ -495,7 +495,7 @@ def test_explicit_comfy_without_comfyui_fails_and_never_runs_native(video_app, m
     from localm.config import update_config
     app, runner = video_app
     update_config(lambda cfg: cfg["plugins"]["video"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_video.backend"]
+    mod = sys.modules["localm.plugins.builtin.video.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (False, "ComfyUI is not running"))
     with TestClient(app) as c:
@@ -903,7 +903,7 @@ def test_a_flow_shift_is_refused_for_comfyui(video_app, monkeypatch):
     from localm.config import update_config
     app, runner = video_app
     update_config(lambda cfg: cfg["plugins"]["video"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_video.backend"]
+    mod = sys.modules["localm.plugins.builtin.video.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (True, "ready"))
     with TestClient(app) as c:

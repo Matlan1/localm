@@ -34,17 +34,10 @@ PICKERS = [
 
 
 def _installed_backend(plugin: str):
-    """The backend module the INSTALLED plugin actually uses.
-
-    PluginManager loads a plugin under a synthetic package name
-    (``_localm_plugin_image``), so ``_localm_plugin_image.backend`` is a
-    DIFFERENT module object from ``localm.plugins.builtin.image.backend``.
-    Patching the canonical path does nothing: the real _comfy_model_slots then
-    runs and returns None (no ComfyUI in the test env), so an "unreachable"
-    assertion would pass for the wrong reason.
-    """
+    """The backend module the INSTALLED plugin actually uses: a first-party
+    plugin loads under its real name, ``localm.plugins.builtin.<plugin>``."""
     import sys
-    mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
+    mod = sys.modules.get(f"localm.plugins.builtin.{plugin}.backend")
     assert mod is not None, (
         f"the installed {plugin} plugin's backend module was not found - the "
         "plugin loader's naming changed and this test would silently patch nothing")

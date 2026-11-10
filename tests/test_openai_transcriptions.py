@@ -229,7 +229,7 @@ class TestRefusals:
 
     def test_file_over_the_cap_is_413_and_never_reaches_the_worker(
             self, client, worker, monkeypatch):
-        mod = sys.modules["_localm_plugin_voice.transcriptions"]
+        mod = sys.modules["localm.plugins.builtin.voice.transcriptions"]
         monkeypatch.setattr(mod, "MAX_AUDIO_BYTES", 1000)
         r = _post(client, files={"file": ("a.wav", b"x" * 1001, "audio/wav")})
         assert r.status_code == 413
@@ -240,7 +240,7 @@ class TestRefusals:
 
     def test_body_over_the_cap_is_refused_before_it_is_buffered(
             self, client, worker, monkeypatch):
-        mod = sys.modules["_localm_plugin_voice.transcriptions"]
+        mod = sys.modules["localm.plugins.builtin.voice.transcriptions"]
         monkeypatch.setattr(mod, "MAX_AUDIO_BYTES", 1000)
         monkeypatch.setattr(mod, "FORM_OVERHEAD_BYTES", 100)
         r = _post(client, files={"file": ("a.wav", b"x" * 5000, "audio/wav")})

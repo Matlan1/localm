@@ -8,11 +8,15 @@
 #   - answers /v1/models with that key and refuses it without (or with a wrong) key,
 #   - runs as a non-root user and reports healthy,
 #   - accepts a key passed in LOCALM_API_KEY.
+#   - carries the license texts: localm's LICENSE and THIRD-PARTY-NOTICES.md and uv's
+#     licenses under /usr/share/doc, the Python packages' dist-info licenses, the
+#     llama.cpp license beside the runtime and the Ubuntu packages' copyright files.
 # For a cuda or cuda13 image, which cannot be given a GPU here, it also checks that
 #   - the CUDA build, the CUDA runtime libraries and the staged-runtime record are
 #     in the image, for the right CUDA line,
 #   - the container refuses to serve without a GPU and says why,
 #   - `localm doctor` reports the runtime as fetched without a GPU,
+#   - NVIDIA's license files are beside the CUDA libraries,
 # and runs the checks above with LOCALM_ALLOW_NO_GPU=1.
 set -euo pipefail
 
@@ -63,6 +67,30 @@ wait_for_server() {
 published_port() {
   docker port "$1" 8642/tcp | head -n 1 | sed 's/.*://'
 }
+
+echo "== the image carries the license texts"
+licenses="$(docker run --rm --entrypoint python "$IMAGE" -c '
+import localm_llama_runtime, sys, sysconfig
+from pathlib import Path
+need = [Path("/usr/share/doc/localm/LICENSE"), Path("/usr/share/doc/localm/THIRD-PARTY-NOTICES.md"),
+        Path("/usr/share/doc/uv/LICENSE-MIT"), Path("/usr/share/doc/uv/LICENSE-APACHE"),
+        Path(localm_llama_runtime.LIB_DIR) / "LICENSE.llama-cpp",
+        Path("/usr/share/doc/tini/copyright"), Path("/usr/share/doc/curl/copyright")]
+for p in need:
+    if not p.is_file() or p.stat().st_size == 0:
+        sys.exit(f"missing or empty: {p}")
+site = Path(sysconfig.get_paths()["purelib"])
+unlicensed = [d.name for d in site.glob("*.dist-info")
+              if not any(f.is_file() for f in d.rglob("*") if "licen" in f.name.lower() or "copying" in f.name.lower()
+                         or f.parent.name == "licenses")]
+print("dist-info without a license file: " + (" ".join(sorted(unlicensed)) or "none"))
+print("lib:" + " ".join(sorted(p.name for p in Path(localm_llama_runtime.LIB_DIR).iterdir())))
+')" || fail "license texts missing from ${IMAGE}: $licenses"
+echo "$licenses"
+case "$BACKEND_LABEL" in
+  cuda|cuda13)
+    grep -q '^lib:.*LICENSE\.nvidia-' <<<"$licenses" || fail "no NVIDIA license file beside the CUDA libraries: $licenses" ;;
+esac
 
 echo "== no key: the container must refuse to start"
 set +e

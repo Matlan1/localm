@@ -2424,6 +2424,7 @@
   "settings.instances.stopFailed": "No se pudo detener: {message}",
   "settings.instances.stopTitle": "¿Detener esta instancia?",
   "settings.instances.stoppedToast": "{name} detenido",
+  "settings.instances.staleToast": "Esa entrada estaba obsoleta: su servidor ya había terminado y el PID {pid} ahora pertenece a otro programa. Se eliminó la entrada; no se detuvo nada.",
   "settings.instances.title": "Otras instancias en ejecución",
   "settings.instances.unknownDir": "un directorio desconocido",
   "settings.intro": "Se guarda en <code>config.json</code> en tu directorio de datos. Elige una sección a la izquierda; cada una se guarda por separado. Los valores del motor se aplican la próxima vez que se cargue un modelo.",

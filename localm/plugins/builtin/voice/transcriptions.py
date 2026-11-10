@@ -35,7 +35,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from localm import voice_formats
-from localm.bindhost import LOCAL_ORIGIN_PATTERN
 from localm.executor import get_plugin_executor
 from localm.inference.errors import route_errors
 from localm.multipartform import Form, MultipartError, read_form
@@ -56,7 +55,6 @@ _UNSUPPORTED_FIELDS = ("include[]", "include", "chunking_strategy",
                        "known_speaker_names[]", "known_speaker_names",
                        "known_speaker_references[]", "known_speaker_references")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}$")
-_LOCAL_ORIGIN_RE = re.compile(rf"^{LOCAL_ORIGIN_PATTERN}$")
 
 
 @dataclass
@@ -71,23 +69,9 @@ class TranscriptionParams:
 
 
 def _origin_allowed(request: Request) -> bool:
-    """False for a browser request whose Origin is not this server itself, a
-    local page (localhost or 127.0.0.1, any port) or a configured
-    ``cors_origins`` entry. A request with no Origin (an SDK, curl) passes.
-
-    A multipart upload is a CORS "simple request", so a browser sends it from any
-    website without a preflight; this keeps the route at the same reach as the
-    JSON inference routes, whose preflight only local origins pass."""
-    origin = request.headers.get("origin")
-    if not origin:
-        return True
-    if origin.split("://", 1)[-1] == request.headers.get("host", ""):
-        return True
-    if _LOCAL_ORIGIN_RE.match(origin):
-        return True
-    from localm.config import load_config
-    configured = load_config().get("cors_origins")
-    return configured == "*" or (isinstance(configured, list) and origin in configured)
+    """``security.simple_request_origin_allowed`` for this route."""
+    from localm.inference.app_assembly.security import simple_request_origin_allowed
+    return simple_request_origin_allowed(request)
 
 
 def _audio_too_large() -> str:
