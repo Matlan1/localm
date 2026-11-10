@@ -153,6 +153,7 @@ class PluginSpec:
     surface: Surface = field(default_factory=Surface)
     cli_entry: str = ""                      # legacy "module:attr" Click command
     register_entry: str = ""                 # "module:attr" -> register(host)
+    tool_entry: str = ""                     # legacy "module:attr" entry (coder tools / CLI)
     tool_exports: list = field(default_factory=list)      # [tools] exports: coder
                                              # agent tools a third-party plugin
                                              # exports (loader.PluginManifest's
@@ -162,6 +163,12 @@ class PluginSpec:
     def __post_init__(self) -> None:
         if not self.scope:
             self.scope = self.name
+
+    @property
+    def tools_only(self) -> bool:
+        """True when the manifest declares ``entry`` and no ``register``: the
+        coder's tool loader owns it and the engine has nothing to load."""
+        return bool(self.tool_entry) and not self.register_entry
 
     def compatible(self) -> bool:
         """True when this plugin targets an api_version the engine supports."""
