@@ -31,6 +31,7 @@ def home(tmp_path, monkeypatch):
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv(security.ALLOWED_HOSTS_ENV, raising=False)
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
@@ -322,6 +323,46 @@ def test_allowed_hosts_star_accepts_any_well_formed_host(home):
     assert _get(client, "/health", "[::1").status_code == 400
 
 
+def test_the_environment_variable_adds_names(home, monkeypatch):
+    monkeypatch.setenv(security.ALLOWED_HOSTS_ENV, "localm, NAS.local ,my_box")
+    _write_config(home, allowed_hosts=["ai.example.com"])
+    client = TestClient(_app("0.0.0.0"))
+    for host in ("localm:8642", "nas.local", "my_box:8642", "ai.example.com"):
+        assert _get(client, "/health", host).status_code == 200, host
+    assert _get(client, "/health", "nas").status_code == 400
+
+
+def test_the_environment_variable_star_turns_the_check_off(home, monkeypatch):
+    monkeypatch.setenv(security.ALLOWED_HOSTS_ENV, "*")
+    assert _get(TestClient(_app()), "/health", "evil.example").status_code == 200
+
+
+def test_a_hand_edited_string_setting_is_read_as_a_list(home):
+    _write_config(home, allowed_hosts="proxy.example, other.example")
+    client = TestClient(_app())
+    assert _get(client, "/health", "proxy.example").status_code == 200
+    assert _get(client, "/health", "other.example").status_code == 200
+
+
+def test_unusable_hand_edited_entries_are_logged_and_ignored(home, caplog):
+    _write_config(home, allowed_hosts=["ok.example", "http://bad.example", 7])
+    client = TestClient(_app())
+    with caplog.at_level(logging.WARNING, logger="localm.security"):
+        assert _get(client, "/health", "ok.example").status_code == 200
+    assert _get(client, "/health", "bad.example").status_code == 400
+    ignored = [r.getMessage() for r in caplog.records if "ignoring" in r.getMessage()]
+    assert any("'http://bad.example'" in m for m in ignored), ignored
+    assert any("7" in m for m in ignored), ignored
+
+
+def test_a_setting_of_the_wrong_type_is_logged_and_ignored(home, caplog):
+    _write_config(home, allowed_hosts={"a": 1})
+    with caplog.at_level(logging.WARNING, logger="localm.security"):
+        assert _get(TestClient(_app()), "/health", "a").status_code == 400
+    assert any("expected a list of host names" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_the_policy_is_built_once_per_app(home, monkeypatch):
     built = []
     real = security.build_host_policy
@@ -389,6 +430,7 @@ def test_allowed_hosts_goes_through_the_settings_validation():
     ("[0:0:0:0:0:0:0:1]", "::1"), ("10.0.0.1:1", "10.0.0.1"),
     ("", None), ("localhost:", None), ("[::1", None), ("a@b", None),
     ("a..b", None), (".a", None), ("a:1:2", None), ("[zz::1]", None),
+    ("My_Box:8642", "my_box"),
 ])
 def test_host_header_name(value, expected):
     assert bindhost.host_header_name(value) == expected

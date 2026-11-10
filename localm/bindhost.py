@@ -205,7 +205,7 @@ def is_own_address(host) -> bool:
     return addr in _interface_addresses()
 
 
-_HOST_NAME_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$")
+_HOST_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+(:\d{1,5})?$")
 _HOST_V6_RE = re.compile(r"^\[([0-9A-Fa-f:.]+)\](:\d{1,5})?$")
 
 

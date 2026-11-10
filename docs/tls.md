@@ -164,8 +164,9 @@ then a restart:
 localm config allowed_hosts llm.example.internal
 ```
 
-nginx's default (`Host` set to the `proxy_pass` address, `127.0.0.1:8642`) needs
-nothing.
+nginx's default sets `Host` to the `proxy_pass` address: `127.0.0.1:8642` or
+another IP address needs nothing, a name (such as a compose service name,
+`http://localm:8642`) needs that name in `allowed_hosts`.
 
 ### Caddy (automatic certificates)
 

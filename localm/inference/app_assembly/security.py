@@ -561,20 +561,50 @@ def own_host_names(certfile: Optional[str] = None) -> set[str]:
     return {n for n in names if n}
 
 
+ALLOWED_HOSTS_ENV = "LOCALM_ALLOWED_HOSTS"
+
+
+def _allowed_host_entries(raw, source: str) -> tuple[set[str], bool]:
+    """``(names, any_host)`` from one ``allowed_hosts`` value (a list, or a
+    comma-separated string, or ``"*"``). Entries that are not host names, and a
+    value of any other type, are logged at WARNING naming *source* and ignored."""
+    if raw is None:
+        return set(), False
+    if isinstance(raw, str):
+        if raw.strip() == "*":
+            return set(), True
+        entries = [p for p in raw.split(",") if p.strip()]
+    elif isinstance(raw, (list, tuple)):
+        entries = list(raw)
+    else:
+        _log.warning("Host check: ignoring %s: expected a list of host names, got %r",
+                     source, raw)
+        return set(), False
+    names: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, str) and entry.strip() == "*":
+            return set(), True
+        norm = normalize_host_name(entry) if isinstance(entry, str) else None
+        if norm:
+            names.add(norm)
+        else:
+            _log.warning("Host check: ignoring %r in %s: not a host name or address",
+                         entry, source)
+    return names, False
+
+
 def configured_allowed_hosts() -> tuple[frozenset[str], bool]:
-    """``(names, any_host)`` from the ``allowed_hosts`` setting: the normalised
-    names, and True when the setting is ``"*"``."""
+    """``(names, any_host)`` from the ``allowed_hosts`` setting and the
+    ``LOCALM_ALLOWED_HOSTS`` environment variable (comma-separated), combined:
+    the normalised names, and True when either is ``"*"``."""
+    import os
+
     from localm.config import load_config
-    raw = load_config().get("allowed_hosts")
-    if raw == "*":
-        return frozenset(), True
-    names = set()
-    if isinstance(raw, (list, tuple)):
-        for entry in raw:
-            norm = normalize_host_name(entry) if isinstance(entry, str) else None
-            if norm:
-                names.add(norm)
-    return frozenset(names), False
+    names, any_host = _allowed_host_entries(
+        load_config().get("allowed_hosts"), "the allowed_hosts setting")
+    env_names, env_any = _allowed_host_entries(
+        os.environ.get(ALLOWED_HOSTS_ENV), ALLOWED_HOSTS_ENV)
+    return frozenset(names | env_names), any_host or env_any
 
 
 class HostPolicy:
@@ -619,9 +649,10 @@ class HostHeaderGuard:
     sets it). Accepted: ``localhost``, ``*.localhost`` and loopback addresses on
     every bind; on a network bind (``app.state.bind_host`` not loopback) also any
     IP literal, this machine's own names and the certificate's names; on every
-    bind the ``allowed_hosts`` setting. The port is not compared. Refused:
+    bind the ``allowed_hosts`` setting and ``LOCALM_ALLOWED_HOSTS``. The port is not compared. Refused:
     anything else, and a missing, empty, repeated or malformed ``Host``. HTTP
-    gets a 400 JSON reply, a WebSocket a close before accept (code 1008). The
+    gets a 400 JSON reply, a WebSocket a close before accept (code 1008, which
+    uvicorn answers as HTTP 403). The
     policy is built once per app, in a worker thread, the first time a name
     needs it. The first refusal per app is logged at WARNING, later ones at
     DEBUG."""

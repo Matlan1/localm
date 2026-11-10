@@ -104,9 +104,22 @@ services:
       - localm-data:/data
     environment:
       LOCALM_API_KEY: ${LOCALM_API_KEY:?set LOCALM_API_KEY in .env}
+      LOCALM_ALLOWED_HOSTS: localm,nas,nas.local
 volumes:
   localm-data:
 ```
+
+## Host names
+
+The server answers only to names it knows as its own (see the Host check in
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding)).
+Inside a container those are `localhost`, the container id and IP addresses, so
+an IP address always works, but a name you reach it by gets `400 Host not
+allowed`: the Docker host's name (`https://nas:8642`, `nas.local`) or the compose
+service name a proxy container uses (`http://localm:8642`). List those names in
+`LOCALM_ALLOWED_HOSTS`, comma-separated, as in the compose file above, or with
+`docker run -e LOCALM_ALLOWED_HOSTS=nas,nas.local ...`. The `allowed_hosts`
+setting in the data volume works too.
 
 ## What lives where
 

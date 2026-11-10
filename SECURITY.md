@@ -90,15 +90,16 @@ locked out of a server that refuses to start, with no way back in.
 
 ### Host header check (DNS rebinding)
 
-A running server answers only to its own names. Every request, WebSockets
-included, must carry a `Host` header naming `localhost`, a `*.localhost` name or
+A running server answers only to its own names. Every request, WebSocket
+upgrades included, must carry a `Host` header naming `localhost`, a `*.localhost` name or
 a loopback address; on a network bind also any IP address, this machine's own
 host name (short and fully qualified, and `<hostname>.local`), the mDNS name,
 its Tailscale names and the names in the TLS certificate. Names listed in the
-owner-only `allowed_hosts` setting are accepted on every bind (`*.example.com`
-covers one label, `"*"` turns the check off). Anything else, and a missing,
-repeated or malformed `Host`, gets `400` before any route, CORS reply or static
-file. The port is not compared. This stops DNS rebinding: a page on an attacker's
+owner-only `allowed_hosts` setting or the comma-separated `LOCALM_ALLOWED_HOSTS`
+environment variable are accepted on every bind (`*.example.com` covers one
+label, `"*"` turns the check off). Anything else, and a missing, repeated or
+malformed `Host`, gets `400` (a WebSocket upgrade `403`) before any route, CORS
+reply or static file. The port is not compared. This stops DNS rebinding: a page on an attacker's
 domain whose DNS answer is switched to `127.0.0.1` is same-origin to the browser,
 so without this check it would also pass the same-origin checks below and, with
 no key set, the keyless inference API.
