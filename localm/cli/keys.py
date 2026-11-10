@@ -146,15 +146,9 @@ def key_show(reveal):
     from localm import auth
     active = auth.get_api_key()
     if not active and auth.any_key_configured():
-        named = len(auth.list_keys())
-        if named:
-            console.print(f"[yellow]no owner key[/yellow] - {named} named key(s) "
-                          "are set, so the server requires a key "
-                          "('localm key list' shows them).")
-        else:
-            console.print("[yellow]no usable owner key[/yellow] - a key file is "
-                          "present but cannot be read, so the server refuses "
-                          "every request. 'localm key clear' removes it.")
+        console.print("[yellow]no owner key[/yellow] - named keys, or a key file "
+                      "that cannot be read, are configured, so the server "
+                      "requires a key ('localm key list' shows named keys).")
         return
     if not active:
         console.print("[yellow]open mode[/yellow] - no API key set; the server "
