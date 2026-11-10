@@ -245,7 +245,8 @@ def build(engines: EngineCache, coder_shell: bool = False,
             UNC/device path or carries a reserved character (via
             ``pathsafe.confined_absolute_or_under``), does not end in an image
             extension, or names a file (or its ``.json`` sidecar) that already
-            exists. The message never echoes the client-supplied string."""
+            exists. The message never echoes the client-supplied string. The
+            path is not created here; ``_reserve`` does that."""
             refused = ValueError(
                 "output_path must name a new image file ("
                 + ", ".join(_OUTPUT_IMAGE_SUFFIXES)
@@ -275,6 +276,27 @@ def build(engines: EngineCache, coder_shell: bool = False,
                 raise refused
             return resolved
 
+        def _reserve(path: Path) -> None:
+            """Create *path* as an empty file, failing if anything exists there,
+            so the backend only ever replaces a file this call created. Raises
+            ``ValueError`` when the name is taken and ``OSError`` when the file
+            cannot be created."""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(path, "xb"):
+                    pass
+            except FileExistsError as e:
+                raise ValueError("output_path names a file that already exists") from e
+
+        def _release(path: Path) -> None:
+            """Remove the reservation of *path* when nothing was written into it."""
+            try:
+                if path.stat().st_size == 0:
+                    path.unlink()
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("could not remove the empty image placeholder (%s)", e)
+
         try:
             out_arg = args.get("output_path")
             out = (_confine_output(out_arg) if out_arg
@@ -298,34 +320,50 @@ def build(engines: EngineCache, coder_shell: bool = False,
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
         from localm.plugins.builtin.image import backend as image_backend
-        with _quiet_stdout():
-            native = image_backend.generate_unless_comfy(
-                prompt, out,
-                guidance=args.get("guidance"),
-                negative_prompt=args.get("negative_prompt"),
-                seed=args.get("seed"),
-                input_image=input_p,
-                denoise=args.get("denoise"),
-                write_sidecar=not is_privacy,
-                delete_outputs=is_privacy,
-                on_progress=_srv.report_progress,
-            )
-        if native is not None:
-            ok, message = native
-            return _text_result(message, is_error=not ok)
-        with _quiet_stdout():
-            ok, message = gen_img(
-                prompt, out,
-                api_url=api_url,
-                guidance=args.get("guidance"),
-                negative_prompt=args.get("negative_prompt"),
-                seed=args.get("seed"),
-                input_image=input_p,
-                denoise=args.get("denoise"),
-                write_sidecar=not is_privacy,
-                delete_outputs=is_privacy,
-                on_progress=_srv.report_progress,
-            )
+
+        def _generate():
+            with _quiet_stdout():
+                native = image_backend.generate_unless_comfy(
+                    prompt, out,
+                    guidance=args.get("guidance"),
+                    negative_prompt=args.get("negative_prompt"),
+                    seed=args.get("seed"),
+                    input_image=input_p,
+                    denoise=args.get("denoise"),
+                    write_sidecar=not is_privacy,
+                    delete_outputs=is_privacy,
+                    on_progress=_srv.report_progress,
+                )
+            if native is not None:
+                return native
+            with _quiet_stdout():
+                return gen_img(
+                    prompt, out,
+                    api_url=api_url,
+                    guidance=args.get("guidance"),
+                    negative_prompt=args.get("negative_prompt"),
+                    seed=args.get("seed"),
+                    input_image=input_p,
+                    denoise=args.get("denoise"),
+                    write_sidecar=not is_privacy,
+                    delete_outputs=is_privacy,
+                    on_progress=_srv.report_progress,
+                )
+
+        try:
+            _reserve(out)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+        except OSError as e:
+            return _text_result(
+                f"could not create the output file: {e.strerror or type(e).__name__}",
+                is_error=True)
+        ok = False
+        try:
+            ok, message = _generate()
+        finally:
+            if not ok:
+                _release(out)
         return _text_result(message, is_error=not ok)
 
     def run_coder_task(args: dict) -> dict:

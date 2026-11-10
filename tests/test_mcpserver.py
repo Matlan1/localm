@@ -1221,8 +1221,8 @@ class TestGenerateImageSafety:
         from localm.config import home_dir
         server, _ = _server()
         home = home_dir()
-        home.mkdir(parents=True, exist_ok=True)
-        victim = home / "LongExistingFileName.png"
+        (home / "mcp-images").mkdir(parents=True, exist_ok=True)
+        victim = home / "mcp-images" / "LongExistingFileName.png"
         victim.write_bytes(b"do not overwrite me")
         alias = "LONGEX~1.PNG"
         victim_resolved = victim.resolve()
@@ -1316,6 +1316,39 @@ class TestGenerateImageSafety:
         assert r["result"].get("isError") is not True, r["result"]
         mock_gen.assert_called_once()
         assert mock_gen.call_args.args[1] == expected
+
+    def test_a_file_created_after_the_check_is_not_replaced(self):
+        """The existence check and the write are not one step, so the call
+        creates its target exclusively first: a file that appears in between
+        (another writer) is refused, not overwritten."""
+        from types import SimpleNamespace
+        from localm.config import home_dir
+        server, _ = _server()
+        target = home_dir().resolve() / "mcp-images" / "raced.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"other writer")
+        blind = SimpleNamespace(path=SimpleNamespace(lexists=lambda p: False))
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen, \
+             patch("localm.plugins.mcpserver.tools.media_coder.os", blind):
+            r = self._call(server, {"prompt": "x", "output_path": "raced.png"})
+        assert target.read_bytes() == b"other writer"
+        assert r["result"]["isError"] is True, r["result"]
+        mock_gen.assert_not_called()
+
+    @pytest.mark.parametrize("outcome", ["failed", "raised"])
+    def test_a_failed_generation_leaves_no_placeholder(self, outcome):
+        from localm.config import home_dir
+        server, _ = _server()
+        target = home_dir().resolve() / "mcp-images" / "nothing.png"
+        kwargs = ({"return_value": (False, "no backend")} if outcome == "failed"
+                  else {"side_effect": RuntimeError("boom")})
+        with patch("localm.image_gen.comfy.generate_image", **kwargs) as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": "nothing.png"})
+        mock_gen.assert_called_once()
+        assert mock_gen.call_args.args[1] == target
+        assert not target.exists()
+        assert r["result"]["isError"] is True, r
 
     def test_default_output_paths_are_distinct_new_files(self):
         """Two calls without output_path in the same second get two names."""
