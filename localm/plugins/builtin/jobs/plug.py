@@ -605,14 +605,13 @@ def _publish_self_url(host) -> None:
 
 
 def rename_notes(old_name: str, new_name: str) -> list[str]:
-    """The rename hook: repoint scheduled jobs from *old_name* to *new_name*
-    and return the notes to show the user."""
+    """The rename hook: write back the scheduled jobs that name the renamed
+    model, so each stores *new_name* with its ``model_refs``, and return the
+    notes to show the user."""
     store = JobStore()
-    migrated = 0
-    for job in store.list():
-        if job.model == old_name:
-            store.update(job.id, model=new_name)
-            migrated += 1
+    migrated = sum(1 for job in store.list() if job.model in (old_name, new_name))
+    if migrated:
+        store.rewrite()
     return [f"Updated {migrated} scheduled job(s) to the new name"] if migrated else []
 
 

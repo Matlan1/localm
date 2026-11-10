@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm import model_ids
+from localm.config import model_index
 from localm.pathsafe import is_unc_or_device_path
 
 # Process-wide lock serialising the read-modify-write of jobs.json. The scheduler
@@ -353,6 +355,7 @@ class JobStore:
         extras["top"] = {k: v for k, v in data.items()
                          if k not in ("jobs", "version")}
         out: dict = {}
+        index = model_index()
         for entry in data.get("jobs", []):
             try:
                 if not isinstance(entry, dict):
@@ -361,6 +364,8 @@ class JobStore:
             except (ValueError, TypeError):
                 extras["entries"].append(entry)    # carried through every write
                 continue
+            job.model = model_ids.stored_to_current(
+                job.model, entry.get(model_ids.REFS_KEY), index)
             out[job.id] = job
         if extras["entries"]:
             from localm.debuglog import logger
@@ -427,9 +432,14 @@ class JobStore:
         are written back unchanged."""
         self._ensure_root()
         extras = extras or {"entries": [], "top": {}}
+        index = model_index()
+        rows = []
+        for j in jobs.values():
+            row = j.to_dict()
+            model_ids.attach_refs(row, (j.model,), index)
+            rows.append(row)
         payload = {**extras["top"], "version": 1,
-                   "jobs": [j.to_dict() for j in jobs.values()]
-                   + list(extras["entries"])}
+                   "jobs": rows + list(extras["entries"])}
         # Unique temp name (pid + thread + uuid) so concurrent writers never
         # share a temp path; os.replace is atomic, so the last writer wins.
         tmp = self._defs_file.with_name(
@@ -455,6 +465,14 @@ class JobStore:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._read_all().get(job_id)
+
+    def rewrite(self) -> None:
+        """Write the defs file back as read, so every job carries its
+        ``model_refs``. No effect when there is no defs file."""
+        with self._locked():
+            if self._defs_file.is_file():
+                jobs, extras = self._load()
+                self._write_all(jobs, extras)
 
     def add(self, job: Job) -> Job:
         job.validate()

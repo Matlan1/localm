@@ -86,7 +86,7 @@ _REGISTRY = {
     "m-b": {"path": "Z:/nonexistent/b.gguf", "source": "hf", "model_type": "llm"},
 }
 
-_ROW_KEYS = {"name", "source", "size_bytes", "mtime", "active", "loaded",
+_ROW_KEYS = {"name", "model_id", "former_names", "source", "size_bytes", "mtime", "active", "loaded",
              "model_type", "architecture", "expert_count"}
 
 

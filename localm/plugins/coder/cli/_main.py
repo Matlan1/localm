@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -49,7 +50,7 @@ from ..privacy import (
     warn_external_provider,
     warn_external_url,
 )
-from ..project_config import ProjectConfigUnreadable
+from ..project_config import ProjectConfigUnreadable, load_project_config
 from ..runner import (
     InvalidSessionMode,
     browser_enabled as _browser_enabled,
@@ -799,6 +800,23 @@ def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
     return platform != "win32" and (machine_output or not stdout_tty)
 
 
+def _unregistered_model_message(model: str, work_dir) -> Optional[str]:
+    """None when *model* is a registered name, else the message saying it is not
+    and, when *work_dir*'s ``.localcoder/config.toml`` is where it came from, that
+    the name is set there."""
+    from localm.model_manager import unregistered_model_error
+    refusal = unregistered_model_error(model)
+    if refusal is None:
+        return None
+    try:
+        from_project = load_project_config(Path(work_dir)).get("model") == model
+    except ProjectConfigUnreadable:
+        from_project = False
+    if from_project:
+        return f"{refusal} This name is set by 'model' in .localcoder/config.toml."
+    return refusal
+
+
 AUTOSTART_LOG_PREFIX = "localm-coder-autostart-"
 
 
@@ -962,6 +980,10 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 "  localcoder --model gemma4-4b\n"
                 "Run `localm list` to see registered models."
             )
+            sys.exit(2 if ci else 1)
+        refusal = _unregistered_model_message(model, work_dir)
+        if refusal:
+            print_error(refusal)
             sys.exit(2 if ci else 1)
 
         # Attach to the localm already running for this project dir instead of

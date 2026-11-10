@@ -219,6 +219,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 loaded = row_resolved is not None and row_resolved in resident_resolved
             row_out = {
                 "name": name,
+                "model_id": entry.get("id") if isinstance(entry.get("id"), str) else "",
+                "former_names": [n for n in (entry.get("former_names") or [])
+                                 if isinstance(n, str)],
                 "source": str(entry.get("source", "")),
                 "size_bytes": size,
                 "mtime": mtime,

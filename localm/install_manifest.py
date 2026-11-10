@@ -98,7 +98,7 @@ DATA_FILES = frozenset({
     "config.json", "registry.json", "instance_id.txt", "auth.key", "auth.json",
     "auth.kdf.json", "sessions.json", "model_source_credentials.json",
     "model_meta.json", "coder-projects.json", "coder-hook-trust.json", "prompts.json",
-    "launcher.json", "chat-memory.md",
+    "launcher.json", "chat-memory.md", "model_refs.migrated",
 })
 DATA_DIRS = frozenset({
     "models", "cache", "logs", "run", "sessions", "bug-reports", "tls", "updates",

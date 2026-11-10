@@ -33,7 +33,7 @@ from localm.rag.store import (Collection, ConfinementError, collection_names,
                               collection_provenance_note,
                               collection_provenance_report, confine_index_path,
                               delete_collection, indexing_policy,
-                              relabel_embedding_model)
+                              record_embedding_model_refs)
 from tests._process_identity import spawn_on_this_tree
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "rag_store_v1"
@@ -628,14 +628,14 @@ class TestLocking:
                 delete_collection("kb", base)
             with pytest.raises(CollectionLockedError):
                 c.add_uploads(_uploads({"b.txt": "banana"}))
-            assert relabel_embedding_model("m1", "m2", base) == ([], ["kb"])
+            assert record_embedding_model_refs(base) == ["kb"]
             os.utime(c.dir / "chunks.jsonl", ns=(1, 1))
             backfilled = Collection.load_and_maybe_backfill("kb", base)
             assert backfilled.documents() == ["upload:a.txt"]
             assert (c.dir / "meta.json").read_bytes() == before
         finally:
             p.communicate(timeout=60)
-        assert relabel_embedding_model("m1", "m2", base) == (["kb"], [])
+        assert record_embedding_model_refs(base) == []
         assert delete_collection("kb", base) is True
 
     def test_a_write_from_another_process_is_seen(self, base, tmp_path, heavy_slot):
@@ -999,10 +999,10 @@ class TestRelabelAndProvenance:
                 _uploads({"x.txt": "apple"}), embed_fn=_embed, model_name=model)
         Collection("d", base=base).create()
         (base / "d" / "meta.json").write_text("{bad", encoding="utf-8")
-        assert relabel_embedding_model("old", "new", base) == (["a", "b"], [])
+        assert record_embedding_model_refs(base) == []
         assert [Collection(n, base=base).embedding_model() for n in "abc"] == [
-            "new", "new", "keep"]
-        assert relabel_embedding_model("old", "new", base) == ([], [])
+            "old", "old", "keep"]
+        assert (base / "d" / "meta.json").read_text(encoding="utf-8") == "{bad"
 
     def test_relabel_skips_an_undecodable_meta(self, base):
         for name in ("a", "b"):
@@ -1010,9 +1010,9 @@ class TestRelabelAndProvenance:
                 _uploads({"x.txt": "apple"}), embed_fn=_embed, model_name="old")
         Collection("u", base=base).create()
         (base / "u" / "meta.json").write_bytes(b"\xff\xfe\x00bad")
-        assert relabel_embedding_model("old", "new", base) == (["a", "b"], [])
+        assert record_embedding_model_refs(base) == []
         assert [Collection(n, base=base).embedding_model() for n in "ab"] == [
-            "new", "new"]
+            "old", "old"]
         assert (base / "u" / "meta.json").read_bytes() == b"\xff\xfe\x00bad"
 
     def test_provenance_report(self):
@@ -1117,7 +1117,7 @@ class TestFacadePatch:
         c.add_uploads(_uploads({"a.txt": "apple"}), embed_fn=_embed, model_name="m")
         assert writes and split
         n = len(writes)
-        relabel_embedding_model("m", "m2", base)
+        record_embedding_model_refs(base)
         assert len(writes) == n + 1
         assert fps == []
         Collection("kb", base=base)
@@ -1147,9 +1147,9 @@ class TestFacadePatch:
         assert collection_names() == ["kb"]
         assert Collection.peek_stats("kb")["n_docs"] == 1
         assert Collection.load_and_maybe_backfill("kb").documents() == ["upload:a.txt"]
-        assert relabel_embedding_model("m", "m2") == (["kb"], [])
+        assert record_embedding_model_refs() == []
         assert collection_provenance_report() == [
-            {"name": "kb", "built_with": "m2", "n_chunks": 1}]
+            {"name": "kb", "built_with": "m", "n_chunks": 1}]
         assert delete_collection("kb") is True
 
     def test_collection_names_and_collection(self, monkeypatch):
@@ -1258,7 +1258,7 @@ MODULE_NAMES = (
     'os',
     'rag_dir',
     'refers_to_conversation',
-    'relabel_embedding_model',
+    'record_embedding_model_refs',
     'split_jsonl',
     'wait_budget',
 )
@@ -1296,7 +1296,7 @@ FUNCTION_SIGNATURES = {
     'indexing_policy': "(cfg: 'Optional[dict]' = None, key_roots: 'Optional[list]' = None) -> 'dict'",
     'rag_dir': "() -> 'Path'",
     'refers_to_conversation': "(text: 'str') -> 'bool'",
-    'relabel_embedding_model': "(old_name: 'str', new_name: 'str', base: 'Optional[Path]' = None) -> 'tuple[list, list]'",
+    'record_embedding_model_refs': "(base: 'Optional[Path]' = None) -> 'list'",
 }
 COLLECTION_METHODS = {
     '__init__': ('function', "(self, name: 'str', base: 'Optional[Path]' = None, *, cache: 'bool' = True, load: 'bool' = True) -> 'None'"),

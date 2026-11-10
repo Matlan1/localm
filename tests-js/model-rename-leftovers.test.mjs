@@ -135,7 +135,8 @@ function chatSetup({ registry = ["live"], stored = null, chat404 = false } = {})
     const headers = { get: () => null };
     if (u === "/api/models") {
       return { ok: true, status: 200, headers,
-               json: async () => ({ models: registry.map((name) => ({ name })), active: "live" }) };
+               json: async () => ({ models: registry.map((m) => (typeof m === "string" ? { name: m } : m)),
+                                  active: "live" }) };
     }
     if (u.startsWith("/api/conversations/") && !opts.method) {
       return stored
@@ -210,6 +211,22 @@ test("a rename made elsewhere is picked up from the server's copy of the chat", 
   const [post] = chatPosts(calls);
   assert.equal(post.body.model, "renamed", "the chat follows the model to its new name");
   assert.equal(post.body.pin_model, true);
+  assert.equal(doc.querySelector("#chat-messages .tool-notice"), null);
+  assert.deepEqual(toasts, []);
+});
+
+test("a chat pinned to a name the model used to have follows it without the server's copy", async () => {
+  const { window, doc, calls, toasts } = chatSetup({
+    registry: ["live", { name: "renamed", model_id: "m1", former_names: ["old"] }] });
+  doc.getElementById("chat-input").value = "hello there";
+
+  await window.sendChat();
+
+  const [post] = chatPosts(calls);
+  assert.equal(post && post.body.model, "renamed", "the chat follows the model to its new name");
+  assert.equal(post.body.pin_model, true);
+  runScript(window, "window.__id = chat.conversations[0].pinnedModelId;");
+  assert.equal(window.__id, "m1");
   assert.equal(doc.querySelector("#chat-messages .tool-notice"), null);
   assert.deepEqual(toasts, []);
 });

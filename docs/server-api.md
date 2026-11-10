@@ -932,14 +932,17 @@ cannot be trusted (a stale probe, a driver that reports only this process's own
 allocations, or an unmeasurable post-unload reading). Unloading is implicit-recovery: the next chat request against an
 unloaded model reloads it automatically.
 
-`POST /v1/models/rename?model=<name>&new_name=<name>` renames a registered
-model in place: re-keys the registry entry and, if the model is currently
-loaded, its in-memory engine, so it keeps serving under the new name with no
-reload. Unlike an alias, the old name stops resolving. It returns
+`POST /v1/models/rename?model=<name>&new_name=<name>` changes a registered
+model's name. If the model is loaded it keeps serving under the new name with
+no reload, and everything stored that points at the model keeps pointing at it.
+Clients keep sending names; unlike an alias, the old name stops resolving and
+answers 404. It returns
 `{"status": "renamed", "model": "<old name>", "new_name": "<new name as
-sanitised>", "notes": [...]}`, where `notes` reports the references to the old
-name it migrated or could not (a per-project coder config, for example); an unregistered `model` is a 404, a taken name a
-409, and a failed rename a 400. This is what `localm
+sanitised>", "notes": [...]}`, where `notes` is empty unless localm could not
+finish recording the IDs of existing references the first time a model is
+renamed, which it retries at the next rename; an unregistered `model` is a 404,
+a taken name a 409, and a name with no usable character or a failed write a 400.
+This is what `localm
 rename` calls; it exists on the always-present `/v1` surface (not only under
 `localm gui`) because a headless `localm serve` has no GUI routes to do it
 from instead.

@@ -26,6 +26,7 @@ from typing import NamedTuple
 from typing import Optional
 from typing import Sequence
 from rich.table import Table
+from .. import model_ids
 from ..config import REGISTRY_FILE
 from ..config import load_config
 from ..config import update_config
@@ -2278,8 +2279,8 @@ def alias_model(existing: str, new_name: str, *, user_type: Optional[str] = None
     def _apply(r: dict) -> None:
         if existing in r and safe_name not in r:
             r[safe_name] = dict(r[existing])
-            r[safe_name].pop("base", None)
-            r[safe_name].pop("scale", None)
+            for key in ("base", "scale", "id", model_ids.FORMER_KEY, model_ids.REFS_KEY):
+                r[safe_name].pop(key, None)
             if user_type is not None:
                 r[safe_name]["model_type"] = user_type
                 r[safe_name]["type_user_set"] = True
@@ -2299,11 +2300,7 @@ def alias_model(existing: str, new_name: str, *, user_type: Optional[str] = None
 def rename_model(old_name: str, new_name: str) -> bool:
     """
     Rename a registered model from *old_name* to *new_name*. Thin bool-only
-    wrapper over :func:`rename_model_with_notes`, for CLI simplicity and
-    backward compatibility (a caller that also needs the migration notes -
-    e.g. the GUI route, which must show them to the user rather than let
-    them sit in the server log - should call that instead). See its
-    docstring for the full behavior.
+    wrapper over :func:`rename_model_with_notes`. See its docstring.
     """
     renamed, _notes = rename_model_with_notes(old_name, new_name)
     return renamed
@@ -2311,31 +2308,23 @@ def rename_model(old_name: str, new_name: str) -> bool:
 
 def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[str]]":
     """
-    Rename a registered model from *old_name* to *new_name*: MOVES the
-    registry entry to a new key (unlike alias_model, which copies - *old_name*
-    stops working here), and best-effort migrates every OTHER place inside
-    <data dir> that stores the plain name string (config.json's pinned_models
-    / embedding_model / coder_reviewer_model / spec_draft_model /
-    rag_rerank_model / model_avatar_overrides and the model slots of the
-    image, music and video ``native`` blocks, scheduled jobs' `model` field,
-    RAG collection metadata, saved chats' ``pinned_model`` and the model
-    references of the media native workflow files). A per-project
-    ``.localcoder/config.toml`` ``model`` setting lives OUTSIDE <data dir>
-    (in the user's own project repo, discoverable only relative to a `cwd` a
-    coder session supplies) and cannot be enumerated or migrated from here -
-    always reported in the returned notes, never silently dropped.
+    Change the display name of entry *old_name* to *new_name*. One registry write
+    moves the key and records the old name in the entry's ``former_names``. The
+    entry's ID and its file stay as they are, and the entry is reached through
+    its new name from then on; *old_name* stops being a name anyone can ask for.
+    Stored references follow the entry: settings and knowledge collections
+    through its ID, media workflow files and what plugins store (saved chats,
+    scheduled jobs) through :func:`_migrate_model_references`.
 
-    Sibling aliases - other registry entries whose file happens to be the same
-    one *old_name* pointed at - are left untouched: they are independent
-    names for that file, exactly like any alias `localm alias` creates, and
-    renaming one name must not delete or repoint the others.
+    Other entries for the same file (aliases) are independent and untouched.
 
-    Returns ``(False, [])`` when *old_name* is not registered, or *new_name*
-    (after the same sanitizing alias_model applies) is already taken by a
-    DIFFERENT entry. Renaming a name to itself (post-sanitize) is a no-op
-    success with no notes (nothing needed migrating). On a genuine rename,
-    returns ``(True, notes)`` where *notes* is what
-    :func:`_migrate_model_references` reports.
+    Returns ``(False, [])`` when *old_name* is not registered, *new_name* has no
+    usable character, or *new_name* (after the sanitizing every registered name
+    gets) belongs to another entry. Renaming a name to itself is a no-op success.
+    On a rename, returns ``(True, notes)``: what followed the new name and what
+    could not be recorded or rewritten (see :func:`_migrate_model_references`).
+    A failed step does not undo the rename; recording references for the first
+    time is retried at the next rename.
     """
     from rich.markup import escape
 
@@ -2343,7 +2332,10 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
     if old_name not in reg:
         console.print(f"[red]Not found:[/red] {escape(old_name)}")
         return False, []
-    safe_name = _sanitize_name(new_name)
+    safe_name = _sanitized_or_empty(new_name)
+    if not safe_name:
+        console.print("[red]A model name needs at least one letter or digit.[/red]")
+        return False, []
     if safe_name == old_name:
         console.print(f"[dim]'{escape(old_name)}' is already named '{escape(safe_name)}'[/dim]")
         return True, []
@@ -2351,19 +2343,16 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
         console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False, []
 
-    # Atomic RMW (re-read inside the lock), and - unlike alias_model above -
-    # actually notice whether the move happened: a concurrent writer could still
-    # take old_name or safe_name between the precheck and this call, and
-    # reporting success on a step that moved nothing would be a false success.
+    notes = record_stored_references()
+
+    # Atomic RMW: re-reads inside the lock and reports whether the move happened,
+    # since a concurrent writer can take either name after the precheck.
     moved = False
 
     def _apply(r: dict) -> None:
         nonlocal moved
         if old_name in r and safe_name not in r:
-            r[safe_name] = r.pop(old_name)
-            for entry in r.values():
-                if isinstance(entry, dict) and entry.get("base") == old_name:
-                    entry["base"] = safe_name
+            model_ids.rename_entry(r, old_name, safe_name)
             moved = True
 
     _mm.update_registry(_apply)
@@ -2375,27 +2364,65 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
             console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False, []
 
+    notes = notes + _migrate_model_references(old_name, safe_name)
+
     # old_name: a confirmed registry key, escaped anyway - a hand-edited
     # registry.json is not restricted to a safe charset.
     console.print(
         f"[green]✓[/green] Renamed [bold]{escape(old_name)}[/bold] -> "
         f"[bold]{escape(safe_name)}[/bold]"
     )
-    notes = _migrate_model_references(old_name, safe_name)
     for note in notes:
-        # note: mostly hardcoded prose, but can carry an arbitrary exception
-        # message (`{e}` from config/jobs/RAG migration failures) - escaped
-        # at this, its one print site, rather than at each notes.append().
         console.print(f"[dim]{escape(note)}[/dim]")
     return True, notes
 
 
-# Config keys holding one registered model name, and the registered-name slots
-# of a media plugin's ``native`` block (config["plugins"][<media>]["native"]).
-_CONFIG_MODEL_KEYS = ("embedding_model", "coder_reviewer_model", "spec_draft_model",
-                      "rag_rerank_model")
-_NATIVE_MODEL_KEYS = ("model", "vae", "clip_l", "clip_g", "t5xxl", "llm", "clip_vision",
-                      "dit", "text_encoder", "lm")
+def record_stored_references() -> list[str]:
+    """Write ``model_refs`` beside every model name stored in the settings, the
+    knowledge collections and the media workflows of the data dir, once (the
+    marker is ``<data dir>/model_refs.migrated``). Records written later carry
+    their own. Never raises: returns one note per place that could not be
+    finished, and without the marker the next call tries again. Reading a record
+    does not depend on this; it makes a reference hold when its old name is later
+    given to another entry."""
+    from localm.config import home_dir
+    marker = home_dir() / "model_refs.migrated"
+    if marker.exists():
+        return []
+    notes: list[str] = []
+
+    def _step(what: str, fn) -> None:
+        try:
+            problems = fn() or ()
+        except Exception as e:
+            logger.warning("Recording the model IDs of %s failed: %s", what, e)
+            notes.append(f"Could not yet record the model IDs of {what}: {e}")
+            return
+        if problems:
+            logger.warning("Recording the model IDs of %s skipped: %s", what, problems)
+            notes.append(f"Could not yet record the model IDs of {what}: "
+                         f"{', '.join(problems)}")
+
+    def _settings():
+        update_config(lambda _cfg: None)
+
+    def _rag():
+        from localm.rag.store import record_embedding_model_refs
+        return record_embedding_model_refs()
+
+    def _workflows():
+        from localm.media.native_workflows import record_model_refs
+        record_model_refs()
+
+    _step("settings", _settings)
+    _step("knowledge collections", _rag)
+    _step("media workflows", _workflows)
+    if not notes:
+        try:
+            marker.write_text("1\n", encoding="utf-8")
+        except OSError as e:
+            logger.warning("Could not write %s: %s", marker.name, e)
+    return notes
 
 
 _RENAME_HOOKS: "dict[str, Callable[[str, str], list[str]]]" = {}
@@ -2417,64 +2444,23 @@ def unregister_rename_hook(name: str) -> None:
 
 
 def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
-    """Best-effort: rewrite every *old_name* reference this process can reach
-    inside <data dir>, after rename_model has already moved the registry
-    entry. Never raises - the registry rename has already succeeded and must
-    not be undone because a secondary reference could not be updated; a site
-    that fails to migrate is reported as a note, not raised as a crash. Returns
-    human-readable notes: what changed, and what could not be reached at all.
-    """
+    """Best-effort, after rename_model has moved the registry entry: names the
+    settings that now read as *new_name*, rewrites *old_name* in the media
+    workflow files, and runs every registered rename hook. Never raises - the
+    registry rename has already succeeded and must not be undone because a
+    secondary reference could not be updated; a site that fails is reported as a
+    note. Returns human-readable notes: what changed, and what could not be
+    reached."""
     notes: list[str] = []
 
     try:
-        changed: list[str] = []
-
-        def _apply_cfg(cfg: dict) -> None:
-            changed.clear()
-            pinned = cfg.get("pinned_models")
-            if isinstance(pinned, list) and old_name in pinned:
-                cfg["pinned_models"] = [new_name if n == old_name else n for n in pinned]
-                changed.append("pinned_models")
-            for key in _CONFIG_MODEL_KEYS:
-                if cfg.get(key) == old_name:
-                    cfg[key] = new_name
-                    changed.append(key)
-            avatars = cfg.get("model_avatar_overrides")
-            if isinstance(avatars, dict) and old_name in avatars:
-                avatars[new_name] = avatars.pop(old_name)
-                changed.append("model_avatar_overrides")
-            plugins = cfg.get("plugins")
-            for media in ("image", "music", "video"):
-                block = plugins.get(media) if isinstance(plugins, dict) else None
-                native = block.get("native") if isinstance(block, dict) else None
-                if not isinstance(native, dict):
-                    continue
-                for key in _NATIVE_MODEL_KEYS:
-                    if native.get(key) == old_name:
-                        native[key] = new_name
-                        changed.append(f"plugins.{media}.native.{key}")
-        update_config(_apply_cfg)
+        changed = model_ids.config_keys_naming(load_config(), new_name)
         if changed:
             notes.append("Updated the settings that named it: " + ", ".join(changed))
     except Exception as e:
-        logger.debug("rename_model: config migration failed for %s -> %s: %s",
+        logger.debug("rename_model: reading the settings failed for %s -> %s: %s",
                      old_name, new_name, e)
-        notes.append(f"Could not update config.json references: {e}")
-
-    try:
-        from localm.rag.store import relabel_embedding_model
-        migrated, busy = relabel_embedding_model(old_name, new_name)
-        if migrated:
-            notes.append(f"Updated {len(migrated)} RAG collection metadata record(s)")
-        if busy:
-            notes.append(
-                "Could not update the RAG collection metadata of "
-                f"{', '.join(busy)}: another write held it past the wait limit, "
-                f"so it still records '{old_name}' as its embedding model")
-    except Exception as e:
-        logger.debug("rename_model: RAG collection migration failed for %s -> %s: %s",
-                     old_name, new_name, e)
-        notes.append(f"Could not update RAG collection metadata: {e}")
+        notes.append(f"Could not read config.json to list the settings that name it: {e}")
 
     try:
         from localm.media.native_workflows import relabel_model
@@ -2497,15 +2483,7 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
             logger.debug("rename_model: %s migration failed for %s -> %s: %s",
                          hook_name, old_name, new_name, e)
             notes.append(f"Could not update {hook_name}: {e}")
-
-    notes.append(
-        "A per-project .localcoder/config.toml 'model' setting (if any) lives "
-        "outside <data dir> and was NOT updated - fix it by hand in any "
-        "project that pinned this model."
-    )
     return notes
-
-
 
 
 def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
@@ -2730,9 +2708,15 @@ def _sanitize_name(base: str) -> str:
     auto-discovered names (sync_models_dir) and user-supplied ``-n`` names
     (add_local).
     """
+    return _sanitized_or_empty(base) or "model"
+
+
+def _sanitized_or_empty(base: str) -> str:
+    """:func:`_sanitize_name` without its fallback: ``""`` when nothing usable is
+    left of *base*."""
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", base)
     base = re.sub(r"\.{2,}", ".", base)          # ..  ->  .  (no traversal)
-    return base.strip("-.") or "model"
+    return base.strip("-.")
 
 
 

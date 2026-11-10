@@ -96,6 +96,11 @@ units = [
 ]
 
 [[tier]]
+name = "identity"
+role = "Stable model identity: the ID every registry entry carries and the model_refs map a stored reference keeps beside a model name. Stdlib only, so configuration reads and writes references through it."
+units = ["model_ids"]
+
+[[tier]]
 name = "stores"
 role = "Store mechanics every JSON and JSONL store shares: atomic writes, the checked read that tells a current file from a backup or an unreadable one, the owner-restricted write, and the cross-process store lock whose staleness follows whether the holder is still running. Below configuration, which keeps its settings through it."
 units = ["storekit"]

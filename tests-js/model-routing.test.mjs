@@ -667,3 +667,51 @@ test("an image refusal removes the images of earlier turns too, as the toast say
     && m.content.some((p) => p.type === "image_url"));
   assert.equal(left.length, 0);
 });
+
+// ---- a pin follows its model through a rename ----
+
+test("a pin found by its model id sends the current name even when another model took the old one", async () => {
+  const models = [{ name: "renamed", model_id: "id-1", former_names: ["plain"] },
+                  { name: "plain", model_id: "id-2", former_names: [] }];
+  const { window, calls } = setup({ active: "seer", models });
+  const conv = { id: "c1", title: "t", pinnedModel: "plain", pinnedModelId: "id-1",
+                 messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const [post] = chatPosts(calls);
+  assert.equal(post.body.model, "renamed");
+  assert.equal(post.body.pin_model, true);
+  assert.equal(conv.pinnedModel, "renamed");
+});
+
+test("a pin saved before ids existed finds its model by a former name", async () => {
+  const models = [{ name: "renamed", model_id: "id-1", former_names: ["plain"] }];
+  const { window, calls } = setup({ active: "seer", models });
+  const conv = { id: "c1", title: "t", pinnedModel: "plain",
+                 messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const [post] = chatPosts(calls);
+  assert.equal(post.body.model, "renamed");
+  assert.equal(conv.pinnedModelId, "id-1", "the id is recorded once the model is found");
+});
+
+test("a pin no installed model matches keeps its name, so the server refuses it by that name", async () => {
+  const models = [{ name: "other", model_id: "id-9", former_names: [] }];
+  const { window, calls } = setup({ active: "seer", models });
+  const conv = { id: "c1", title: "t", pinnedModel: "plain", pinnedModelId: "id-1",
+                 messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(chatPosts(calls)[0].body.model, "plain");
+});
+
+test("the pin label shows the current name after a rename", () => {
+  const models = [{ name: "renamed", model_id: "id-1", former_names: ["plain"] }];
+  const { window, doc } = setup({ active: "renamed", models });
+  activateConv(window, { id: "a", title: "t", pinnedModel: "plain", pinnedModelId: "id-1", messages: [] });
+  runScript(window, "renderChat();");
+  assert.equal(doc.getElementById("p-pin-model-name").textContent, "renamed");
+  assert.equal(doc.getElementById("pin-mismatch").hidden, true,
+    "the loaded model is the pinned one, under its new name");
+});

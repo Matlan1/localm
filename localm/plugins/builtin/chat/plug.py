@@ -39,6 +39,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from localm import model_ids
+from localm.config import model_index
 from localm.storekit import NamespaceLockRegistry, atomic_write
 
 _router = APIRouter()
@@ -92,6 +94,18 @@ _RESERVED_NAMES = {"con", "prn", "aux", "nul",
 def _home() -> Path:
     from localm.config import home_dir
     return home_dir()
+
+
+def _conv_with_current_pin(data: dict) -> dict:
+    """Saved conversation *data* with ``pinned_model`` holding the pinned model's
+    current name and without the stored ``model_refs``."""
+    if not isinstance(data, dict):
+        return data
+    refs = data.pop(model_ids.REFS_KEY, None)
+    if data.get("pinned_model"):
+        data["pinned_model"] = model_ids.stored_to_current(
+            data["pinned_model"], refs, model_index())
+    return data
 
 
 # Serialisation scope: writers inside this process (request handlers and the
@@ -210,7 +224,7 @@ async def conversations_list(request: Request, meta: bool = False,
                 else:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
-                    rows.append(data)
+                    rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
             except Exception as e:
@@ -245,7 +259,7 @@ async def conversation_get(conv_id: str, request: Request):
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
-    return data
+    return _conv_with_current_pin(data)
 
 
 @_router.put("/api/conversations/{conv_id}")
@@ -256,14 +270,17 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert,
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
     path = _conv_path(conv_id, _principal_dir(request))
-    payload = json.dumps(
-        {"id": conv_id, "title": req.title,
-         "updated_at": req.updated_at,
-         "pinned": req.pinned, "folder": req.folder,
-         "pinned_model": req.pinned_model,
-         "branches": req.branches,
-         "messages": req.messages},
-        ensure_ascii=False)
+    record = {"id": conv_id, "title": req.title,
+              "updated_at": req.updated_at,
+              "pinned": req.pinned, "folder": req.folder,
+              "pinned_model": req.pinned_model,
+              "branches": req.branches,
+              "messages": req.messages}
+    if req.pinned_model:
+        index = model_index()
+        record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
+        model_ids.attach_refs(record, (record["pinned_model"],), index)
+    payload = json.dumps(record, ensure_ascii=False)
     if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
         raise HTTPException(413, "Conversation too large to persist")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,13 +327,15 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
     holding an older cached copy takes this one rather than uploading its own
     over it. Each file is rewritten under its per-file lock, and a file whose
     ``updated_at`` changed since it was read is left as it is and listed in
-    ``failed``. Returns ``(rewritten, failed)``: the ids rewritten, and the ids
+    ``failed``. A rewritten conversation's ``model_refs`` is set for *new_name*.
+    Returns ``(rewritten, failed)``: the ids rewritten, and the ids
     of files that name *old_name* but were not rewritten. A file that does not
     contain *old_name* is not parsed. Works in every session mode: it edits
     files that already exist and creates none."""
     import time
 
     needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
+    index = model_index()
     rewritten: list = []
     failed: list = []
     for p in _all_chat_files():
@@ -330,6 +349,7 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
                     continue
                 read_stamp = data.get("updated_at")
                 data["pinned_model"] = new_name
+                model_ids.attach_refs(data, (new_name,), index)
                 data["updated_at"] = int(time.time() * 1000)
                 if _updated_at_of(p) != read_stamp:
                     failed.append(p.stem)

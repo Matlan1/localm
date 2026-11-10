@@ -30,6 +30,14 @@ def home(tmp_path, monkeypatch):
     return home
 
 
+@pytest.fixture(autouse=True)
+def _no_engine_left_by_another_test(monkeypatch):
+    """The remove route asks the loaded engines whether they hold the file."""
+    from localm.inference import http_server
+    monkeypatch.setattr(http_server, "_engines", {})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+
 @pytest.fixture
 def app(monkeypatch):
     from localm.inference import http_server

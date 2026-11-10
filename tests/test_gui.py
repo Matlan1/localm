@@ -5798,13 +5798,9 @@ def test_rename_route_reports_the_name_it_actually_stored(gui_app, alias_env):
             "the route must report the name it actually created")
 
 
-def test_rename_route_surfaces_the_migration_notes_to_the_caller(gui_app, alias_env):
-    """rename_model_with_notes's honest report of what could NOT be migrated
-    (a per-project .localcoder/config.toml, unreachable from
-    <data dir>) must reach the HTTP caller, not just the server console -
-    otherwise a user renames a model, gets a bare 200, and only discovers
-    later (via a confusing coder error) that a project config still names
-    the old model, with no way to connect the two."""
+def test_rename_route_forwards_notes_only_when_there_is_something_to_say(gui_app, alias_env):
+    """A note from rename_model_with_notes reaches the HTTP caller, not just the
+    server console, and an ordinary rename has none."""
     from localm import model_manager as mm
     app, _ = gui_app
     _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
@@ -5813,11 +5809,13 @@ def test_rename_route_surfaces_the_migration_notes_to_the_caller(gui_app, alias_
         r = client.post("/api/models/rename",
                         json={"model": "gemma3-12b", "new_name": "daily-driver"})
         assert r.status_code == 200, r.text
-        notes = r.json().get("notes")
-        assert isinstance(notes, list) and notes, (
-            "the route must forward rename_model_with_notes's notes, not "
-            "just the bool success flag")
-        assert any(".localcoder" in n for n in notes)
+        assert r.json().get("notes") == []
+        with patch("localm.model_manager.rename_model_with_notes",
+                   return_value=(True, ["a note"])):
+            r = client.post("/api/models/rename",
+                            json={"model": "daily-driver", "new_name": "other"})
+        assert r.status_code == 200, r.text
+        assert r.json().get("notes") == ["a note"]
 
 
 def test_rename_route_refuses_a_sanitized_collision_instead_of_faking_success(gui_app, alias_env):

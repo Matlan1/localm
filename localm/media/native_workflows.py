@@ -454,12 +454,65 @@ def _path_for(media: str, wid: str) -> Path:
         raise WorkflowNotFound(wid) from e
 
 
+def _refs_path(path: Path) -> Path:
+    """The file beside workflow *path* holding its ``model_refs``. Its suffix keeps
+    it out of the ``*.json`` listing."""
+    return path.with_name(path.stem + ".model_refs")
+
+
+def _all_refs(wf: dict) -> list:
+    return list(wf["models"].values()) + list(wf["loras"])
+
+
+def _names_to_current(wf: dict, path: Path) -> None:
+    """Set every model name in *wf*, read from *path*, to its current name."""
+    from localm.config import model_index
+    from localm.model_ids import stored_to_current
+    try:
+        refs = json.loads(_refs_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        refs = None
+    index = model_index()
+    for ref in _all_refs(wf):
+        ref["name"] = stored_to_current(ref["name"], refs, index)
+
+
+def _write_refs(path: Path, wf: dict) -> None:
+    """Store the IDs of *wf*'s registered models beside workflow *path*, or remove
+    the file when none is registered."""
+    from localm.config import model_index
+    from localm.model_ids import refs_for
+    from localm.storekit import atomic_write
+    refs = refs_for((r["name"] for r in _all_refs(wf)), model_index())
+    if refs:
+        atomic_write(_refs_path(path), json.dumps(refs))
+    else:
+        _refs_path(path).unlink(missing_ok=True)
+
+
+def record_model_refs() -> None:
+    """Store the model IDs of every user workflow that can be read. One that cannot
+    be read is listed with its error by ``list_workflows`` and is left alone."""
+    for media in MEDIA_TYPES:
+        d = native_dir(media)
+        if not d.is_dir():
+            continue
+        for path in d.glob("*.json"):
+            if not _ID_RE.match(path.stem):
+                continue
+            try:
+                _write_refs(path, _read_file(media, path))
+            except (FileNotFoundError, UnicodeDecodeError, ValueError):
+                continue
+
+
 def _read_file(media: str, path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     try:
         wf = parse_workflow(load_json_text(text), media)
     except (TypeError, AttributeError, KeyError, OverflowError, RecursionError) as e:
         raise ValueError(f"The stored workflow is not valid: {e}") from e
+    _names_to_current(wf, path)
     return dict(wf, id=path.stem, builtin=False)
 
 
@@ -532,6 +585,7 @@ def _write(media: str, wid: str, wf: dict) -> None:
     path = _path_for(media, wid)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(path, json.dumps(export_data(wf), indent=2, ensure_ascii=False))
+    _write_refs(path, wf)
 
 
 def attach_known_sources(wf: dict, reg: dict) -> dict:
@@ -605,6 +659,7 @@ def delete_workflow(media: str, wid: str) -> None:
         path.unlink()
     except FileNotFoundError as e:
         raise WorkflowNotFound(wid) from e
+    _refs_path(path).unlink(missing_ok=True)
 
 
 def relabel_model(old_name: str, new_name: str) -> tuple[list, list]:

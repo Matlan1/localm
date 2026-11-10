@@ -398,7 +398,7 @@ class _CollectionIndexing:
                             if model_name:
                                 self._meta["embedding_model"] = str(model_name)
                         elif (new_dim is not None and model_name
-                                and model_name != self._meta.get("embedding_model")):
+                                and model_name != _st.current_embedding_label(self._meta)):
                             # Same dimension as before but a different named
                             # model: the recorded label above still names
                             # only the first model, so mark the vectors as
