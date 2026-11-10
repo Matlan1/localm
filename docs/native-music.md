@@ -13,7 +13,7 @@ Settings > Music > **Music backend** (config `plugins.music.backend`):
 
 | Value | Behaviour |
 |---|---|
-| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
+| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, `FLUX_API_URL` is set, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
 | `native` | Always the native backend. |
 | `comfy` | Always ComfyUI. |
 
@@ -31,8 +31,8 @@ localm setup-music --status
 ```
 
 1. **Runtime.** A pinned KoboldCpp release goes into `<data dir>/runtimes/koboldcpp/`:
-   about 115 MB for the Vulkan/CPU build, about 610 MB for the CUDA build, about 65 MB
-   on Apple Silicon. The download goes through the network policy like a model pull, and
+   about 90 MB (Windows) or 105 MB (Linux) for the Vulkan/CPU build, about 625 MB for the
+   CUDA build, about 70 MB on Apple Silicon. The download goes through the network policy like a model pull, and
    its size and sha256 are checked before it is ever run. `auto` picks CUDA for NVIDIA,
    Metal on Apple Silicon, CPU when no GPU is found, and Vulkan otherwise (AMD and Intel
    GPUs included); a backend that does not start falls back to Vulkan, then CPU, and

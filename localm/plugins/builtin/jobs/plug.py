@@ -474,7 +474,8 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
                 return None
             return _run_job(job, engine=engine)
 
-    result = await loop.run_in_executor(None, _run_guarded)
+    from localm.audit import carry_request_privacy
+    result = await loop.run_in_executor(None, carry_request_privacy(_run_guarded))
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
@@ -502,7 +503,9 @@ def register(host) -> None:
     """Mount the jobs routes and start the scheduler when running under a live
     server. The host auto-scopes every route to the ``jobs`` capability."""
     global _scheduler, _host
+    from localm.model_manager import register_rename_hook
     _host = host
+    register_rename_hook("scheduled jobs", rename_notes)
     host.mount_router(_router)
     # Serve the client_entry (static/jobs.js) at /plugins/jobs/ so the GUI's
     # loadClientPlugins() can import() it; without this the Jobs view 404s and
@@ -553,9 +556,23 @@ def _publish_self_url(host) -> None:
     os.environ["LOCALM_SELF_URL"] = f"{scheme}://{host_part}:{port}/v1"
 
 
+def rename_notes(old_name: str, new_name: str) -> list[str]:
+    """The rename hook: repoint scheduled jobs from *old_name* to *new_name*
+    and return the notes to show the user."""
+    store = JobStore()
+    migrated = 0
+    for job in store.list():
+        if job.model == old_name:
+            store.update(job.id, model=new_name)
+            migrated += 1
+    return [f"Updated {migrated} scheduled job(s) to the new name"] if migrated else []
+
+
 def unregister() -> None:
     """Stop the scheduler on disable/uninstall."""
     global _scheduler, _host
+    from localm.model_manager import unregister_rename_hook
+    unregister_rename_hook("scheduled jobs")
     if _scheduler is not None:
         try:
             _scheduler.stop()

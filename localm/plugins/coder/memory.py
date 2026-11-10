@@ -4,7 +4,8 @@ Persistent project memory for localcoder.
 
 Looks for memory files in cwd (in priority order):
   1. LOCALCODER.md
-  2. .localcoder/memory.md
+  2. .localcoder/memory.md (injected only once the project is trusted,
+     hook_trust.py)
 
 Both files use free-form markdown. The content is injected into the system
 prompt under a "## Project Memory" heading so the LLM always sees it, capped at
@@ -114,6 +115,33 @@ def find_memory_file(cwd: Path) -> Optional[Path]:
     return None
 
 
+def _project_trusted(cwd: Path) -> bool:
+    """hook_trust.project_trusted, False when the project config cannot be
+    read."""
+    from .hook_trust import project_trusted
+    from .project_config import ProjectConfigUnreadable
+    try:
+        return project_trusted(cwd)
+    except ProjectConfigUnreadable:
+        return False
+
+
+def _gated(p: Optional[Path]) -> bool:
+    """Whether the memory file *p* is the one under the ``.localcoder``
+    folder."""
+    return p is not None and p.parent.name == ".localcoder"
+
+
+def find_injected_memory_file(cwd: Path) -> Optional[Path]:
+    """The memory file injected for *cwd*: :func:`find_memory_file`, except
+    that ``.localcoder/memory.md`` is injected only once the project is
+    trusted (hook_trust.py)."""
+    p = find_memory_file(cwd)
+    if _gated(p) and not _project_trusted(cwd):
+        return None
+    return p
+
+
 def default_memory_file(cwd: Path) -> Path:
     """Preferred path when creating a new memory file from scratch."""
     return cwd / "LOCALCODER.md"
@@ -142,13 +170,14 @@ _MEMORY_REMEDY = "Trim it, or use /forget <pattern> to drop stale entries."
 
 def load_memory(cwd: Path) -> str:
     """Return memory file content, stripped and capped for injection, or empty
-    string if none exists.
+    string if none exists. ``.localcoder/memory.md`` is read only once the
+    project is trusted (hook_trust.py); ``LOCALCODER.md`` always is.
 
     Capped at _MAX_MEMORY_CHARS: content over the budget is cut back and leaves a
     visible notice, never dropped silently. Use :func:`memory_warning` to tell the
     user when that happened.
     """
-    text, _ = _read_injectable(find_memory_file(cwd))
+    text, _ = _read_injectable(find_injected_memory_file(cwd))
     return _cap_for_injection(text, _MAX_MEMORY_CHARS, "project memory", _MEMORY_REMEDY)
 
 
@@ -160,6 +189,9 @@ def memory_warning(cwd: Path) -> str:
     file is over the injection budget, or it exists but could not be read.
     """
     p = find_memory_file(cwd)
+    if p is not None and find_injected_memory_file(cwd) is None:
+        return (f"Project memory {p} is not used: the project is not trusted "
+                "(/hooks to review and trust it).")
     raw, unreadable = _read_injectable(p)
     if unreadable:
         return (f"Project memory {p} could not be read; the agent is running "
@@ -187,15 +219,24 @@ def _existing_instructions_file(cwd: Path) -> Optional[Path]:
     return p if p.is_file() else None
 
 
+def _injected_instructions_file(cwd: Path) -> Optional[Path]:
+    """``.localcoder/system.md`` when it exists and the project is trusted."""
+    p = _existing_instructions_file(cwd)
+    if p is not None and not _project_trusted(cwd):
+        return None
+    return p
+
+
 def load_custom_instructions(cwd: Path) -> str:
     """Return the contents of ``.localcoder/system.md`` (stripped and capped for
-    injection), or empty string when the file does not exist or cannot be read.
+    injection), or empty string when the file does not exist, cannot be read,
+    or the project is not trusted (hook_trust.py).
 
     Capped at _MAX_CUSTOM_INSTRUCTIONS_CHARS, loudly: the model sees a notice that
     the file was cut, and :func:`custom_instructions_warning` tells the user which
     of their instructions are not being followed.
     """
-    text, _ = _read_injectable(_existing_instructions_file(cwd))
+    text, _ = _read_injectable(_injected_instructions_file(cwd))
     return _cap_for_injection(text, _MAX_CUSTOM_INSTRUCTIONS_CHARS,
                               "user instructions", _INSTRUCTIONS_REMEDY)
 
@@ -229,6 +270,9 @@ def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> st
         )
 
     p = _existing_instructions_file(cwd)
+    if p is not None and _injected_instructions_file(cwd) is None:
+        return (f"User instructions {p} are not used: the project is not trusted "
+                "(/hooks to review and trust it).")
     raw, unreadable = _read_injectable(p)
     if unreadable:
         return (f"User instructions {p} could not be read; the agent is running "
@@ -266,7 +310,9 @@ def remember(cwd: Path, text: str) -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         new_content = f"# Project Memory\n\n{bullet}\n"
 
-    p.write_text(new_content, encoding="utf-8")
+    from .hook_trust import keep_trust
+    with keep_trust(cwd):
+        p.write_text(new_content, encoding="utf-8")
     return p
 
 
@@ -295,5 +341,7 @@ def forget(cwd: Path, pattern: str) -> tuple:
         else:
             kept.append(line)
 
-    p.write_text("".join(kept), encoding="utf-8")
+    from .hook_trust import keep_trust
+    with keep_trust(cwd):
+        p.write_text("".join(kept), encoding="utf-8")
     return p, removed

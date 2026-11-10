@@ -2,7 +2,7 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Fully offline by default - nothing leaves your machine unless you allow it. Cloud providers are available, but always opt-in.</p>
+<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Local by default - chat, the coder and generation run on your machine, and cloud providers are always opt-in. The one automatic request is the periodic update check, which you can turn off, and which stays off when `net_mode` is `off`.</p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
@@ -104,12 +104,12 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 
 > **Stable release:** to install a specific tagged version instead of the latest
 > `master`, clone that tag, for example:
-> `git clone --depth 1 --branch v0.2.0 https://github.com/Matlan1/localm.git`
+> `git clone --depth 1 --branch v0.3.3 https://github.com/Matlan1/localm.git`
 > then follow the setup below inside the clone.
 
 ### Prefer a window? Use the graphical installer
 
-Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and the whole install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, and your hardware's recommendation is preselected); where models and data live and whether the Python tooling stays inside the folder; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and, after one question in the console (keep the Python tooling inside the folder, or share it), the install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, and your hardware's recommendation is preselected); where models and data live; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
 
 It performs the same install as the console setup below and covers the same choices, grouped into those pages (so not in the console's order). Everything after this section describes the console path; if you used the window, you are already finished.
 
@@ -130,7 +130,7 @@ The same self-contained install, one command:
 curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
 ```
 
-This needs `git` and `curl`. It clones localm to `~/localm` (or updates the clone already there), runs `bash setup.sh --yes` to create a private `.venv` with uv and Python kept inside the clone, detects your GPU, and provisions the matching backend, taking the default at every question. Piped from `curl`, it skips the plugin picker; run `localm plugin setup` afterwards. `localm` is not put on your PATH (see the Quick start note). For the interactive version (`bash setup.sh` from a clone; the same prompts as `setup.bat` above, with an application-menu entry in place of the desktop shortcut), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
+This needs `git` and `curl`. It clones localm to `~/localm` (or updates the clone already there), runs `bash setup.sh --yes` to create a private `.venv` with uv and Python kept inside the clone, detects your GPU, and provisions the matching backend, taking the default at every question. It installs the recommended plugins (coder, rag, web, tts) without asking; run `localm plugin setup` afterwards to change the selection. `localm` is not put on your PATH (see the Quick start note). For the interactive version (`bash setup.sh` from a clone; the same prompts as `setup.bat` above, with an application-menu entry in place of the desktop shortcut), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
 
 ### `pip install localm` (no clone needed)
 
@@ -373,7 +373,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, `mcp`, and `exllama` (opt-in, offered only on Linux with an NVIDIA GPU), plus the protected `chat`. For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 
@@ -390,7 +390,7 @@ localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 ```
 
-Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
+Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build for RX 6000 on Windows is self-contained: its archive carries the ROCm runtime it needs (the `[gpu]` extra is separate: it adds the ROCm PyTorch stack for HuggingFace models). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
 **NVIDIA users:** on **both Windows and Linux** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed - a third-party build plus the CUDA runtime libraries on Linux, the official build plus a `cudart` bundle on Windows), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.4+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`).
 
@@ -433,9 +433,12 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/plugin-interop.md](docs/plugin-interop.md) | Foreign-ecosystem interop: importing plugins from other tools over the MCP spine |
 | [docs/skills.md](docs/skills.md) | The Agent Skills (`SKILL.md`) importer for the coder agent |
 | [docs/gui.md](docs/gui.md) | The web GUI: chat, coder sessions, studios, Jobs, approvals, security notes |
+| [docs/gui-design.md](docs/gui-design.md) | The GUI design standard for contributors |
 | [docs/jobs.md](docs/jobs.md) | Scheduled jobs: the scheduler, `localm job` CLI, `/api/jobs`, the Jobs tab |
 | [docs/mcp.md](docs/mcp.md) | MCP in both directions: serving models, consuming tool servers |
 | [docs/server-api.md](docs/server-api.md) | HTTP API: OpenAI endpoints, management routes, auth, CORS |
+| [docs/api-reference.md](docs/api-reference.md) | Generated API reference: every route, parameter and schema in the server's OpenAPI schema |
+| [docs/ollama-api.md](docs/ollama-api.md) | The Ollama-compatible API on the same server and port |
 | [docs/architecture.md](docs/architecture.md) | Design notes |
 | [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
@@ -443,6 +446,9 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline (shared by music/video) |
 | [docs/managed-comfyui.md](docs/managed-comfyui.md) | localm's own managed ComfyUI: `localm comfy setup`, coexistence, shared models |
 | [docs/video.md](docs/video.md) | Wan 2.2 video generation: model setup, timing, workflow override |
+| [docs/native-image.md](docs/native-image.md) | Native image generation without ComfyUI (stable-diffusion.cpp) |
+| [docs/native-music.md](docs/native-music.md) | Native music generation without ComfyUI (ACE-Step 1.5 on KoboldCpp) |
+| [docs/native-workflows.md](docs/native-workflows.md) | Native workflows: saved presets for the built-in image, video and music generators |
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |

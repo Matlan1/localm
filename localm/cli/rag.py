@@ -60,8 +60,7 @@ def rag_group():
     Index files or folders into named collections, then ground chat replies
     in them: pick the collection in the GUI's parameters drawer, or query
     from the terminal. Retrieval is BM25 (always available offline);
-    embeddings are blended in when indexed via the GUI with a model that
-    supports them. PDF parsing is built in (pypdf).
+    pass --embed, or index from the GUI, to blend in embeddings. PDF parsing is built in (pypdf).
     """
 
 

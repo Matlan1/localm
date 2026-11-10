@@ -192,6 +192,11 @@ class Agent(
         self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
+        # Set when a tool result put untrusted content into this context; while
+        # set (and taint_rearms_confirm), destructive, network and code-running
+        # tools ask again. Cleared by the next user message.
+        self._untrusted_in_context = False
+        self.taint_rearms_confirm = True
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
         cap_backend_session_mode(backend, mode)
@@ -508,6 +513,8 @@ class Agent(
         # imports no plugin module and discovers no skill. The project's hooks
         # and MCP servers load first: MCP servers start only once trusted.
         self._init_tool_hooks(cwd)
+        _hooks = self._tool_hooks
+        self._project_trust_loaded: bool = bool(_hooks is not None and _hooks.trusted)
         self._init_mcp_tools(cwd)
         self._init_plugin_tools()
         self._init_skill_tools(cwd)
@@ -740,6 +747,42 @@ class Agent(
             if getattr(backend, "native_tools", False):
                 backend.set_tools(self._native_tool_defs())
         return names
+
+    def apply_project_trust(self, interactive: bool = False) -> bool:
+        """Bring the project's trust-gated files in line with its current trust
+        (hook_trust.py): when that changed since they were last read, re-read
+        the project memory, ``.localcoder/system.md`` (unless ``--system``
+        overrides it) and the skills, and rebuild the system prompt and the
+        native tool list. While the project stays untrusted and declares no hook
+        or MCP server, say so once per session. Returns whether anything was
+        re-read. Nothing for a restricted session or a sub-agent."""
+        hooks = getattr(self, "_tool_hooks", None)
+        if hooks is None or self.restricted or self.parent is not None:
+            return False
+        if not hooks.has_project_items():
+            return False
+        trusted = hooks.refresh_trust()
+        if not trusted and not hooks.has_commands() and hooks.claim_untrusted_report():
+            msg = hooks.untrusted_message()
+            _agent.print_warning(msg, to_stderr=not interactive)
+            self._emit("info", text=msg)
+            self._audit.notice("project_untrusted", msg)
+        if trusted == getattr(self, "_project_trust_loaded", False):
+            return False
+        self._project_trust_loaded = trusted
+        self._memory = _agent.load_memory(self.cwd)
+        if self._system_override is None:
+            self._custom_instructions = _agent.load_custom_instructions(self.cwd)
+        self._init_skill_tools(self.cwd)
+        if self._role_preset is not None:
+            self._apply_role_toolset()
+        if self._inherited_skill_tools is not None:
+            self._apply_inherited_skill_toolset()
+        self._rebuild_system_prompt()
+        backend: Any = self.backend
+        if getattr(backend, "native_tools", False):
+            backend.set_tools(self._native_tool_defs())
+        return True
 
     def report_deferred_mcp(self, interactive: bool) -> None:
         """Say, once per session, that the project's MCP servers were not
