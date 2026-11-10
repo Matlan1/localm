@@ -71,7 +71,9 @@ def native_fault_hint() -> str:
 def debug_content_enabled() -> bool:
     """Whether the debug log may include raw CHAT CONTENT (a user prompt or a model
     reply). True only when the debug log is on AND no relevant session mode is
-    privacy - so privacy mode NEVER persists chat content to the debug log, even
+    privacy, no coder session is in privacy and no request that carries privacy
+    mode is being answered (``audit.request_privacy``) - so privacy mode NEVER
+    persists chat content to the debug log, even
     when ``--debug`` or ``keep_diagnostics`` enabled the log file for OPERATIONAL
     diagnostics. Fail-safe: no content when the mode cannot be resolved.
 
@@ -81,7 +83,11 @@ def debug_content_enabled() -> bool:
     if not debug_enabled():
         return False
     try:
-        from localm.audit import SessionMode, any_coder_session_is_privacy, effective_mode
+        from localm.audit import (SessionMode, any_coder_session_is_privacy,
+                                  effective_mode, request_is_privacy)
+        # A request that carries privacy mode to a server in another mode.
+        if request_is_privacy():
+            return False
         # Suppress content if ANY of these surfaces is privacy: the backend that
         # produces the content (llamacpp/llama.py) is surface-agnostic and serves
         # coder sessions through the same generation path as chat/server, so a
