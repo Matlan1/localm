@@ -361,20 +361,20 @@ def running_server(*, allow_url_override: bool = True):
     Returns None rather than exiting, leaving the caller to decide what to do
     without a server.
 
-    *allow_url_override*: honour ``LOCALM_URL`` for a different instance. An
-    overridden URL has no registry entry, so there is no attach token to fall
-    back on and a keyless server there needs ``LOCALM_API_KEY``.
+    *allow_url_override*: honour ``LOCALM_URL`` (a server root or a ``/v1``
+    base) for a different instance. Its attach token comes from this home's
+    registry entry at exactly that address; with none, a keyless server there
+    needs ``LOCALM_API_KEY``.
     """
-    import os
-
     from .. import instances
     from ..auth import resolve_bearer_headers
     from ..config import home_dir
 
     if allow_url_override:
-        override = os.environ.get("LOCALM_URL", "").rstrip("/")
+        from ..localm_url import env_root, registry_token
+        override = env_root()
         if override:
-            return override, resolve_bearer_headers(None)
+            return override, resolve_bearer_headers(registry_token(override))
     entry = instances.find_attachable(home_dir(), instances.resolve_root_dir())
     if entry is None:
         return None

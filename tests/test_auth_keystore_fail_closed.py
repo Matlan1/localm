@@ -11,6 +11,7 @@ cross-process contention half of the same class of bug, and
 test_config_cross_process_lock.py for the sibling coverage this mirrors for
 config.json/registry.json."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -182,3 +183,66 @@ def test_wrong_shape_keystore_is_a_409_on_the_key_routes_and_exit_1_on_the_cli(
     assert (cli_create.exit_code, cli_rm.exit_code) == (1, 1), (
         cli_create.output, cli_rm.output)
     assert "auth.json" in cli_create.output and "auth.json" in cli_rm.output
+
+
+@pytest.mark.parametrize("entries", ['["x"]', "[null]", "[1]", "[[]]"])
+def test_non_object_entries_answer_401_and_list_cleanly(auth, monkeypatch, entries):
+    """A keystore list holding non-object entries stays keyed, answers a bearer
+    request with 401 (not 500), lists no keys, refuses writes untouched, and
+    makes ``localm key list`` exit 1 with a message."""
+    from click.testing import CliRunner
+    from fastapi.testclient import TestClient
+
+    import localm.config as cfg
+    from localm.cli import main
+    from localm.inference.http_server import create_app
+
+    path = Path(auth.keystore_file())
+    path.write_text(entries, encoding="utf-8")
+    before = path.read_bytes()
+
+    assert auth.list_keys() == []
+    assert auth.verify("lm-some-presented-key") is None
+    assert auth._keystore_configured() is True
+    assert auth.keystore_readable() is False
+    with pytest.raises(cfg.ConfigUnreadable):
+        auth.create_key("gamma", [])
+    assert path.read_bytes() == before
+
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    with TestClient(create_app(None), raise_server_exceptions=False) as c:
+        resp = c.get("/v1/models", headers={"Authorization": "Bearer lm-some-presented-key"})
+    assert resp.status_code == 401, resp.text
+
+    listed = CliRunner().invoke(main, ["key", "list"])
+    assert listed.exit_code == 1, listed.output
+    assert listed.exception is None or isinstance(listed.exception, SystemExit), listed.exception
+    assert "auth.json" in listed.output
+
+
+def test_mixed_keystore_keeps_object_entries_working(auth, monkeypatch):
+    """Object entries beside non-object ones still verify and list; writes
+    refuse and leave the file untouched; ``localm key list`` lists the good key
+    with a warning."""
+    from click.testing import CliRunner
+
+    import localm.config as cfg
+    from localm.cli import main
+
+    path = Path(auth.keystore_file())
+    path.write_text("[]", encoding="utf-8")
+    alpha = auth.create_key("alpha", ["chat"])
+    records = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps(["x", None] + records + [7]), encoding="utf-8")
+    before = path.read_bytes()
+
+    assert [k["name"] for k in auth.list_keys()] == ["alpha"]
+    assert auth.verify(alpha["key"]) is not None
+    assert auth.keystore_readable() is False
+    with pytest.raises(cfg.ConfigUnreadable):
+        auth.revoke_key(alpha["id"])
+    assert path.read_bytes() == before
+
+    listed = CliRunner().invoke(main, ["key", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert "alpha" in listed.output and "not key records" in listed.output
