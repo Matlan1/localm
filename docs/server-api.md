@@ -79,7 +79,7 @@ object) and `POST /v1/responses` (OpenAI's error object).
 
 ### `POST /v1/chat/completions`
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 Streaming and non-streaming chat. Standard OpenAI request body (see
 [OpenAI request fields](#openai-request-fields) for what each field does here),
@@ -517,7 +517,7 @@ covered.
 
 ### `POST /v1/completions`
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 Raw text completion (streaming and non-streaming). The model continues
 `prompt` exactly as sent: no chat template, no system prompt and no chat
@@ -546,7 +546,7 @@ and `suffix` are each a 400 naming the field.
 
 ### `POST /v1/messages` (Anthropic Messages API)
 
-Scope: any valid key (no specific scope required once auth is enabled). Anthropic clients
+Scope: `chat`. Anthropic clients
 authenticate with `x-api-key`, which the API routes accept as well as `Authorization: Bearer`
 (the bearer token wins when both are sent; the GUI login takes only the bearer form); the
 `anthropic-version` and `anthropic-beta` headers are accepted and not needed.
@@ -589,7 +589,7 @@ another instance serves is counted there). The model is loaded if it is not alre
 
 ### `POST /v1/responses` (OpenAI Responses API)
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 An OpenAI SDK or agent tool that speaks the Responses API can use localm by pointing its base URL
 at the server (`OPENAI_BASE_URL=http://127.0.0.1:8642/v1`) and naming a localm model. The request
