@@ -188,3 +188,54 @@ def test_config_saved_is_written_in_every_session_mode(home, mode):
     (home / "config.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
     cfg.update_config(lambda c: c.update(max_tokens=1234))
     assert [e["kind"] for e in _events(home)] == ["config_saved"]
+
+
+def _plugin_manager(home):
+    import textwrap
+
+    from fastapi import FastAPI
+
+    from localm.plugins.engine import PluginManager
+    store = home / "store"
+    pdir = store / "p1"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.toml").write_text(
+        '[plugin]\nname = "p1"\nscope = "p1"\nversion = "2.5.0"\nregister = "plug"\n',
+        encoding="utf-8")
+    (pdir / "plug.py").write_text(textwrap.dedent('''
+        def register(host):
+            pass
+
+        def unregister():
+            pass
+    '''), encoding="utf-8")
+    return PluginManager(FastAPI(), store_root=store, installed_root=home / "installed")
+
+
+def _plugin_events(home):
+    return [e for e in _events(home) if e["kind"].startswith("plugin_")]
+
+
+def test_install_and_uninstall_each_write_one_plugin_event(home):
+    mgr = _plugin_manager(home)
+    mgr.install("p1")
+    (ev,) = _plugin_events(home)
+    assert (ev["kind"], ev["plugin"], ev["version_to"]) == ("plugin_installed", "p1", "2.5.0")
+    assert mgr.uninstall("p1") is True
+    evs = _plugin_events(home)
+    assert [e["kind"] for e in evs] == ["plugin_installed", "plugin_uninstalled"]
+    assert (evs[1]["plugin"], evs[1]["version_from"]) == ("p1", "2.5.0")
+
+
+def test_uninstall_of_an_unknown_plugin_writes_nothing(home):
+    mgr = _plugin_manager(home)
+    with pytest.raises(KeyError):
+        mgr.uninstall("nope")
+    assert _plugin_events(home) == []
+
+
+def test_plugin_install_succeeds_when_the_log_cannot_be_written(home):
+    mgr = _plugin_manager(home)
+    (home / "logs").write_text("blocker")
+    mgr.install("p1")
+    assert mgr.is_installed("p1")
