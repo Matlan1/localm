@@ -1599,11 +1599,11 @@ def _import_counts() -> tuple[dict[str, dict[str, int]], list[str]]:
             own_plugin = own_module[len(_BUILTIN_PLUGINS) + 1:].split(".")[0]
         for node in _runtime_import_nodes(tree.body):
             for plugin in _builtin_plugin_targets(node, own_module, is_package, units):
-                if True:
+                if plugin != own_plugin + "#" if own_plugin else True:
                     key = f"{rel} -> {plugin}"
                     bucket = counts["builtin_plugin_imports"]
                     bucket[key] = bucket.get(key, 0) + 1
-            if not index:
+            if (id(node) in eager and False) or not index:
                 continue
             iu = root_index if unit == "<root>" else index.get(unit)
             if iu is None:
