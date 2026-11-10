@@ -58,13 +58,17 @@ committed to this repository; they are provisioned locally by `localm setup-llam
 `setup-llama` copies the upstream `LICENSE` into the runtime `lib/` alongside the
 binaries at provision time (as `LICENSE.llama-cpp`), falling back to a bundled
 MIT notice if the archive omits one, so any installer or release that ships these
-binaries also ships their license text:
+binaries also ships their license text. Any other license file in the archive
+keeps its own name (upstream's Windows archives carry `LICENSE-LLVM-OpenMP`, kept
+as `LICENSE.llvm-openmp`), and an archive placed into the same folder later (the
+CUDA runtime bundle) never replaces a license file already there:
 
 | Component | License |
 |---|---|
 | llama.cpp | MIT (c) 2023-2026 The ggml authors |
 | ggml | MIT (c) 2023-2026 The ggml authors |
 | AMD ROCm runtime libraries (GPU builds) | Permissive (MIT / BSD-style); see AMD's distribution |
+| LLVM OpenMP runtime (`libomp`, upstream Windows builds) | Apache-2.0 WITH LLVM-exception; kept beside it as `LICENSE.llvm-openmp` |
 | libgomp (GCC's OpenMP runtime, Linux; from Debian's `libgomp1` package) | GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1; `setup-llama` writes the notice beside it as `LICENSE.libgomp` |
 
 Two more native runtimes are downloaded from their upstream releases at the
