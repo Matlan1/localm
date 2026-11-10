@@ -618,6 +618,8 @@ class _LoopMixin:
 
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
+        def apply_project_trust(self, interactive: bool = False) -> bool: ...
+
         @property
         def disabled_tools(self) -> frozenset: ...
 
@@ -765,6 +767,7 @@ class _LoopMixin:
         # (the GUI or another session may have trusted them since); while they
         # stay untrusted the session says so once.
         if self.parent is None:
+            self.apply_project_trust(interactive)
             self.start_deferred_mcp()
             self.report_deferred_mcp(interactive)
         # Live attribute lookup, so a patched agent.parse_tool_calls / confirm /

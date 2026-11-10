@@ -11,7 +11,10 @@ from ..display import console, print_info, print_success, print_warning
 
 
 def _noun(hooks) -> str:
-    """What *hooks* declares: "Tool hooks", "MCP servers" or both."""
+    """What *hooks* declares: "Tool hooks", "MCP servers" or both, or "Project
+    settings" when it declares neither."""
+    if not hooks.has_commands():
+        return "Project settings"
     if not hooks.has_mcp():
         return "Tool hooks"
     if not hooks.has_hooks():
@@ -20,8 +23,9 @@ def _noun(hooks) -> str:
 
 
 def _show_hooks(hooks) -> None:
-    console.print(f"[bold]{_noun(hooks)}[/bold] in {markup_safe(str(hooks.config_path))}:")
-    for line in (*hooks.describe(), *hooks.describe_mcp()):
+    where = hooks.config_path if hooks.has_commands() else hooks.trust_path.parent
+    console.print(f"[bold]{_noun(hooks)}[/bold] in {markup_safe(str(where))}:")
+    for line in (*hooks.describe(), *hooks.describe_mcp(), *hooks.describe_project()):
         console.print(f"  {markup_safe(line)}")
 
 
@@ -39,6 +43,14 @@ def _remember(hooks) -> bool:
     return True
 
 
+def _apply_project(agent) -> None:
+    """Load the project's trust-gated files into *agent* now that they are
+    trusted (Agent.apply_project_trust)."""
+    apply = getattr(agent, "apply_project_trust", None)
+    if apply is not None:
+        apply()
+
+
 def _start_mcp(agent, *, remembered: bool) -> None:
     """Start the MCP servers the session held back, now that they are trusted,
     and say how many tools they registered. When the trusted config is not the
@@ -46,6 +58,7 @@ def _start_mcp(agent, *, remembered: bool) -> None:
     they start in a later session if the trust was *remembered*, and that they
     do not start otherwise."""
     from ..hook_trust import config_key
+    _apply_project(agent)
     hooks = getattr(agent, "_tool_hooks", None)
     if hooks is None or not hooks.has_mcp():
         return
@@ -70,7 +83,12 @@ def ask_trust(hooks) -> str:
     """Ask whether to run *hooks* and start its MCP servers. Returns "session",
     "always" or "no"; an interrupted prompt counts as "no"."""
     _show_hooks(hooks)
-    if not hooks.has_mcp():
+    if not hooks.has_commands():
+        console.print("These settings and files come from the project folder and "
+                      "change what the agent does and what it may do without asking. "
+                      "Only trust a project you know.")
+        refused = "none of them is used"
+    elif not hooks.has_mcp():
         console.print("These commands run on this computer around the agent's tool "
                       "calls. Only trust hooks you have read.")
         refused = "calls a pre_tool_use hook checks are then refused"
@@ -83,6 +101,8 @@ def ask_trust(hooks) -> str:
         refused = "no MCP server is started"
         if hooks.has_hooks():
             refused += "; calls a pre_tool_use hook checks are refused"
+    if hooks.has_commands() and hooks.has_project_items():
+        refused += "; the project settings and files listed are not used"
     try:
         answer = console.input(
             "[yellow]Run them? \\[y] this session, \\[a] always (until they "
@@ -97,6 +117,9 @@ def ask_trust(hooks) -> str:
 
 
 def _declined_message(hooks) -> str:
+    if not hooks.has_commands():
+        return ("Project settings and files not trusted: none of them is used "
+                "(/hooks trust to change that).")
     if not hooks.has_mcp():
         return ("Tool hooks not trusted: none of them run, and a tool call a "
                 "pre_tool_use hook would check is refused (/hooks trust to "
@@ -109,6 +132,41 @@ def _declined_message(hooks) -> str:
             "refused (/hooks trust to change that).")
 
 
+def settle_project_trust(work_dir, *, trust_flag: bool, can_prompt: bool) -> None:
+    """Settle the project's trust before the session's settings are resolved,
+    so the answer covers its ``auto_approve``, ``verify``, ``model`` and
+    ``mode`` and the files the agent reads at startup.
+
+    Nothing to do when nothing needs trust, it is already trusted, or the
+    project config cannot be read (resolving the settings reports that).
+    ``trust_flag`` trusts and records it; otherwise an interactive terminal is
+    asked. A refusal is kept for this process, and resolve_hook_trust reports
+    it once the session is built."""
+    from ..hooks import ToolHooks
+    from ..project_config import ProjectConfigUnreadable
+    try:
+        hooks = ToolHooks.load(work_dir)
+    except ProjectConfigUnreadable:
+        return
+    if hooks is None or not hooks.needs_trust() or hooks.trusted:
+        return
+    if trust_flag:
+        if _remember(hooks):
+            print_success(f"{_noun(hooks)} in {hooks.trust_path.parent} trusted.")
+        return
+    if not can_prompt:
+        return
+    choice = ask_trust(hooks)
+    if choice == "always":
+        if _remember(hooks):
+            print_success(f"{_noun(hooks)} trusted and remembered until they change.")
+    elif choice == "session":
+        hooks.trust_for_session()
+        print_info(f"{_noun(hooks)} trusted for this session.")
+    else:
+        hooks.revoke()
+
+
 def resolve_hook_trust(agent, *, trust_flag: bool, can_prompt: bool) -> None:
     """Settle, at startup, whether the session's project hooks may run and its
     MCP servers may start.
@@ -118,7 +176,11 @@ def resolve_hook_trust(agent, *, trust_flag: bool, can_prompt: bool) -> None:
     interactive terminal is asked; without one they stay untrusted and that is
     reported once. MCP servers held back start as soon as they are trusted."""
     hooks = getattr(agent, "_tool_hooks", None)
-    if hooks is None or not hooks.has_commands() or hooks.trusted:
+    if hooks is None or not hooks.needs_trust() or hooks.trusted:
+        return
+    if hooks.revoked and not trust_flag:
+        if hooks.claim_untrusted_report():
+            print_warning(_declined_message(hooks))
         return
     if trust_flag:
         remembered = _remember(hooks)
@@ -153,7 +215,7 @@ def handle_hooks_command(arg: str, agent) -> None:
     and stops the hooks for this session (MCP servers it already started keep
     running until it ends)."""
     hooks = getattr(agent, "_tool_hooks", None)
-    if hooks is None or not hooks.has_commands():
+    if hooks is None or not hooks.needs_trust():
         if getattr(agent, "restricted", False):
             print_info("Tool hooks never run and MCP servers never start in a "
                        "restricted session.")
@@ -173,7 +235,7 @@ def handle_hooks_command(arg: str, agent) -> None:
         from ..hook_trust import TrustStoreUnreadable, forget_trust
         hooks.revoke()
         try:
-            forget_trust(hooks.config_path)
+            forget_trust(hooks.trust_path)
         except (OSError, TrustStoreUnreadable) as e:
             print_warning(f"Could not update the trust record ({e}); the hooks "
                           "are stopped for this session only.")
@@ -194,7 +256,10 @@ def handle_hooks_command(arg: str, agent) -> None:
         print_info("Usage: /hooks [trust | forget]")
         return
     _show_hooks(hooks)
-    if not hooks.has_mcp():
+    if not hooks.has_commands():
+        state = ("trusted: they are used" if hooks.trusted else
+                 "NOT trusted: none of them is used")
+    elif not hooks.has_mcp():
         state = ("trusted: they run" if hooks.trusted else
                  "NOT trusted: none run, and calls a pre_tool_use hook checks are refused")
     else:

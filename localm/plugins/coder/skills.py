@@ -31,6 +31,7 @@ is retired by the user's NEXT request, never by anything the model can call.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,16 +66,72 @@ class Skill:
     allowed_tools: list = field(default_factory=list)
 
 
-def _skill_roots(cwd: Path) -> list[Path]:
-    """Global (data dir) first, then project. Project skills win on a name clash."""
-    roots: list[Path] = []
+def _project_skills_trusted(cwd: Path) -> bool:
+    """hook_trust.project_trusted, False when the project config cannot be
+    read."""
+    from .hook_trust import project_trusted
+    from .project_config import ProjectConfigUnreadable
+    try:
+        return project_trusted(cwd)
+    except ProjectConfigUnreadable:
+        return False
+
+
+def _skill_roots(cwd: Path, problems: Optional[list[str]] = None) -> list[tuple[Path, bool]]:
+    """``(root, is_project)`` pairs: global (data dir) first, then project.
+    Project skills win on a name clash. The project root is left out while the
+    project is not trusted (hook_trust.py), and then one line saying so is
+    appended to *problems* when it exists."""
+    roots: list[tuple[Path, bool]] = []
     try:
         from localm.config import home_dir
-        roots.append(home_dir() / "skills")
+        roots.append((home_dir() / "skills", False))
     except Exception:
         pass
-    roots.append(cwd / ".localcoder" / "skills")
+    project = cwd / ".localcoder" / "skills"
+    if _is_link(project) or project.is_dir():
+        if _project_skills_trusted(cwd):
+            roots.append((project, True))
+        elif problems is not None:
+            problems.append(f"project skills in {project} are not used: the project "
+                            "is not trusted (/hooks to review and trust it)")
     return roots
+
+
+def _is_link(path: Path) -> bool:
+    """Whether *path* is a symlink or an NTFS junction (not followed)."""
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction and isjunction(path))
+
+
+def _link_refusal(root: Path, target: Path) -> Optional[str]:
+    """Why a skill path *target* under the skill *root* must not be read: a
+    link at *root* or at any component from *root* down to *target*, a
+    location that resolves outside *root*, or a protected file of localm's data
+    folder (data_guard.protected_file). None when it may be read."""
+    if _is_link(root):
+        return f"{root} is a link"
+    try:
+        rel = target.relative_to(root)
+    except ValueError:
+        return f"{target} is not inside {root}"
+    current = root
+    for part in rel.parts:
+        current = current / part
+        if _is_link(current):
+            return f"{current} is a link"
+    try:
+        resolved = target.resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return f"{target} resolves outside {root}"
+    from .data_guard import protected_file
+    label = protected_file(resolved)
+    if label:
+        return f"{target} is {label}"
+    return None
 
 
 def _split_list(v: str) -> list:
@@ -109,11 +166,19 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def discover_skills(cwd: Path, problems: Optional[list[str]] = None) -> list[Skill]:
     """Every valid ``SKILL.md`` folder under the skill roots, sorted by name.
     Project skills override global ones on a name clash. Best-effort: unreadable
-    or invalid entries are skipped, never raised. When *problems* is given, one
-    line is appended to it for each skill root or ``SKILL.md`` that exists but
-    could not be read."""
+    or invalid entries are skipped, never raised. A skill root, skill folder or
+    ``SKILL.md`` that is a link, resolves outside its root or is a protected
+    file of localm's data folder is refused. When *problems* is given, one line
+    is appended to it for each skill root or ``SKILL.md`` that exists but could
+    not be read or was refused, for a project skill that replaces a global one,
+    and for project skills left out because the project is not trusted."""
     found: dict[str, Skill] = {}
-    for root in _skill_roots(cwd):
+    origin: dict[str, bool] = {}
+    for root, is_project in _skill_roots(cwd, problems):
+        if _is_link(root):
+            if problems is not None:
+                problems.append(f"skill folder {root} is refused: it is a link")
+            continue
         if not root.is_dir():
             continue
         try:
@@ -124,7 +189,13 @@ def discover_skills(cwd: Path, problems: Optional[list[str]] = None) -> list[Ski
             continue
         for child in children:
             sm = child / "SKILL.md"
-            if not (child.is_dir() and sm.is_file()):
+            if not (_is_link(child) or _is_link(sm)
+                    or (child.is_dir() and sm.is_file())):
+                continue
+            refusal = _link_refusal(root, sm)
+            if refusal is not None:
+                if problems is not None:
+                    problems.append(f"skill {child.name} is refused: {refusal}")
                 continue
             try:
                 meta, _ = _parse_frontmatter(
@@ -136,6 +207,11 @@ def discover_skills(cwd: Path, problems: Optional[list[str]] = None) -> list[Ski
             name = (meta.get("name") or child.name).strip()
             if not _NAME_RE.match(name):
                 continue
+            if (is_project and origin.get(name) is False
+                    and problems is not None):
+                problems.append(f"project skill {name} in {child} replaces the "
+                                "global skill of the same name")
+            origin[name] = is_project
             found[name] = Skill(
                 name=name,
                 description=(meta.get("description") or "").strip(),
@@ -157,9 +233,13 @@ def _confine_skill_file(skill: Skill, rel: str) -> Path:
     carries the NTFS Alternate Data Stream / short-name-alias hardening too.
     Translates ValueError to the PermissionError this module's caller expects."""
     try:
-        return pathsafe.confined_under(skill.path, rel)
+        target = pathsafe.confined_under(skill.path, rel)
     except ValueError as e:
         raise PermissionError(str(e)) from e
+    refusal = _link_refusal(skill.path, skill.path / rel.replace("\\", "/"))
+    if refusal is not None:
+        raise PermissionError(f"{rel} is refused: {refusal}")
+    return target
 
 
 # ------------------------------------------------------------------ #

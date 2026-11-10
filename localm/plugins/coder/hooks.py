@@ -365,16 +365,22 @@ class ToolHooks:
     """The hooks one project config declares, and whether they may run."""
 
     def __init__(self, config_path: Path, table: Any, *, trusted: bool = False,
-                 mcp_servers: Optional[dict] = None, digest: Optional[str] = None):
+                 mcp_servers: Optional[dict] = None, digest: Optional[str] = None,
+                 trust_path: Optional[Path] = None,
+                 project_items: Optional[list[str]] = None):
         """*table* is the ``[hooks]`` table and *mcp_servers* the MCP servers
         (mcp.mcp_servers_from) of the config at *config_path*. *digest* is what
-        trust is recorded against; it defaults to ``hooks_digest(table)``."""
+        trust is recorded against, under *trust_path* (default *config_path*);
+        it defaults to ``hooks_digest(table)``. *project_items* lists the other
+        settings and files the trust covers (hook_trust.gated_items)."""
         from .hook_trust import hooks_digest
         self.config_path = Path(config_path)
+        self.trust_path = Path(trust_path) if trust_path is not None else self.config_path
         self.project_dir = self.config_path.parent.parent
         self.digest = digest if digest is not None else hooks_digest(table)
         self.pre, self.post, self.warnings = parse_hooks(table)
         self.mcp_servers: dict = dict(mcp_servers or {})
+        self.project_items: list[str] = list(project_items or [])
         self.trusted = trusted
         self.trust_source: Optional[str] = "store" if trusted else None
         self.revoked = False
@@ -384,26 +390,34 @@ class ToolHooks:
 
     @classmethod
     def load(cls, cwd: Path) -> Optional[ToolHooks]:
-        """The hooks and MCP servers in the project config nearest *cwd*, with
-        ``trusted`` read from the trust store against commands_digest of that
-        same read. None when there is no config, or it has no ``hooks`` key and
-        no MCP server. Raises ProjectConfigUnreadable when the config exists but
+        """The hooks and MCP servers in the project config nearest *cwd* and
+        the other settings and files the project trust covers (hook_trust.py),
+        with ``trusted`` read from this process's decisions and then the trust
+        store against project_digest of that same read. None when nothing
+        needs trust. Raises ProjectConfigUnreadable when the config exists but
         cannot be read."""
-        from .project_config import find_project_config, read_project_config_file
-        from .hook_trust import commands_digest, is_trusted
+        from .hook_trust import (gated_items, has_gated, is_trusted, project_digest,
+                                 session_decision, trust_subject)
         from .mcp import mcp_servers_from
-        path = find_project_config(cwd)
-        if path is None:
-            return None
-        raw = read_project_config_file(path)
+        path, raw, anchor, content = trust_subject(Path(cwd))
         servers = mcp_servers_from(raw)
-        if "hooks" not in raw and not servers:
+        gated = has_gated(raw, content)
+        if "hooks" not in raw and not servers and not gated:
             return None
-        hooks = cls(path, raw.get("hooks", {}), mcp_servers=servers,
-                    digest=commands_digest(raw))
+        hooks = cls(path if path is not None else anchor, raw.get("hooks", {}),
+                    mcp_servers=servers, digest=project_digest(raw, content),
+                    trust_path=anchor,
+                    project_items=gated_items(raw, content) if gated else [])
         hooks.loaded_cwd = Path(cwd).resolve()
-        hooks.trusted = hooks.has_commands() and is_trusted(path, hooks.digest)
-        hooks.trust_source = "store" if hooks.trusted else None
+        if hooks.needs_trust():
+            decided = session_decision(anchor, hooks.digest)
+            if decided is not None:
+                hooks.trusted = decided
+                hooks.revoked = not decided
+                hooks.trust_source = "session" if decided else None
+            else:
+                hooks.trusted = is_trusted(anchor, hooks.digest)
+                hooks.trust_source = "store" if hooks.trusted else None
         return hooks
 
     @classmethod
@@ -427,34 +441,48 @@ class ToolHooks:
         return bool(self.mcp_servers)
 
     def has_commands(self) -> bool:
-        """Whether the config declares anything that needs trust: a hook or an
-        MCP server."""
+        """Whether the config declares a hook or an MCP server."""
         return self.has_hooks() or self.has_mcp()
+
+    def has_project_items(self) -> bool:
+        """Whether the trust covers settings or files besides hooks and MCP
+        servers (``project_items``)."""
+        return bool(self.project_items)
+
+    def needs_trust(self) -> bool:
+        """Whether anything here takes effect only once trusted."""
+        return self.has_commands() or self.has_project_items()
 
     def applies(self, event: str, tool: str) -> bool:
         specs = self.pre if event == PRE else self.post
         return any(s.matches(tool) for s in specs)
 
     def trust_for_session(self) -> None:
+        """Trust these hooks and the rest of the project for this process."""
+        from .hook_trust import set_session_decision
         self.trusted = True
         self.trust_source = "session"
         self.revoked = False
+        set_session_decision(self.trust_path, self.digest, True)
 
     def revoke(self) -> None:
-        """Stop these hooks for the rest of the session, whatever the trust
-        store says."""
+        """Stop these hooks, and the project's other trust-gated settings and
+        files, for the rest of this process, whatever the trust store says."""
+        from .hook_trust import set_session_decision
         self.trusted = False
         self.trust_source = None
         self.revoked = True
+        set_session_decision(self.trust_path, self.digest, False)
 
     def refresh_trust(self) -> bool:
         """Re-read the trust store, so trust granted or withdrawn elsewhere
         (another session, the GUI) applies. Hooks trusted for this session only
         stay trusted; revoked hooks stay off. Returns ``trusted``."""
-        if self.revoked or not self.has_commands() or self.trust_source in ("session", "fixed"):
+        if self.revoked or not self.needs_trust() or self.trust_source in ("session", "fixed"):
             return self.trusted
-        from .hook_trust import is_trusted
-        stored = is_trusted(self.config_path, self.digest)
+        from .hook_trust import is_trusted, renewed_digest
+        self.digest = renewed_digest(self.trust_path, self.digest)
+        stored = is_trusted(self.trust_path, self.digest)
         self.trusted = stored
         self.trust_source = "store" if stored else None
         return self.trusted
@@ -463,11 +491,12 @@ class ToolHooks:
         """Trust these hooks now and record it for later sessions. Raises
         OSError or TrustStoreUnreadable when the record cannot be written; the
         hooks are trusted for this session either way."""
-        from .hook_trust import remember_trust
+        from .hook_trust import remember_trust, set_session_decision
         self.trusted = True
         self.trust_source = "session"
         self.revoked = False
-        remember_trust(self.config_path, self.digest)
+        set_session_decision(self.trust_path, self.digest, True)
+        remember_trust(self.trust_path, self.digest)
         self.trust_source = "store"
 
     def claim_untrusted_report(self) -> bool:
@@ -480,6 +509,24 @@ class ToolHooks:
             return True
 
     def untrusted_message(self) -> str:
+        if not self.has_commands():
+            return (f"The project settings and files in {self.trust_path.parent} are "
+                    "not trusted, so they are not used: "
+                    + "; ".join(self.project_items)
+                    + ". Review them and trust them with /hooks trust or "
+                    "--trust-hooks.")
+        msg = self._untrusted_commands_message()
+        if self.project_items:
+            msg += (" Also not used until trusted: " + "; ".join(self.project_items)
+                    + ".")
+        return msg
+
+    def describe_project(self) -> list[str]:
+        """One line per setting or file besides hooks and MCP servers the
+        trust covers, for display to the user."""
+        return list(self.project_items)
+
+    def _untrusted_commands_message(self) -> str:
         if not self.has_hooks():
             from .mcp import untrusted_servers_message
             return untrusted_servers_message(self.config_path, self.mcp_servers)

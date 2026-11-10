@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **A project folder you open with the coder has no effect until you trust it.** Besides tool hooks and MCP servers, the trust prompt now covers the rest of the project's `.localcoder` folder: `auto_approve`, the `verify` command, `model`, a `mode` that records more than your own, `system.md`, `memory.md` and skills. Until you trust the project (at the prompt, with `--trust-hooks`, `/hooks trust` or the GUI's hooks dialog) none of these is used, and changing any of them asks again. A run nobody watches (the MCP `run_coder_task` tool, a scheduled job) never takes `auto_approve` from the project. A restricted session can no longer create or change `LOCALCODER.md`, and a skill whose file or folder is a link is refused. A project you trusted before for its hooks or MCP servers alone stays trusted; one that also sets these is asked about once.
+
 ### Changed
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
