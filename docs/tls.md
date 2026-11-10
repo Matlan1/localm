@@ -160,6 +160,20 @@ certificate (no per-device trust step), for example to reach localm from the
 public internet. Keep localm on 127.0.0.1 so the only way in is through the
 proxy.
 
+localm answers only to its own names (see the Host check in
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding)).
+A proxy that forwards the browser's host name, as Caddy does by default and nginx
+does with `proxy_set_header Host $host`, needs that name in `allowed_hosts`,
+then a restart:
+
+```powershell
+localm config allowed_hosts llm.example.internal
+```
+
+nginx's default sets `Host` to the `proxy_pass` address: `127.0.0.1:8642` or
+another IP address needs nothing, a name (such as a compose service name,
+`http://localm:8642`) needs that name in `allowed_hosts`.
+
 ### Caddy (automatic certificates)
 
 `Caddyfile`:

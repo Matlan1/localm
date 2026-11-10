@@ -229,6 +229,11 @@ coding agent's shell access, so you can grant one without the other.
 
 ## What the policy does NOT govern
 
+- **Requests coming in.** This policy covers what localm fetches. What reaches
+  localm is limited by the bind address, the API key and the Host check: the
+  server answers only to its own names and addresses (plus the `allowed_hosts`
+  setting) and refuses every other `Host` with `400`, which stops DNS-rebinding
+  pages. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
 - **Child processes.** `run_shell` commands like `pip install`, `npm install`,
   or `git clone` talk to the network themselves. The gate for those is the
   shell-command approval (and `always_confirm` for `run_shell`), not the

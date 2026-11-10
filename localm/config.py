@@ -807,6 +807,7 @@ DEFAULT_CONFIG: dict = {
     "tls_cert": "",
     "tls_key": "",
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    "allowed_hosts": None,    # None = own names only; list of host names; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
     # False (default) = open in local/dev mode on loopback.
