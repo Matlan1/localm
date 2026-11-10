@@ -41,7 +41,7 @@ const RUNTIME = new URL("onnxruntime/", VENDOR);
 // Provenance pin. Recorded from the npm registry artefact, whose integrity hash
 // npm verifies during `npm pack`:
 //   npm pack onnxruntime-web@1.31.0-dev.20260914-8d85527a0  ->  package/dist/
-const VENDORED_TRANSFORMERS = "4.3.1";
+const VENDORED_TRANSFORMERS = "4.3.2";
 const VENDORED_ORT = "1.31.0-dev.20260914-8d85527a0";
 const MJS = "ort-wasm-simd-threaded.asyncify.mjs";
 const WASM = "ort-wasm-simd-threaded.asyncify.wasm";
