@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 OUTPUT_SUFFIX = ".wav"
+SUPPORTS_STEPS = True
+SUPPORTS_JOB_OPTIONS = True
 
 
 def _native(s: dict) -> dict:

@@ -1065,28 +1065,11 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
 
 # The REPL media-generation commands (/generate-image, /generate-music,
-# /generate-video) share one shape on ComfyUI: ensure ComfyUI is reachable (auto-
-# launching it from the configured comfy_launch_cmd/comfy_workdir if needed),
-# unload the chat model to free VRAM, generate one file into <home>/<subdir>,
-# then free ComfyUI's VRAM. Only the generator, output subdir/extension and the
-# argument label differ, so the three paths are table-driven to stay identical.
-# Each helper imports its generator from the `.comfy` submodule at call time so a
-# test that patches e.g. localm.image_gen.comfy.generate_image is honoured.
-def _media_generate_image():
-    from ..image_gen.comfy import generate_image
-    return generate_image
-
-
-def _media_generate_music():
-    from ..music_gen.comfy import generate_music
-    return generate_music
-
-
-def _media_generate_video():
-    from ..video_gen.comfy import generate_video
-    return generate_video
-
-
+# /generate-video) share one shape: the plugin's backend facade
+# (``generate_media``) makes sure the backend is available, unloads the chat
+# model to free VRAM, generates one file into <home>/<subdir> and releases the
+# backend's VRAM. Only the output subdir/extension and the argument label
+# differ, so the three paths are table-driven to stay identical.
 # The gallery directory names come from localm.media.paths, which is also what
 # the image/music/video plugins and the input_image confinement policy use. One
 # list, not a duplicated set of literals here: it decides which directories an
@@ -1097,22 +1080,22 @@ from ..media import paths as _media_paths  # noqa: E402
 _MEDIA_REPL = {
     "generate-image": {
         "subdir": _media_paths.IMAGE_DIR_NAME, "ext": ".png", "arg": "prompt",
-        "get_generate": _media_generate_image, "plugin": "image",
+        "plugin": "image",
     },
     "generate-music": {
         "subdir": _media_paths.MUSIC_DIR_NAME, "ext": ".flac", "arg": "tags",
-        "get_generate": _media_generate_music, "plugin": "music",
+        "plugin": "music",
     },
     "generate-video": {
         "subdir": _media_paths.VIDEO_DIR_NAME, "ext": ".mp4", "arg": "prompt",
-        "get_generate": _media_generate_video, "plugin": "video",
+        "plugin": "video",
     },
 }
 
 
 def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None:
     """REPL /generate-image|/generate-music|/generate-video: generate one media
-    file via the configured ComfyUI backend, unloading the chat model first to
+    file via the plugin's configured backend, unloading the chat model first to
     free VRAM. console + home_dir are passed in so a caller that resolved the
     (monkeypatchable) localm.cli.console / localm.cli.HOME_DIR is honoured here."""
     from rich.markup import escape
@@ -1124,91 +1107,32 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
-    if spec["plugin"] in ("image", "video"):
-        import time as _t
-        from importlib import import_module
-
-        from ..audit import SessionMode, effective_mode
-        media_backend = import_module(f"localm.plugins.builtin.{spec['plugin']}.backend")
-        out_dir = home_dir / spec["subdir"]
-        out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
-
-        def _unload_chat() -> None:
-            console.print("[dim]Freeing VRAM (chat model unloads, "
-                          "reloads on your next message)...[/dim]")
-            engine.unload()
-
-        is_privacy = effective_mode("chat") == SessionMode.PRIVACY
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result = media_backend.generate_unless_comfy(
-            arg, out, before_generate=_unload_chat,
-            on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
-            write_sidecar=not is_privacy, delete_outputs=is_privacy)
-        if result is not None:
-            console.print(escape(result[1]))
-            return
-    if spec["plugin"] == "music":
-        import time as _t
-
-        from ..audit import SessionMode, effective_mode
-        from ..plugins.builtin.music import backend as music_backend
-        out_dir = home_dir / spec["subdir"]
-        out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
-
-        def _unload_chat_for_music() -> None:
-            console.print("[dim]Freeing VRAM (chat model unloads, "
-                          "reloads on your next message)...[/dim]")
-            engine.unload()
-
-        is_privacy = effective_mode("chat") == SessionMode.PRIVACY
-        out_dir.mkdir(parents=True, exist_ok=True)
-        music_result = music_backend.generate_unless_comfy(
-            arg, out, before_generate=_unload_chat_for_music,
-            on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
-            write_sidecar=not is_privacy, delete_outputs=is_privacy)
-        if music_result is not None:
-            console.print(escape(music_result[1]))
-            return
-    from ..image_gen.comfy import ensure_comfy, free_comfy_vram
-    from .media import _plugin_api_url
-    api = _plugin_api_url(spec["plugin"])
-    # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir.
-    # Only unload the chat model once ComfyUI is actually available. escape(t):
-    # progress text embeds the user's own comfy_launch_cmd/comfy_workdir config
-    # values verbatim.
-    ok, msg = ensure_comfy(
-        api, on_progress=lambda t: console.print(f"[dim]{escape(t)}[/dim]"))
-    if not ok:
-        console.print(f"[yellow]{escape(msg)}[/yellow]")
-        return
     import time as _t
-    out_dir = home_dir / spec["subdir"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
-    console.print("[dim]Freeing VRAM (chat model unloads, "
-                  "reloads on your next message)...[/dim]")
-    engine.unload()
+    from importlib import import_module
+
     from ..audit import SessionMode, effective_mode
-    generate = spec["get_generate"]()
+    media_backend = import_module(f"localm.plugins.builtin.{spec['plugin']}.backend")
+    out_dir = home_dir / spec["subdir"]
+    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
+
+    def _unload_chat() -> None:
+        console.print("[dim]Freeing VRAM (chat model unloads, "
+                      "reloads on your next message)...[/dim]")
+        engine.unload()
+
     is_privacy = effective_mode("chat") == SessionMode.PRIVACY
-    ok, message = generate(
-        arg, out,
-        api_url=api,
-        write_sidecar=not is_privacy,
-        delete_outputs=is_privacy,
-    )
-    # escape(): message is a bare string passed straight to console.print - Rich
-    # parses "[...]" in ANY printed string, not just inside literal markup tags -
-    # and it embeds the generated output path plus, on failure, arbitrary
-    # exception/config text (see generate_image's own return sites).
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _ok, message, _path = media_backend.generate_media(
+        arg, out, before_generate=_unload_chat,
+        on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
+        write_sidecar=not is_privacy, delete_outputs=is_privacy,
+        privacy=is_privacy)
     console.print(escape(message))
-    if ok:
-        free_comfy_vram(api)
 
 
 def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
     """REPL /generate-image (and the /imagine alias): generate one image via the
-    configured ComfyUI backend. Thin wrapper over the shared media path that
+    configured image backend. Thin wrapper over the shared media path that
     keeps the /imagine rename notice."""
     if cmd == "imagine":
         console.print("[dim]/imagine was renamed to /generate-image[/dim]")

@@ -11,13 +11,20 @@ structures. The file length and the position of every other byte are
 unchanged: MP4 ``stco``/``co64`` chunk offsets and FLAC seek points are
 absolute and must stay valid.
 
-Pure Python, no dependencies. Both entry points return "" on a clean strip and
-a WARNING string when the container is not one they recognise or the rewrite
-failed, mirroring ``localm.image_gen.comfy._strip_png_metadata``.
+PNG images are handled the same way: ``tEXt``, ``zTXt``, ``iTXt`` and ``eXIf``
+chunks are dropped.
+
+Pure Python, no dependencies. ``strip_output`` is the typed entry point: it
+returns a ``StripResult`` that says whether metadata was stripped, there was
+nothing to strip, or the strip failed (with the reason). The per-kind
+``strip_*_metadata`` functions return "" unless the strip failed, and a WARNING
+string when the container is not one they recognise or the rewrite failed.
 """
 
 from __future__ import annotations
 
+import enum
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -44,6 +51,36 @@ _HEIF_BRANDS = frozenset({
 _ID3V2_FOOTER_FLAG = 0x10
 _ID3V1_TAG_SIZE = 128
 
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_PNG_METADATA_CHUNKS = frozenset({b"tEXt", b"zTXt", b"iTXt", b"eXIf"})
+
+_CONTENTS = {"image": "prompt/EXIF data", "audio": "prompt and lyrics",
+             "video": "prompt"}
+
+
+class StripStatus(enum.Enum):
+    """Outcome of stripping one generated file."""
+    STRIPPED = "stripped"
+    NOTHING_TO_STRIP = "nothing_to_strip"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class StripResult:
+    """The typed outcome of ``strip_output``: *status*, plus *reason* (the
+    WARNING text) when the status is FAILED, else ""."""
+    status: StripStatus
+    reason: str = ""
+
+    @property
+    def failed(self) -> bool:
+        return self.status is StripStatus.FAILED
+
+    @property
+    def warning(self) -> str:
+        """The WARNING text for a failed strip, else ""."""
+        return self.reason if self.failed else ""
+
 
 def _zero(f: BinaryIO, count: int) -> None:
     """Write *count* zero bytes at the current position."""
@@ -59,11 +96,13 @@ def _syncsafe(raw: bytes) -> int:
     return (raw[0] << 21) | (raw[1] << 14) | (raw[2] << 7) | raw[3]
 
 
-def _neutralise_flac(f: BinaryIO, size: int) -> None:
+def _neutralise_flac(f: BinaryIO, size: int) -> int:
     """Rewrite every APPLICATION, VORBIS_COMMENT and PICTURE block as a zeroed
-    PADDING block of the same length. Raises ValueError on a malformed block
-    chain (never writes past the end of the file)."""
+    PADDING block of the same length. Returns the number of blocks rewritten.
+    Raises ValueError on a malformed block chain (never writes past the end of
+    the file)."""
     pos = len(_FLAC_MAGIC)
+    count = 0
     while True:
         f.seek(pos)
         header = f.read(4)
@@ -79,15 +118,18 @@ def _neutralise_flac(f: BinaryIO, size: int) -> None:
             f.write(bytes([is_last | _FLAC_PADDING]))
             f.seek(pos + 4)
             _zero(f, length)
+            count += 1
         pos += 4 + length
         if is_last:
-            return
+            return count
 
 
-def _neutralise_mp3(f: BinaryIO, size: int) -> None:
+def _neutralise_mp3(f: BinaryIO, size: int) -> int:
     """Zero the body of a leading ID3v2 tag (keeping its header, so the tag
-    becomes pure padding) and the fields of a trailing ID3v1 tag. Raises
-    ValueError when the ID3v2 header declares a tag longer than the file."""
+    becomes pure padding) and the fields of a trailing ID3v1 tag. Returns the
+    number of tags cleared. Raises ValueError when the ID3v2 header declares a
+    tag longer than the file."""
+    count = 0
     f.seek(0)
     header = f.read(10)
     if len(header) == 10 and header[:3] == b"ID3":
@@ -99,21 +141,25 @@ def _neutralise_mp3(f: BinaryIO, size: int) -> None:
         f.write(bytes([header[5] & _ID3V2_FOOTER_FLAG]))
         f.seek(10)
         _zero(f, tag_size)
+        count += 1
     if size >= _ID3V1_TAG_SIZE:
         f.seek(size - _ID3V1_TAG_SIZE)
         if f.read(3) == b"TAG":
             _zero(f, _ID3V1_TAG_SIZE - 3)
+            count += 1
+    return count
 
 
-def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int, depth: int) -> None:
+def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int, depth: int) -> int:
     """Walk the boxes in [start, end), turning every ``udta``/``meta`` box nested
     inside ``moov``/``trak`` (``depth`` >= 1) into a zeroed ``free`` box of the
     same size. File-level boxes (``depth`` 0) are only descended into, never
-    rewritten. Raises ValueError on a box that overruns its parent or on nesting
-    deeper than ``_MP4_MAX_DEPTH``."""
+    rewritten. Returns the number of boxes rewritten. Raises ValueError on a box
+    that overruns its parent or on nesting deeper than ``_MP4_MAX_DEPTH``."""
     if depth > _MP4_MAX_DEPTH:
         raise ValueError(f"MP4 boxes nested deeper than {_MP4_MAX_DEPTH} levels")
     pos = start
+    count = 0
     while pos + 8 <= end:
         f.seek(pos)
         header = f.read(8)
@@ -137,13 +183,16 @@ def _neutralise_mp4_boxes(f: BinaryIO, start: int, end: int, depth: int) -> None
             f.write(b"free")
             f.seek(pos + header_len)
             _zero(f, box_size - header_len)
+            count += 1
         elif box_type in _MP4_CONTAINER_BOXES:
-            _neutralise_mp4_boxes(f, pos + header_len, pos + box_size, depth + 1)
+            count += _neutralise_mp4_boxes(f, pos + header_len, pos + box_size,
+                                           depth + 1)
         pos += box_size
+    return count
 
 
-def _neutralise_mp4(f: BinaryIO, size: int) -> None:
-    _neutralise_mp4_boxes(f, 0, size, 0)
+def _neutralise_mp4(f: BinaryIO, size: int) -> int:
+    return _neutralise_mp4_boxes(f, 0, size, 0)
 
 
 def _is_flac(head: bytes) -> bool:
@@ -159,7 +208,7 @@ def _is_mp4(head: bytes) -> bool:
     return head[4:8] == b"ftyp" and head[8:12] not in _HEIF_BRANDS
 
 
-_Neutraliser = Callable[[BinaryIO, int], None]
+_Neutraliser = Callable[[BinaryIO, int], int]
 
 _AUDIO_FORMATS: tuple[tuple[str, Callable[[bytes], bool], _Neutraliser], ...] = (
     ("FLAC", _is_flac, _neutralise_flac),
@@ -170,7 +219,7 @@ _VIDEO_FORMATS: tuple[tuple[str, Callable[[bytes], bool], _Neutraliser], ...] = 
 )
 
 
-def _strip(output_path: Path, formats, kind: str, contents: str) -> str:
+def _strip(output_path: Path, formats, kind: str, contents: str) -> StripResult:
     try:
         with open(output_path, "r+b") as f:
             head = f.read(12)
@@ -178,27 +227,84 @@ def _strip(output_path: Path, formats, kind: str, contents: str) -> str:
             size = f.tell()
             for _name, sniff, neutralise in formats:
                 if sniff(head):
-                    neutralise(f, size)
-                    return ""
-    except (OSError, ValueError) as e:
-        return (f"WARNING: could not strip {kind} metadata ({e}); the file may "
-                f"still contain the {contents}.")
+                    count = neutralise(f, size)
+                    return StripResult(StripStatus.STRIPPED if count
+                                       else StripStatus.NOTHING_TO_STRIP)
+    except Exception as e:  # noqa: BLE001
+        return StripResult(StripStatus.FAILED, (
+            f"WARNING: could not strip {kind} metadata ({e}); the file may "
+            f"still contain the {contents}."))
     names = " or ".join(name for name, _sniff, _neutralise in formats)
-    return (f"WARNING: generated file is not {names}; {kind} metadata could not "
-            f"be stripped and may still contain the {contents}.")
+    return StripResult(StripStatus.FAILED, (
+        f"WARNING: generated file is not {names}; {kind} metadata could not "
+        f"be stripped and may still contain the {contents}."))
+
+
+def _neutralise_png(f: BinaryIO, size: int) -> int:
+    """Drop every text and EXIF chunk from the PNG in *f*, in place. Returns the
+    number of chunks dropped."""
+    f.seek(0)
+    data = f.read()
+    clean = bytearray(_PNG_MAGIC)
+    pos, dropped = len(_PNG_MAGIC), 0
+    while pos + 8 <= len(data):
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        total = 12 + length
+        if data[pos + 4:pos + 8] in _PNG_METADATA_CHUNKS:
+            dropped += 1
+        else:
+            clean.extend(data[pos:pos + total])
+        pos += total
+    if dropped:
+        f.seek(0)
+        f.write(bytes(clean))
+        f.truncate()
+    return dropped
+
+
+def _is_png(head: bytes) -> bool:
+    return head.startswith(_PNG_MAGIC)
+
+
+_IMAGE_FORMATS: tuple[tuple[str, Callable[[bytes], bool], _Neutraliser], ...] = (
+    ("PNG", _is_png, _neutralise_png),
+)
+
+_KIND_FORMATS = {"image": _IMAGE_FORMATS, "audio": _AUDIO_FORMATS,
+                 "video": _VIDEO_FORMATS}
+
+
+def strip_output(kind: str, output_path: Path) -> StripResult:
+    """Strip the metadata ComfyUI embedded in a generated file, in place.
+
+    *kind* is ``"image"`` (PNG), ``"audio"`` (FLAC or MP3) or ``"video"`` (MP4).
+    Returns a ``StripResult``: STRIPPED when metadata was neutralised,
+    NOTHING_TO_STRIP when the container is recognised and carried none, FAILED
+    (with the reason) when the file is a container this kind does not handle,
+    is unreadable, or the rewrite failed. Raises KeyError for an unknown *kind*.
+    """
+    return _strip(output_path, _KIND_FORMATS[kind], kind, _CONTENTS[kind])
+
+
+def strip_image_metadata(output_path: Path) -> str:
+    """Strip PNG text and EXIF chunks from a generated image, in place.
+
+    Returns "" unless the strip failed, else a WARNING string: the file is not a
+    PNG, or the rewrite failed."""
+    return strip_output("image", output_path).warning
 
 
 def strip_audio_metadata(output_path: Path) -> str:
     """Strip container metadata from a generated FLAC or MP3 file, in place.
 
-    Returns "" when the metadata was neutralised, else a WARNING string: the
-    file is neither FLAC nor MP3, or the rewrite failed."""
-    return _strip(output_path, _AUDIO_FORMATS, "audio", "prompt and lyrics")
+    Returns "" unless the strip failed, else a WARNING string: the file is
+    neither FLAC nor MP3, or the rewrite failed."""
+    return strip_output("audio", output_path).warning
 
 
 def strip_video_metadata(output_path: Path) -> str:
     """Strip container metadata from a generated MP4 file, in place.
 
-    Returns "" when the metadata was neutralised, else a WARNING string: the
-    file is not an MP4, or the rewrite failed."""
-    return _strip(output_path, _VIDEO_FORMATS, "video", "prompt")
+    Returns "" unless the strip failed, else a WARNING string: the file is not
+    an MP4, or the rewrite failed."""
+    return strip_output("video", output_path).warning
