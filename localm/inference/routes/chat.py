@@ -5,7 +5,7 @@ These are the heaviest routes - they read the live engine and inference semaphor
 from the http_server module globals, the session-scoped audit/transcript from
 ctx, and call the streaming/completion helpers that stay on http_server
 (_stream_sse, _stream_sse_completion, _complete, _audit_exchange,
-_messages_prompt_text, _protocol_messages_to_dicts).
+_protocol_messages_to_dicts).
 
 NOTE on the local ``ctx``: each handler builds its own per-request
 ``ChatHookContext`` named ``ctx`` (the chat-pipeline turn context), so the
@@ -26,16 +26,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
-    EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    PretokenizerUnsafeInputError, RerankerHeadMissingError, RerankInputError,
+    RAW_PROMPT_UNSUPPORTED_MESSAGE, EmbedBatchTooLargeError, GrammarUnsupportedError,
+    InvalidGrammarError, PretokenizerUnsafeInputError, RerankerHeadMissingError,
+    RerankInputError,
     TriggerValidatorUnavailableError, messages_contain_audio, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
+from localm.inference.load_lease import LoadBusyError
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.inference_gate import InferenceGate, exclusively
 from localm.inference.openai_compat import (
@@ -84,7 +86,6 @@ def register(app: FastAPI, ctx) -> None:
     _stream_sse_completion = _hs._stream_sse_completion
     _complete = _hs._complete
     _generate_full = _hs._generate_full
-    _messages_prompt_text = _hs._messages_prompt_text
     _audit_exchange = _hs._audit_exchange
     _pin_engine = _hs._pin_engine
     _memory_used_header = _hs._memory_used_header
@@ -584,6 +585,9 @@ def register(app: FastAPI, ctx) -> None:
         except UnsupportedFieldError as e:
             raise HTTPException(400, str(e)) from e
 
+        if not req.messages:
+            raise HTTPException(400, "'messages' must not be empty")
+
         # Plain-dict messages for the backend. Hoisted above engine resolution
         # because capability routing reads them to decide which model answers.
         messages = _protocol_messages_to_dicts(req.messages)
@@ -670,7 +674,8 @@ def register(app: FastAPI, ctx) -> None:
             headers={**sse_headers, **_prepared_headers(prepared)})
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
-    async def embeddings(req: EmbeddingRequest, request: Request):
+    async def embeddings(req: EmbeddingRequest, request: Request,
+                         response: Response = None):  # pyright: ignore[reportArgumentType]
         # An empty model means "no preference": resolved below to the configured
         # embedder when one exists, otherwise through the general get_engine()
         # resolution. Refused only when there is nothing to fall back to.
@@ -748,6 +753,8 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 async with sem_emb:
                     vecs_emb = await loop.run_in_executor(None, _run_embed)
+            except LoadBusyError:
+                raise
             except _rr.RerankerUnavailableError as e:
                 raise HTTPException(
                     503, f"Embedding model {resolved_model!r} unavailable: "
@@ -778,6 +785,7 @@ def register(app: FastAPI, ctx) -> None:
                     return base64.b64encode(buf).decode("ascii")
                 return vec
 
+            _est_tokens = sum(max(1, len(t) // 4) for t in texts_emb if t)
             return {
                 "object": "list",
                 "data": [
@@ -788,7 +796,7 @@ def register(app: FastAPI, ctx) -> None:
                 # block require an explicit match against it. req.model is None on
                 # the omitted-model-resolved-to-the-configured-embedder path.
                 "model": resolved_model,
-                "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                "usage": {"prompt_tokens": _est_tokens, "total_tokens": _est_tokens},
             }
 
         # Resolve without forcing a chat-model load: a GGUF backend (can_embed=False)
@@ -844,6 +852,15 @@ def register(app: FastAPI, ctx) -> None:
             None, lambda: sum(
                 count_tokens_or_estimate(engine.count_tokens, t, "an embedding input")
                 for t in texts))
+        reported_model = resolved_model or engine.display_name
+        if getattr(engine, "embeds_via_dedicated", lambda: False)():
+            from localm.config import load_config
+            from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+            reported_model = str(load_config().get("embedding_model") or "").strip() \
+                or DEFAULT_EMBEDDING_MODEL
+            if response is not None:
+                response.headers["x-localm-embedding-model"] = reported_model
+                response.headers["x-localm-requested-model"] = engine.display_name
         return {
             "object": "list",
             "data": [
@@ -853,7 +870,7 @@ def register(app: FastAPI, ctx) -> None:
             # Report the model that actually answered when the request named none:
             # resolved_model is None in that case and falls through to
             # engine.display_name. An explicit "localm" echoes back unchanged.
-            "model": resolved_model or engine.display_name,
+            "model": reported_model,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
 
@@ -882,6 +899,8 @@ def register(app: FastAPI, ctx) -> None:
         except _rr.RerankerUnavailableError as e:
             raise HTTPException(
                 503, f"Reranker unavailable: {_hs.path_formatter(request)(e)}") from e
+        except LoadBusyError:
+            raise
         except RuntimeError as e:
             raise HTTPException(503, f"Reranking failed: {e}") from e
         results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
@@ -928,9 +947,10 @@ def register(app: FastAPI, ctx) -> None:
         try:
             _touch_activity(engine.display_name)
 
-            # Wrap the prompt as a single user message so raw completions flow through
-            # the same chat-pipeline hooks and audit/transcript as
-            # /v1/chat/completions.
+            # The prompt reaches the model as sent: no chat template and no inlet
+            # hooks. *messages* is the exchange as audit and transcript record it.
+            if not getattr(engine, "supports_raw_prompt", False):
+                raise HTTPException(400, RAW_PROMPT_UNSUPPORTED_MESSAGE)
             messages = [{"role": "user", "content": prompt}]
             sampling = _sampling_kwargs(req)
             _check_sampling(engine, sampling)
@@ -950,8 +970,6 @@ def register(app: FastAPI, ctx) -> None:
                 )
                 ctx.state["client_id"] = request.headers.get("x-client-id", "")
                 ctx.state["capacity"] = engine.context_capacity()
-                if pipeline.has("inlet"):
-                    messages = await pipeline.run_inlet(messages, ctx)
             n_logprobs = logprobs_of(req)
             if n_logprobs is not None:
                 _check_logprobs(engine, pipeline if req.stream else None)
@@ -969,6 +987,7 @@ def register(app: FastAPI, ctx) -> None:
                 stop=req.stop,
                 logprobs=n_logprobs,
                 cache_prompt=False if req.cache_prompt is False else None,
+                raw_prompt=prompt,
                 **sampling,
             )
             gen_kwargs: dict[str, Any] = {k: v for k, v in gen_kwargs.items()
@@ -1020,12 +1039,12 @@ def register(app: FastAPI, ctx) -> None:
                         503, f"Grammar validation failed: the model worker "
                         f"faulted ({e}).") from e
 
-            # Count tokens on the (possibly inlet-transformed) messages, matching the
-            # chat path. Off the event loop: count_tokens is a native tokenizer call.
+            # Count the prompt's tokens off the event loop: count_tokens is a native
+            # tokenizer call.
             loop = asyncio.get_running_loop()
             try:
                 prompt_tokens = await loop.run_in_executor(
-                    None, engine.count_tokens, _messages_prompt_text(messages))
+                    None, engine.count_tokens, prompt)
             except PretokenizerUnsafeInputError as e:
                 raise HTTPException(400, str(e)) from e
 
@@ -1058,6 +1077,7 @@ def register(app: FastAPI, ctx) -> None:
 
             gen_error: Exception | None = None
             lp_records: list = []
+            timing: dict = {}
             _hs._admit_generation(sem, engine)
             async with sem:
                 # Cancelable on client disconnect: an aborted request releases the
@@ -1066,8 +1086,11 @@ def register(app: FastAPI, ctx) -> None:
                 # else falls through to the generic backstop.
                 try:
                     text = await _generate_full(engine, messages, request,
+                                                timing=timing,
                                                 on_logprobs=lp_records.extend,
                                                 **gen_kwargs)
+                except LoadBusyError:
+                    raise
                 except _hs._BACKEND_ERROR_TYPES as e:
                     raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except RuntimeError as e:
@@ -1083,8 +1106,16 @@ def register(app: FastAPI, ctx) -> None:
                     text = _hs.inference_error_text(e, _hs.path_formatter(request))
 
             generated = text
+            stopped = False
             if gen_error is None and req.stop:
-                text, _stopped = apply_stop(text, req.stop)
+                text, stopped = apply_stop(text, req.stop)
+            if gen_error is not None:
+                finish_reason = "error"
+            elif stopped:
+                finish_reason = "stop"
+            else:
+                finish_reason = _hs._outcome(timing.get("outcome", {}),
+                                             "finish_reason", engine)
             visible = text
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
@@ -1096,7 +1127,7 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_caller_recorder(request), None, messages, text,
                             outcome=outcome)
-            _hs._log_chat_reply(text, finish_reason="error" if gen_error is not None else "stop")
+            _hs._log_chat_reply(text, finish_reason=finish_reason)
 
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,
@@ -1107,9 +1138,7 @@ def register(app: FastAPI, ctx) -> None:
             choice: dict[str, Any] = {
                 "text": (prompt + text) if req.echo and gen_error is None else text,
                 "index": 0,
-                # "error", not "stop", when generation failed, matching the
-                # terminal frame the streaming twin emits.
-                "finish_reason": "error" if gen_error is not None else "stop"}
+                "finish_reason": finish_reason}
             if n_logprobs is not None:
                 choice["logprobs"] = (
                     _hs.completion_text_logprobs(generated, lp_records, n_logprobs,

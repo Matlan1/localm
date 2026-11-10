@@ -302,6 +302,23 @@ def embedding_load_prompt(name: str, entry: dict) -> str:
             "you can change its type again on the Models page.")
 
 
+def _unregistered_gguf_refusal(name: str) -> Optional[str]:
+    """The refusal for *name* when it is the path of a GGUF file that is not
+    registered and whose header marks it as an embedding or reranker model, else
+    None. Reads the file header; a registered model is judged by its recorded
+    type instead, so ``localm set-type`` keeps working."""
+    if not isinstance(name, str) or not name.lower().endswith(".gguf"):
+        return None
+    try:
+        path = Path(name)
+        if not path.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    from .gguf import gguf_architecture, gguf_chat_refusal
+    return gguf_chat_refusal(gguf_architecture(path), path=path)
+
+
 def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = False) -> Optional[str]:
     """The message refusing a request that names *name* as a model to load, or
     None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
@@ -313,6 +330,8 @@ def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = Fals
     entry is refused when its file is one no backend runs; that check reads the
     file system and the backend registry."""
     entry = registry.get(name)
+    if entry is None and not allow_embedding:
+        return _unregistered_gguf_refusal(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
     if kind == "embedding" and isinstance(entry, dict):
         return None if allow_embedding else _embedding_refusal(name, entry)
@@ -343,7 +362,9 @@ async def chat_load_refusal_off_loop(name: str, registry: dict, *,
     refused), inline otherwise. For callers on the event loop."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
-    if kind == "unknown" or (kind == "embedding" and not allow_embedding):
+    unregistered_gguf = (entry is None and not allow_embedding and isinstance(name, str)
+                         and name.lower().endswith(".gguf"))
+    if kind == "unknown" or (kind == "embedding" and not allow_embedding) or unregistered_gguf:
         import asyncio
         return await asyncio.get_running_loop().run_in_executor(
             None, lambda: chat_load_refusal(name, registry, allow_embedding=allow_embedding))
@@ -1755,7 +1776,7 @@ def vision_input_guidance(mmproj_failed: bool = False,
             f"library. GGUF vision works too (the built-in mtmd path) - pull "
             f"a vision-capable GGUF model with its projector, e.g. "
             f"`localm pull <repo> --mmproj <repo>:<file>`. Or install the "
-            f"HuggingFace stack (`pip install \"localm[gpu]\"`) and load a "
+            f"HuggingFace stack (see docs/gpu-setup.md) and load a "
             f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")
 
 

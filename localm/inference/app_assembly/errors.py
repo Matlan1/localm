@@ -18,9 +18,20 @@ _ONE_LINE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """Install the four handlers. The response of each is pinned by
-    tests/test_create_app_characterization.py."""
+    """Install the five handlers. The response of each is pinned by
+    tests/test_create_app_characterization.py, and the load-busy 503 by
+    tests/test_load_lease.py."""
     from localm.config import ConfigLockTimeout
+    from localm.inference.load_lease import LoadBusyError
+
+    @app.exception_handler(LoadBusyError)
+    async def _load_busy(request, exc):  # noqa: ANN001 - framework signature
+        from localm.debuglog import logger as _dbg
+        _dbg.info("%s %s refused: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": str(exc)},
+            headers={"Retry-After": str(exc.retry_after_s)})
 
     @app.exception_handler(ConfigLockTimeout)
     async def _config_busy(request, exc):  # noqa: ANN001 - framework signature

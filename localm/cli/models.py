@@ -713,6 +713,9 @@ def spec_drafts(model):
               help="Internal: route a single-file HF pull to this directory "
                    "instead of <data dir>/models (used by the GUI's ComfyUI "
                    "missing-model download flow).")
+@click.option("--remote-only", "remote_only", is_flag=True, hidden=True,
+              help="Internal: treat MODEL_SPEC as a remote spec even when it "
+                   "names a file or folder on this machine.")
 @click.option("--register/--no-register", default=True, hidden=True,
               help="Internal: whether to add the download to localm's own "
                    "model registry (off for a file routed to --comfy-dest-dir, "
@@ -731,7 +734,8 @@ def spec_drafts(model):
               help="Stop offering the interrupted download ID; its files are "
                    "kept and --list-interrupted still shows it.")
 def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
-         comfy_dest_dir, register, list_interrupted, resume, delete_id, dismiss_id):
+         comfy_dest_dir, register, remote_only, list_interrupted, resume, delete_id,
+         dismiss_id):
     """Download a model from HuggingFace, CivitAI, or a URL.
 
     \b
@@ -792,13 +796,13 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
         if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
             _offer_interrupted(model_spec, name)
         rc = _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-                       comfy_dest_dir, register, type_hint)
+                       comfy_dest_dir, register, type_hint, remote_only=remote_only)
     if rc:
         sys.exit(rc)
 
 
 def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-              comfy_dest_dir, register, type_hint=False) -> int:
+              comfy_dest_dir, register, type_hint=False, remote_only=False) -> int:
     """Run one pull as ``localm pull`` does; returns its exit code (0, 1, or
     130 when Ctrl+C stopped it)."""
     from ..model_manager.pull import forget_stopped_download
@@ -807,7 +811,7 @@ def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
                         dest_dir=comfy_dest_dir, register=register,
-                        type_is_hint=type_hint)
+                        type_is_hint=type_hint, allow_local=not remote_only)
     except KeyboardInterrupt:
         click.echo("\n" + _stopped_pull_message(), err=True)
         return 130
@@ -1784,7 +1788,7 @@ def info():
               if _is_portable_home(HOME_DIR) else "standard")
     temp_path = temp_dir_in_use(HOME_DIR)
     temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
-    console.print(f"  [bold]mode       [/bold]   {mode_s}")
+    console.print(f"  [bold]install    [/bold]   {mode_s}")
     console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
     console.print()
     for k, v in sorted(cfg.items()):
@@ -2394,10 +2398,10 @@ def stop_cmd(instance_id, stop_all, timeout):
     stop a specific instance, or --all to stop every running one.
 
     Requests the same clean shutdown the GUI's Settings page uses (model
-    unloaded, then the process exits). Without LOCALM_API_KEY set, a plain
-    local instance declines the unauthenticated request (by design), and if
-    the server does not confirm within --timeout for any reason, `stop` ends
-    the process directly instead.
+    unloaded, then the process exits), with the API key when one is set and
+    otherwise the instance's own local token. If the server refuses the
+    request or does not confirm within --timeout, `stop` ends the process
+    directly instead.
     """
     import time
 
@@ -2477,11 +2481,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                                      timeout=5, verify=tls.requests_verify(url),
                                      allow_redirects=False)
                 if resp.status_code in (401, 403):
-                    # The open-mode management gate refuses an unauthenticated POST
-                    # from a bare local client with no shell/API-key credential,
-                    # which is the DEFAULT case for a plain `localm
-                    # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
-                    # back to a direct kill rather than hard-failing.
+                    # The server refused the credential. Fall back to ending
+                    # the process directly.
                     graceful_denied = True
                 elif resp.status_code == 200:
                     deadline = time.monotonic() + timeout
@@ -2499,10 +2500,10 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         if not stopped:
             if graceful_denied:
-                console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
-                              f"unauthenticated shutdown request (set "
-                              f"LOCALM_API_KEY for a clean model-unload "
-                              f"shutdown) - ending the process directly.")
+                console.print(f"[dim]{escape(iid)}:[/dim] server refused the "
+                              f"shutdown request (set LOCALM_API_KEY to its key for "
+                              f"a clean model-unload shutdown) - ending the process "
+                              f"directly.")
             stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path

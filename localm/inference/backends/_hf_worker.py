@@ -2385,7 +2385,11 @@ class HFWorker:
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
+        # *raw_prompt*: the whole prompt, tokenised as given with the tokenizer's
+        # own special tokens and no chat template; *messages* and *thinking* are
+        # then not read.
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
         # models). Both remaining options - drop it, or enforce it strictly - give
@@ -2405,6 +2409,7 @@ class HFWorker:
         # text alone). Checked before importing transformers so it fails
         # fast and clearly.
         from .base import (
+            EMPTY_RAW_PROMPT_MESSAGE,
             UnsupportedInputError,
             image_unsupported_message,
             messages_contain_image,
@@ -2414,6 +2419,8 @@ class HFWorker:
                 image_unsupported_message(self.processor_error))
         if _messages_contain_audio(messages) and not self._supports_audio:
             raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
+        if raw_prompt is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
 
         tokenizer = self._tokenizer
         model = self._model
@@ -2471,7 +2478,11 @@ class HFWorker:
                 vision_cache.clear()
 
         # --- Tokenize / process ---
-        if self._processor and (images or audios):
+        if raw_prompt is not None:
+            inputs = tokenizer(raw_prompt, return_tensors="pt").to(model.device)
+            if int(inputs["input_ids"].shape[-1]) == 0:
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
+        elif self._processor and (images or audios):
             # Full multimodal path
             fallback_template = _processor_fallback_template(self._processor, tokenizer)
             try:

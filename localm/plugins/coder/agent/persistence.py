@@ -607,13 +607,17 @@ class _PersistenceMixin:
         """Remove THIS agent's own saved checkpoint - its own per-session id under
         HOME, plus the two legacy shapes (a project can only ever have ONE
         checkpoint under either legacy layout). It does NOT reach any OTHER
-        session's per-id checkpoint - see _checkpoint_path_for.
+        session's per-id checkpoint - see _checkpoint_path_for. A restricted
+        session removes only its own per-id file, never a legacy one (the
+        in-project one is under ``.localcoder``).
 
         Best-effort per path: a delete that fails is LOGGED at warning and does
         not raise, so this returning is not by itself proof the checkpoint is
         gone."""
-        for p in (self._checkpoint_path, self._legacy_checkpoint_path,
-                  self._legacy_home_checkpoint_path):
+        paths = [self._checkpoint_path]
+        if not getattr(self, "restricted", False):
+            paths += [self._legacy_checkpoint_path, self._legacy_home_checkpoint_path]
+        for p in paths:
             try:
                 p.unlink(missing_ok=True)
             except Exception as e:
