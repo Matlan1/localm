@@ -2211,12 +2211,18 @@ def gpus_cmd():
 
 @main.command("unload")
 @click.argument("model", required=False, shell_complete=_complete_model_name)
-def unload_cmd(model):
+@click.option("--force", is_flag=True,
+              help="Stop requests still running on a busy model (the reply "
+                   "being written is cut off) and unload it.")
+def unload_cmd(model, force):
     """Unload the currently loaded model(s) from a running localm server.
 
     With no MODEL, unloads everything - frees the GPU for another task, the
     same as the GUI's "Unload all". With MODEL, unloads only that one,
     leaving any other loaded models running.
+
+    A model still busy with a request is left loaded and the command exits 1;
+    --force stops its requests and unloads it.
 
     Talks to the server already serving this directory (see `localm status`);
     set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
@@ -2251,8 +2257,13 @@ def unload_cmd(model):
     headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
 
     try:
+        params = {}
+        if model:
+            params["model"] = model
+        if force:
+            params["force"] = "true"
         resp = requests.post(f"{url}/v1/models/unload", headers=headers,
-                             params={"model": model} if model else None,
+                             params=params or None,
                              timeout=180, verify=tls.requests_verify(url))
     except requests.RequestException as e:
         # show_url() already escapes its own argument; only `e` needs it here.
@@ -2284,9 +2295,23 @@ def unload_cmd(model):
     if data.get("status") == "already_unloaded":
         # A targeted unload on a registered-but-not-loaded model is an
         # idempotent no-op success, reported as such rather than as an unload.
+        if not model:
+            console.print("[dim]Nothing was loaded.[/dim]")
+            return
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    if data.get("status") == "confirm_required":
+        # The model is still busy with a request and stays loaded.
+        busy = escape(str(data.get("model") or model))
+        detail = data.get("detail")
+        console.print(f"[yellow]'{busy}' is busy with a running request and was "
+                      "not unloaded.[/yellow]")
+        if detail:
+            console.print(f"  {escape(str(detail))}")
+        console.print("Try again when it finishes, or re-run with "
+                      "[bold]--force[/bold] to stop it and unload it.")
+        sys.exit(1)
     skipped = [str(s) for s in (data.get("skipped_in_use") or [])]
     left = data.get("media_left_running")
     left = left if isinstance(left, dict) else {}
@@ -2300,11 +2325,15 @@ def unload_cmd(model):
     if data.get("status") == "in_use":
         if skipped:
             _print_left_loaded()
-            console.print("Try again when it finishes.")
+            console.print("Try again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]."
+                             if data.get("confirm_required") and not force else "."))
         else:
             console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
                           "by a running request and was not unloaded.[/yellow] Try "
-                          "again when it finishes.")
+                          "again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]." if not force
+                             else "."))
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
