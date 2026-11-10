@@ -1101,3 +1101,23 @@ def test_a_pending_update_of_another_install_is_dropped_and_this_one_checked(
     _start_components(inst, home, monkeypatch, calls=calls)
     assert [c[3] for c in calls] == ["setup-sdcpp"]
     assert uc.read_pending() is None
+
+
+def test_a_pytorch_step_the_network_policy_refuses_runs_nothing(tmp_path, torch_install,
+                                                               monkeypatch):
+    """net_mode = off: the update's own dependency step runs with the update
+    exemption, the PyTorch step's package install is refused and rolled back."""
+    inst, site = torch_install
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w",
+                                     "update_ignore_net_policy": True})
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    data, sig = _release(_files("0.3.2", pyproject=_PYPROJECT_032))
+    calls = []
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: calls.append(c) or 0)
+    assert "PyTorch stack was not updated" in ei.value.reason
+    assert "net_mode=off" in ei.value.reason
+    assert not any("gpu" in c for c in calls)
+    assert uc.dists(site)["transformers"]["version"] == "5.15.1"
+    assert _v(inst) == "0.3.1"

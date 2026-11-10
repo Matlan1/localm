@@ -194,3 +194,29 @@ def test_plugin_install_fails_when_an_installed_package_has_an_unmet_dependency(
                         lambda name: ["no-such-dist-xyz>=1"] if name == "faster-whisper" else [])
     ok, out = deps._run_pip(["faster-whisper>=1.2.1"], extras=["voice"])
     assert ok is False and "faster-whisper needs no-such-dist-xyz>=1" in out
+
+
+def test_managed_comfy_pip_install_is_refused_under_net_mode_off(monkeypatch):
+    from localm.media import managed_comfy_provision as mcp
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    monkeypatch.setattr(mcp.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("a refused install must not start"))
+    ok, out = mcp._run(["python", "-m", "pip", "install", "torch",
+                        "--index-url", "https://download.pytorch.org/whl/cpu"])
+    assert ok is False and "net_mode=off" in out
+
+
+def test_managed_comfy_non_install_command_is_not_checked(monkeypatch):
+    from localm.media import managed_comfy_provision as mcp
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    ran = []
+
+    class P:
+        stdout = iter(())
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+    monkeypatch.setattr(mcp.subprocess, "Popen", lambda cmd, **k: ran.append(cmd) or P())
+    ok, _out = mcp._run(["python", "-m", "venv", "x"])
+    assert ok and ran
