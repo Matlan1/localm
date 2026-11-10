@@ -2413,7 +2413,10 @@ def stop_cmd(instance_id, stop_all, timeout):
         sys.exit(1)
 
     home = home_dir()
-    instances.reap_stale(home)
+    # Removes only entries whose process is gone; the loop below reports
+    # and removes stale ones.
+    instances.reap_stale(
+        home, is_alive=lambda e: instances.entry_process_state(e)[0] != "gone")
     entries = instances.list_entries(home)
 
     if stop_all:
@@ -2471,6 +2474,14 @@ def stop_cmd(instance_id, stop_all, timeout):
                           f"{escape(replaced_by[:8])}. Removed the entry and "
                           f"stopped nothing.")
             continue
+        state, reason = instances.entry_process_state(entry)
+        if state == "stale":
+            path = entry.get("_path")
+            if path:
+                instances.unregister_instance(path)
+            console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was stale: "
+                          f"{escape(reason)} Removed the entry and stopped nothing.")
+            continue
         if is_own_address(dial):
             try:
                 resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
@@ -2498,12 +2509,33 @@ def stop_cmd(instance_id, stop_all, timeout):
                 "machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
-            if graceful_denied:
+            state, reason = instances.entry_process_state(entry)
+            if state == "stale":
+                path = entry.get("_path")
+                if path:
+                    instances.unregister_instance(path)
+                console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was "
+                              f"stale: {escape(reason)} Removed the entry and "
+                              f"stopped nothing.")
+                continue
+            if state == "unknown":
+                console.print(f"[red]{escape(iid)}:[/red] did not end pid {pid}: "
+                              f"{escape(reason)} If that server is still running, "
+                              f"close it from its own window or terminal; if it "
+                              f"is not, the entry goes away once pid {pid} exits.")
+                any_failed = True
+                continue
+            if graceful_denied and state == "same":
                 console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
                               f"unauthenticated shutdown request (set "
                               f"LOCALM_API_KEY for a clean model-unload "
                               f"shutdown) - ending the process directly.")
-            stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
+            if state == "gone":
+                stopped = True
+            else:
+                stopped = instances.kill_pid(
+                    int(pid or -1), timeout=timeout,
+                    start_identity=entry.get("start_identity"))
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path
                 # (_do_shutdown), which normally clears the crash marker, so it

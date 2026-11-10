@@ -110,6 +110,11 @@ def _write_entry(home, **kw):
                     started="2026-08-20T00:00:00+00:00")
     defaults.update(kw)
     defaults["token"] = defaults["token"] or instances.new_token()
+    defaults.setdefault("pid_space", instances.pid_space_id())
+    if "start_identity" not in defaults:
+        pid = defaults["pid"]
+        defaults["start_identity"] = (instances.process_start_identity(pid)
+                                      if isinstance(pid, int) and pid > 0 else None)
     path = instances.registry_path(home, defaults["instance_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(defaults, indent=2), encoding="utf-8")
@@ -505,6 +510,8 @@ class TestStopUnconfirmed:
         _write_entry(home, instance_id="neverconfirmed001", pid=999999998,
                   port=dead_port)
         monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: False)
+        monkeypatch.setattr(instances, "entry_process_state",
+                            lambda e: ("same", ""))
         with TestClient(app) as c:
             r = c.post("/api/instances/neverconfirmed001/stop",
                        headers=_hdr(_admin_key()))

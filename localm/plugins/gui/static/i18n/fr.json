@@ -2419,6 +2419,7 @@
   "settings.instances.stopFailed": "Impossible d'arrêter : {message}",
   "settings.instances.stopTitle": "Arrêter cette instance ?",
   "settings.instances.stoppedToast": "{name} arrêté",
+  "settings.instances.staleToast": "Cette entrée était périmée : son serveur s'était déjà arrêté et le PID {pid} appartient désormais à un autre programme. L'entrée a été supprimée ; rien n'a été arrêté.",
   "settings.instances.title": "Autres instances en cours",
   "settings.instances.unknownDir": "un dossier inconnu",
   "settings.intro": "Enregistrés dans <code>config.json</code> dans votre dossier de données. Choisissez une section à gauche ; chacune s'enregistre séparément. Les valeurs du moteur s'appliquent au prochain chargement de modèle.",

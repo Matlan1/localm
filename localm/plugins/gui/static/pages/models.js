@@ -1891,8 +1891,12 @@ export async function refreshInstancesCard() {
               { method: "POST", headers: authHeaders() });
             const d = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(d.detail || resp.statusText);
-            toast(t("settings.instances.stoppedToast",
-              { name: inst.root_dir || inst.instance_id }));
+            if (d.status === "stale") {
+              toast(t("settings.instances.staleToast", { pid: d.pid ?? inst.pid }));
+            } else {
+              toast(t("settings.instances.stoppedToast",
+                { name: inst.root_dir || inst.instance_id }));
+            }
             refreshInstancesCard();
           } catch (e) {
             toast(t("settings.instances.stopFailed", { message: e.message }), true);

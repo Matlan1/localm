@@ -7,6 +7,7 @@ Also `localm stop`: id/prefix/--all target resolution, the graceful
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import requests
 from click.testing import CliRunner
 
@@ -116,6 +117,12 @@ def _entry(iid, pid, root, port=8642):
             "host": "127.0.0.1", "port": port, "_path": f"/run/{iid}.json"}
 
 
+@pytest.fixture
+def _same_process(monkeypatch):
+    """Every entry's pid reads as the server the entry describes."""
+    monkeypatch.setattr(instances, "entry_process_state", lambda e: ("same", ""))
+
+
 def _resp(status_code):
     return SimpleNamespace(status_code=status_code)
 
@@ -190,7 +197,7 @@ def test_stop_by_id_graceful_shutdown_success(monkeypatch):
     assert "abcd1234" in res.output
 
 
-def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
+def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch, _same_process):
     # A plain local instance with no LOCALM_API_KEY set refuses an unauthenticated
     # shutdown request (the open-mode management gate), the same 403 `localm unload`
     # hits unauthenticated, so `stop` falls back to killing the process directly.
@@ -199,7 +206,7 @@ def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
     killed = {}
 
-    def fake_kill_pid(pid, timeout=10.0):
+    def fake_kill_pid(pid, timeout=10.0, start_identity=None):
         killed["pid"] = pid
         return True
 
@@ -215,7 +222,7 @@ def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
     assert "stopped" in res.output
 
 
-def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
+def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch, _same_process):
     # A direct kill bypasses the server's own clean-shutdown code, which is what
     # normally clears the crash marker, so `stop` disarms the marker itself.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
@@ -240,7 +247,7 @@ def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
     assert disarmed["instance_id"] == "abcd1234ef"
 
 
-def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch):
+def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch, _same_process):
     # If the kill did NOT confirm the process is gone, the marker survives.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
@@ -259,13 +266,13 @@ def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch):
     assert disarm_calls == []
 
 
-def test_stop_falls_back_to_kill_pid_when_server_unreachable(monkeypatch):
+def test_stop_falls_back_to_kill_pid_when_server_unreachable(monkeypatch, _same_process):
     entry = _entry("abcd1234ef", 4321, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
     killed = {}
 
-    def fake_kill_pid(pid, timeout=10.0):
+    def fake_kill_pid(pid, timeout=10.0, start_identity=None):
         killed["pid"] = pid
         killed["timeout"] = timeout
         return True
@@ -281,7 +288,7 @@ def test_stop_falls_back_to_kill_pid_when_server_unreachable(monkeypatch):
     assert "stopped" in res.output
 
 
-def test_stop_reports_failure_when_kill_cannot_confirm(monkeypatch):
+def test_stop_reports_failure_when_kill_cannot_confirm(monkeypatch, _same_process):
     entry = _entry("abcd1234ef", 4321, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])

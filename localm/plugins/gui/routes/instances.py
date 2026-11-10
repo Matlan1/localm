@@ -103,7 +103,14 @@ def register(app: FastAPI, ctx) -> None:
         CLI/MCP already share), falling back to instances.kill_pid - a direct
         OS terminate/kill - if the target declines, is unreachable, or does
         not confirm within the timeout. No --all equivalent: a GUI row acts on
-        one instance at a time."""
+        one instance at a time.
+
+        Before any kill the entry's recorded process start identity is
+        compared with the live process (instances.entry_process_state): a pid
+        that now belongs to another program removes the entry and answers 200
+        with ``status: "stale"`` and a ``message``, killing nothing; an entry
+        whose process cannot be proven to be that server answers 409 and
+        kills nothing."""
         import time
 
         import requests
@@ -116,7 +123,10 @@ def register(app: FastAPI, ctx) -> None:
 
         timeout = 10.0
         home = home_dir()
-        instances.reap_stale(home)
+        # Removes only entries whose process is gone; the code below reports
+        # and removes stale ones.
+        instances.reap_stale(
+            home, is_alive=lambda e: instances.entry_process_state(e)[0] != "gone")
         matches = [e for e in instances.list_entries(home)
                    if str(e.get("instance_id", "")).startswith(instance_id)]
         if not matches:
@@ -144,6 +154,19 @@ def register(app: FastAPI, ctx) -> None:
                      f"({candidates}) - use a longer id.")
         entry = matches[0]
         pid = entry.get("pid")
+
+        def _stale(reason: str) -> dict:
+            path = entry.get("_path")
+            if path:
+                instances.unregister_instance(path)
+            return {"status": "stale", "instance_id": entry.get("instance_id"),
+                    "root_dir": entry.get("root_dir"), "pid": pid,
+                    "message": (f"This entry was stale: {reason} Removed the "
+                                f"entry and stopped nothing.")}
+
+        state, reason = instances.entry_process_state(entry)
+        if state == "stale":
+            return _stale(reason)
         scheme = entry.get("scheme", "http")
         dial = self_connect_host(entry.get("host"))
         base_url = f"{scheme}://{url_host(dial)}:{entry.get('port')}/v1"
@@ -175,7 +198,21 @@ def register(app: FastAPI, ctx) -> None:
                 "this machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
-            stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
+            state, reason = instances.entry_process_state(entry)
+            if state == "stale":
+                return _stale(reason)
+            if state == "unknown":
+                raise HTTPException(
+                    409, f"Did not end pid {pid}: {reason} If that server is "
+                         f"still running, close it from its own window or "
+                         f"terminal; if it is not, the entry goes away once "
+                         f"pid {pid} exits.")
+            if state == "gone":
+                stopped = True
+            else:
+                stopped = instances.kill_pid(
+                    int(pid or -1), timeout=timeout,
+                    start_identity=entry.get("start_identity"))
             if stopped:
                 # A direct kill bypasses the target's own clean-shutdown path,
                 # which normally clears its crash marker, so the next start of
