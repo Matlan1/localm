@@ -385,7 +385,7 @@ def get_use_mmap(mp) -> bool:
     return bool(mp.use_mmap)
 
 
-# THREE llama_context_params LAYOUTS EXIST, ALL 224 BYTES (native + pad)
+# FOUR llama_context_params LAYOUTS EXIST, ALL 224 BYTES (native + pad)
 # -------------------------------------------------------------------------
 # V2 carries an extra uint32_t field, n_outputs_max_per_seq, directly before
 # n_threads. Every field from n_threads onward sits 4 bytes later as a result:
@@ -423,7 +423,23 @@ def get_use_mmap(mp) -> bool:
 # Writing a V2 offload_kqv / embeddings / kv_unified into a V3 build lands in
 # the abort_callback_data pointer; a V2 samplers pointer lands on V3's flags.
 #
-# localm ships all THREE layouts and picks one per loaded library at load time
+# V4 (upstream b12191+; b12190 is the last release without it) is V3 plus a
+# float moe_cache_cpu_share directly after moe_cache_size (default 0.0, all
+# cache misses uploaded), padded to 8 for the pointer after it. Every field
+# from abort_callback onward sits 8 bytes later again and the native size grows
+# from 168 to 176:
+#
+#     offset   V3 (upstream b11480..b12190)     V4 (upstream >= b12191)
+#     [112]    moe_cache_size                   moe_cache_size
+#     [120]    abort_callback                   moe_cache_cpu_share  <-- INSERTED
+#     [128]    abort_callback_data              abort_callback
+#     [136]    embeddings ... kv_unified        abort_callback_data
+#     [144]    samplers                         embeddings ... kv_unified
+#     [152]    n_samplers                       samplers
+#     [160]    ctx_other                        n_samplers
+#     [168]    (end of struct)                  ctx_other
+#
+# localm ships all FOUR layouts and picks one per loaded library at load time
 # (`_abi.detect_context_params_layout`), same as the model_params split above.
 # There is NO bare `LlamaContextParams` name: a caller must go through
 # `_abi.context_params_class()` / `_api.llama_context_default_params()`.
@@ -610,10 +626,70 @@ class LlamaContextParamsV3(ctypes.Structure):
     ]
 
 
+class LlamaContextParamsV4(ctypes.Structure):
+    _fields_ = [
+        # --- batch / sequence limits ---
+        ("n_ctx",             ctypes.c_uint32),   # [0]
+        ("n_batch",           ctypes.c_uint32),   # [4]
+        ("n_ubatch",          ctypes.c_uint32),   # [8]
+        ("n_seq_max",         ctypes.c_uint32),   # [12]
+        ("n_rs_seq",          ctypes.c_uint32),   # [16] recurrent-state snapshots
+        ("n_outputs_max",     ctypes.c_uint32),   # [20] max outputs per ubatch
+        ("n_outputs_max_per_seq", ctypes.c_uint32), # [24] max outputs per sequence
+        # --- threading ---
+        ("n_threads",         ctypes.c_int32),    # [28]
+        ("n_threads_batch",   ctypes.c_int32),    # [32]
+        # --- encoding type enums ---
+        ("ctx_type",          ctypes.c_int32),    # [36] LLAMA_CONTEXT_TYPE_*
+        ("rope_scaling_type", ctypes.c_int32),    # [40] default -1
+        ("pooling_type",      ctypes.c_int32),    # [44] default -1
+        ("attention_type",    ctypes.c_int32),    # [48] default -1
+        ("flash_attn_type",   ctypes.c_int32),    # [52] default -1
+        # --- RoPE / YaRN floats ---
+        ("rope_freq_base",    ctypes.c_float),    # [56]
+        ("rope_freq_scale",   ctypes.c_float),    # [60]
+        ("yarn_ext_factor",   ctypes.c_float),    # [64] -1 = from model
+        ("yarn_attn_factor",  ctypes.c_float),    # [68]
+        ("yarn_beta_fast",    ctypes.c_float),    # [72]
+        ("yarn_beta_slow",    ctypes.c_float),    # [76]
+        ("yarn_orig_ctx",     ctypes.c_uint32),   # [80]
+        ("defrag_thold",      ctypes.c_float),    # [84]
+        # --- backend eval callback ---
+        ("cb_eval",           ctypes.c_void_p),   # [88]
+        ("cb_eval_user_data", ctypes.c_void_p),   # [96]
+        # --- KV cache types ---
+        ("type_k",            ctypes.c_int32),    # [104] ggml_type
+        ("type_v",            ctypes.c_int32),    # [108] ggml_type
+        # --- MoE expert cache ---
+        ("moe_cache_size",    ctypes.c_size_t),   # [112] bytes, 0 = disabled
+        ("moe_cache_cpu_share", ctypes.c_float),  # [120] 0 = all misses uploaded
+        ("_pad_moe",          ctypes.c_uint32),   # [124] alignment pad
+        # --- abort callback ---
+        ("abort_callback",      ctypes.c_void_p), # [128]
+        ("abort_callback_data", ctypes.c_void_p), # [136]
+        # --- boolean flags (kept together per llama.h comment) ---
+        ("embeddings",  ctypes.c_bool),           # [144]
+        ("offload_kqv", ctypes.c_bool),           # [145]
+        ("no_perf",     ctypes.c_bool),           # [146]
+        ("op_offload",  ctypes.c_bool),           # [147]
+        ("swa_full",    ctypes.c_bool),           # [148]
+        ("kv_unified",  ctypes.c_bool),           # [149]
+        ("_pad2",       ctypes.c_uint8 * 2),      # [150-151]
+        # --- sampler chain hooks ---
+        ("samplers",    ctypes.c_void_p),         # [152]
+        ("n_samplers",  ctypes.c_uint64),         # [160]
+        ("ctx_other",   ctypes.c_void_p),         # [168] struct llama_context*
+        # Forward-compat headroom: 16 bytes shorter than V1/V2's so all four
+        # classes allocate the same 224 bytes.
+        ("_reserved",   ctypes.c_uint8 * 48),     # [176]
+    ]
+
+
 # Self-consistency guards ONLY (these do NOT validate against the DLL - that
-# is _abi.verify_abi). All three layouts land at 224 bytes: V2's extra 4-byte
+# is _abi.verify_abi). All four layouts land at 224 bytes: V2's extra 4-byte
 # n_outputs_max_per_seq takes the place of V1's 4-byte alignment pad before
-# cb_eval, and V3's 8-byte moe_cache_size comes out of the reserved pad.
+# cb_eval, V3's 8-byte moe_cache_size comes out of the reserved pad, and so do
+# V4's 4-byte moe_cache_cpu_share and its 4-byte alignment pad.
 assert ctypes.sizeof(LlamaContextParamsV1) == 224, (
     f"LlamaContextParamsV1 size mismatch: {ctypes.sizeof(LlamaContextParamsV1)} != 224"
 )
@@ -622,6 +698,9 @@ assert ctypes.sizeof(LlamaContextParamsV2) == 224, (
 )
 assert ctypes.sizeof(LlamaContextParamsV3) == 224, (
     f"LlamaContextParamsV3 size mismatch: {ctypes.sizeof(LlamaContextParamsV3)} != 224"
+)
+assert ctypes.sizeof(LlamaContextParamsV4) == 224, (
+    f"LlamaContextParamsV4 size mismatch: {ctypes.sizeof(LlamaContextParamsV4)} != 224"
 )
 for _cls, _off in (
     (LlamaContextParamsV1, {"n_outputs_max": 20, "n_threads": 24,
@@ -644,6 +723,15 @@ for _cls, _off in (
                             "embeddings": 136, "offload_kqv": 137,
                             "kv_unified": 141, "samplers": 144,
                             "n_samplers": 152, "ctx_other": 160}),
+    (LlamaContextParamsV4, {"n_outputs_max_per_seq": 24, "n_threads": 28,
+                            "ctx_type": 36, "rope_scaling_type": 40,
+                            "flash_attn_type": 52, "cb_eval": 88,
+                            "type_v": 108, "moe_cache_size": 112,
+                            "moe_cache_cpu_share": 120,
+                            "abort_callback": 128, "abort_callback_data": 136,
+                            "embeddings": 144, "offload_kqv": 145,
+                            "kv_unified": 149, "samplers": 152,
+                            "n_samplers": 160, "ctx_other": 168}),
 ):
     for _name, _want in _off.items():
         _got = getattr(_cls, _name).offset
