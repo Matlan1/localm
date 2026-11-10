@@ -12,12 +12,18 @@ CDN. Each keeps its own license:
 
 | Component | Used for | License | Copyright |
 |---|---|---|---|
-| marked | Markdown rendering | MIT | (c) 2018-2026 MarkedJS, (c) 2011-2018 Christopher Jeffrey |
+| marked | Markdown rendering | MIT | (c) 2018-2026 MarkedJS, (c) 2011-2018 Christopher Jeffrey; its license file also carries the Markdown notice, (c) 2004 John Gruber |
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
 | KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2020 Khan Academy and other contributors |
 | Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
 | jsQR | QR-code camera scanning (phone pairing) | Apache-2.0 | (c) Cosmo Wolfe and contributors |
+
+Each license text sits beside the vendored files in
+`localm/plugins/gui/static/vendor/`, copied unchanged from the upstream release
+that is vendored: `LICENSE.marked`, `LICENSE.dompurify` (Apache-2.0) and
+`LICENSE.dompurify-mpl` (MPL-2.0), `LICENSE.highlightjs`, `LICENSE.katex`,
+`LICENSE.jsqr` and `inter/OFL.txt`.
 
 The TTS plugin vendors a separate browser bundle (`kokoro.min.js`) under
 `localm/plugins/builtin/tts/static/vendor/`. Its components and licenses are

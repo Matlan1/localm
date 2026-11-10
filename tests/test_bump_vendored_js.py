@@ -361,6 +361,39 @@ def test_highlightjs_theme_that_differs_is_replaced_too(bump, tree):
         b".hljs-new{color:red}\n")
 
 
+LICENCE_FILES = [
+    ("marked", "package/LICENSE", "LICENSE.marked"),
+    ("DOMPurify", "package/LICENSE", "LICENSE.dompurify"),
+    ("DOMPurify", "package/LICENSE-MPL", "LICENSE.dompurify-mpl"),
+    ("highlight.js", "package/LICENSE", "LICENSE.highlightjs"),
+    ("KaTeX", "package/LICENSE", "LICENSE.katex"),
+]
+NEWER = {"marked": NEW_MARKED, "DOMPurify": NEW_DOMPURIFY, "highlight.js": NEW_HLJS,
+         "KaTeX": NEW_KATEX}
+
+
+@pytest.mark.parametrize("key, member, dest", LICENCE_FILES)
+def test_a_licence_text_that_differs_in_the_release_is_replaced(bump, tree, key, member, dest):
+    files = release_files(tree, bump, key, NEWER[key])
+    assert member in files, "the vendored licence text is part of the pretend release"
+    files[member] += b"Copyright (c) 2099 a later contributor\n"
+    reg = Registry(bump, bump.LIBS[key].npm, NEWER[key], make_tarball(files))
+    assert run(bump, ["--lib", key, "--tag", NEWER[key], "--write"], reg) == 0
+    assert (tree / bump.VENDOR_REL / dest).read_bytes() == files[member]
+
+
+@pytest.mark.parametrize("key, member, dest", LICENCE_FILES)
+def test_an_unchanged_licence_text_is_left_alone_whatever_its_line_endings(
+        bump, tree, capsys, key, member, dest):
+    path = tree / bump.VENDOR_REL / dest
+    crlf = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    path.write_bytes(crlf)
+    reg = registry_for(bump, tree, key, NEWER[key])
+    assert run(bump, ["--lib", key, "--tag", NEWER[key], "--write"], reg) == 0
+    assert f"{bump.VENDOR_REL}/{dest}" not in capsys.readouterr().out
+    assert path.read_bytes() == crlf
+
+
 def test_a_theme_missing_from_the_release_is_not_an_error(bump, tree):
     files = release_files(tree, bump, "highlight.js", NEW_HLJS)
     del files["package/styles/github-dark.min.css"]
