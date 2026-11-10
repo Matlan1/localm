@@ -43,6 +43,24 @@ test("artifactSrcdoc injects a network-blocking CSP", () => {
   assert.match(frag, /<body><button>go<\/button><\/body>/);
 });
 
+test("a canvas frame that loads a second document is torn down", () => {
+  const { window: win } = loadApp();
+  const pane = win.document.getElementById("artifact-pane");
+  win.openArtifact("<p>x</p>", "html");
+  const frame = pane.querySelector("iframe.artifact-frame");
+  frame.dispatchEvent(new win.Event("load"));
+  assert.ok(pane.querySelector("iframe.artifact-frame"), "the srcdoc load keeps the frame");
+  frame.dispatchEvent(new win.Event("load"));
+  assert.equal(pane.querySelector("iframe.artifact-frame"), null,
+    "a second load means the artifact navigated its frame");
+  const note = pane.querySelector(".artifact-navigated");
+  assert.ok(note && note.textContent.length > 0, "the pane says why it closed");
+  assert.equal(pane.hidden, false);
+  win.openArtifact("<p>x</p>", "html");
+  assert.ok(pane.querySelector("iframe.artifact-frame"), "re-render shows it again");
+  assert.equal(pane.querySelector(".artifact-navigated"), null);
+});
+
 test("openArtifact shows a hard-sandboxed iframe; close tears it down", () => {
   const { window: win } = loadApp();
   const pane = win.document.getElementById("artifact-pane");

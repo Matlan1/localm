@@ -31,6 +31,11 @@ from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
+
+SUPPORTS_STEPS = True
+SUPPORTS_CLIP_SKIP = True
+SUPPORTS_JOB_OPTIONS = True
+SUPPORTS_UPSCALE = True
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 2 * 1024 ** 3

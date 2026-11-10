@@ -628,6 +628,7 @@
   "coder.usage.tokTurn": "{tokens} Tok. · Runde {turn}",
   "common.advancedFold.setCount": "{n} gesetzt",
   "common.artifact.title": "Artefakt ({lang})",
+  "common.artifact.navigated": "Dieses Artefakt wollte eine andere Seite laden, daher wurde die Leinwand geschlossen. Mit Neu rendern wird es wieder angezeigt.",
   "common.codeBlock.canvas": "Artefakt",
   "common.codeBlock.canvasTitle": "Dieses {lang} als isoliertes Artefakt darstellen",
   "common.codeBlock.copied": "kopiert",
