@@ -57,7 +57,7 @@ _PATCH_MODE_ELIGIBLE_TOOLS: frozenset[str] = _UNDOABLE_TOOLS | frozenset({
 
 # Read tools that, in patch mode, take the session's captured writes into
 # account (the dispatcher injects the overlay as ``_overlay``).
-_PATCH_OVERLAY_READ_TOOLS: frozenset[str] = frozenset({"read_file", "grep"})
+_PATCH_OVERLAY_READ_TOOLS: frozenset[str] = frozenset({"read_file", "grep", "search_replace"})
 
 # Tools whose target paths are NESTED inside a collection arg instead of a
 # top-level `path` arg. Maps tool name -> (collection arg, key within each item).

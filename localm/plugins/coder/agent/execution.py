@@ -906,9 +906,10 @@ class _ExecutionMixin:
         # cannot win.
         if call.name == "search_replace" or call.name in DIAGNOSED_TOOLS:
             args["_restricted"] = self.restricted
-        # In patch mode the read tools see the session's captured writes.
-        if self.patch_mode and call.name in _PATCH_OVERLAY_READ_TOOLS:
-            args["_overlay"] = self._patch_overlay
+        # In patch mode the read tools see the session's captured writes; outside
+        # it they get None.
+        if call.name in _PATCH_OVERLAY_READ_TOOLS:
+            args["_overlay"] = self._patch_overlay if self.patch_mode else None
         # The interaction tools prompt this session's user (tools/interact.py).
         # Injected after the copy, so a model-supplied "_session" or
         # "_interactive" cannot win.
@@ -1335,7 +1336,8 @@ class _ExecutionMixin:
             try:
                 new_text = apply_diff(old_text, diff)
             except PatchError:
-                return None
+                self._patch_chunks.append(diff)
+                return diff
         else:
             new_text = resolve_new_content(call.name, call.args, old_text)
         if new_text is None or new_text == old_text:
