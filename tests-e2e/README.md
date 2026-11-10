@@ -45,7 +45,7 @@ Both assertions (`boot-and-click.spec.mjs`) are proven to fail when their bug is
 reintroduced, so a green run means something.
 
 The other spec files cover deep links, the artifact preview sandbox, the remote-image
-proxy, coder toolbar reachability, card row selection and the Settings media layout;
+proxy, coder toolbar reachability, card row selection, the Settings media layout and touch-capability handling;
 each file's header says what it asserts.
 
 ## Run it when

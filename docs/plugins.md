@@ -309,8 +309,8 @@ current loader, not a convention: a plugin that wants both surfaces has to
 declare `entry` as well as `register`.
 
 A manifest with only `entry` works for the coder, but the plugin engine also sees
-it once it is installed and enabled, looks for a `plugin` module, and reports
-`load failed: module 'plugin' not found` for it on the Plugins page.
+it once it is installed and enabled, looks for a `plugin` module, and reports a load
+failure for it on the Plugins page (`module 'plugin' not found`).
 
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by

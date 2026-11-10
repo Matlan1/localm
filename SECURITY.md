@@ -335,7 +335,8 @@ this section states the security properties and, more importantly, their edges.
   update check run regardless of `off`. `net_allow_model_downloads` lets the
   downloads you trigger yourself proceed under `off`: model pulls and
   HuggingFace search, the vision-projector, voice, embedding-model, browser-build
-  and TTS model fetches, and the llama.cpp runtime download (`localm setup-llama`). It never applies to model-initiated access (the
+  and TTS model fetches, and the native runtime downloads (`localm setup-llama`,
+  `localm setup-sdcpp`, `localm setup-music`). It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
   bug-report upload (sent only when you press Send), and requests to your

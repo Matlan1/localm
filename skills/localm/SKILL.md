@@ -12,12 +12,14 @@ description: >
 
 localm exposes a local, offline LLM engine as MCP tools: chat, model search
 and management, diagnostics, and (when active) coding-agent delegation and
-image generation. Every call runs on this machine's own hardware. Prompts and
-files stay on this machine. The only tools that reach the network are the ones
-that fetch something you asked for: `search_models` and `list_model_files`
-(HuggingFace lookups), `pull_model` and `setup_embeddings` (model downloads),
-and `install_plugin` (pip, for a plugin's dependencies, unless `with_deps` is
-false).
+image generation. Every call runs on this machine's own hardware. The tools that
+reach the network are the ones that fetch something you asked for:
+`search_models` and `list_model_files` (HuggingFace lookups), `pull_model` and
+`setup_embeddings` (model downloads), `install_plugin` (pip, for a plugin's
+dependencies, unless `with_deps` is false), and `run_coder_task`, whose agent
+has web tools (`fetch_url`, `web_search`, the browser) that run without a
+prompt unless localm's network access (`net_mode`) is `off`. Apart from
+those, prompts and files stay on this machine.
 
 The tool list is not fixed. `run_coder_task` only appears when the coder
 plugin is active and the server was not started with `--no-coder`;
@@ -49,7 +51,7 @@ download.
 HuggingFace source of a model that is already registered (for example to fetch
 another quant), or one of a short built-in list. For any other repo the pull
 has to be run by the user on the host (`localm pull <repo>:<file>`);
-`pull_model` answers with exactly that instruction.
+`pull_model` refuses and names the `localm pull` command to run.
 
 Call `server_activity` before starting anything long-running (a pull, a
 re-embed, a media generation). It reports what any localm server running on
