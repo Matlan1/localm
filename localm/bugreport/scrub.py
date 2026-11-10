@@ -195,7 +195,10 @@ def _scrub_query_and_header_secrets(text: str) -> str:
 # line, or a mistyped config value. A bug report is share-intended, so they are
 # stripped defensively. The token is a run of eight or more characters from the
 # base64, base64url and JWT alphabets (letters, digits and ``. _ ~ + / = -``).
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}")
+# A word followed by ``:`` or by ``=`` and a value is a credential NAME
+# (``Bearer\nX-Api-Key: ...``, ``scheme=bearer api_key=...``) and is left for
+# the by-name patterns, which run after this one.
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 
 
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")

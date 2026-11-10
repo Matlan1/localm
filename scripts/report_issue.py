@@ -119,7 +119,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 #  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept

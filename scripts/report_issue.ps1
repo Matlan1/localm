@@ -59,7 +59,7 @@ function Scrub([string]$t) {
   # user:pass@ credentials in any URL-ish value (a comfy/searx/remote-server URL).
   $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
   # Bearer tokens.
-  $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}', '${1}<redacted>')
   # Credential-named assignments (a URL query parameter, a .env line, a shell line)
   # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _AUTH_HEADER_RE /
   # _HEADER_SECRET_RE in localm/bugreport/scrub.py; the reasoning is documented there. Applied

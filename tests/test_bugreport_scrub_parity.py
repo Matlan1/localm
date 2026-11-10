@@ -96,6 +96,12 @@ _CORPUS = [
     'call("Authorization": "Basic ' + SECRET + '") done; "token":<redacted>; x',
     '{"token": (Bearer ' + SECRET + ")}",
     "token=bearer " + SECRET,
+    "auth_scheme=bearer api_key=abc!" + SECRET,
+    "scheme: Bearer password=Sup3r!" + SECRET,
+    "login ok, type=Bearer token=abc:" + SECRET + " expires=3600",
+    "expected Bearer X-Api-Key: " + SECRET,
+    "X-Api-Key: (bearer " + SECRET + ")",
+    "Bearer QUJDREVGR0hJ==",
     '{"Authorization": false, "proxy_authorization": "none"}',
     # URL credentials and email.
     "https://u:" + SECRET + "@comfy.example.org/api",

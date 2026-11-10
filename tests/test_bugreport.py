@@ -254,6 +254,24 @@ def test_scrub_secrets_redacts_an_authorization_value_whole_for_any_scheme(
     assert out == expected
 
 
+@pytest.mark.parametrize("text", [
+    "WWW-Authenticate: Bearer\nX-Api-Key: CANARYAFTER1",
+    "WWW-Authenticate: Bearer\nAuthorization: Basic CANARYAFTER2",
+    "WWW-Authenticate: Bearer\r\nProxy-Authorization: Basic CANARYAFTER3\r\n",
+    "token_type: Bearer\nAuthorization: CANARYAFTER4",
+    "TOKEN_TYPE=Bearer\nPASSWORD=hunter2!CANARYAFTER5",
+    "AUTH_SCHEME=Bearer\nOPENAI_API_KEY=abc:CANARYAFTER6",
+    "auth_scheme=bearer api_key=abc!CANARYAFTER7",
+    "scheme: Bearer password=Sup3r!CANARYAFTER8",
+    "login ok, type=Bearer token=abc:CANARYAFTER9 expires=3600",
+    "expected Bearer X-Api-Key: CANARYAFTER10",
+    "X-Api-Key: (bearer CANARYAFTER11)",
+])
+def test_scrub_secrets_bearer_word_never_hides_the_credential_after_it(text):
+    out = bugreport._scrub_secrets(text)
+    assert "CANARYAFTER" not in out, out
+
+
 def test_scrub_secrets_authorization_redaction_ends_with_the_line():
     out = bugreport._scrub_secrets("Authorization: CANARYRAW1\nn_gpu_layers=35 threads=8")
     assert out == "Authorization: <redacted>\nn_gpu_layers=35 threads=8"
@@ -286,6 +304,8 @@ def test_scrub_secrets_redacts_a_scheme_word_and_token_on_a_key_header(line, exp
     ("Bearer abcdefgh+ijkl/mnop==", "+ijkl/mnop=="),
     ("curl -H 'Bearer QUJDREVGR0g+/CANARYB64TAIL='", "CANARYB64TAIL"),
     ("bearer abcdefgh~CANARYTILDE", "CANARYTILDE"),
+    ("Bearer abcdefgh=", "abcdefgh"),
+    ("Bearer QUJDREVGR0hJ==", "QUJDREVGR0hJ"),
 ])
 def test_scrub_secrets_redacts_a_base64_bearer_token_whole(line, tail):
     out = bugreport._scrub_secrets(line)
