@@ -24,6 +24,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Chat hooks are documented as transforms, not controls.** The plugin guide now lists every path that skips them and no longer suggests them for redaction.
 
 ### Changed
+- **A new managed ComfyUI on an AMD RX 6000 (gfx103X) card on Windows installs PyTorch 2.11.0 (from 2.9.1).** It is the same ROCm build localm itself runs on, with torchvision 0.26.0 and torchaudio 2.11.0. An existing managed ComfyUI moves to it the next time it is updated.
 - **The browser voice (Kokoro) uses transformers.js 4.3.2 (from 4.3.1).** Its speech runtime and voices are unchanged.
 - **The chat's Markdown renderer is updated to marked 18.1.3 (from 18.1.2).** It fixes a batch of Markdown edge cases, among them a heading underline followed by a tab, a task list item with a tab after its checkbox, escaped brackets and quotes in links, and block quotes and list items that end at a lazy line.
 - **`localm mcp` decides whether the coder may run shell commands.** `run_coder_task` now denies every shell call unless the server is started with `--coder-shell`; before, the client's `yes=true` (or a project's `auto_approve`) was enough. File writes are still auto-approved. `--coder-root DIR` limits the folders the client can have the coder work in. The MCP `install_plugin` tool now follows the `auto_install_plugin_deps` setting when `with_deps` is not given.
