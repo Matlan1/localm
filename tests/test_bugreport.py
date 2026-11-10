@@ -224,6 +224,14 @@ def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
      "headers = { Authorization: <redacted> }"),
     ("Proxy-Authorization: Custom CANARYPROXY8", "CANARYPROXY8",
      "Proxy-Authorization: <redacted>"),
+    ('Authorization: Digest username="u", realm="Restricted Area", nonce="n", '
+     'uri="/a", response="CANARYRESP9"', "CANARYRESP9", "Authorization: <redacted>"),
+    ("Authorization: Token CANARYONE10 CANARYTWO11", "CANARYTWO11",
+     "Authorization: <redacted>"),
+    ("Authorization: Bearer\nCANARYNEXTLINE12", "CANARYNEXTLINE12",
+     "Authorization: <redacted>"),
+    ("Authorization: Bearer\r\n CANARYFOLDED13", "CANARYFOLDED13",
+     "Authorization: <redacted>"),
 ])
 def test_scrub_secrets_redacts_an_authorization_value_whole_for_any_scheme(
         line, canary, expected):
@@ -240,9 +248,21 @@ def test_scrub_secrets_authorization_redaction_ends_with_the_line():
 def test_scrub_secrets_authorization_redaction_is_idempotent():
     once = bugreport._scrub_secrets(
         "Authorization: Token CANARYTOK1 then the request failed\n"
-        "Authorization: AWS4-HMAC-SHA256 Credential=CANARYAWS2, Signature=CANARYSIG3")
+        "Authorization: AWS4-HMAC-SHA256 Credential=CANARYAWS2, Signature=CANARYSIG3\n"
+        "{ Authorization: 'Token CANARYJS4', n: 1 }\n"
+        '{"Authorization":["Bearer CANARYARR5"], "n": 1}')
     assert "CANARY" not in once, once
+    assert once.endswith("{ Authorization: <redacted>, n: 1 }\n"
+                         '{"Authorization":<redacted>, "n": 1}')
     assert bugreport._scrub_secrets(once) == once
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("X-Api-Key: Bearer CANARYSCHEME1", "X-Api-Key: <redacted>"),
+    ("Auth-Token: Basic CANARYSCHEME2", "Auth-Token: <redacted>"),
+])
+def test_scrub_secrets_redacts_a_scheme_word_and_token_on_a_key_header(line, expected):
+    assert bugreport._scrub_secrets(line) == expected
 
 
 @pytest.mark.parametrize("line, tail", [
@@ -1113,6 +1133,15 @@ def test_scrub_secrets_leaves_non_credential_json_fields_intact():
     ('{"AWS_SECRET_ACCESS_KEY": "CANARYAWS3"}', "CANARYAWS3",
      '{"AWS_SECRET_ACCESS_KEY": <redacted>}'),
     ('{"my_hf_hub_token":"CANARYHF4"}', "CANARYHF4", '{"my_hf_hub_token":<redacted>}'),
+    ('{"Authorization":["Bearer CANARYARRAY5"]}', "CANARYARRAY5",
+     '{"Authorization":<redacted>}'),
+    ('"Authorization": Bearer CANARYBARE6', "CANARYBARE6", '"Authorization": <redacted>'),
+    ('{"Authorization":"Digest username=\\"u\\", realm=\\"r\\", '
+     'response=\\"CANARYESC7\\""}', "CANARYESC7", '{"Authorization":<redacted>}'),
+    ('{"password": "a\\"b CANARYESC8", "n": 1}', "CANARYESC8",
+     '{"password": <redacted>, "n": 1}'),
+    ('{"api_keys": 2, "token": ["CANARYLIST9", "CANARYLIST10"], "n": 1}', "CANARYLIST10",
+     '{"api_keys": 2, "token": <redacted>, "n": 1}'),
 ])
 def test_scrub_secrets_redacts_json_header_and_multi_part_credential_keys(
         text, canary, expected):
@@ -1153,6 +1182,14 @@ def _scrub_seconds(text: str, samples: int = 5) -> float:
     pytest.param(lambda n: '"a_' * n, id="json-many-quotes"),
     pytest.param(lambda n: '"' + "a_key_" * n + '"', id="json-key-run"),
     pytest.param(lambda n: '"' + "token_" * n, id="json-name-run"),
+    pytest.param(lambda n: "Authorization:" + " " * n + "<redacted>", id="auth-space-run"),
+    pytest.param(lambda n: "Authorization: Bearer" + " \n" * n, id="auth-scheme-blank-lines"),
+    pytest.param(lambda n: '"token":' + " " * n + "true,", id="json-flag-after-spaces"),
+    pytest.param(lambda n: '"authorization":' + " " * n + "true,",
+                 id="json-auth-flag-after-spaces"),
+    pytest.param(lambda n: '"token":"' + '\\"' * n, id="json-escaped-quote-run"),
+    pytest.param(lambda n: '"token":[' + "a" * n, id="json-open-array"),
+    pytest.param(lambda n: '"token":[' * n, id="json-many-arrays"),
     pytest.param(lambda n: "bearer " + "+/=" * n, id="bearer-base64-run"),
     pytest.param(lambda n: "bearer " * n, id="bearer-name-run"),
 ])

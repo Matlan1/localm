@@ -109,23 +109,25 @@ _QUERY_SECRET_RE = re.compile(
 # by NAME like the query-string case above, over a small explicit set of
 # credential header names rather than a bearer-style catch-all, so an unrelated
 # header is never touched. The value is the run of non-space characters after
-# the colon.
+# the colon, a leading scheme word such as Bearer/Basic included.
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)"
+    r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
 
 
 # An ``Authorization:`` value, whatever its scheme. A quoted value goes whole
-# (to the closing quote, or to the end of the line when there is none). An
-# unquoted value is an optional scheme word followed by spaces or tabs, one
-# credential, and every further ``, parameter`` on the same line (Digest and
-# AWS4-HMAC-SHA256 carry several). ``Proxy-Authorization`` and
+# (to the closing quote, or to the end of the line when there is none) and
+# the text after the closing quote is kept. An unquoted value goes to the end
+# of its line; when it is one of the scheme words Bearer, Basic, Digest,
+# Negotiate or NTLM alone on its line, the next line goes too. A value that
+# already reads ``<redacted>`` is left as it is. ``Proxy-Authorization`` and
 # ``X-Authorization`` end in the same name and are matched by it. See
 # test_header_json_and_bearer_patterns_do_not_grow_superlinearly.
 _AUTH_HEADER_RE = re.compile(
-    r"(?i)(authorization\s*:\s*)"
+    r"(?i)(authorization\s*:\s*)(?=\S)(?!<redacted>)"
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?"
-    r"|(?:[A-Za-z][A-Za-z0-9_-]*[ \t]+)?[^\s,]+(?:,[ \t]*[^\s,]+)*)"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^\r\n]*)"
 )
 
 
@@ -144,8 +146,10 @@ _AUTH_HEADER_RE = re.compile(
 # A name may follow any number of ``_``/``-`` separated parts, so
 # ``"X-Auth-Token"``, ``"Proxy-Authorization"`` and
 # ``"AWS_SECRET_ACCESS_KEY"`` are matched.
-# The value stops at the JSON structural characters rather than at whitespace,
-# so a redaction never eats the rest of the object.
+# The value is a quoted string (backslash escapes included), a whole ``[...]``
+# array, or an unquoted run with an optional leading scheme word; the unquoted
+# run stops at the JSON structural characters, so a redaction never eats the
+# rest of the object.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
     r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
@@ -156,18 +160,18 @@ _JSON_SECRET_RE = re.compile(
     # The leading ``\s*`` is load-bearing: the ``\s*`` inside the name group can
     # give the separator space back on backtracking, so without it the guard is
     # tested one character too late and matches nothing.
+    r"(?=\S)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+    r"(?:\"(?:[^\"\\\r\n]|\\.)*\"?|'(?:[^'\\\r\n]|\\.)*'?|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?[^,}\]\s]*)"
 )
 
 
 def _scrub_query_and_header_secrets(text: str) -> str:
     """Redact credential-ish URL query parameters, HTTP header lines and JSON
-    object keys, by NAME (see the regexes above). Idempotent: the
-    ``<redacted>`` replacement contains none of the delimiters the value
-    patterns stop on, so a second pass matches nothing new and leaves an
-    already-redacted value unchanged."""
+    object keys, by NAME (see the regexes above). Idempotent: a second pass
+    leaves an already-redacted value unchanged."""
     if not text:
         return text
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
