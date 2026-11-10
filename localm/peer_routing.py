@@ -415,8 +415,11 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
         verify = requests_verify(url)
     except FileNotFoundError:
         verify = False
-    resp = requests.get(_peer_url(probe, "/api/session"), headers=_auth_headers(api_key),
-                        timeout=timeout, verify=verify)
+    from localm.selfclient import local_request
+    resp = local_request("GET", _peer_url(probe, "/api/session"),
+                         headers=_auth_headers(api_key), timeout=timeout,
+                         verify=verify)
+    _refuse_peer_redirect(resp)
     try:
         state = resp.json() if resp.status_code == 200 else None
     except (ValueError, RecursionError):
@@ -427,14 +430,23 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
                 "the peer requires its own API key" if not api_key
                 else "the peer rejected that API key")
         return
-    resp = requests.get(url, headers=_auth_headers(api_key), timeout=timeout,
-                        verify=verify)
+    resp = local_request("GET", url, headers=_auth_headers(api_key),
+                         timeout=timeout, verify=verify)
+    _refuse_peer_redirect(resp)
     if resp.status_code in (401, 403):
         raise PeerCredentialError(
             "the peer requires its own API key" if not api_key
             else f"the peer rejected that API key (HTTP {resp.status_code})")
     if resp.status_code >= 400:
         raise PeerCredentialError(f"the peer answered HTTP {resp.status_code}")
+
+
+def _refuse_peer_redirect(resp) -> None:
+    """Raise PeerCredentialError when *resp* is a redirect (3xx): a peer
+    never sends this instance anywhere else."""
+    if 300 <= resp.status_code < 400:
+        raise PeerCredentialError(
+            f"the peer answered with a redirect (HTTP {resp.status_code})")
 
 
 class PeerWouldRecord(Exception):
@@ -478,8 +490,9 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
         verify = False
     headers = {**_auth_headers(api_key), SESSION_MODE_HEADER: SessionMode(mode).value}
     try:
-        resp = requests.get(url, headers=headers, timeout=timeout, verify=verify,
-                            allow_redirects=False)
+        from localm.selfclient import local_request
+        resp = local_request("GET", url, headers=headers, timeout=timeout,
+                             verify=verify)
     except requests.RequestException as e:
         raise PeerUnreachable(f"it could not be reached ({e})") from e
     if resp.status_code in (401, 403):
@@ -620,9 +633,11 @@ async def forward(route: PeerRoute, request, path: str, *,
     except FileNotFoundError:
         verify = False
 
+    from localm.selfclient import local_request
+
     def _send():
-        return requests.post(
-            url, data=body, headers=fwd_headers, stream=True,
+        return local_request(
+            "POST", url, data=body, headers=fwd_headers, stream=True,
             timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT), verify=verify)
 
     try:
@@ -636,6 +651,19 @@ async def forward(route: PeerRoute, request, path: str, *,
             502, f"Peer instance at {route.host}:{route.port} became "
             f"unavailable while routing '{route.model}'; the route has been "
             "cleared. Retry to load a local copy, or re-offer routing.") from e
+
+    if 300 <= resp.status_code < 400:
+        resp.close()
+        clear_route(route.model)
+        logger.warning("peer_routing: peer %s (%s:%s) answered '%s' with a "
+                       "redirect (HTTP %s), clearing the route",
+                       route.instance_id, route.host, route.port, route.model,
+                       resp.status_code)
+        raise HTTPException(
+            502, f"Peer instance at {route.host}:{route.port} answered "
+            f"'{route.model}' with a redirect (HTTP {resp.status_code}); the "
+            "route has been cleared. Retry to load a local copy, or re-offer "
+            "routing.")
 
     if resp.status_code in (401, 403):
         resp.close()

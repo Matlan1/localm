@@ -802,7 +802,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
     # hops, native cert store first, certifi as fallback. The https-only-redirect
     # guard is http_ssl.HttpsOnlyRedirect, installed by default.
-    from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
+    from localm.http_ssl import RedirectDowngradeRefused, copy_bounded, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with verified_urlopen(req, timeout=timeout) as resp:
@@ -810,11 +810,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+                copy_bounded(resp, f)
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}") from None
     except RedirectDowngradeRefused as e:

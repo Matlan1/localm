@@ -3623,7 +3623,8 @@ def _ssrf_resolve_final_url(url: str) -> str:
         netpolicy.check_url(current, allow_when_off=allow_off)
         try:
             resp = netpolicy.pinned_request(
-                "HEAD", current, allow_redirects=False, timeout=10)
+                "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         except netpolicy.NetworkPolicyError:
             raise                       # a policy refusal / rebind must NOT be swallowed into a silent GET
         except Exception:
@@ -3677,7 +3678,8 @@ def _policy_head(url: str):
                    if urllib.parse.urlparse(current).hostname == hub_host
                    else None)
         resp = netpolicy.pinned_request(
-            "HEAD", current, allow_redirects=False, timeout=10, headers=headers)
+            "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10, headers=headers)
         location = (resp.headers.get("Location")
                     if resp.status_code in (301, 302, 303, 307, 308) else None)
         if not location or len(history) == 5:
@@ -4285,7 +4287,8 @@ def _pull_url_locked(
     # non-fatal; the GET still fails closed.
     head_etag = None
     try:
-        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
+        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         total = int(head.headers.get("content-length", 0))
         head_etag = head.headers.get("etag")
     except NetworkPolicyError as e:
@@ -4331,13 +4334,15 @@ def _pull_url_locked(
         # revalidate immediately before the connect
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")
@@ -4623,13 +4628,15 @@ def _pull_civitai_file_locked(
     try:
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")

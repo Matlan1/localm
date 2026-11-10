@@ -240,10 +240,23 @@ def resolve_self_url(app) -> Optional[str]:
     return None
 
 
+def local_request(method: str, url: str, **kwargs) -> requests.Response:
+    """The one helper for requests to this machine's own server and to peer
+    instances on loopback: ``requests`` with redirects off. A 3xx response is
+    returned to the caller, never followed. Callers cannot pass
+    ``allow_redirects``."""
+    kwargs["allow_redirects"] = False
+    verb = method.upper()
+    if verb == "GET":
+        return requests.get(url, **kwargs)
+    if verb == "POST":
+        return requests.post(url, **kwargs)
+    return requests.request(verb, url, **kwargs)
+
+
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None,
-                  instance_token: Optional[str] = None,
-                  allow_redirects: bool = True) -> requests.Response:
+                  instance_token: Optional[str] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
@@ -268,10 +281,7 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     ``requests.Response`` and never raises for a non-2xx status, leaving
     per-endpoint success/error handling to the caller.
 
-    *allow_redirects* defaults to True (``requests``' own default). A caller
-    that has independently confirmed *base_url* is an address this machine
-    holds and wants a single-hop request - never redirected to somewhere
-    else - passes False.
+    A redirect is never followed: a 3xx is returned to the caller.
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")
@@ -279,6 +289,5 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     headers = resolve_bearer_headers(instance_token)
     from localm import tls as _tls
     url = f"{base_url}{path}"
-    return requests.request(method, url, json=json, headers=headers,
-                            timeout=timeout, verify=_tls.requests_verify(url),
-                            allow_redirects=allow_redirects)
+    return local_request(method, url, json=json, headers=headers,
+                         timeout=timeout, verify=_tls.requests_verify(url))

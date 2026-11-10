@@ -20,16 +20,52 @@ import socket
 from typing import Optional
 
 
+LOCAL_ORIGIN_PATTERN = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+
+
+def normalise_host(host) -> str:
+    """*host* as the local-host predicates compare it: stripped, lower-cased,
+    one pair of IPv6 square brackets removed. A non-string or empty value is
+    ``""``. A trailing dot (``localhost.``) and non-dotted-quad IPv4 spellings
+    (``2130706433``, ``127.1``) are left as they are, so none of the predicates
+    below treats them as local."""
+    if not isinstance(host, str):
+        return ""
+    h = host.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h
+
+
 def is_loopback_host(host: str) -> bool:
     """True for a loopback bind/client host (127.0.0.0/8, ::1, localhost)."""
-    if not host:
+    h = normalise_host(host)
+    if not h:
         return False
-    if host == "localhost":
+    if h == "localhost":
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        return ipaddress.ip_address(h).is_loopback
     except ValueError:
         return False
+
+
+def is_wildcard_host(host: str) -> bool:
+    """True for the unspecified address (``0.0.0.0``, ``::``): a bind value
+    meaning every interface, never a connectable destination."""
+    h = normalise_host(host)
+    if not h:
+        return False
+    try:
+        return ipaddress.ip_address(h).is_unspecified
+    except ValueError:
+        return False
+
+
+def is_local_dial_host(host: str) -> bool:
+    """True when a client dialling *host* reaches this machine: a loopback
+    host or a wildcard (which the OS connects to the local machine)."""
+    return is_loopback_host(host) or is_wildcard_host(host)
 
 
 def is_valid_bind_host(host) -> bool:

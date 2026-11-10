@@ -15,6 +15,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 
 ### Fixed
+- **A peer instance can no longer redirect localm's requests to it.** Forwarding a chat to a peer and checking a peer's API key now treat a redirect answer as a failed peer instead of following it and re-sending the conversation to the address it names. Requests localm makes to its own server never follow a redirect either.
+- **Update and runtime downloads no longer pass localm's own credentials to another host.** When a download is redirected to a different host (the update zip goes to the release CDN), only basic headers are sent on; the update token is not. Downloads and metadata reads are also capped in size.
+- **Outbound requests check the network policy themselves.** The shared pinned request helper now runs the policy check and does not follow redirects unless a caller asks for it.
+### Fixed
 - **The Ouro Thinking models now generate.** They loaded but stopped on the first reply with `'int' object has no attribute 'shape'`, because their cache code expected a different argument from the transformers localm uses. localm now bridges that for Ouro models, and Ouro-1.4B, 2.6B and both Thinking variants answer.
 - **A damaged Whisper speech model can be downloaded again.** When the speech model file in localm's cache fails its check, localm now removes it completely, including the copy Hugging Face keeps in its shared store, so the next download fetches a good file instead of failing the same check every time.
 - **Ouro models (ByteDance Ouro-1.4B, 2.6B and their Thinking variants) load and answer.** Their bundled code was written for an older transformers and failed to load on the one localm uses (`'OuroConfig' object has no attribute 'pad_token_id'`). With `hf_trust_remote_code` on, localm now bridges the three differences for these models only; models without bundled code, other bundled-code models and the default (off) setting are unchanged.

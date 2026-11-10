@@ -21,6 +21,7 @@ from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive, ArtifactError
 import localm.setup_llama as _sl
+from localm.http_ssl import read_bounded
 
 # --------------------------------------------------------------------------- #
 #  NVIDIA / CUDA preflight + self-assembly                                     #
@@ -312,7 +313,7 @@ def _pypi_wheel_url_and_sha(package: str) -> tuple:
         req = urllib.request.Request(api, headers={"Accept": "application/json",
                                                     "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
+            data = json.loads(read_bounded(r).decode("utf-8"))
         for f in data["urls"]:
             name = str(f.get("filename", ""))
             if name.endswith(".whl") and "x86_64" in name and "linux" in name.lower():
