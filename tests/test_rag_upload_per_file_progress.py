@@ -174,7 +174,7 @@ class TestItReachesAJobListing:
         path: `_job_progress` forwards the same numbers to `Job.progress`, which
         is the only place that divides."""
         from localm.plugins.builtin.rag.plug import _job_progress
-        from localm.plugins.gui.jobs import Job
+        from localm.jobmanager import Job
 
         job = Job(id="j1", kind="rag-upload", argv=[])
         coll.add_uploads(_files(4), embed_fn=_embed,

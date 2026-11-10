@@ -11,7 +11,14 @@ the llama.cpp loader directly for GPU-probe diagnostics; `localm/cli/chat.py`
 and `localm/cli/_core.py` import the backend exception types from
 `inference/backends/base.py`; `localm/cli/chat.py` also reads capability
 routing and compaction constants from `inference/`; `localm/cli/models.py`
-imports `describe_gpu_placement` from `inference/engine.py`;
+imports `describe_gpu_placement` and `resolve_spec_draft_model` from
+`inference/engine.py` and the private llama.cpp modules `_drafting` and
+`_draftmodel`; `localm/cli/speak.py` imports `inference/speech.py`, the backend
+exception types and `inference/backends/llamacpp/mtmd_gen.py`;
+`localm/cli/rerank.py` imports `inference/reranker.py` and the backend
+exception types; `localm/cli/maintenance.py` imports the private names
+`_nonlocal_spec_reason`, `_EMBEDDING_PINS` and `_embeddings_dir` from
+`inference/embedder.py`;
 `localm/cli/rag.py` imports the default embedding model name from
 `inference/embedder.py`). CHAT
 is the protected, preinstalled plugin (#0); coder, browser, image, music,
