@@ -53,6 +53,7 @@ _ORDER = ("reboot", "deps", "runtime", "setup")
 _SIG_FORMAT = "localm-update-sig/2"
 _SIG_MAX_CHARS = 4096
 _TRUST_FILE = "trust.json"
+_CHAIN_FILE = "trust-chain.json"
 
 _PINNED_KEYSET: dict = {
     "seq": 1,
@@ -215,14 +216,60 @@ def _trust_path() -> Path:
     return _updates_dir(create=False) / _TRUST_FILE
 
 
+def _chain_path() -> Path:
+    return _updates_dir(create=False) / _CHAIN_FILE
+
+
+def _read_chain() -> list:
+    """The signed key sets saved in the data dir's chain file (``[]`` when there
+    is none). Raises :class:`~localm.bugreport.LocalmError` naming the file when
+    it cannot be read or does not validate."""
+    from localm.bugreport import LocalmError
+    path = _chain_path()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise LocalmError("the saved update signing keys could not be read",
+                          reason=f"{path}: {e}") from None
+    try:
+        obj = _strict_json(raw.decode("utf-8"))
+        _check_fields(obj, "the key set chain", {"keysets"})
+        if not isinstance(obj["keysets"], list):
+            raise _BadSignature("the key set chain keysets is not a list")
+        return [_parse_keyset(k, signed=True) for k in obj["keysets"]]
+    except (ValueError, RecursionError) as e:
+        raise LocalmError(
+            "the saved update signing keys are corrupt",
+            reason=f"{path}: {e}. Restore that file, or reinstall localm") from None
+
+
+def _chains_to(pinned: dict, saved: dict, chain: list) -> bool:
+    """Whether *saved* is reached from *pinned* through key sets of *chain* (and
+    *saved* itself), each with a higher seq than the one before and signed by at
+    least the recovery threshold of distinct recovery keys of the one before."""
+    current = pinned
+    for ks in sorted(chain + [saved], key=lambda k: k["seq"]):
+        if ks["seq"] <= current["seq"]:
+            continue
+        recovery = current["recovery"]
+        if _count_signers(ks["signatures"], recovery["keys"],
+                          canonical_keyset_bytes(ks)) >= recovery["threshold"]:
+            current = ks
+    return canonical_keyset_bytes(current) == canonical_keyset_bytes(saved)
+
+
 def _load_trusted() -> dict:
     """The trusted key set: the one saved in the data dir when its seq is higher
-    than the pinned one's, else the pinned one. A saved file that cannot be read,
-    does not validate, or has the pinned seq with different keys raises
-    :class:`~localm.bugreport.LocalmError` naming the file; it is never replaced by
-    the pinned set."""
+    than the pinned one's, else the pinned one. A saved set with a higher seq is
+    trusted only when it chains to the pinned set (:func:`_chains_to`, through the
+    sets in the chain file). A saved file that cannot be read, does not validate,
+    has the pinned seq with different keys, or does not chain to the pinned set
+    raises :class:`~localm.bugreport.LocalmError` naming the file; it is never
+    replaced by the pinned set."""
     from localm.bugreport import LocalmError
-    pinned = _parse_keyset(_PINNED_KEYSET, signed=False)
+    pinned = _parse_keyset(_PINNED_KEYSET, signed="signatures" in _PINNED_KEYSET)
     path = _trust_path()
     try:
         raw = path.read_bytes()
@@ -243,25 +290,59 @@ def _load_trusted() -> dict:
             "the saved update signing keys conflict with the built-in ones",
             reason=f"{path}: key set {saved['seq']} differs from the built-in key set "
                    f"{pinned['seq']}. Restore that file, or reinstall localm")
-    return saved if saved["seq"] > pinned["seq"] else pinned
+    if saved["seq"] <= pinned["seq"]:
+        return pinned
+    chain = _read_chain()
+    if not _chains_to(pinned, saved, chain):
+        raise LocalmError(
+            "the saved update signing keys are not signed by the built-in recovery keys",
+            reason=f"{path}: key set {saved['seq']} does not chain to the built-in key set "
+                   f"{pinned['seq']} (through {_chain_path()}). Restore that file, or "
+                   "reinstall localm")
+    return saved
 
 
-def _save_keyset(keyset: dict) -> None:
-    """Atomically write the signed *keyset* to the data dir's trust file."""
+def _write_json_atomic(path: Path, obj) -> None:
+    """Atomically write *obj* as JSON to *path*. Raises OSError."""
     import os
-
-    from localm.bugreport import LocalmError
-    path = _updates_dir() / _TRUST_FILE
-    tmp = path.with_name(f".{_TRUST_FILE}.{uuid.uuid4().hex}.tmp")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write(_json.dumps(keyset, indent=2, sort_keys=True) + "\n")
+            f.write(_json.dumps(obj, indent=2, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-    except OSError as e:
+    except OSError:
         with contextlib.suppress(OSError):
             tmp.unlink()
+        raise
+
+
+def _save_keyset(keyset: dict) -> None:
+    """Atomically write the signed *keyset* to the data dir's trust file, after
+    adding it, and the signed set the trust file held before, to the chain file
+    (:func:`_read_chain`) that :func:`_load_trusted` verifies it through. Raises
+    :class:`~localm.bugreport.LocalmError` when a write fails or the existing
+    chain file does not validate."""
+    from localm.bugreport import LocalmError
+    path = _updates_dir() / _TRUST_FILE
+    chain = _read_chain()
+    try:
+        previous = [_parse_keyset(_strict_json(path.read_text(encoding="utf-8")),
+                                  signed=True)]
+    except (OSError, ValueError, RecursionError):
+        previous = []
+    kept: dict = {}
+    for ks in chain + previous + [keyset]:
+        if "signatures" in ks:
+            kept[canonical_keyset_bytes(ks)] = {
+                **{k: ks[k] for k in ("seq", "release", "recovery")},
+                "signatures": ks["signatures"]}
+    try:
+        _write_json_atomic(path.with_name(_CHAIN_FILE),
+                           {"keysets": sorted(kept.values(), key=lambda k: k["seq"])})
+        _write_json_atomic(path, keyset)
+    except OSError as e:
         raise LocalmError("could not save the update's new signing keys",
                           reason=f"{path}: {e}") from None
 
@@ -1397,6 +1478,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             post_cmd = (au.post_swap_command("deps", uv=uv_exe)
                         if deps_changed and not has_finish else None)
             _require_runnable(post_cmd, "deps")
+            if post_cmd:
+                _require_deps_source(root)
             if rt_plan["reprovision"] and klass != "setup":
                 _require_runnable([sys.executable], "runtime")
                 left = updater_runtime.stop_own_holders(
@@ -1530,6 +1613,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 try:
                     post_cmd = au.post_swap_command("deps", uv=_uv_for_deps(target))
                     _require_runnable(post_cmd, "deps")
+                    _require_deps_source(target)
                 except LocalmError as e:
                     _roll_back(f"{e.summary}: {e.reason}", "looking for uv failed",
                                e.summary, reason=e.reason)
@@ -1655,6 +1739,26 @@ def _require_runnable(cmd, klass: str) -> None:
                f"localm folder to repair the install, then update again")
 
 
+def _require_deps_source(tree: Path) -> None:
+    """Refuse, before anything is swapped, a dependency step the build at *tree*
+    cannot run: it has no ``uv.lock``, or the network policy refuses the package
+    index (``localm.pyinstall.check_network``; ``update_ignore_net_policy`` exempts
+    it like the update itself). Raises LocalmError."""
+    from localm import pyinstall
+    from localm.bugreport import LocalmError
+    if pyinstall.lock_file(tree) is None:
+        raise LocalmError("this update cannot install its dependencies, so nothing was changed",
+                          reason=f"the build has no {pyinstall.LOCK_NAME}")
+    from localm.netpolicy import network_mode
+    if network_mode() == "off" and _net_policy_allows_update_check():
+        return
+    try:
+        pyinstall.check_network()
+    except pyinstall.InstallRefused as e:
+        raise LocalmError("this update cannot install its dependencies, so nothing was changed",
+                          reason=str(e)) from None
+
+
 def _uv_for_deps(target: Path) -> str:
     """The uv that reinstalls the dependencies of the install at *target*.
 
@@ -1698,6 +1802,7 @@ def _deps_env(target: Path) -> dict:
     contained and the caller has not set them."""
     import os
     env = dict(os.environ)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
     try:
         from localm import install_manifest
         m = install_manifest.load(target) or {}

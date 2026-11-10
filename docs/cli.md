@@ -46,7 +46,7 @@ localm run hf-model --device cpu          # HuggingFace models: device override 
 localm run mymodel --no-server            # load the model in this process
 ```
 
-By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
+By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server is not up within about 20 seconds, `run` says so and loads MODEL in its own process as well, while the background server keeps starting. `--ctx`, `--gpu-layers`, `--mmproj` and `--device` apply when `run` loads the model or starts the server; attached to a server that is already running they are not applied. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
 
 A message mymodel cannot handle - an image it cannot read, or a conversation
 that has outgrown the context window it was trained for - is answered by an
@@ -88,7 +88,7 @@ localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit dev
 
 Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](gui.md) for details.
 
-A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). `gui` and `serve` run in the foreground until Ctrl+C.
+A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). An attach cannot change the running server, so a second `localm gui` that names another model, another `--port` or `--host`, or passes `--ctx`, `--gpu-layers`, `--mode`, `--pull`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--qr`, `--api-mode`, `--mmproj` or `--device` exits 1 and lists what it could not apply; drop the option or add `--new`. `gui` and `serve` run in the foreground until Ctrl+C.
 
 Past loopback, built-in TLS is on by default: `--no-tls` serves plain HTTP, and `--tls-cert FILE --tls-key FILE` use your own PEM certificate instead of localm's local-CA one. Without an API key, a bind past loopback is refused unless `--insecure` is passed (see [Configuration](#configuration)).
 
@@ -179,7 +179,7 @@ localm pull owner/repo:model-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf
 localm pull owner/repo:model-Q4_K_M.gguf --type llm
 ```
 
-A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
+A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add something already registered, localm offers alias / copy / move / register / skip; a pull of something you already have offers alias / download anyway / skip before it downloads (a URL download that turns out to match a registered file offers to alias it and delete the new copy), instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
 ### Interrupted downloads
 
@@ -272,7 +272,7 @@ localm rename mymodel newname                # rename it outright (unlike alias,
 
 `localm rename` also updates, best effort, the references to the old name inside the data directory (config, jobs, Knowledge collections); a per-project `.localcoder/config.toml` `model` setting is not touched. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
 
-Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file, unless you gave `--type`: then the new name becomes an alias of the registered file with that type, and the same holds for `localm pull --type` with no terminal, such as a script.
+Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type, and the same holds for `localm pull --type` with no terminal, such as a script.
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
@@ -401,7 +401,7 @@ localm relocate MODEL NEW_PATH  # re-point a registered model after you moved it
 localm unload [MODEL]           # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. It also refuses when a running localm server (this directory's or another one's) still has the model's file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
+`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. When the removal would delete the file, it also refuses while a running localm server that uses this data directory (whichever folder it serves) still has that file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model that is not busy with a request and stops the image, video and music runtimes no job is using; a model still busy after a short wait is left loaded and named in the output (exit code 1 when nothing could be unloaded for that reason). A named model that is not loaded is a no-op.
 
 ---
 
@@ -461,7 +461,9 @@ localm comfy restart               # stop it, then launch a fresh one
 handle on a ComfyUI localm launched belongs to the process that launched it -
 only that process can end it. `localm comfy stop` never kills a ComfyUI you
 started yourself: it aborts the render and frees the VRAM, and says so rather
-than implying the process is gone. A cold start compiles GPU kernels and can take
+than implying the process is gone. `localm comfy restart` does the same to a
+ComfyUI you started yourself and launches nothing; it relaunches only one localm
+started, or starts one when none is running. A cold start compiles GPU kernels and can take
 minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`. `localm comfy status` also works without a server, but then reports whether localm launched the running ComfyUI as unknown.
 
 Pressing Ctrl-C during `localm image` / `localm music` / `localm video` tells
@@ -621,7 +623,7 @@ localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of me
 
 When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
-`ctx_reserve` (default 16384) is the window every load keeps usable. A Mixture-of-Experts model sized automatically keeps more of its experts in system RAM so this window stays on the GPU; any other model keeps its layers, and past free VRAM the KV cache lives in system RAM. A long chat that compaction can bring inside the loaded window is compacted and the model stays loaded. A request that compaction cannot help (one message larger than the window, or a conversation with nothing to summarise), or one that declares a window with `min_context` or `context_reserve`, reloads the model with a larger window instead, at least double, up to the model's trained window, `n_ctx_max` with `ctx_auto` off, or 65536 with `ctx_auto` on and `n_ctx_max` above 0. The coding agent asks for 32768 tokens.
+`ctx_reserve` (default 16384) is the window every load keeps usable. A Mixture-of-Experts model sized automatically keeps more of its experts in system RAM so this window stays on the GPU; any other model keeps its layers, and past free VRAM the KV cache lives in system RAM. A long chat that compaction can bring inside the loaded window is compacted and the model stays loaded. A request that compaction cannot help (one message larger than the window, or a conversation with nothing to summarise), or one that declares a window with `min_context` or `context_reserve`, reloads the model with a larger window instead (at least double for a prompt that does not fit, the declared size rounded up to a multiple of 4096 for a declared window), up to the model's trained window, `n_ctx_max` with `ctx_auto` off, or 65536 with `ctx_auto` on and `n_ctx_max` above 0. The coding agent asks for 32768 tokens.
 
 ```bash
 localm config ctx_reserve 32768  # keep a 32k window on every load
@@ -631,7 +633,7 @@ Long chats compact automatically before they collide with the ceiling. See [docs
 
 ### Unloading other models to make room
 
-`unload_for_room` decides what a model switch does when the new model needs video memory other models hold: `always` (the default) unloads this instance's idle models, `ask` asks first and names them, `never` keeps them loaded and gives the new model the video memory that is left. A switch that does not fit under `never` offers to load beside them, slower, or to unload them for this load only. A model of another localm instance is unloaded only after you confirm a switch.
+`unload_for_room` decides what a model switch does when the new model needs video memory other models hold: `always` (the default) unloads this instance's idle models, `ask` asks first and names them (only a model switch you make is asked; any other load, such as an API request that names another model, behaves as `never`), `never` keeps them loaded and gives the new model the video memory that is left. A switch that does not fit under `never` offers to load beside them, slower, or to unload them for this load only. A model of another localm instance is unloaded only after you confirm a switch.
 
 ### Multi-GPU: picking the main device
 
@@ -642,7 +644,7 @@ localm gpus                        # list detected GPUs
 localm config main_gpu_index 1     # make device 1 the main GPU
 ```
 
-The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card.
+The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card. For a GGUF model placed over two or more GPUs, the vision projector then goes on the GPU of that placement with the most memory left, without a warning.
 
 `localm gpus` omits the free-VRAM figure (printing a note instead) rather than show a number it cannot stand behind, when the reading is process-scoped or otherwise untrusted for the platform - notably AMD ROCm/HIP on Windows.
 
@@ -714,7 +716,8 @@ localm config use_mmap on         # always memory-map
 localm config use_mmap off        # always read the whole model into memory first
 ```
 
-With `auto` and every layer on the GPU, localm reads the weights that stay in
+With `auto` and every layer on the GPU (`n_gpu_layers` left at 99; a smaller
+count is treated as a partial offload even when it covers every layer), localm reads the weights that stay in
 system RAM (the token embeddings, and any MoE experts kept off the GPU) into
 memory when they fit available RAM with 2 GiB to spare (inside a container,
 its memory limit counts). When they do not, the model is memory-mapped and the
@@ -725,7 +728,10 @@ load output says so:
 ```
 
 Reads then come from disk until the pages are cached, which is why the first
-tokens are slower. A model split between GPU and CPU, a load on a machine with
+tokens are slower. (When MoE experts kept in system RAM or a draft model on the
+CPU are part of it and the weights the CPU reads while generating do not fit
+either, the warning described below is printed before the load instead of this
+line.) A model split between GPU and CPU, a load on a machine with
 no GPU, and a load where available RAM cannot be read use llama.cpp's own
 default instead, which memory-maps the file wherever the device supports it.
 Such a load stays memory-mapped whatever the RAM. When the weights the CPU reads
@@ -755,19 +761,24 @@ localm config gpu_split_indices ""       # clear it - llama.cpp spreads a GGUF m
 
 How much of a GGUF model lands on each card is planned at load time from every card's free VRAM: each card gets a run of layers that fits its free memory, counting the layers' weights, their share of the context (KV cache) and about 1.5 GB per card for llama.cpp's working buffers (`vram_overhead_mb`); the cards are filled in the order `gpu_split_indices` lists them (by GPU number when it is blank) whenever localm plans the load (when it cannot, the log says so and llama.cpp uses its own device order), the output layer goes on the last card that holds a layer, and a card that cannot hold anything useful is left out. localm then tells llama.cpp exactly which cards to use and how many layers each takes, so llama.cpp sets nothing up on cards outside the plan. The load output prints the plan (`gpu split: GPU 0 (...): 12 layers, 6.6 of 14.9 GB free; ...`). When the model does not fit, the routed experts of a Mixture-of-Experts model move to system RAM first, then whole layers move to the CPU. Set `gpu_split_ratios` only to pin the shares yourself; the plan then follows your ratios (with automatic GPU layers, fewer layers go on the GPUs when a card would be over its free memory; with a fixed `n_gpu_layers`, the plan says which card is short).
 
-GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices (every GPU when none are listed), filled in the listed order, with `vram_overhead_mb` left free on each GPU for generation. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. For a GGUF load localm matches each card to llama.cpp's own device list by its PCI bus, so the cards you chose are the ones llama.cpp uses even when it numbers them in another order; when the two lists cannot be matched, llama.cpp's default split is kept and a warning says why. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp does not use it. A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, two or more are filled in the order you tick them, none ticked uses every discrete GPU), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
+GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices (every GPU when none are listed), filled in the listed order, with `vram_overhead_mb` left free on each GPU for generation. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. For a GGUF load localm matches each card to llama.cpp's own device list by its PCI bus, so the cards you chose are the ones llama.cpp uses even when it numbers them in another order; when the two lists cannot be matched, llama.cpp's default split is kept and a warning says why. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp does not use it. A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are not translated (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices); they are checked against the runtime's own device list, and a number it does not list is left out with a warning. There the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, two or more are filled in the order you tick them, none ticked uses every discrete GPU), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 
 ### Keeping more than one model loaded
 
 localm already keeps several models resident at once when they fit: loading a
 second model does **not** evict the first if a live free-VRAM reading shows it
-fits alongside (the model's estimated need plus a 1 GB headroom, and, with a
-split configured, enough room on every split device). Only when it does not fit
-is a resident model evicted, least-recently-used first, and never one that is
-currently generating. When free VRAM cannot be measured, or the reading is
-inconclusive, localm deliberately stays single-resident rather than stacking
-models until the driver runs out. This applies to the HTTP server (`localm
-serve` / `localm gui`) and the MCP server (`localm mcp`) alike.
+fits alongside (for a GGUF model the backend sized, its own figure for the
+load; otherwise the estimated need plus a 1 GB headroom; and, with a split
+configured, enough room on every split device). Only when it does not fit is a
+resident model evicted, least-recently-used first. A model that is currently
+generating is waited for; if it stays busy, a model switch asks before it stops
+that reply. When the free-VRAM reading stays inconclusive after the idle models
+are unloaded and the reading is retried, the HTTP server refuses the load (503)
+and the MCP server loads the model alone, rather than stacking models until the
+driver runs out; on the HTTP server with `unload_for_room never` (or `ask`, for
+a load that is not a model switch) such a load goes beside the others. The rest
+applies to the HTTP server (`localm serve` / `localm gui`) and the MCP server
+(`localm mcp`); the MCP server does not read `unload_for_room`.
 
 Two optional knobs override that arithmetic when you would rather decide
 yourself:
@@ -781,7 +792,10 @@ localm config pinned_models ""              # clear every pin
 ```
 
 Both are off by default, so behavior is unchanged unless you set them. The cap
-bounds how many models stay loaded regardless of how much headroom there is;
+bounds how many models stay loaded regardless of how much headroom there is
+(on the HTTP server while `unload_for_room` is `always`, the default; there, with
+`ask` or `never`, a model that fits is loaded beside the others over the cap; the
+MCP server always applies the cap);
 pinning protects named models from being chosen as the eviction victim (it never
 loads a model on its own). If pins leave nothing that can be evicted, the load
 still goes ahead and the missed policy is logged rather than silently dropped.
@@ -1027,15 +1041,17 @@ opened with a shared, scoped key never run a verify command - those sessions hav
 process execution at all. In the GUI the same three controls sit in the coder setup
 form: a verification command, a fix-attempt cap, and a skip-verification toggle.
 
-**Plan mode and questions.** `/plan` in the REPL (or the agent itself, through its
-`enter_plan_mode` tool) switches to plan mode: only read-only tools run - reading,
+**Plan mode and questions.** `/plan` in the REPL switches plan mode on, or off when it is
+already on (`/plan on` and `/plan off` set it outright); the agent can enter it itself
+through its `enter_plan_mode` tool. In plan mode only read-only tools run - reading,
 searching, git status/diff/log, the task list - and every tool that writes a file, runs
 a command, uses the network or starts a sub-agent is refused by the harness, whatever
 the model emits. Background jobs started before plan mode keep running. When the agent
 has a plan it presents it with `exit_plan_mode`, and you answer `y` (approve; plan mode
 ends and edits ask as they did before), `a` (approve and auto-run: for the rest of that
 task gated tools run without asking, except what the shell safety gate or an
-always-confirm setting holds back, and the project's verification check runs before the
+always-confirm setting holds back, a call the model wrote in a loose format and a call
+that reaches localm's own data folder, and the project's verification check runs before the
 task finishes, detected when none is set; if the fix attempts run out the task is
 reported as not verified), or `n` or any text (the agent stays in plan mode and gets
 your feedback). `/plan off` leaves plan mode without a plan. The agent can also ask you
@@ -1082,11 +1098,13 @@ measured, a GGUF reply can also depend on the requests the model answered before
 **When the session compacts.** The agent compacts on its own, in the terminal as well
 as in unattended runs, when the next request would take more than 85% of the model's
 context window (or would leave less than the server's reply reserve free), and brings it
-down to about half the window. It counts from the prompt size the server reported for
+down to about half the window (less on a small one: about a quarter at 4096 tokens). It counts from the prompt size the server reported for
 the last request. First it drops the output of older tool calls from the context (a file
 read, a command's output), keeping a short note of which tool ran on what; the model runs
 the tool again when it needs that output. Only when that is not enough does it summarise
-older turns. Every message you wrote yourself is kept word for word in the summary. A
+older turns. Your current request is kept word for word in the summary; earlier messages you wrote
+are listed word for word as far as space allows (each up to 1200 characters, the first
+and the most recent ones first), and the summary says how many were left out. A
 localm server reports its window; so does a llama-server. With any other server (Ollama,
 LM Studio) the agent assumes the `n_ctx` of your localm config (4096 by default), so set
 `n_ctx` to the window that server runs. Whatever the window, a request the server refuses
@@ -1102,7 +1120,8 @@ the last test run, and the durable notes described next. It is rebuilt from what
 session actually recorded every time it compacts. Before summarising, the agent asks the
 model for durable notes from the turns about to be condensed (decisions and their
 reasons, constraints you stated, commands that worked, pitfalls and their fixes). The
-notes stay word for word in every later summary and survive a resume. In `log` and
+newest 20 notes are carried word for word into later summaries (older ones are left out
+first when the block runs out of room, and the block says so) and survive a resume. In `log` and
 `full` mode, with episodic memory on (`coder_episodic_memory`, the default), they are
 also saved as one lesson in episodic memory, so a later session can
 recall them; in privacy mode, in a restricted session, and for a sub-agent they stay in
@@ -1161,16 +1180,18 @@ so a call a hook blocks is never offered for approval, and they do not run for a
 `\uXXXX` escapes), so a hook can read it whatever its console encoding.
 
 A cloned repository can ship hooks, so a project's hooks run only after you trust them.
-An interactive session lists them and asks: `y` trusts them for this session, `a` trusts
-them and remembers it (in the localm data folder) until any hook in the file changes, and
-anything else leaves them off. A non-interactive run never asks: pass `--trust-hooks` to
+A session started at a terminal, a one-shot task included, lists them and asks: `y` trusts
+them for this session, `a` trusts them and remembers it (in the localm data folder) until
+any hook in the file changes, and anything else leaves them off. A run without a terminal,
+with `--ci` or with `--output-format json` never asks: pass `--trust-hooks` to
 trust and remember them. Untrusted hooks never run: a tool call an untrusted
 `pre_tool_use` hook would check is refused, because the check cannot run, and untrusted
 `post_tool_use` hooks are skipped, with a warning either way. In the REPL,
 `/hooks` lists them and whether they run, `/hooks trust` trusts and remembers them, and
 `/hooks forget` withdraws the trust. In the GUI the **hooks** button in the coder setup
 panel shows the same list and trusts or untrusts them; a running session picks up trust
-granted or withdrawn there at its next tool call. After `/cd`, the new folder's hooks
+granted or withdrawn there at the next tool call a hook applies to, unless it was
+answered at its own terminal (`y`, a refusal, or `/hooks forget`), which it keeps. After `/cd`, the new folder's hooks
 apply, with their own trust.
 
 The same trust covers the project's MCP servers (`[mcp.servers.<name>]`, see
@@ -1251,7 +1272,7 @@ localm stop --all                        # stop every running localm instance
 
 `--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
-`localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits; `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
+`localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 

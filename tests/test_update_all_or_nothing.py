@@ -47,7 +47,7 @@ def _sd_pins(tag):
 def _files(version, deps, sd=None):
     files = {"VERSION": version, "localm/__init__.py": f"# {version}",
              "localm/setup_llama/pins.py": '_ROCM_TAG = "b1355"\n_PINNED_TAG = "b11928"\n',
-             "pyproject.toml": _pyproject(deps)}
+             "pyproject.toml": _pyproject(deps), "uv.lock": "version = 1\n"}
     if sd:
         files["localm/media/sdcpp/pins.py"] = _sd_pins(sd)
     return files

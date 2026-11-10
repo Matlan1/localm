@@ -6,7 +6,12 @@ these as classic scripts and the app code references them as window globals, so
 they are served from disk exactly as they arrive from upstream.
 
 Licenses and copyright for each component are recorded in the repo-root
-[`THIRD-PARTY-NOTICES.md`](../../../../../THIRD-PARTY-NOTICES.md).
+[`THIRD-PARTY-NOTICES.md`](../../../../../THIRD-PARTY-NOTICES.md). The license
+text of each library sits in this directory as `LICENSE.<library>` (DOMPurify is
+dual-licensed and has two: `LICENSE.dompurify` and `LICENSE.dompurify-mpl`), and
+is the `LICENSE` file of the same npm release as the vendored code. It moves
+with the code: every recipe below copies it, and `scripts/bump_vendored_js.py`
+replaces it when a release changes it.
 
 ## These are INVISIBLE to dependency tooling. That is the thing to remember.
 
@@ -116,6 +121,8 @@ instead of looking fine.
 npm pack dompurify@<version>          # npm verifies the registry integrity hash
 tar -xzf dompurify-<version>.tgz
 cp package/dist/purify.min.js localm/plugins/gui/static/vendor/purify.min.js
+cp package/LICENSE            localm/plugins/gui/static/vendor/LICENSE.dompurify
+cp package/LICENSE-MPL        localm/plugins/gui/static/vendor/LICENSE.dompurify-mpl
 npm test                              # the vendor guard runs here
 ```
 
@@ -141,6 +148,7 @@ cp package/dist/katex.min.js            localm/plugins/gui/static/vendor/katex.m
 cp package/dist/katex.min.css           localm/plugins/gui/static/vendor/katex.min.css
 cp package/dist/contrib/auto-render.min.js \
                         localm/plugins/gui/static/vendor/auto-render.min.js
+cp package/LICENSE                      localm/plugins/gui/static/vendor/LICENSE.katex
 npm test    # then update VENDORED_VERSION + PINNED in tests-js/vendor-katex.test.mjs
 ```
 
@@ -153,6 +161,7 @@ revision would.
 npm pack @highlightjs/cdn-assets@<version>   # npm verifies the registry integrity hash
 tar -xzf highlightjs-cdn-assets-<version>.tgz
 cp package/highlight.min.js localm/plugins/gui/static/vendor/highlight.min.js
+cp package/LICENSE          localm/plugins/gui/static/vendor/LICENSE.highlightjs
 npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-highlightjs.test.mjs
 ```
 
@@ -160,6 +169,7 @@ npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-high
 npm pack marked@<version>             # npm verifies the registry integrity hash
 tar -xzf marked-<version>.tgz
 cp package/lib/marked.umd.js localm/plugins/gui/static/vendor/marked.min.js
+cp package/LICENSE           localm/plugins/gui/static/vendor/LICENSE.marked
 npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-marked.test.mjs
 ```
 
