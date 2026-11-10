@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import http.server
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -82,6 +83,10 @@ def test_music_cli_hands_the_backend_a_v1_base(server, monkeypatch):
             return type("I", (), {"OUTPUT_SUFFIX": ".flac"})
 
         @staticmethod
+        def supports(s, capability):
+            return False
+
+        @staticmethod
         def ensure_available(s, on_progress=None):
             return True, "ready"
 
@@ -96,7 +101,8 @@ def test_music_cli_hands_the_backend_a_v1_base(server, monkeypatch):
         def free_vram(s):
             return True
 
-    media._music_via_backend(_Backend, {"backend": "native"}, "lofi", "o.flac",
-                            lyrics=None, duration=8.0, write_sidecar=False)
+    monkeypatch.setattr(media, "_offer_open", lambda path: None)
+    media._via_backend(_Backend, {"backend": "native"}, "lofi", Path("o.flac"),
+                       "music", lyrics=None, duration=8.0)
     assert got == {"self_url": root + "/v1", "swap": True}
     assert _Handler.seen == ["/v1/models/unload?media=false"]
