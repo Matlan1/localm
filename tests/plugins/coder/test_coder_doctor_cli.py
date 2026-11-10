@@ -6,6 +6,7 @@ a scripted backend."""
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 import threading
@@ -97,7 +98,10 @@ def test_doctor_never_starts_a_model_server(proj, monkeypatch):
             super().__init__(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", Spy)
-    res = _invoke("doctor", "-m", "m1", "--cwd", str(proj),
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    res = _invoke("doctor", "-m", "m1", "--cwd", str(proj), "--port", str(free_port),
                   "--output-format", "json")
     assert res.exit_code == 1, res.output
     assert json.loads(res.stdout)["checks"][0]["status"] == "fail"

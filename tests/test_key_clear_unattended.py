@@ -66,6 +66,75 @@ def test_yes_does_not_skip_the_question_for_the_last_key(monkeypatch, argv):
         assert auth.get_api_key() == STRONG_KEY
 
 
+def test_clear_removes_named_keys_when_no_owner_key_is_set(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.create_key("first", ["models:read"])
+    auth.create_key("second", ["models:read"])
+    assert auth.get_api_key() is None
+    r = CliRunner().invoke(main, ["key", "clear"], input="y\n")
+    assert r.exit_code == 0, r.output
+    assert "already open mode" not in r.output
+    assert "Clear the API key?" in r.output
+    assert "API key cleared" in r.output
+    assert auth.list_keys() == []
+    assert not auth.keystore_file().exists()
+    assert auth.any_key_configured() is False
+
+
+def test_clear_of_named_keys_only_from_piped_stdin_is_refused():
+    rec = auth.create_key("only", ["models:read"])
+    r = CliRunner().invoke(main, ["key", "clear", "--yes"], input="y\n")
+    assert r.exit_code == 1, r.output
+    assert "Refusing to clear the API key" in r.output
+    assert [k["id"] for k in auth.list_keys()] == [rec["id"]]
+
+
+def test_clear_of_named_keys_only_answered_no_keeps_them(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    rec = auth.create_key("only", ["models:read"])
+    r = CliRunner().invoke(main, ["key", "clear", "--yes"], input="n\n")
+    assert "Cancelled" in r.output, r.output
+    assert [k["id"] for k in auth.list_keys()] == [rec["id"]]
+
+
+def test_clear_removes_a_keystore_that_cannot_be_parsed(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+    auth.keystore_file().write_text("{not json", encoding="utf-8")
+    assert auth.any_key_configured() is True
+    r = CliRunner().invoke(main, ["key", "clear"], input="y\n")
+    assert r.exit_code == 0, r.output
+    assert not auth.keystore_file().exists()
+    assert auth.any_key_configured() is False
+
+
+def test_clear_removes_a_named_key_that_has_expired(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.create_key("old", ["models:read"], expires=1.0)
+    r = CliRunner().invoke(main, ["key", "clear"], input="y\n")
+    assert r.exit_code == 0, r.output
+    assert not auth.keystore_file().exists()
+    assert "already open mode" not in r.output
+
+
+def test_clear_asks_when_the_owner_key_file_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.key_file().mkdir(parents=True)
+    assert auth.get_api_key() is None
+    assert auth.any_key_configured() is True
+    r = CliRunner().invoke(main, ["key", "clear"], input="n\n")
+    assert "already open mode" not in r.output, r.output
+    assert "Cancelled" in r.output
+    assert auth.key_file().is_dir()
+
+
+def test_clear_with_nothing_configured_changes_nothing():
+    r = CliRunner().invoke(main, ["key", "clear", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "already open mode" in r.output
+    assert "?" not in r.output
+
+
 def test_yes_still_skips_the_question_when_a_key_remains():
     keep = auth.create_key("keep", ["models:read"])
     gone = auth.create_key("gone", ["models:read"])

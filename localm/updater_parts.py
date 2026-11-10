@@ -248,7 +248,8 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
                               "previous ones back failed", reason=f"{problem}; "
                               + "; ".join(errors))
         raise LocalmError("the dependencies could not be reinstalled; the previous ones "
-                          "were put back", reason=problem)
+                          "were put back",
+                          reason=updater.with_retry_hint(problem, root, "update --repair"))
     finally:
         uc.discard(snap)
 

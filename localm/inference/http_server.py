@@ -54,7 +54,8 @@ from localm.inference.backends.base import (
     UnsupportedInputError,
     VisionInputError,
 )
-from localm.inference import residency, switch_admission
+from localm.inference import load_lease, residency, switch_admission
+from localm.inference.load_lease import LoadBusyError
 from localm.inference.compact import CompactionCache
 from localm.inference.engine import Engine
 from localm.inference.inference_gate import InferenceGate, exclusively, set_capacity
@@ -667,7 +668,7 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
             engine.load()
             return
         lock = engine_mod._LOAD_LOCK
-        with lock:
+        with load_lease.bounded(lock, what=f"loading {getattr(engine, 'display_name', 'a model')}"):
             fresh = getattr(lock, "generation", None) == reading.mark + 1
             discover.using_shared_gpu_reading(
                 reading.state if fresh else None, engine.load)
@@ -751,10 +752,84 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     backend fails to load it. ``LoadSkipped`` (a 503) is raised for
     *skip_if_latched*.
 
+    From its first VRAM reading until its load has returned or failed the call
+    holds the GPU load lease (``localm.inference.load_lease``), so another
+    localm process reads free VRAM only after this load allocated it; a lease
+    still held elsewhere after ``load_lease.LOAD_WAIT_TIMEOUT_S`` raises
+    ``LoadBusyError`` (a 503 with Retry-After).
+
     Loads of one model are serialized by its ``_inference_sems`` semaphore.
     The admission decisions come from ``localm.inference.switch_admission``;
     the ``_switch_*`` helpers below perform the effects.
     """
+    lease = _SwitchLease(name)
+    try:
+        return await _switch_engine_leased(
+            name, make_engine, lease, on_active=on_active, preempt=preempt,
+            force=force, activate=activate, skip_if_latched=skip_if_latched,
+            on_status=on_status, allow_embedding=allow_embedding,
+            reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
+    finally:
+        await lease.drop(asyncio.get_running_loop())
+
+
+class _SwitchLease:
+    """The GPU load lease one ``switch_engine`` call holds from its first VRAM
+    reading until its load has returned or failed."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.keys: Optional[tuple] = None
+
+    async def take(self, loop, *, timeout: Optional[float] = None) -> None:
+        """Take the lease of the current config's keys, once, waiting at most
+        *timeout* seconds (default ``load_lease.LOAD_WAIT_TIMEOUT_S``); raises
+        ``LoadBusyError`` past it. A take whose caller is cancelled while it
+        waits releases the lease once the wait ends."""
+        if self.keys is not None:
+            return
+        purpose = f"loading {self.name}"
+        fut = loop.run_in_executor(
+            None, lambda: load_lease.acquire(load_lease.lease_keys(), purpose=purpose,
+                                             timeout=timeout))
+        try:
+            self.keys = await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            fut.add_done_callback(_release_late_lease)
+            raise
+
+    async def try_take(self, loop) -> bool:
+        """``take`` with a single attempt; False when another process holds
+        the lease."""
+        try:
+            await self.take(loop, timeout=0)
+        except LoadBusyError:
+            return False
+        return True
+
+    async def drop(self, loop) -> None:
+        """Release the lease when it was taken."""
+        keys, self.keys = self.keys, None
+        if keys:
+            await loop.run_in_executor(None, load_lease.release, keys)
+
+
+def _release_late_lease(fut) -> None:
+    """Release the keys an abandoned ``_SwitchLease.take`` acquired."""
+    if fut.cancelled() or fut.exception() is not None:
+        return
+    load_lease.release(fut.result())
+
+
+async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
+                                on_active=None, preempt: bool = True,
+                                force: bool = False, activate: bool = True,
+                                skip_if_latched: bool = False,
+                                on_status: Optional[Callable[[str], None]] = None,
+                                allow_embedding: bool = False,
+                                reserve_ctx: Optional[int] = None,
+                                keep_others: bool = False, own_pins: int = 0) -> dict:
+    """``switch_engine``'s body; takes *lease* before its first VRAM reading."""
     global _engine_factory, _switch_desired
 
     await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
@@ -794,6 +869,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
             if heal_budget is not None:
+                try:
+                    await lease.take(loop)
+                except LoadBusyError:
+                    resident.reserve_context(previous_reserve)
+                    raise
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
             if (_engines.get(name) is resident and _is_reusable(resident)
@@ -819,6 +899,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
                     _postpone_placement_recheck(resident)
+            if heal_budget is not None and not await lease.try_take(loop):
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: not reloading '%s' for a better placement while "
+                          "another load holds the GPU, it is used as loaded", name)
+                _postpone_placement_recheck(resident)
+                heal_budget = None
             if heal_budget is not None:
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
@@ -852,6 +938,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if healing is not None:
             budget = heal_budget
         else:
+            await lease.take(loop)
             budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if budget is not None and (budget.check_split_fit or budget.plugin_backend):
                 sized = _engines.get(name)
@@ -1930,20 +2017,12 @@ def _shared_vram_holds() -> SharedVramHolds:
     media runtimes (``vram.native_media_runtime_states``). Takes their locks;
     must not run on the event loop thread."""
     from localm import vram as _vram
-    from localm.inference import embedder as _embedder_mod
-    from localm.inference import reranker as _reranker_mod
-    from localm.inference import speech as _speech_mod
     holds, unknown = [], []
-    for kind, mod in (("embedding model", _embedder_mod),
-                      ("reranker model", _reranker_mod),
-                      ("speech model", _speech_mod)):
-        loaded, hold = mod.resident_vram_hold()
-        if not loaded:
-            continue
-        if hold is None:
-            unknown.append(kind)
+    for resident in residency.shared_residents():
+        if resident.hold is None:
+            unknown.append(resident.kind)
         else:
-            holds.append(hold)
+            holds.append(resident.hold)
     busy = []
     for name, state in _vram.native_media_runtime_states().items():
         (busy if state == "busy" else unknown).append(name)
@@ -2180,6 +2259,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         return {"status": "cancelled", "model": name, "reason": str(e)}
+    except LoadBusyError:
+        raise
     except RuntimeError as exc:
         _routing_latch.record_failure(name, exc, fingerprint=fingerprint)
         raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
@@ -2568,6 +2649,36 @@ def plan_capability_route(model_name: str | None, messages: list,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
+def _forget_removed_model(name: str) -> bool:
+    """Drop this process's state for *name* when it left the registry and its
+    model file is gone (``localm rm`` ran in another process). A model that is
+    loaded, whose file still exists, or whose path is not an absolute file path
+    (a hub repo id) is kept. Returns whether anything was
+    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
+    from pathlib import Path
+    engine = _engines.get(name)
+    if engine is not None and engine.loaded:
+        return False
+    path = getattr(engine, "model_path", None)
+    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
+        return False
+    _engines.pop(name, None)
+    if name in _engines_lru:
+        _engines_lru.remove(name)
+    _inference_sems.pop(name, None)
+    _last_activity_per_model.pop(name, None)
+    if _active_model_name == name:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+    if _last_active_model_name == name:
+        _last_active_model_name = None
+    if _default_model_name == name:
+        _default_model_name = None
+    return True
+
+
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
                      on_status: Optional[Callable[[str], None]] = None,
@@ -2622,6 +2733,11 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             name = name or _default_model_name
             if name != _default_model_name and name not in _engines:
                 raise HTTPException(503, "No model loaded. Please load a model first.")
+
+    if registry:
+        unnamed = not (model_name or "").strip() or (model_name or "").strip() == "localm"
+        while name and name not in registry and _forget_removed_model(name):
+            name = _resolve_unnamed_model_name() if unnamed else name
 
     # Only enforce registration check if the registry is not empty
     if registry:
@@ -6124,6 +6240,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_keyless_network_gate(app)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
+    security.add_host_header_guard(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # outermost; only when enabled
 
@@ -6454,11 +6571,17 @@ def _debug_prompt_dump(messages: list) -> str:
     return "\n".join(lines)
 
 
-def _log_assembled_prompt(messages: list) -> None:
-    """Debug-log the messages about to reach the backend, content-gated on
-    debug_content_enabled(). See test_assembled_prompt_debug_capture.py."""
+def _log_assembled_prompt(messages: list, raw_prompt: Optional[str] = None) -> None:
+    """Debug-log the messages about to reach the backend, or with *raw_prompt*
+    that raw completion prompt, content-gated on debug_content_enabled(). See
+    test_assembled_prompt_debug_capture.py."""
     from localm.debuglog import debug_content_enabled, logger as _dbg
-    if debug_content_enabled():
+    if not debug_content_enabled():
+        return
+    if raw_prompt is not None:
+        _dbg.debug("raw completion prompt (%d character(s), no chat template):\n%s",
+                   len(raw_prompt), raw_prompt)
+    else:
         _dbg.debug("assembled chat prompt (%d message(s)):\n%s",
                     len(messages), _debug_prompt_dump(messages))
 
@@ -7291,11 +7414,13 @@ async def _stream_sse_completion_body(
         def __init__(self, records: list) -> None:
             self.records = records
 
+    call_outcome: dict = {}
+
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
         # orphan the consumer (see the fuller note in _stream_sse).
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         gen = None
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
@@ -7340,6 +7465,7 @@ async def _stream_sse_completion_body(
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing completion generation stream failed")
+            _snapshot_outcome(call_outcome, engine)
             # See _stream_sse: tolerate a gone loop when waking the consumer.
             try:
                 loop.call_soon_threadsafe(token_queue.put_nowait, None)
@@ -7469,14 +7595,18 @@ async def _stream_sse_completion_body(
     _log_chat_reply(reply, finish_reason=("error" if gen_error is not None else "stop"))
 
     completion_tokens = await _count_streamed_tokens(engine, streamed)
-    # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
-    # not "stop", so a client keying off finish_reason detects the failure even
-    # though the error text was already streamed as a visible chunk.
+    # A mid-stream error is "error", a stop sequence "stop", otherwise the
+    # backend's reason ("length" when max_tokens ran out).
+    if gen_error is not None:
+        finish_reason = "error"
+    elif stopped:
+        finish_reason = "stop"
+    else:
+        finish_reason = _outcome(call_outcome, "finish_reason", engine)
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
-        "choices": [{"text": "", "index": 0,
-                     "finish_reason": ("error" if gen_error is not None else "stop")}],
+        "choices": [{"text": "", "index": 0, "finish_reason": finish_reason}],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -7671,8 +7801,11 @@ async def grow_context_window(engine, tokens: int, *,
     ``context_grow_failed``, set here). When the reload raises, *engine* is
     registered again and loaded with its earlier window, and returned, the
     active model again when it was before the reload and no other model became
-    active meanwhile; the error is raised only when that fails too. Logs at
-    INFO (a failed reload at WARNING)."""
+    active meanwhile; the error is raised only when that fails too. A reload
+    refused with ``LoadBusyError`` (another load holds the GPU) does not set
+    ``context_grow_failed``; it is raised while *engine* is still loaded with
+    its earlier window, else *engine* is loaded again as above. Logs at INFO
+    (a failed reload at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or can() is not True:
@@ -7698,6 +7831,18 @@ async def grow_context_window(engine, tokens: int, *,
     try:
         await switch_engine(name, None, preempt=False, activate=False,
                             reserve_ctx=target, on_status=on_status, own_pins=1)
+    except LoadBusyError:
+        if _engines.get(name) is engine and engine.loaded:
+            raise
+        reserve = getattr(engine, "reserve_context", None)
+        if callable(reserve):
+            reserve(previous)
+        if _engines.get(name) is None:
+            engine.unloading = False
+            _engines[name] = engine
+        await switch_engine(name, None, preempt=False,
+                            activate=was_active and _active_model_name in (None, name),
+                            on_status=on_status)
     except Exception as exc:
         _dbg.warning("context: reloading '%s' with a %s-token window failed (%s: %s); "
                      "loading it again with its earlier window", name, target,
@@ -8020,7 +8165,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
         gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []
@@ -8371,6 +8516,8 @@ async def _complete(
             text = await _generate_full(engine, messages, request,
                                         timing=timing, on_logprobs=lp_records.extend,
                                         **gen_kwargs)
+        except LoadBusyError:
+            raise
         except _BACKEND_ERROR_TYPES as e:
             # A backend refusal the CALLER can act on (an image this vision model
             # could not process, a grammar the deferred check finally rejected at
@@ -8637,6 +8784,10 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     from an instance whose GUI had been mounted live), the variable is removed
     from the environment and the GUI is mounted onto *app* once the instance is
     advertised, before serving starts.
+
+    Turns on the Host header guard (``app.state.host_header_guard``,
+    ``security.HostHeaderGuard``) and records *ssl_certfile* in
+    ``app.state.tls_certfile`` for it.
     """
     from localm import instances, portmux
     from localm.config import home_dir
@@ -8645,6 +8796,8 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     # watchdog inherits os.environ. See
     # test_run_advertised_removes_the_gui_mount_flag_before_serving.
     remount_gui = os.environ.pop(_GUI_MOUNTED_ENV, None) == "1"
+    app.state.host_header_guard = True
+    app.state.tls_certfile = ssl_certfile
     if log_level is None:
         from localm.debuglog import uvicorn_log_level
         log_level = uvicorn_log_level()

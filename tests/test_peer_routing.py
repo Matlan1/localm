@@ -289,7 +289,8 @@ class TestForward:
     def test_forwards_body_and_peer_api_key_never_coordination_token(self, monkeypatch):
         captured = {}
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             captured["url"] = url
             captured["data"] = data
             captured["headers"] = headers
@@ -419,6 +420,41 @@ class TestAcceptPeerRouteEndpoint:
         assert route.api_key == "peer-key-123"
         assert route.instance_id == "peer-acc"
 
+    @pytest.mark.parametrize("bad", ["peer-key\nX-Injected: 1", "peer\rkey",
+                                     "peer\x00key", "peer key", "peer-k\u00e9y"])
+    def test_a_key_with_a_character_a_key_cannot_hold_is_refused_unechoed(
+            self, tmp_path, monkeypatch, caplog, bad):
+        import logging
+        caplog.set_level(logging.DEBUG)
+        d = tmp_path / "reg"
+        peer = _FakePeerServer(key="peer-key")
+        _write_peer(d, "peer-bad", peer.port, model="shared-model")
+        client = self._client()
+        r = client.post("/v1/models/shared-model/peer-route",
+                        headers=self._write_hdr(client),
+                        json={"instance_id": "peer-bad", "api_key": bad})
+        assert r.status_code == 400, r.text
+        assert bad not in r.text and bad.strip() not in r.text
+        assert bad not in caplog.text
+        assert peer.auth_seen == []
+        assert peer_routing.get_route("shared-model") is None
+
+    def test_verify_peer_credential_refuses_such_a_key_without_sending(self, tmp_path):
+        peer = _FakePeerServer(key="peer-key")
+        target = _write_peer(tmp_path / "reg", "peer-v", peer.port, model="shared-model")
+        with pytest.raises(peer_routing.PeerCredentialError) as e:
+            peer_routing.verify_peer_credential(target, "peer-key\nX: y")
+        assert "peer-key" not in str(e.value)
+        assert peer.auth_seen == []
+
+    def test_peer_recording_mode_refuses_such_a_key_without_sending(self, tmp_path):
+        peer = _FakePeerServer(key="peer-key")
+        target = _write_peer(tmp_path / "reg", "peer-m", peer.port, model="shared-model")
+        with pytest.raises(peer_routing.PeerUnreachable) as e:
+            peer_routing.peer_recording_mode(target, "peer-key\nX: y", "privacy")
+        assert "peer-key" not in str(e.value)
+        assert peer.auth_seen == []
+
     def test_stale_offer_is_rejected(self, tmp_path, monkeypatch):
         """The client's offer names a peer that is no longer live/matching -
         the endpoint must re-verify, not trust the caller."""
@@ -495,7 +531,8 @@ class TestChatCompletionsForwarding:
         return TestClient(create_app(None))
 
     def test_routed_model_is_forwarded_and_never_touches_local_engines(self, monkeypatch):
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             return _FakePeerResponse(
                 chunks=(b'{"id": "x", "choices": [{"message": {"content": "hi"}}]}',))
 
@@ -519,7 +556,8 @@ class TestChatCompletionsForwarding:
         import json
         sent = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             sent.append((url, json.loads(data)))
             return _FakePeerResponse(chunks=(b'{"choices": [{"text": "ok"}]}',))
 
@@ -542,7 +580,8 @@ class TestChatCompletionsForwarding:
         assert "routed-lp" not in hs._engines
 
     def test_completions_route_also_forwards(self, monkeypatch):
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             assert url.endswith("/v1/completions")
             return _FakePeerResponse(chunks=(b'{"choices": [{"text": "ok"}]}',))
 
@@ -682,7 +721,8 @@ class TestForwardRefusesANonLoopbackRoute:
         rather than through find_offer."""
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 
@@ -717,7 +757,8 @@ class TestForwardRefusesANonLoopbackRoute:
         """The control: same shape, loopback host, request goes out."""
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 
@@ -866,7 +907,8 @@ class TestRoutesLock:
 
         acquired = []
 
-        def probing_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def probing_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             def probe():
                 got = peer_routing._ROUTES_LOCK.acquire(blocking=False)
                 acquired.append(got)
@@ -932,7 +974,8 @@ class TestPeerSchemeIsPinnedToo:
     def test_forward_refuses_a_smuggled_scheme_without_sending_the_key(self, monkeypatch):
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 

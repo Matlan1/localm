@@ -191,7 +191,7 @@ def unregister():
 BACKEND_PLUGIN_WITH_ROUTES = BACKEND_PLUGIN.replace("def register(host):\n", '''def register(host):
     from fastapi import APIRouter
     router = APIRouter()
-    router.add_api_route("/fakeexl/ping", lambda: {"ok": True})
+    router.add_api_route("/api/fakeexl/ping", lambda: {"ok": True})
     host.mount_router(router)
     host.register_chat_hook("inlet", lambda body, **kw: body)
 ''')
@@ -305,7 +305,7 @@ class TestBackendOnlyLoad:
         app = FastAPI()
         mgr = attach_engine(app)
         assert mgr._errors == {}
-        assert "/fakeexl/ping" in app.openapi()["paths"]
+        assert "/api/fakeexl/ping" in app.openapi()["paths"]
         assert [d.name for d in backend_registry.registered()] == ["fakeexl"]
 
 

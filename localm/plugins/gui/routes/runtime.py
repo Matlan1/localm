@@ -54,6 +54,15 @@ from localm.plugins.gui.web import RuntimeSetupRequest
 # bounded.
 _CHECK_TIMEOUT_S = 15.0
 
+# Answer for an update that names no backend while the installed runtime is
+# one the user supplied (setup-llama --from or --url, marker "custom").
+_CUSTOM_BUILD_REFUSAL = (
+    "The installed llama.cpp runtime is a build you supplied yourself "
+    "(setup-llama --from or --url), so it cannot be updated or rolled back "
+    "from here. Pick a backend to replace it with a downloaded build, or run "
+    "`localm setup-llama --from <dir>` (or `--url <archive>`) again with the "
+    "newer build.")
+
 
 def register(app: FastAPI, ctx) -> None:
     jobs = ctx.jobs
@@ -134,6 +143,11 @@ def register(app: FastAPI, ctx) -> None:
         --keep-choice, so a recorded choice of another backend survives a build
         update or rollback.
 
+        Refuses (400) a request that names no backend (or, for rollback,
+        names 'auto') while the installed runtime is a user-supplied build
+        (marker "custom", from `setup-llama --from` or `--url`): no download
+        refreshes it, and setup-llama's --backend does not accept "custom".
+
         Refuses (409) only when a runtime job is already running. A concurrent
         `localm update` re-provision or a bare terminal `setup-llama` is refused
         by the job itself, via setup-llama's own cross-process provisioning
@@ -179,6 +193,8 @@ def register(app: FastAPI, ctx) -> None:
                     400, "Rollback needs to know which backend - nothing is "
                          "recorded as installed on this machine. Name one "
                          "explicitly.")
+            if backend == "custom":
+                raise HTTPException(400, _CUSTOM_BUILD_REFUSAL)
             if backend == "amd-rocm":
                 raise HTTPException(
                     400, "The amd-rocm backend cannot be rolled back: its "
@@ -192,6 +208,8 @@ def register(app: FastAPI, ctx) -> None:
                          "back to.")
         else:
             backend = wanted or installed or "auto"
+            if backend == "custom":
+                raise HTTPException(400, _CUSTOM_BUILD_REFUSAL)
         if jobs.has_running("runtime-update"):
             raise HTTPException(409, "A runtime update is already running.")
 

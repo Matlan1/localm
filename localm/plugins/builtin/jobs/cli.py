@@ -213,10 +213,85 @@ def job_show(job_id):
     click.echo(f"  last_result: {d['last_result_id'] or '-'}")
 
 
+def _running_server():
+    """``(base_url, registry_entry)`` of the live localm server serving this
+    data folder and directory, or None when none answers."""
+    from localm import config, instances
+    from localm.bindhost import self_connect_host, url_host
+
+    entry = instances.find_attachable(config.HOME_DIR, instances.resolve_root_dir())
+    if entry is None:
+        return None
+    scheme = entry.get("scheme", "http")
+    host = url_host(self_connect_host(entry.get("host")))
+    return f"{scheme}://{host}:{entry.get('port')}", entry
+
+
+def _run_on_server(job_id: str, url: str, entry: dict):
+    """Run *job_id* through ``POST /api/jobs/{id}/run`` on the server at *url*.
+
+    Returns the run result dict (already recorded by the server), or None when
+    the server has no jobs route (the caller then runs the job in this process).
+    Exits 1 with a message on a refusal or an unreachable server.
+    """
+    from urllib.parse import quote
+
+    import requests
+
+    from localm import tls
+    from localm.auth import resolve_bearer_headers
+
+    headers = resolve_bearer_headers(entry.get("token"))
+    try:
+        resp = requests.post(f"{url}/api/jobs/{quote(job_id, safe='')}/run",
+                             headers=headers, timeout=(10, None),
+                             verify=tls.requests_verify(url))
+    except requests.ConnectionError as e:
+        _safe_echo(f"Could not reach the running localm server at {url}: {e}", err=True)
+        sys.exit(1)
+    except requests.RequestException as e:
+        _safe_echo(f"No reply from the running localm server at {url} ({e}); the run "
+                   "may still finish there. See 'localm job results "
+                   f"{job_id}'.", err=True)
+        sys.exit(1)
+
+    detail = ""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        detail = str(body.get("detail") or "")
+    if resp.status_code == 404 and detail == "Not Found":
+        return None
+    if resp.status_code == 409:
+        click.echo(f"Another job is running in the localm server at {url}; "
+                   "try again once it finishes.", err=True)
+        sys.exit(1)
+    if resp.status_code == 401:
+        click.echo("The running localm server refused the request (401). Set "
+                   "LOCALM_API_KEY to the server's key.", err=True)
+        sys.exit(1)
+    if not resp.ok:
+        _safe_echo(f"The running localm server refused the run "
+                   f"({resp.status_code}): {detail or resp.text}", err=True)
+        sys.exit(1)
+    if not isinstance(body, dict):
+        click.echo("The running localm server answered, but its reply was not "
+                   f"valid JSON. See 'localm job results {job_id}'.", err=True)
+        sys.exit(1)
+    return body
+
+
 @main.command("run")
 @click.argument("job_id")
 def job_run(job_id):
-    """Run a job once now and record its result."""
+    """Run a job once now and record its result.
+
+    When a localm server is running for this data folder and directory, the
+    job runs inside that server (``POST /api/jobs/{id}/run``), on the model it
+    already holds; otherwise it runs in this process.
+    """
     from localm.plugins.builtin.jobs.runner import run_job
 
     store = _store()
@@ -224,7 +299,27 @@ def job_run(job_id):
     if job is None:
         click.echo(f"No such job: {job_id}", err=True)
         sys.exit(1)
-    result = run_job(job, engine=None)
+    server = _running_server()
+    if server is not None:
+        result = _run_on_server(job_id, *server)
+        if result is not None:
+            if result.get("status") == "ok":
+                _safe_echo(result.get("output", ""))
+                return
+            _safe_echo(f"Job failed: {result.get('error')}", err=True)
+            sys.exit(1)
+        click.echo("The running localm server has no jobs plugin; running the "
+                   "job in this process.", err=True)
+    claimed = store.claim(job_id)
+    if claimed is None:
+        click.echo(f"Job {job_id} is already running; not starting a second run.",
+                   err=True)
+        sys.exit(1)
+    try:
+        result = run_job(claimed, engine=None)
+    except BaseException:
+        store.release_claim(job_id, claimed.claim)
+        raise
     store.record_result(job_id, result)
     if result.get("status") == "ok":
         _safe_echo(result.get("output", ""))

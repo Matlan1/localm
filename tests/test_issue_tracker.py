@@ -148,6 +148,16 @@ def test_malformed_record_is_read_as_empty_and_logged(monkeypatch, fresh_record,
     assert "not valid JSON" in caplog.text
 
 
+def test_a_malformed_record_is_not_overwritten_by_a_new_filing(monkeypatch, fresh_record, caplog):
+    _mode(monkeypatch, "log")
+    _record_file().parent.mkdir(parents=True, exist_ok=True)
+    _record_file().write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert issue_tracker.record_filed(9, "t") is False
+    assert _record_file().read_text(encoding="utf-8") == "{not json"
+    assert "could not record filed issue #9" in caplog.text
+
+
 def test_unwritable_record_is_reported_false_not_raised(monkeypatch, fresh_record, caplog):
     _mode(monkeypatch, "log")
     _record_file().parent.mkdir(parents=True, exist_ok=True)
@@ -319,8 +329,8 @@ def test_a_record_without_an_issue_list_is_read_as_empty_and_logged(
     with caplog.at_level("WARNING"):
         assert issue_tracker.recorded() == []
     assert "has no list of issues" in caplog.text
-    assert issue_tracker.record_filed(50, "after") is True
-    assert issue_tracker.recorded() == [{"number": 50, "title": "after"}]
+    assert issue_tracker.record_filed(50, "after") is False
+    assert _record_file().read_text(encoding="utf-8") == content
 
 
 def test_a_failed_write_leaves_the_record_whole(monkeypatch, fresh_record, caplog):

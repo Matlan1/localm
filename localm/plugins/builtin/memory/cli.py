@@ -103,9 +103,17 @@ def _embed_fn():
     picked up by the next backfill.
     """
     try:
+        from localm.debuglog import native_console_paused
         from localm.inference.embedder import get_embedder
-        emb = get_embedder()
-        return emb.embed if emb is not None else None
+        with native_console_paused():
+            emb = get_embedder()
+        if emb is None:
+            return None
+
+        def _embed(texts):
+            with native_console_paused():
+                return emb.embed(texts)
+        return _embed
     except Exception:                                          # noqa: BLE001
         # Best effort. Reported rather than swallowed, so a vectorless save is
         # visible and can be correlated with a broken embedder later.

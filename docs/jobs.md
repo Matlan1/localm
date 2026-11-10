@@ -66,6 +66,15 @@ localm job enable <job_id>
 localm job remove <job_id>      # delete the job and its stored results
 ```
 
+`localm job run` runs the job inside the localm server already running for this
+data folder and directory (it sends the owner key, or the server's instance
+token in open mode, like `localm unload`). A chat or memory job then uses the
+model the server has loaded, a coder job runs in the server, and a knowledge
+re-sync runs there too. If another job is already running in the server, the
+command says so and exits 1 instead of loading a second model. With no server
+running, the job runs in the terminal's own process and a chat or memory job
+loads its model there.
+
 `localm job add` options:
 
 | Option | Meaning |
@@ -112,7 +121,7 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server - jobs never stack model loads. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
@@ -120,6 +129,12 @@ A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
 need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 (seconds as an integer, or a 5-field cron string), and the optional `model`,
 `cwd` (required for a `coder` job), `scope`, `collection`, `allow_shell`, and `enabled` fields.
+Creating a job needs the scope for its task kind as well as `jobs`: `chat`,
+`coder`, `memory` or `rag` (a `jobs`-only key gets `403`). At run time a job
+created by a key other than the owner key runs only while that key still exists
+and still holds that scope; a job whose creating key was revoked, expired or
+narrowed is not run and records an error result instead. Jobs created with the
+owner key, or in open mode, are not affected.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.
@@ -127,7 +142,12 @@ A caller without the owner key or a `coder:full` key cannot choose a coder job's
 `cwd`: the job is stored with the instance's project root instead, and the
 response shows the `cwd` that will be used. `model` must be a registered model
 name, and a UNC or device-path `cwd` is refused. `collection` is required for a
-`rag` job and refused at creation if it is not a valid collection name.
+`rag` job and refused at creation if it is not a valid collection name. A key
+confined to RAG folders (`rag_roots`) gets `403` when it creates a `rag` job, or
+points one with an update, at an existing collection holding documents from
+outside those folders. At run time such a job re-syncs under its creating key's
+folders, and is not run (an error result is recorded) when they no longer cover
+the collection.
 
 ## Two things live under `/api/jobs`
 
@@ -249,7 +269,7 @@ time limit, so a long index is never cut short; a holder that dies stops
 reporting and its lock is reclaimed automatically.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
-or denied folder policy as an interactive add (Settings > Knowledge), including
+or denied folder policy as an interactive add (Settings > Plugins > Knowledge (RAG)), including
 the always-refused credential folders. A folder that was legal when it was
 indexed but is outside the policy now is skipped and reported, never indexed.
 Secret-looking files dropped into an indexed folder are filtered exactly as they

@@ -52,6 +52,7 @@ from ._structs import (
     LlamaContextParamsV1,
     LlamaContextParamsV2,
     LlamaContextParamsV3,
+    LlamaContextParamsV4,
     LlamaModelParamsV1,
     LlamaModelParamsV2,
     LlamaModelParamsV3,
@@ -72,17 +73,19 @@ _MODEL_PARAMS_CLASSES = {
     MODEL_PARAMS_V3: LlamaModelParamsV3,
 }
 
-# The three llama_context_params layouts localm binds. All three classes are
+# The four llama_context_params layouts localm binds. All four classes are
 # 224 bytes, so no insertion is visible in sizeof. Distinct namespace from
 # MODEL_PARAMS_*; the two axes are not interchangeable.
 CONTEXT_PARAMS_V1 = "ctx_v1"  # no n_outputs_max_per_seq
 CONTEXT_PARAMS_V2 = "ctx_v2"  # n_outputs_max_per_seq@24 inserted
 CONTEXT_PARAMS_V3 = "ctx_v3"  # V2 plus moe_cache_size@112 inserted
+CONTEXT_PARAMS_V4 = "ctx_v4"  # V3 plus moe_cache_cpu_share@120 inserted
 
 _CONTEXT_PARAMS_CLASSES = {
     CONTEXT_PARAMS_V1: LlamaContextParamsV1,
     CONTEXT_PARAMS_V2: LlamaContextParamsV2,
     CONTEXT_PARAMS_V3: LlamaContextParamsV3,
+    CONTEXT_PARAMS_V4: LlamaContextParamsV4,
 }
 
 # Symbols that appear in llama.h in the same change as the V2 reorder: present
@@ -138,18 +141,21 @@ _CONTEXT_FINGERPRINT = {
 # ctx_type's own default, graded by _fingerprint_context_layout.
 _CTX_TYPE_DEFAULT = 0
 
-# V2 and V3 share every byte before offset 112, so the fingerprint above cannot
-# tell them apart. This one reads the boolean flag block, which starts at 128 on
-# V2 and at 136 on V3. Each entry is (offsets of the four flags whose default is
-# true: offload_kqv/no_perf/op_offload/swa_full, offset of the 8-byte pointer
-# that occupies the OTHER layout's flag block and defaults to NULL).
+# V2, V3 and V4 share every byte before offset 112, so the fingerprint above
+# cannot tell them apart. This one reads the boolean flag block, which starts at
+# 128 on V2, at 136 on V3 and at 144 on V4. Each entry is (offsets of the four
+# flags whose default is true: offload_kqv/no_perf/op_offload/swa_full, offset of
+# an 8-byte pointer that defaults to NULL and occupies another layout's flag
+# block).
 #   V2: flags@129..132, samplers@136 == NULL
 #   V3: flags@137..140, abort_callback_data@128 == NULL
+#   V4: flags@145..148, abort_callback_data@136 == NULL
 # Every offset lies inside the 160 bytes a V2 build writes. See
-# test_ctx_v2_and_v3_default_bytes_fingerprint_apart.
+# test_ctx_v2_v3_and_v4_default_bytes_fingerprint_apart.
 _MOE_FINGERPRINT = {
     CONTEXT_PARAMS_V2: ((129, 130, 131, 132), 136),
     CONTEXT_PARAMS_V3: ((137, 138, 139, 140), 128),
+    CONTEXT_PARAMS_V4: ((145, 146, 147, 148), 136),
 }
 
 
@@ -201,14 +207,14 @@ def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
 
 
 def _fingerprint_moe_layout(raw: bytes) -> Optional[str]:
-    """CONTEXT_PARAMS_V2 or CONTEXT_PARAMS_V3 for bytes already known to be in
-    the V2 family, or None when inconclusive.
+    """CONTEXT_PARAMS_V2, CONTEXT_PARAMS_V3 or CONTEXT_PARAMS_V4 for bytes
+    already known to be in the V2 family, or None when inconclusive.
 
     Each layout scores one point per true-by-default flag reading exactly 1 at
     its offset, plus one for its NULL-default pointer reading 0 (at most 5). On
-    real default bytes the right layout scores 5 and the wrong one 0. A winner
-    needs at least 2 points and a strict lead; with all four flags flipped to
-    false the two layouts tie and the result is None."""
+    real default bytes the right layout scores 5 and every wrong one at most 1.
+    A winner needs at least 2 points and a strict lead; with all four flags
+    flipped to false the layouts tie and the result is None."""
     scores = {}
     for layout, (flag_offs, null_off) in _MOE_FINGERPRINT.items():
         try:
@@ -261,7 +267,7 @@ class AbiVerdict:
     diagnostics: list[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
     layout: str = ""                                       # MODEL_PARAMS_V1 / _V2 / _V3
-    context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2 / _V3
+    context_layout: str = ""                                # CONTEXT_PARAMS_V1 .. _V4
 
     @property
     def ok(self) -> bool:
@@ -418,10 +424,11 @@ def detect_context_params_layout(
 
     Returns ``(layout, notes, assumed)``. Unlike
     :func:`detect_model_params_layout`, there is no accompanying marker SYMBOL
-    for either insertion (``n_outputs_max_per_seq``, ``moe_cache_size``: plain
+    for any insertion (``n_outputs_max_per_seq``, ``moe_cache_size``,
+    ``moe_cache_cpu_share``: plain
     struct fields, not new API), so this rests on value fingerprints alone. The
     first (:func:`_fingerprint_context_layout`) decides V1 versus the V2 family;
-    within that family :func:`_fingerprint_moe_layout` decides V2 versus V3.
+    within that family :func:`_fingerprint_moe_layout` decides V2, V3 or V4.
 
     ``assumed`` is True when a fingerprint was inconclusive and a fallback was
     taken: CONTEXT_PARAMS_V1 when the first one was, CONTEXT_PARAMS_V2 when only
@@ -449,7 +456,8 @@ def detect_context_params_layout(
         if moe is None:
             assumed = True
             notes.append(
-                "context_params moe_cache_size probe was inconclusive; assuming "
+                "context_params moe_cache_size / moe_cache_cpu_share probe was "
+                "inconclusive; assuming "
                 f"the {CONTEXT_PARAMS_V2} llama_context_params layout")
         else:
             layout = moe
@@ -487,10 +495,10 @@ def evaluate(mp, cp) -> AbiVerdict:
     non-fatal diagnostics.
 
     The layout of *mp* AND *cp* is taken from their classes (model_params
-    V1/V2/V3, context_params V1/V2/V3 - independent axes), so every check below
+    V1/V2/V3, context_params V1/V2/V3/V4 - independent axes), so every check below
     reads each field at the offset its actual bound layout uses. The checks
     name fields, never raw offsets: ``getattr(cp, name)`` resolves correctly
-    regardless of which of the three context_params layouts *cp* actually is."""
+    regardless of which of the four context_params layouts *cp* actually is."""
     failures: list[str] = []
     diags: list[str] = []
     has_load_mode = isinstance(mp, _LOAD_MODE_LAYOUTS)
@@ -806,11 +814,14 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
       refuses. Not always: bytes whose -1 run is longer than the four
       checked fields (a build whose ctx_type is itself -1) put both
       candidate windows inside one run, and every reading then satisfies
-      evaluate(). A V2/V3 misbind reads the flag block at a NULL-default
-      pointer (abort_callback_data or samplers) and refuses. Bytes in the V2
-      family whose flag block cannot tell V2 from V3 (all four
-      true-by-default flags read false) satisfy evaluate() under either
-      class, so an undecided V2/V3 split is itself a refusal.
+      evaluate(). A V2/V3 or V3/V4 misbind reads the flag block at a
+      NULL-default pointer (abort_callback_data or samplers) and refuses. V4
+      bytes read through the V2 class put V2's three NULL-default pointers on
+      zero V4 fields and satisfy evaluate(); the flag-block fingerprint never
+      picks V2 for V4 bytes. Bytes in the V2 family whose flag block cannot
+      tell the layouts apart (all four true-by-default flags read false)
+      satisfy evaluate() under more than one class, so an undecided split is
+      itself a refusal.
 
     * ``model_params`` - the second layer buys NOTHING. evaluate()'s
       model_params checks are RANGE checks over fields whose plausible
@@ -859,8 +870,9 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     if ctx_assumed and context_layout == CONTEXT_PARAMS_V2:
         ctx_undecided = (
             "context_params layout cannot be determined: the default flag "
-            f"block fits both {CONTEXT_PARAMS_V2} and {CONTEXT_PARAMS_V3} "
-            "(without and with moe_cache_size)")
+            f"block fits none of {CONTEXT_PARAMS_V2}, {CONTEXT_PARAMS_V3} and "
+            f"{CONTEXT_PARAMS_V4} (no moe_cache_size, moe_cache_size, and "
+            "moe_cache_size plus moe_cache_cpu_share) conclusively")
 
     # Log the contradiction BEFORE the skip check and carry it into the skipped
     # verdict, so the escape hatch suppresses the refusal but not the finding.

@@ -48,11 +48,13 @@ def git_argv(*args: str) -> list[str]:
 
 def git_env(env: Optional[dict] = None) -> dict:
     """Environment for a hardened git: *env* (default ``os.environ``) copied,
-    with the system config ignored and program-naming variables removed."""
+    with program-naming variables removed. The system and global config stay in
+    effect (line endings, credential helper, symlinks); the ``-c`` settings in
+    :func:`git_argv` override them for every hardened key. See
+    test_system_line_ending_config_still_applies."""
     out = dict(os.environ if env is None else env)
     for name in _DROPPED_ENV:
         out.pop(name, None)
-    out["GIT_CONFIG_NOSYSTEM"] = "1"
     return out
 
 
@@ -188,8 +190,21 @@ def tool_git_push(
     remote: str = "origin",
     branch: str = "",
 ) -> ToolResult:
-    """Push the current branch to a remote."""
-    args = ["push", remote]
+    """Push the current branch to a remote.
+
+    A *remote* that is empty after stripping, or a *remote* or *branch* that
+    begins with ``-``, is refused; the two are passed after ``--`` so git never
+    reads either as an option."""
+    remote = (remote or "origin").strip()
+    branch = (branch or "").strip()
+    for label, value in (("remote", remote), ("branch", branch)):
+        if value.startswith("-"):
+            return ToolResult.error(
+                f"git push refused: the {label} {value!r} begins with '-', which "
+                "git would read as an option.")
+    if not remote:
+        return ToolResult.error("git push refused: the remote is empty.")
+    args = ["push", "--", remote]
     if branch:
         args.append(branch)
     out, ok = _git(cwd, *args, timeout=60)

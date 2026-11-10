@@ -26,7 +26,7 @@ def test_context_capacity_retries_after_early_failure(monkeypatch):
 
     calls = {"n": 0}
 
-    def flaky_get(url, headers=None, timeout=None):
+    def flaky_get(url, headers=None, timeout=None, allow_redirects=True):
         calls["n"] += 1
         if calls["n"] == 1:
             # First call: model not loaded yet -> a non-200 (must NOT latch None).
@@ -47,7 +47,7 @@ def test_context_capacity_caches_success(monkeypatch):
     eng = HttpEngine("http://x/v1", token="t", model="m")
     calls = {"n": 0}
 
-    def ok_get(url, headers=None, timeout=None):
+    def ok_get(url, headers=None, timeout=None, allow_redirects=True):
         calls["n"] += 1
         return _resp(200, {"effective_ctx_max": 4096})
 

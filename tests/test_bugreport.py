@@ -227,7 +227,8 @@ def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
     ('Authorization: Digest username="u", realm="Restricted Area", nonce="n", '
      'uri="/a", response="CANARYRESP9"', "CANARYRESP9", "Authorization: <redacted>"),
     ("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host "
-     "Signature=CANARYSPACED10", "CANARYSPACED10", "Authorization: <redacted>"),
+     "Signature=CANARYSPACED10", "CANARYSPACED10",
+     "Authorization: <redacted> Signature=<redacted>"),
     ("Authorization: Token CANARYONE11 then the request failed", "CANARYONE11",
      "Authorization: <redacted> then the request failed"),
     ("Authorization: Bearer\nCANARYNEXTLINE12", "CANARYNEXTLINE12",
@@ -283,9 +284,68 @@ def test_scrub_secrets_bearer_word_never_hides_the_credential_after_it(text):
      "headers: Authorization: <redacted>, Accept: */*, User-Agent: x"),
     ("Authorization: Token CANARYPROSE4, retrying in 5s",
      "Authorization: <redacted>, retrying in 5s"),
+    ("level=error Authorization: Bearer CANARYPROSE5 status=401 path=/v1/chat duration=3ms",
+     "level=error Authorization: <redacted> status=401 path=/v1/chat duration=3ms"),
 ])
 def test_scrub_secrets_authorization_redaction_keeps_the_text_after_the_value(
         line, expected):
+    assert bugreport._scrub_secrets(line) == expected
+
+
+@pytest.mark.parametrize("text, canary", [
+    ('{"msg":"Authorization: Digest username=\\"u\\", realm=\\"Restricted Area\\", '
+     'response=\\"CANARYESCQ1\\""}', "CANARYESCQ1"),
+    ('{"msg":"Authorization: Digest username=\\"u, v\\", response=\\"CANARYESCQ2\\""}',
+     "CANARYESCQ2"),
+    ("Authorization: Token\nCANARYNEXT3", "CANARYNEXT3"),
+    ("Authorization: ApiKey\r\nCANARYNEXT4", "CANARYNEXT4"),
+])
+def test_scrub_secrets_redacts_escaped_digest_params_and_a_lone_token_scheme(text, canary):
+    out = bugreport._scrub_secrets(text)
+    assert canary not in out, out
+    assert bugreport._scrub_secrets(out) == out
+
+
+@pytest.mark.parametrize("text, canary", [
+    ('Authorization: Digest username = "u", realm = "Restricted Area", nonce = "CANARYEQ1", '
+     'cnonce = "CANARYEQ2", response = "CANARYEQ3"', "CANARYEQ"),
+    ('Authorization: Digest username="u",response = "CANARYEQ4"', "CANARYEQ4"),
+    ("password = hunter2CANARYEQ5", "CANARYEQ5"),
+    ("OPENAI_API_KEY = CANARYEQ6", "CANARYEQ6"),
+    ('api_key = "CANARYEQ7 with spaces"', "CANARYEQ7"),
+    ("https://x.example/?q=a&token =CANARYEQ8", "CANARYEQ8"),
+    ("SECRET_KEY\t=\tCANARYEQ9", "CANARYEQ9"),
+    ("token_type: Bearer\npassword = abc:CANARYEQ10", "CANARYEQ10"),
+])
+def test_scrub_secrets_redacts_a_credential_with_spaces_around_the_equals_sign(text, canary):
+    out = bugreport._scrub_secrets(text)
+    assert canary not in out, out
+    assert bugreport._scrub_secrets(out) == out
+
+
+@pytest.mark.parametrize("line", [
+    "has_token = false",
+    "require_auth = 1",
+    "LOCALM_REQUIRE_AUTH = true and api_key = none",
+    "key = value",
+    "monkey = banana",
+])
+def test_scrub_secrets_keeps_a_flag_or_ordinary_value_with_spaces_around_the_equals_sign(line):
+    assert bugreport._scrub_secrets(line) == line
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("Authorization: Bearer CANARYLINE1AA Authorization: CANARYLINE2 "
+     "Authorization: Basic Q0FOQVJZTElORTM=",
+     "Authorization: <redacted> Authorization: <redacted> Authorization: <redacted>"),
+    ("Authorization: CANARYLINE4 X-Api-Key: CANARYLINE5",
+     "Authorization: <redacted> X-Api-Key: <redacted>"),
+    ("Authorization: CANARYLINE6 Proxy-Authorization: Basic CANARYLINE7",
+     "Authorization: <redacted> Proxy-Authorization: <redacted>"),
+    ("Authorization: user:CANARYLINE8 then it failed",
+     "Authorization: <redacted> then it failed"),
+])
+def test_scrub_secrets_several_headers_on_one_line_are_each_redacted(line, expected):
     assert bugreport._scrub_secrets(line) == expected
 
 
@@ -1252,6 +1312,14 @@ def _scrub_seconds(text: str, samples: int = 5) -> float:
     pytest.param(lambda n: 'Authorization: "' + "\\" * n, id="auth-backslash-run"),
     pytest.param(lambda n: '"Authorization":' + " " * n + "null,", id="auth-flag-after-spaces"),
     pytest.param(lambda n: "Authorization: [" * n, id="auth-many-arrays"),
+    pytest.param(lambda n: "password" + " " * n + "=", id="query-spaces-before-equals"),
+    pytest.param(lambda n: "password =" + " " * n, id="query-spaces-after-equals"),
+    pytest.param(lambda n: "password =" + " " * n + "false", id="query-spaces-then-flag"),
+    pytest.param(lambda n: "Authorization: Digest a" + " " * n + "=", id="auth-spaces-before-equals"),
+    pytest.param(lambda n: "Authorization: Digest a=b" + ", a =" * n, id="auth-spaced-param-list"),
+    pytest.param(lambda n: "bearer abcdefgh" + " " * n + "=", id="bearer-spaces-before-equals"),
+    pytest.param(lambda n: 'Authorization: Digest a=\\"' + "\\x" * n, id="auth-escaped-param-run"),
+    pytest.param(lambda n: 'Authorization: a=b' + ', a=\\"' * n, id="auth-escaped-param-list"),
     pytest.param(lambda n: '"token":' + " " * n + "<redacted>", id="json-space-run"),
     pytest.param(lambda n: "bearer " + "+/=" * n, id="bearer-base64-run"),
     pytest.param(lambda n: "bearer " * n, id="bearer-name-run"),

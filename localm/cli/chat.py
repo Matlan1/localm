@@ -245,6 +245,29 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
 #  run                                                                 #
 # ------------------------------------------------------------------ #
 
+_RUN_LOAD_OPTIONS = (("ctx", "--ctx"), ("gpu_layers", "--gpu-layers"),
+                     ("mmproj", "--mmproj"), ("device", "--device"))
+
+
+def _load_options_given() -> list:
+    """The load options of the current ``localm run`` that came from the command
+    line (``--ctx``, ``--gpu-layers``, ``--mmproj``, ``--device``), as flag
+    strings in that order. Empty when there is no click context."""
+    from click.core import ParameterSource
+    try:
+        cctx = click.get_current_context()
+    except RuntimeError:
+        return []
+    out = []
+    for name, flag in _RUN_LOAD_OPTIONS:
+        try:
+            if cctx.get_parameter_source(name) == ParameterSource.COMMANDLINE:
+                out.append(flag)
+        except Exception:
+            continue
+    return out
+
+
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-p", "--prompt",       default=None,  help="Single prompt (non-interactive).")
@@ -358,7 +381,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             target = None
         if target:
             from ..auth import resolve_bearer_token
-            from ..inference.http_engine import HttpEngine, remote_model_status
+            from ..inference.http_engine import (
+                HttpEngine, remote_model_status, served_model_is_requested)
             # The discovered instance's own per-instance token is only
             # meaningful in OPEN mode (it satisfies the origin guard, not
             # _enforce_request's key check). Once an owner key is configured,
@@ -375,8 +399,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             # model - indistinguishable from X answering. Refuse instead of
             # silently overriding the user's explicit choice; --no-server is the
             # way out.
-            from ..model_manager import names_same_model
-            if active and not names_same_model(active, model):
+            if active and model and not served_model_is_requested(
+                    target["base_url"], attach_token, active, model):
                 console.print(
                     f"[red]The localm server here serves "
                     f"[bold]{escape(active)}[/bold], not "
@@ -411,6 +435,14 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             console.print(
                 f"[dim]connected to the localm server at "
                 f"{show_url(target['base_url'])} (no second model load)[/dim]")
+            _dropped = _load_options_given()
+            if _dropped:
+                console.print(
+                    f"[yellow]Not applied to the running server: "
+                    f"{', '.join(_dropped)}.[/yellow] [dim]It keeps its own "
+                    f"settings; re-run with [bold]--no-server[/bold] to load "
+                    f"{escape(model or 'the model')} in this process with them."
+                    f"[/dim]")
 
     autostart_attempted = False
     if engine is None and not no_server:
@@ -448,11 +480,26 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 target = instances.attach_target(home_dir(), instances.resolve_root_dir())
                 if target:
                     from ..auth import resolve_bearer_token
-                    from ..inference.http_engine import HttpEngine
+                    from ..inference.http_engine import (
+                        HttpEngine, remote_model_status, served_model_is_requested)
+                    _token = resolve_bearer_token(target.get("token"))
+                    # Addresses the model by the name the server reports for it.
+                    _active = remote_model_status(target["base_url"], _token)[1]
+                    if _active and model and not served_model_is_requested(
+                            target["base_url"], _token, _active, model):
+                        console.print(
+                            f"[red]The localm server that came up here serves "
+                            f"[bold]{escape(_active)}[/bold], not the requested "
+                            f"[bold]{escape(model)}[/bold].[/red]\n"
+                            f"[dim]To run {escape(model)}, re-run with "
+                            f"[bold]--no-server[/bold] (loads it in this "
+                            f"process).[/dim]")
+                        sys.exit(1)
                     engine = HttpEngine(
                         target["base_url"],
-                        token=resolve_bearer_token(target.get("token")),
-                        model=model, display_name=model, pin_model=pin_model,
+                        token=_token,
+                        model=_active or model, display_name=_active or model,
+                        pin_model=pin_model,
                         client_id="chat", session_mode=session_mode)
                     console.print(f"[dim]connected to newly started server at "
                                   f"{show_url(target['base_url'])}[/dim]")
@@ -479,8 +526,14 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         model_path, _display_hint = info
 
         from ..inference.engine import Engine
-        from ..model_manager.registry import get_operator_model_mmproj
+        from ..model_manager.registry import chat_load_refusal, get_operator_model_mmproj
         from localm.model_manager import load_registry as _reg
+
+        from rich.markup import escape
+        refusal = chat_load_refusal(model, _reg())
+        if refusal is not None:
+            console.print(f"[red]{escape(refusal)}[/red]")
+            sys.exit(1)
 
         # Priority: registered alias > Ollama manifest hint > engine auto-derive
         is_registered = model in _reg()
