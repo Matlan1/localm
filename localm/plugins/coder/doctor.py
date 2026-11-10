@@ -150,7 +150,7 @@ def _git(work_dir: Path, *args: str) -> subprocess.CompletedProcess:
     if res.error is not None:
         raise OSError(res.error)
     return subprocess.CompletedProcess(
-        ["git", *args], res.returncode, res.stdout, res.stderr)
+        ["git", *args], cast(int, res.returncode), res.stdout, res.stderr)
 
 
 def check_git(work_dir: Path) -> Check:
