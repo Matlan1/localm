@@ -231,7 +231,7 @@ class TestFallbackChain:
             "answering; Brave Search: search.brave.com had a server error, "
             "HTTP 503). These services limit automated searches from one "
             "network; a self-hosted SearXNG search backend can be set under "
-            "Settings > Network.")
+            "Settings > Server & network.")
         for banned in BANNED:
             assert banned not in b.search_error
 
@@ -331,7 +331,7 @@ class TestNoResultsVersusUnreadable:
         b = retrieve("q")
         assert b.search_status == "failed"
         assert b.search_error == (
-            "The search backend set in Settings > Network (searx.example) "
+            "The search backend set in Settings > Server & network (searx.example) "
             "returned no results, and these of its search engines failed: "
             "google (timeout), duckduckgo (Suspended: CAPTCHA).")
 
@@ -367,7 +367,7 @@ class TestNoResultsVersusUnreadable:
         b = retrieve("q")
         assert b.search_status == "failed"
         assert b.search_error == (
-            "The search backend set in Settings > Network (searx.example) "
+            "The search backend set in Settings > Server & network (searx.example) "
             "returned no results, and 2 of its search engines reported an "
             "error.")
 
@@ -397,7 +397,7 @@ class TestNoResultsVersusUnreadable:
         b = retrieve("q")
         assert b.search_status == "failed"
         assert b.search_error == (
-            "The search backend set in Settings > Network (searx.example) "
+            "The search backend set in Settings > Server & network (searx.example) "
             "answered with a page localm could not read results from.")
         assert all("searx.example" in u for u in t.urls())
 
@@ -536,7 +536,7 @@ class TestConfiguredSearXNG:
         b = retrieve("q")
         assert b.search_status == "failed"
         assert b.search_error == ("The search backend set in Settings > "
-                                  "Network failed: searx.example closed the "
+                                  "Server & network failed: searx.example closed the "
                                   "connection before answering.")
         assert all("searx.example" in u for u in t.urls())
 
