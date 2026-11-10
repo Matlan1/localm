@@ -234,11 +234,7 @@ coding agent's shell access, so you can grant one without the other.
   shell-command approval (and `always_confirm` for `run_shell`), not the
   network policy.
 - **Model downloads** (`localm pull`) and **online coder providers**
-  (OpenAI/Anthropic opt-ins, or a `--url` that is not on this machine) -
-  explicit user actions. An off-machine coder backend is checked by
-  `check_url` and by the privacy-mode gate when it is built, so `off` refuses
-  it, and privacy mode refuses it unless the user typed the flag
-  (`LOCALCODER_URL` is refused). Note that model
+  (OpenAI/Anthropic opt-ins) - explicit user actions. Note that model
   downloads DO go through this same policy's domain lists and SSRF guard
   (`check_url`); `off` is bypassed only via the separate
   `net_allow_model_downloads` setting. A Hugging Face pull checks the hub
@@ -247,8 +243,10 @@ coding agent's shell access, so you can grant one without the other.
   transfer itself are made by the `huggingface_hub` library, which follows the
   hub's redirect to its download host on its own, without the per-hop check or
   the DNS-rebinding pin. The
-  coder's network reviewer (a cloud model or an off-machine URL) is checked
-  the same way, and falls back to the local model when refused.
+  coder's off-machine backends (the providers, a non-local `--url`, and the
+  network reviewer) are checked the same way when built; privacy mode also
+  refuses an off-machine URL from `LOCALCODER_URL`. The reviewer falls back to
+  the local model when refused.
 - **Packages a model's own code needs** (`localm install-packages`, or
   **install packages** on the Models page). A deliberate action you agree to
   after seeing the list. Before resolving and before installing, localm calls
