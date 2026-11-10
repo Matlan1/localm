@@ -910,7 +910,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
-- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before shell commands, `--dry-run` runs without executing destructive tools.
+- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
 - `--output-format jsonl` writes each agent event (`tool_call`, `tool_result`, `token`, `turn`, `info`, ...) to stdout as one JSON object per line as it happens, then a closing `{"type": "final", "success", "response", "turns", "total_tokens", "denied"}` line; everything else the CLI prints goes to stderr, and so it does for `--output-format json`, whose stdout is exactly the one result document. `jsonl` needs a TASK.
@@ -958,7 +958,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `patch_file` | Apply a unified diff, more reliable than `edit_file` for multi-hunk | yes | yes |
 | `search_replace` | Regex search and replace across many files | yes | yes |
 | `read_env` | Read `.env` and environment, with secret-looking values masked | no | no |
-| `run_tests` | Run the detected suite (pytest, cargo, go, npm/yarn) | no | no |
+| `run_tests` | Run the detected suite (pytest, cargo, go, npm/yarn) | yes | no |
 | `run_shell` | Execute a shell command | yes | no |
 | `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
 | `check_shell_job` | Check a background shell job's state and output | no | no |
@@ -998,15 +998,23 @@ installed and enabled, and are always unavailable to a restricted session -
 "a restricted session never browses" is a deliberate exclusion, not an
 oversight. See [network.md](network.md#the-browser-plugin).
 
-Five things the table cannot express, and each of them matters:
+Six things the table cannot express, and each of them matters:
 
 - **`fetch_url`, `web_search`, and `browser_navigate`/`browser_click`/`browser_fill`
   follow the network policy, not this column.** They confirm when `net_mode` is
-  `ask` (the default) and run without asking when it is `allow`. See
-  [network.md](network.md).
-- **"Confirms: no" is not "harmless".** `run_tests` and `generate_image` both
-  have real side effects and neither asks by default. `run_tests` runs your
-  project's own test command, which can do anything that command does.
+  `ask` (the default) and run without asking when it is `allow`. `git_push` is
+  refused when `net_mode` is `off`, and it refuses a remote or branch that begins
+  with `-`. See [network.md](network.md).
+- **Tools that run code ask even when writes do not.** `run_shell`,
+  `run_shell_background`, `run_tests` and an untrusted MCP server's tools run code
+  the project controls (a test suite runs the project's own test files). A one-shot
+  `localm coder "TASK"` without `--yes` denies them, `--interactive-confirm` asks
+  before each, and an untrusted MCP server's tools ask before every call even under
+  `--yes`. `generate_image` still has real side effects and does not ask.
+- **Untrusted content re-arms confirmation.** Once the session has read a web page,
+  a search result, an MCP tool's output or a skill, every destructive, network or
+  code-running tool asks again until your next message, even with writes
+  auto-approved; an unattended run without `--yes` denies them.
 - **Restricted sessions are allowlisted, not denylisted.** A newly added tool is
   unavailable to a shared session until it is explicitly added, so this column
   fails closed rather than open.
@@ -1206,7 +1214,8 @@ scripts. So when file writes run without confirmation but `run_shell` does not (
 `localm coder "TASK"` without `--yes`, `run_shell` in `always_confirm`, or a file write
 allowed for the session with `a` at a prompt or "always allow" in the GUI), every hook run
 needs the same confirmation `run_shell` would, and a run that cannot ask refuses it; if
-`run_shell` is disabled in such a session, its hooks do not run at all. When several read-only calls
+`run_shell` is disabled in such a session, its hooks do not run at all. `run_tests` and
+the verification command follow the same rule. When several read-only calls
 run at once, their hooks count toward that batch's two-minute limit. Sub-agents run under
 the same hooks, in their own working tree; a restricted session (a shared `coder` key, a
 scheduled job without `--allow-shell`) never runs hooks.

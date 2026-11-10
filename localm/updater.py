@@ -1643,10 +1643,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             except Exception as e:
                 what = f"could not start {cmd[0]}: {e}" if isinstance(e, OSError) else str(e)
                 _roll_back(f"post-update step crashed: {what}", "the post-update step crashed",
-                           "the post-update step crashed; rolled back", reason=what)
+                           "the post-update step crashed; rolled back",
+                           reason=with_retry_hint(what, target, "update"))
             if rc != 0:
-                _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
-                           "the post-update step failed; rolled back")
+                why = f"{cmd[0]} exited {rc}"
+                _roll_back(why, "the post-update step failed",
+                           "the post-update step failed; rolled back",
+                           reason=with_retry_hint(why, target, "update"))
         if cmd or venv_kept:
             try:
                 updater_components.record_changes(
@@ -1704,6 +1707,24 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept}
+
+
+def retry_hint(root, args: str) -> str:
+    """The sentence that tells the user how to run ``localm <args>`` again through the
+    launcher script in the install at *root* (``localm.bat`` on Windows, ``localm.sh``
+    elsewhere), which starts localm with its Python and holds no program file of the
+    venv. Empty when the install has no such script."""
+    name = "localm.bat" if sys.platform == "win32" else "localm.sh"
+    if not (Path(root) / name).is_file():
+        return ""
+    run = name if sys.platform == "win32" else f"./{name}"
+    return f"To try again, close localm and run {run} {args} in the localm install folder"
+
+
+def with_retry_hint(reason: str, root, args: str) -> str:
+    """*reason* followed by :func:`retry_hint` when there is one."""
+    hint = retry_hint(root, args)
+    return f"{reason}. {hint}" if hint else reason
 
 
 def _require_runnable(cmd, klass: str) -> None:
