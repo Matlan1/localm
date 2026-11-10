@@ -197,9 +197,10 @@ jobs:
       - name: Install
         shell: bash
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev --extra rag -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       # --cov-fail-under=0: the global ratchet and the per-module floors gate the
       # COMBINED data in the test job, not this slice's share of it.
@@ -292,8 +293,9 @@ jobs:
       - name: Install the coverage tooling
         shell: bash
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
 
       - name: Download this platform's shard results
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -452,10 +454,11 @@ jobs:
       # real types. torch comes first, from the CPU index.
       - name: Install
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
           uv export --quiet --locked --no-emit-project --prune torch --extra dev --extra rag --extra hf --extra voice --extra browser --extra desktop -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
       - name: Lint (ruff)
         run: ruff check .
 
@@ -532,9 +535,10 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev --extra rag -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       - name: Hygiene gate
         run: python scripts/check_hygiene.py
@@ -579,9 +583,10 @@ jobs:
       - name: Install
         shell: bash
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra monitor --extra dev -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       # Header-level drift: diff our struct offsets against the latest upstream
       # llama.h. A mid-struct reorder/insert exits non-zero here.
@@ -780,10 +785,11 @@ jobs:
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
           pip install --require-hashes --no-deps -r .github/requirements/mutmut.txt
-          pip install --no-deps -e .
+          pip install --no-deps --no-build-isolation -e .
 
       # continue-on-error so a cut-short run still uploads whatever real,
       # partial results exist; the gate below fails on the gap.
@@ -999,9 +1005,10 @@ jobs:
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       - name: Run one real search per search service and report whether each layout still parses
         continue-on-error: true
@@ -1097,9 +1104,10 @@ jobs:
       - name: Install the voice extra
         if: steps.scope.outputs.run == 'true'
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev --extra voice -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       - name: Show the resolved versions
         if: steps.scope.outputs.run == 'true'
@@ -1166,10 +1174,11 @@ jobs:
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
           uv export --quiet --locked --no-emit-project --prune torch --extra dev --extra rag --extra hf --extra monitor --extra audio --extra voice --extra grammar -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       - name: Show the resolved versions
         run: pip list 2>/dev/null | grep -i -E "^(torch|transformers|tokenizers|accelerate|psutil|pillow|pypdf|numpy|soundfile|av|xgrammar|faster-whisper) "
