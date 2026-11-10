@@ -691,7 +691,7 @@ def spec_drafts(model):
 @click.argument("model_spec", required=False)
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
 @click.option("--sha256", default=None, metavar="HASH",
-              help="Expected SHA256 hex digest (direct-URL and HF single-GGUF pulls; "
+              help="Expected SHA256 hex digest (direct-URL, HF single-GGUF and CivitAI pulls; "
                    "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
               help="Download even when an identical model is already registered.")
@@ -2104,8 +2104,9 @@ def config_cmd(key, value):
 def gpus_cmd():
     """List detected GPUs, the configured main GPU index, and any GPU split.
 
-    On a multi-GPU system, localm loads models onto device 0 unless you set
-    main_gpu_index. Pick one from this list, then:
+    On a multi-GPU system a GGUF chat model spreads over every GPU;
+    main_gpu_index picks the GPU for HuggingFace models and the vision
+    projector. Pick one from this list, then:
 
     \b
       localm config main_gpu_index <index>

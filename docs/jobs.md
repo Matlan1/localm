@@ -76,7 +76,7 @@ localm job remove <job_id>      # delete the job and its stored results
 | `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday; 7 is also accepted as Sunday). Mutually exclusive with `--every`. |
 | `--every SECONDS` | Interval schedule in seconds (1 or more). Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
-| `--cwd DIR` | Working directory for a coder job. |
+| `--cwd DIR` | Working directory for a coder job (required with `--coder`). |
 | `--scope GLOB` | File-access glob for a coder job. Confines the file tools only: `run_shell`/`run_tests` execute a process and cannot be bounded by a path check, so leave `--allow-shell` off (the default) if you need the scope to be a hard boundary. |
 | `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents, no MCP servers, no writes inside `.localcoder` or `.git`) unless you pass this. |
 | `--model M` | Registered model to run the job with (a name from `localm list`, not a path; an unregistered name is refused when the job is created). Without one, the active model runs it unless it needs something that model lacks (a coder job always needs structured tool calls; a chat job needs them only when web access is on, or when its prompt needs a longer window than the model supports), in which case an installed model that has them answers instead. |
@@ -119,7 +119,7 @@ A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
 `rag` - the memory and rag kinds mirror the CLI's `--memory` / `--rag` flags and
 need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 (seconds as an integer, or a 5-field cron string), and the optional `model`,
-`cwd`, `scope`, `collection`, `allow_shell`, and `enabled` fields.
+`cwd` (required for a `coder` job), `scope`, `collection`, `allow_shell`, and `enabled` fields.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.

@@ -65,7 +65,7 @@ Ask questions and have conversations with the model. The model can access docume
 - **Which voice:** Settings &rsaquo; Text-to-speech holds the server-side defaults every browser starts from (default voice, speaking speed, voice model, and an Advanced box for compute device and model precision). The **voice model** picker offers the shipped default plus a verified alternate with word-level timestamps, with a "Custom" option that still accepts any other Kokoro-compatible HuggingFace repo id. The Voice picker in the chat parameters drawer is a **this-browser** override: it changes what you hear here without changing the default for anyone else. When your browser has its own pick, the Settings section says so and offers to clear it.
 
 **Memory and personas:**
-- `/remember <fact>` saves a durable fact to your memory store (via the memory plugin); the **Memory** checkbox in the drawer recalls the relevant facts into the system prompt each turn, and memory also grows on its own as you chat. Memory needs `log` or `full` mode: in privacy mode (the default) nothing is written and, unless you opt into read-only privacy recall, nothing is recalled. A "used N memories" chip on the reply shows what was recalled. See [memory.md](memory.md).
+- `/remember <fact>` saves a durable fact to your memory store (via the memory plugin); the **Memory** checkbox in the drawer recalls the relevant facts into the system prompt each turn, and memory also grows on its own as you chat. Memory needs `log` or `full` mode: in privacy mode (the default) nothing is written and, unless you opt into read-only privacy recall, nothing is recalled. A memory chip on the reply shows what was recalled. See [memory.md](memory.md).
 - Personas save the current system prompt and sampling values under a name (drawer → save), then apply them with `/persona <name>` or pick from the drawer select. Stored in `prompts.json` in the data directory.
 
 **Usage and context:** The line under the composer shows total tokens, time to first token, and tokens per second for the last reply. The sidebar also shows model name, current session mode, and whether memory is enabled.
@@ -109,7 +109,7 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 - **Native tools API** asks the model server for the OpenAI-compatible `tools` protocol. localm's own server does not implement it and says so when you tick this; it uses grammar-constrained tool calls instead, which give the same guarantee.
 - **Lessons** manages the episodic-memory lessons stored for the directory in the form. It has two tabs: **stored** (what the coder currently recalls) and **dropped** (what it has let go of, which can be brought back). Each lesson can be forgotten, each dropped one restored, and the whole set can be **erased** - that last one takes the recoverable copies too and cannot be undone, so it asks first. **Consolidate** asks the model to merge related lessons into one; it is opt-in and manual, every original is archived so a bad merge is reversible, and it tells you how many groups it left alone. Ids are shown because they are what `localcoder --forget-episode` and `--restore-episode` take.
 
-**In-session commands:** Type `/` to open the coder command menu: `/undo`, `/files`, `/compact`, `/export`, `/log`, `/stop`, `/end`, `/help`.
+**In-session commands:** Type `/` to open the coder command menu: `/undo`, `/files`, `/model`, `/compact`, `/export`, `/log`, `/stop`, `/end`, `/help`.
 
 **Circuit breaker:** If a tool fails 4 times in a row the agent stops with a circuit-breaker message instead of burning turns; the conversation stays intact so you can adjust and continue.
 
@@ -163,7 +163,7 @@ Chat output renders LaTeX math offline via vendored KaTeX: `$inline$`, `$$displa
 localm gui --debug      # also available on serve and run
 ```
 
-Debug mode writes a timestamped log to `<data dir>/logs/` containing every HTTP request with timing, and captures the native llama.cpp stderr stream (model loading details, KV cache messages, and crash abort reasons). Normal operation strips internal model markers from chat output - thinking-channel tags like `<|channel|>analysis` and reserved placeholder tokens that some finetunings emit. Debug mode shows them raw so model behaviour can be analysed.
+Debug mode writes a timestamped log to `<data dir>/logs/` containing every HTTP request with timing, and captures the native llama.cpp stderr stream (model loading details, KV cache messages, and crash abort reasons). Chat output always has internal model markers stripped - thinking-channel tags like `<|channel|>analysis` and reserved placeholder tokens that some finetunings emit. In debug mode the raw, unscrubbed text is also written to the debug log so model behaviour can be analysed, except in privacy mode, where chat content is never written to disk.
 
 If the server dies mid-generation, the native abort message at the end of that file says why.
 
