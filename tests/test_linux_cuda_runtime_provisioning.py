@@ -75,7 +75,7 @@ class _FakeResponse:
         self._buf = io.BytesIO(payload)
         self.headers = {}
 
-    def read(self):
+    def read(self, n=-1):
         return self._buf.read()
 
     def __enter__(self):

@@ -289,7 +289,8 @@ class TestForward:
     def test_forwards_body_and_peer_api_key_never_coordination_token(self, monkeypatch):
         captured = {}
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             captured["url"] = url
             captured["data"] = data
             captured["headers"] = headers
@@ -495,7 +496,8 @@ class TestChatCompletionsForwarding:
         return TestClient(create_app(None))
 
     def test_routed_model_is_forwarded_and_never_touches_local_engines(self, monkeypatch):
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             return _FakePeerResponse(
                 chunks=(b'{"id": "x", "choices": [{"message": {"content": "hi"}}]}',))
 
@@ -519,7 +521,8 @@ class TestChatCompletionsForwarding:
         import json
         sent = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             sent.append((url, json.loads(data)))
             return _FakePeerResponse(chunks=(b'{"choices": [{"text": "ok"}]}',))
 
@@ -542,7 +545,8 @@ class TestChatCompletionsForwarding:
         assert "routed-lp" not in hs._engines
 
     def test_completions_route_also_forwards(self, monkeypatch):
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             assert url.endswith("/v1/completions")
             return _FakePeerResponse(chunks=(b'{"choices": [{"text": "ok"}]}',))
 
@@ -682,7 +686,8 @@ class TestForwardRefusesANonLoopbackRoute:
         rather than through find_offer."""
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 
@@ -717,7 +722,8 @@ class TestForwardRefusesANonLoopbackRoute:
         """The control: same shape, loopback host, request goes out."""
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 
@@ -866,7 +872,8 @@ class TestRoutesLock:
 
         acquired = []
 
-        def probing_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def probing_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             def probe():
                 got = peer_routing._ROUTES_LOCK.acquire(blocking=False)
                 acquired.append(got)
@@ -932,7 +939,8 @@ class TestPeerSchemeIsPinnedToo:
     def test_forward_refuses_a_smuggled_scheme_without_sending_the_key(self, monkeypatch):
         calls = []
 
-        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None,
+                      allow_redirects=None):
             calls.append((url, headers))
             return _FakePeerResponse()
 
