@@ -119,8 +119,10 @@ def _entry(iid, pid, root, port=8642):
 
 @pytest.fixture
 def _same_process(monkeypatch):
-    """Every entry's pid reads as the server the entry describes."""
+    """Every entry's pid reads as the server the entry describes, and its port
+    answers /whoami as that instance."""
     monkeypatch.setattr(instances, "entry_process_state", lambda e: ("same", ""))
+    monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
 
 
 def _resp(status_code):
@@ -169,7 +171,7 @@ def test_stop_ambiguous_id_lists_matches(monkeypatch):
     assert "abcd1111" in res.output and "abcd2222" in res.output
 
 
-def test_stop_by_id_graceful_shutdown_success(monkeypatch):
+def test_stop_by_id_graceful_shutdown_success(monkeypatch, _same_process):
     entry = _entry("abcd1234ef", 999999, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])

@@ -168,6 +168,7 @@ class TestStopCredentialSelection:
         monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
         monkeypatch.setattr(instances, "list_entries", lambda *a, **k: entries)
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         seen = []
 
         def fake_post(url, headers=None, **kw):
@@ -190,6 +191,7 @@ class TestStopCredentialSelection:
         monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
         monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         captured = {}
 
         def fake_post(url, headers=None, **kw):
@@ -309,6 +311,7 @@ class TestStopRealHttp:
                             lambda **kw: shutdown_calls.append(kw))
         rs = _start_real_server()
         try:
+            rs.app.state.instance_id = "realsrv1"
             entry = _entry(iid="realsrv1", pid=999999999, port=rs.port,
                            token=rs.app.state.instance_token)
             monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])

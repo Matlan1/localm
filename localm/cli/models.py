@@ -2492,7 +2492,13 @@ def stop_cmd(instance_id, stop_all, timeout):
             console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was stale: "
                           f"{escape(reason)} Removed the entry and stopped nothing.")
             continue
-        if is_own_address(dial):
+        # The shutdown request is sent only to a server whose /whoami names
+        # this entry's instance id.
+        verified = is_own_address(dial) and instances.default_probe(entry, timeout=2.0)
+        if is_own_address(dial) and not verified:
+            logger.debug("stop: %s does not answer /whoami as instance %s; not "
+                         "sending a shutdown request", url, entry.get("instance_id"))
+        if verified:
             try:
                 resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
                                      timeout=5, verify=tls.requests_verify(url),
@@ -2513,7 +2519,7 @@ def stop_cmd(instance_id, stop_all, timeout):
                             time.sleep(0.25)
             except requests.RequestException:
                 pass  # server unreachable (hung / already gone) - fall through to a direct kill
-        else:
+        elif not is_own_address(dial):
             logger.warning(
                 "stop: registry entry's host %r is not an address this "
                 "machine holds; not dialing it", entry.get("host"))

@@ -345,8 +345,9 @@ class TestCliNoArgumentStop:
 
 class TestCliAfterGracefulAnswer:
     def test_a_declined_shutdown_of_an_unproven_entry_kills_nothing(
-            self, home, child):
+            self, home, child, monkeypatch):
         from unittest.mock import patch
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         p = _write_entry(home, iid="decl000000000001", pid=child.pid, identity=None)
         with patch("requests.post", return_value=_fake_resp(403)), \
              patch("localm.tls.requests_verify", return_value=True):
@@ -358,8 +359,9 @@ class TestCliAfterGracefulAnswer:
         assert p.exists()
 
     def test_an_accepted_shutdown_whose_pid_lives_on_is_ended_by_identity(
-            self, home, child):
+            self, home, child, monkeypatch):
         from unittest.mock import patch
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         _write_entry(home, iid="acpt000000000001", pid=child.pid)
         with patch("requests.post", return_value=_fake_resp(200)), \
              patch("localm.tls.requests_verify", return_value=True):
@@ -368,8 +370,9 @@ class TestCliAfterGracefulAnswer:
         child.wait(timeout=10)
 
     def test_an_accepted_shutdown_whose_pid_now_names_another_process(
-            self, home, child):
+            self, home, child, monkeypatch):
         from unittest.mock import patch
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         p = _write_entry(home, iid="acst000000000001", pid=child.pid)
         real_state = instances.entry_process_state
         seen = []
@@ -388,3 +391,39 @@ class TestCliAfterGracefulAnswer:
         assert child.poll() is None
         assert "this entry was stale" in res.output
         assert not p.exists()
+
+
+class TestShutdownGoesOnlyToTheEntrysInstance:
+    """A port that answers /whoami as a different localm instance gets no
+    shutdown request."""
+
+    @staticmethod
+    def _other_answers(monkeypatch):
+        monkeypatch.setattr(instances, "fetch_any_whoami",
+                            lambda *a, **k: {"app": "localm",
+                                             "instance_id": "someotherinstance1"})
+
+    def test_cli(self, home, child, monkeypatch):
+        from unittest.mock import Mock, patch
+        self._other_answers(monkeypatch)
+        monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-the-other-server")
+        p = _write_entry(home, iid="cliwho0000000001", pid=child.pid, identity=None)
+        post = Mock(return_value=_fake_resp(200))
+        with patch("requests.post", post), \
+             patch("localm.tls.requests_verify", return_value=True):
+            res = CliRunner().invoke(main, ["stop", "cliwho"])
+        post.assert_not_called()
+        assert child.poll() is None
+        assert res.exit_code == 1, res.output
+        assert p.exists()
+
+    def test_gui(self, home, client, child, monkeypatch):
+        from unittest.mock import Mock, patch
+        self._other_answers(monkeypatch)
+        _write_entry(home, iid="guiwho0000000001", pid=child.pid, identity=None)
+        req = Mock(return_value=_fake_resp(200))
+        with patch("requests.request", req):
+            r = client.post("/api/instances/guiwho0000000001/stop")
+        req.assert_not_called()
+        assert child.poll() is None
+        assert r.status_code == 409, r.text

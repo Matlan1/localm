@@ -103,6 +103,7 @@ class TestGuiStopRefusesAForgedHost:
         _write_entry(home, instance_id=iid, host="127.0.0.1")
         request_spy = Mock(side_effect=requests.ConnectionError("refused"))
         monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: True)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         with patch("requests.request", request_spy):
             with TestClient(app) as c:
                 r = c.post(f"/api/instances/{iid}/stop")
@@ -152,6 +153,7 @@ class TestCliStopRefusesAForgedHost:
         monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
         monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
         monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: True)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         post_spy = Mock(side_effect=requests.ConnectionError("refused"))
         with patch("requests.post", post_spy), \
              patch("localm.tls.requests_verify", return_value=True):

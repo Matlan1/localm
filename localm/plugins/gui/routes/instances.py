@@ -173,7 +173,14 @@ def register(app: FastAPI, ctx) -> None:
 
         stopped = False
         graceful_denied = False
-        if is_own_address(dial):
+        # The shutdown request is sent only to a server whose /whoami names
+        # this entry's instance id.
+        verified = is_own_address(dial) and instances.default_probe(entry, timeout=2.0)
+        if is_own_address(dial) and not verified:
+            logger.debug("instance stop: %s does not answer /whoami as instance "
+                         "%s; not sending a shutdown request", base_url,
+                         entry.get("instance_id"))
+        if verified:
             try:
                 resp = self_request("POST", "/server/shutdown", base_url=base_url,
                                     timeout=5, instance_token=entry.get("token"))
@@ -192,7 +199,7 @@ def register(app: FastAPI, ctx) -> None:
                             time.sleep(0.25)
             except requests.RequestException:
                 pass  # target unreachable (hung / already gone) - fall through to a direct kill
-        else:
+        elif not is_own_address(dial):
             logger.warning(
                 "instance stop: registry entry's host %r is not an address "
                 "this machine holds; not dialing it", entry.get("host"))

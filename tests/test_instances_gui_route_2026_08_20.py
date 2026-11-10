@@ -391,6 +391,7 @@ class TestStopRealHttp:
         rs = _start_real_server()
         try:
             iid = "realtargetserver01"
+            rs.app.state.instance_id = iid
             _write_entry(home, instance_id=iid, pid=999999999, host="127.0.0.1",
                         port=rs.port, root_dir="/proj/real", mode="api",
                         token=rs.app.state.instance_token)
@@ -432,6 +433,7 @@ class TestStopGracefulDeclined:
             iid = "declinedtarget001"
             _write_entry(home, instance_id=iid, pid=proc.pid, host="127.0.0.1",
                         port=59986, root_dir="/proj/declined", mode="api")
+            monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
             fake_401 = SimpleNamespace(status_code=401, ok=False,
                                        json=lambda: {}, text="")
             with patch("requests.request", return_value=fake_401):
