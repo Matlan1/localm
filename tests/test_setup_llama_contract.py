@@ -278,7 +278,7 @@ class World:
             entry = {"name": name, "browser_download_url": url, "size": len(body)}
             if digest == "ok":
                 entry["digest"] = "sha256:" + _sha(body)
-                for table in (sl._PINNED_FALLBACK_SHA256, sl._CUDA_LINUX_PINNED_SHA256):
+                for table in (sl._PINNED_FALLBACK_SHA256, pins._CUDA_LINUX_PINNED_SHA256):
                     if name in table:
                         self.mp.setitem(table, name, _sha(body))
             elif digest:
