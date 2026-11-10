@@ -22,6 +22,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin that is turned off no longer contributes coder tools.** The coder agent now loads tool exports only from plugins that are installed and enabled, through the same loader as the rest of the plugin system.
 - **A third-party plugin cannot protect itself from removal, claim a reserved scope, or mount a page outside `/api/` and `/v1/`.** `protected` and `default_enabled` in a third-party manifest are ignored, scope checks run every time plugins are discovered (not only at install), and a plugin route outside those two prefixes is refused.
 - **Chat hooks are documented as transforms, not controls.** The plugin guide now lists every path that skips them and no longer suggests them for redaction.
+- **Settings that name a folder or the network are owner-only, and a key can only mint scopes it holds.** `temp_location`, `net_mode`, `net_allow` and the privacy-mode memory recall settings can no longer be changed by a non-owner `config:write` key, and `temp_location` refuses a network (UNC) or device path. A `keys:admin` key that is not the owner may only create keys with scopes it holds itself. Creating a key with a scope no plugin owns now warns and names the closest known scope.
 
 ### Changed
 - **The browser voice (Kokoro) uses transformers.js 4.3.2 (from 4.3.1).** Its speech runtime and voices are unchanged.
@@ -31,9 +32,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The shared store lock no longer gives up on a slow writer or waits on a dead one.** The lock behind config, registry, API keys, saved credentials and sessions now asks whether the process holding it is still running: a holder that is running keeps the lock however long its write takes, a holder that has exited is replaced at once, and a write that finds its lock taken over stops without writing. Setting the API key now takes the same lock.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.
 - **NVIDIA's license now travels with the CUDA runtime libraries localm downloads.** On Linux, `localm setup-llama --backend cuda` keeps each NVIDIA package's own license file beside the libraries (`LICENSE.nvidia-cuda-runtime-cu12`, `LICENSE.nvidia-cublas-cu12` and so on). For the CUDA runtime bundles of llama.cpp (Windows, and Linux on ARM64) and of the native image runtime (`localm setup-sdcpp --backend cuda`), which carry no license file, localm writes `LICENSE.nvidia-cuda` naming NVIDIA's CUDA license.
-
-### Security
-- **Settings that name a folder or the network are owner-only, and a key can only mint scopes it holds.** `temp_location`, `net_mode`, `net_allow` and the privacy-mode memory recall settings can no longer be changed by a non-owner `config:write` key, and `temp_location` refuses a network (UNC) or device path. A `keys:admin` key that is not the owner may only create keys with scopes it holds itself. Creating a key with a scope no plugin owns now warns and names the closest known scope.
 
 ### Fixed
 - **A second `localm serve` refuses options it cannot apply.** With a server already running for the project, `localm serve --port 8650 --ctx 4096 --mode log` reported that it attached and exited 0 while nothing listened on the new port. It now exits 1 and lists what the running server cannot apply, as `localm gui` does; `--new` starts a separate server.
