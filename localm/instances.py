@@ -812,10 +812,15 @@ def entry_process_state(entry: dict) -> tuple[str, str]:
                            f"running.")
     recorded = entry.get("start_identity")
     space = entry.get("pid_space")
-    if not isinstance(recorded, dict) or not isinstance(space, str):
+    if not isinstance(space, str):
         return "unknown", (f"this entry was written by an earlier localm that did "
                            f"not record when its server started, so localm cannot "
                            f"prove that pid {pid} is still that server.")
+    if not isinstance(recorded, dict):
+        return "unknown", (f"its server could not read its own start time when it "
+                           f"registered (on Windows and macOS this needs the psutil "
+                           f"package), so localm cannot prove that pid {pid} is "
+                           f"still that server.")
     if space != pid_space_id():
         return "unknown", (f"this entry was written on another machine or "
                            f"container sharing this data folder, so pid {pid} "
@@ -895,8 +900,6 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
     d = run_dir(home)
     if not d.is_dir():
         return []
-    # `or -1` so a null or empty pid reads as a dead process and is reaped;
-    # without it int(None) raises and the corrupt entry is kept forever.
     alive = is_alive or (lambda e: entry_process_state(e)[0] not in ("gone", "stale"))
     removed: list[str] = []
     for f in sorted(d.glob("*.json")):

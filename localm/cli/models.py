@@ -2440,6 +2440,16 @@ def stop_cmd(instance_id, stop_all, timeout):
             sys.exit(1)
     else:
         root = instances.resolve_root_dir()
+        for e in entries:
+            if instances._canon(e.get("root_dir", "")) != instances._canon(root):
+                continue
+            state, reason = instances.entry_process_state(e)
+            if state == "stale":
+                if e.get("_path"):
+                    instances.unregister_instance(e["_path"])
+                console.print(f"[yellow]{escape(str(e.get('instance_id', ''))[:8])}:"
+                              f"[/yellow] this entry was stale: {escape(reason)} "
+                              f"Removed the entry and stopped nothing.")
         entry = instances.find_attachable(home, root)
         if entry is None:
             console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
@@ -2521,8 +2531,9 @@ def stop_cmd(instance_id, stop_all, timeout):
             if state == "unknown":
                 console.print(f"[red]{escape(iid)}:[/red] did not end pid {pid}: "
                               f"{escape(reason)} If that server is still running, "
-                              f"close it from its own window or terminal; if it "
-                              f"is not, the entry goes away once pid {pid} exits.")
+                              f"close it from its own window or terminal. If it is "
+                              f"not, delete its entry file "
+                              f"{escape(str(entry.get('_path') or ''))}.")
                 any_failed = True
                 continue
             if graceful_denied and state == "same":

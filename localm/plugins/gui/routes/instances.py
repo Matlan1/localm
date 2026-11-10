@@ -205,8 +205,9 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     409, f"Did not end pid {pid}: {reason} If that server is "
                          f"still running, close it from its own window or "
-                         f"terminal; if it is not, the entry goes away once "
-                         f"pid {pid} exits.")
+                         f"terminal. If it is not, delete its entry file "
+                         f"run/{entry.get('instance_id')}.json in the localm "
+                         f"data folder.")
             if state == "gone":
                 stopped = True
             else:
