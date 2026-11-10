@@ -367,6 +367,35 @@ def test_a_build_change_of_the_installed_backend_keeps_the_record(box, monkeypat
     assert choice and choice["requested"] == "cuda"
 
 
+@pytest.mark.parametrize("version_args", [["--tag", "b1"], ["--rollback"]])
+def test_a_build_change_with_no_backend_named_keeps_the_installed_backend(box, monkeypatch,
+                                                                          version_args):
+    """cpu is installed on a machine whose detected backend is another one: a
+    --tag or --rollback with no --backend re-provisions cpu."""
+    assert _run(["--backend", "cpu", "--force", "--yes"]).exit_code == 0
+    monkeypatch.setattr(sl, "_auto_backend", lambda: "vulkan")
+    from localm.setup_llama import cli
+    monkeypatch.setattr(cli, "_apply_version_request", lambda *a, **k: None)
+    result = _run([*version_args, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert box.provisioned == ["cpu", "cpu"]
+    assert sl._provisioned_backend(box.target) == "cpu"
+    assert not (box.target / sl._CHOICE_MARKER).exists()
+
+
+def test_a_build_change_over_an_own_build_detects_the_backend(box, monkeypatch):
+    """The installed runtime is the user's own build, which has no release to
+    take a tag from: a --tag with no --backend installs the detected backend."""
+    (box.target / sl._lib_name()).write_bytes(b"x")
+    sl._record_provisioned_backend(box.target, "custom")
+    monkeypatch.setattr(sl, "_auto_backend", lambda: "vulkan")
+    from localm.setup_llama import cli
+    monkeypatch.setattr(cli, "_apply_version_request", lambda *a, **k: None)
+    result = _run(["--tag", "b1", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert box.provisioned == ["vulkan"]
+
+
 def test_auto_on_an_old_driver_uses_vulkan_without_asking(box, monkeypatch):
     monkeypatch.setattr(sl, "_auto_backend", lambda: "cuda")
     monkeypatch.setattr(sl, "nvidia_preflight",

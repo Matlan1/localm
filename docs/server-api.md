@@ -4,7 +4,7 @@ localm's inference server exposes an OpenAI-compatible REST API plus a small
 set of localm-specific management endpoints.
 
 ```bash
-localm serve <model>          # default 127.0.0.1:8642, auto-bumps when busy
+localm serve [model]          # default 127.0.0.1:8642, auto-bumps when busy
 ```
 
 Authentication: open (no key required) until an API key exists - the
@@ -37,6 +37,17 @@ Ollama.
 
 The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
 on the same port; see [ollama-api.md](ollama-api.md).
+
+The server answers only to its own names: `localhost`, loopback addresses and,
+on a network bind, its IP addresses, host name, mDNS and Tailscale names and
+certificate names. A request with any other `Host` gets `400` with
+`{"detail": ..., "error": ...}` (both carry the same message, which names the
+refused host and the fix) before any route runs. A client that reaches localm
+under another name, such as a container calling `http://host.docker.internal:8642`
+or a reverse proxy that forwards its own host name, needs that name in the
+`allowed_hosts` setting or the `LOCALM_ALLOWED_HOSTS` environment variable,
+then a restart; see [docker.md](docker.md#a-client-in-a-container-hostdockerinternal)
+and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
 
 Open mode does not open the management routes. With no key configured, every
 state-changing request and every `GET` under `/api/` or `/v1/` outside the
@@ -618,7 +629,11 @@ Returns `{"object": "list", "data": [{"object": "embedding", "index": 0,
 "total_tokens": N}}`. `encoding_format` is `float` (default) or `base64` (each
 vector as little-endian float32 bytes, base64-encoded); anything else is a 400.
 A model registered as an embedding model (or the configured `embedding_model`)
-is served by the dedicated embedder, whose `usage` counts are 0.
+is served by the dedicated embedder, whose `usage` counts are an estimate
+(about one token per four characters). A request that names a chat model is
+embedded by the dedicated embedder too: `model` in the reply names that
+embedder, and the `x-localm-embedding-model` and `x-localm-requested-model`
+response headers name the embedder and the model the request asked for.
 
 Errors: 400 when `model` is empty and there is no active or startup chat model, or (dedicated embedder) for an input the tokenizer refuses; 422 when the loaded model cannot
 embed, when the embedding model is unavailable (`localm setup-embeddings`), or
@@ -827,6 +842,11 @@ initialised.
 
 Scope: `models:write`.
 
+The model routes take `model` (and `force`, `media`, `new_name` where they apply)
+from the query string or from a JSON body (`{"model": "mymodel"}`); the query
+wins when both are given. A body that is not a JSON object, or that carries a
+key the route does not read, is a 400 naming the keys it reads.
+
 `POST /v1/models/unload?model=<name>` releases model(s) from VRAM (e.g.
 before image generation hands the GPU to ComfyUI; omit `model` to unload
 everything currently loaded); `POST /v1/models/load?model=<name>` reloads one
@@ -861,7 +881,7 @@ carries `use_mmap`, `mmap`, `mmap_from_disk` and `mmap_cpu_from_disk`, with
 `mmap_ram_available_bytes`, and `adapters`
 lists the LoRA adapters applied. Without `model` and with nothing active,
 loaded or configured to fall back to, the load is a 503; an unregistered name is a
-404.
+404 (a 503 while no model is registered at all).
 
 `POST /v1/models/unload` with no `model` returns `status` (`"unloaded"`,
 `"in_use"` when every loaded model was mid-request and none could be freed, or
@@ -947,7 +967,7 @@ Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. These settings widen a trust boundary and are hidden from, and refused for, a
 non-owner `config:write` key - only an `admin`-scoped key or the open-mode
-owner may read or change them: `allow_network_drives`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `metrics_enabled`, `mode`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
+owner may read or change them: `allow_network_drives`, `allowed_hosts`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write
@@ -1019,7 +1039,7 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. Returns `{"available": true, "current", "latest", "newer", "comparable", "notes", "published_at", "asset", "signature"}`; `{"available": false}` when no updater is configured; `{"available": true, "error": "..."}` when the check fails. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. Returns `{"available": true, "version", "markdown"}` with the released history and without the `[Unreleased]` section, or `{"available": false}` when the file is absent from this build. |
 | `GET /api/update/releases` | `config:read` | The releases that can be installed. Read-only. Returns `{"available": true, "current", "releases"}`, or `{"available": false}` when no updater is configured. |
-| `POST /api/update/apply` | `config:write` | Apply an available update. A JSON body `{"version": "<V>"}` installs that release instead of the latest, older ones included; that form needs an owner (`admin`) key (403 otherwise) and answers 400 for an invalid `version` or `sha256`. A build whose signature does not verify is not installed: the reply is `{"applied": false, "needs_confirmation": "unverified", "version", "reason", "sha256"}`, and repeating the request with `"allow_unverified": true` and that `sha256` installs it. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. A JSON body `{"version": "<V>"}` installs that release instead of the latest, older ones included; that form needs an owner (`admin`) key (403 otherwise) and answers 400 for an invalid `version` or `sha256`. A build whose signature does not verify is not installed: the reply is `{"applied": false, "needs_confirmation": "unverified", "version", "reason", "sha256"}`, and repeating the request with `"allow_unverified": true` and that `sha256` installs it. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails, or, in the `{"version"}` form, when the update server has no such release or cannot be asked. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
 | `GET /api/update/parts` | `config:read` | Which version each part of the install is at against the installed localm version. Read-only. Returns `{"app", "install_record", "install_record_matches", "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent", "last_steps"}`: `install_record` is the version of localm's record in its environment (null when there is none to compare), `runtime` is `{"backend", "current", "target", "matches"}`, each `components` entry is `{"name", "label", "current", "target", "matches"}`, `problems` has one line per part that differs, and `last_steps` lists the runtime and component update results of the last day as `{"part", "state", "note", "at"}` (both scrubbed for a scoped key). |
 | `POST /api/update/repair` | `admin` | Bring every part of the install to the installed localm version: reinstall its packages when they differ (put back as they were if that fails), then re-provision the native runtime and update the components during the restart that follows. Returns `{"repaired": true, "notes", "restarting"}`, or `{"repaired": false, "error"}` when a step failed; 403 for a key without `admin`. |
 | `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `{"available", "backup", "version", "current"}`, with `version` null when the backup does not record one. `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
@@ -1240,7 +1260,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
@@ -1306,8 +1326,8 @@ design, indexing confinement, and CLI equivalents.
 
 Across the collection routes: a `name` that is not a legal collection name is a
 `400`, and an unknown collection a `404` (create excepted). The routes that read
-or change an existing collection's content (detail, delete, query, reembed,
-repair, remove-doc) answer `403` when the key's `rag_roots` confine it to
+or change an existing collection's content (detail, delete, add, upload, query,
+reembed, repair, remove-doc) answer `403` when the key's `rag_roots` confine it to
 folders and the collection holds documents indexed from outside them; the
 listing leaves such collections out. Create, delete and remove-doc answer `409`
 while another process is writing the collection.
@@ -1325,7 +1345,7 @@ and `vector_dim`.
 | `POST /api/rag/collections/{name}/upload` | Same, for uploaded files; same `{"job_id": ...}` response. Body: `files` (1 to 50 of `{"filename", "content_b64"}`), `embed`, `reindex`. 400 for no files, more than 50, or invalid base64; 413 for a file over 30 MB or a request over 100 MB. |
 | `POST /api/rag/collections/{name}/query` | Semantic/lexical search against one collection; body `query` (empty is a 400), `k` (default 4, clamped to 1 to 20), `relevant_only`, `rerank` (null follows the `rag_rerank` setting), `context`; returns up to `k` hits; with `"relevant_only": true` it drops hits below the collection's relevance floor, so an unrelated query returns none; `"context"` (the user's previous message, cut to 600 characters) is searched together with a `relevant_only` query that refers back to the conversation, and the response's `context_used` says whether it was. The response is `{"collection", "query", "hits", "relevant_only", "reranked", "rerank_model", "rerank_note", "context_used"}`. Chunk text is defanged of control/frame tokens before it comes back, since it is untrusted content headed for a chat prompt. |
 | `POST /api/rag/collections/{name}/reembed` | Recompute the collection's vectors with the currently-loaded embedding model, from the stored chunk text (no re-read of the source files). Job-backed (`{"job_id": ...}`); 400 when no embedding model is available. |
-| `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. Body: `embed` (default true), `confirm`. Returns `{"job_id": ...}` otherwise; 400 when the collection has no documents or every document was uploaded. |
+| `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. Body: `embed` (default true), `confirm`. Returns `{"job_id": ...}` otherwise; 400 when the collection has no documents or every document was uploaded. For a key other than the owner's, each source is re-checked against that key's indexing policy, as `.../add` checks it; a refused source is skipped and named in the job log. |
 | `POST /api/rag/collections/{name}/remove-doc` | Remove one indexed document (`{"path": ...}`) from a collection. Returns `{"status": "removed", "path"}`; 404 if it is not indexed there. |
 | `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Body: `filename`, `content_b64`, `max_chars` (omit for the whole text; otherwise clamped to 500 to 200000). Returns `{"filename", "text", "chars", "truncated"}`; 400 for invalid base64, 413 over 30 MB, 422 when no text can be extracted. Not used by collection indexing. The GUI's Chat and Coder attachments use `POST /api/chat/extract` instead: the same request and answer, served by the built-in chat plugin (`chat` scope), so it works without this plugin. |
 | `GET /api/rag/rerank` | Whether Knowledge results are reranked. Returns `{"enabled", "installed", "model", "candidates", "note"}`: the `rag_rerank` setting, the registered reranker names, the reranker a query would use (null when none), how many hits it would see, and why a wanted rerank cannot run. Never loads a model. |

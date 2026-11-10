@@ -71,6 +71,9 @@ class _Host:
     def mount_router(self, router):
         pass
 
+    def track(self, stop_callable):
+        pass
+
     def register_chat_hook(self, phase, fn, priority=0):
         pass
 

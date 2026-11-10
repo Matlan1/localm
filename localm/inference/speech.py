@@ -438,7 +438,11 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
     Raises ``mtmd_gen.SpeechUnavailable`` when the runtime or the model files
     cannot synthesize speech, and :class:`SpeechUnavailableError` when the load
     fails otherwise or a different speech model is still busy. A failed file
-    pair is not retried for a minute unless it changes."""
+    pair is not retried for a minute unless it changes. Holds the GPU load
+    lease from the placement check until the load has returned; raises
+    :class:`~localm.inference.load_lease.LoadBusyError`, latching nothing, when
+    it or the engine's load lock is still held elsewhere after
+    ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
     global _ENGINE, _ENGINE_KEY
     from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
     key = _file_key(model)
@@ -450,43 +454,52 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
         _raise_latched(key)
     if on_progress is not None:
         on_progress({"stage": "loading"})
-    from localm.inference.backends.llamacpp.mtmd_gen import DEFAULT_N_CTX
-    ngl, reason = _choose_gpu_layers(model, DEFAULT_N_CTX)
-    if reason is not None:
-        logger.warning("speech placement: %s", reason)
-    from localm.inference.engine import _LOAD_LOCK
-    with _LOAD_LOCK:
-        with _LOCK:
-            if _ENGINE is not None and _ENGINE_KEY == key and _ENGINE.alive:
+    from localm.config import load_config
+    from localm.inference import load_lease
+    configured = load_config().get("n_gpu_layers", 99)
+    lease = load_lease.acquire(
+        load_lease.lease_keys(n_gpu_layers=configured if type(configured) is int else None),
+        purpose="loading a speech model")
+    try:
+        from localm.inference.backends.llamacpp.mtmd_gen import DEFAULT_N_CTX
+        ngl, reason = _choose_gpu_layers(model, DEFAULT_N_CTX)
+        if reason is not None:
+            logger.warning("speech placement: %s", reason)
+        from localm.inference.engine import _LOAD_LOCK
+        with load_lease.bounded(_LOAD_LOCK, what="loading a speech model"):
+            with _LOCK:
+                if _ENGINE is not None and _ENGINE_KEY == key and _ENGINE.alive:
+                    if claim:
+                        _ENGINE.claim()
+                    return _ENGINE
+                _raise_latched(key)
+                current = _ENGINE
+                if current is not None and current.alive and current.active_requests > 0:
+                    raise SpeechUnavailableError(
+                        "another speech model is still speaking a request; retry shortly")
+                if current is not None:
+                    _ENGINE = None
+                    _ENGINE_KEY = None
+                    current.close()
+                try:
+                    _ENGINE = SpeechEngine(model, n_gpu_layers=ngl)
+                except Exception as e:
+                    reason_text = pathscrub.scrub_paths(str(e))
+                    _LOAD_FAILED[key] = (reason_text, time.monotonic(),
+                                         isinstance(e, SpeechUnavailable))
+                    logger.warning("could not load speech model %s (%s)", model.name, e)
+                    if isinstance(e, SpeechUnavailable):
+                        raise SpeechUnavailable(reason_text) from e
+                    raise SpeechUnavailableError(reason_text) from e
+                _ENGINE_KEY = key
+                _livefeed.kick("speech model loaded")
+                logger.info("speech model ready: %s (%d Hz, projector on %s)", model.name,
+                            _ENGINE.sample_rate, "GPU" if _ENGINE.projector_on_gpu else "CPU")
                 if claim:
                     _ENGINE.claim()
                 return _ENGINE
-            _raise_latched(key)
-            current = _ENGINE
-            if current is not None and current.alive and current.active_requests > 0:
-                raise SpeechUnavailableError(
-                    "another speech model is still speaking a request; retry shortly")
-            if current is not None:
-                _ENGINE = None
-                _ENGINE_KEY = None
-                current.close()
-            try:
-                _ENGINE = SpeechEngine(model, n_gpu_layers=ngl)
-            except Exception as e:
-                reason_text = pathscrub.scrub_paths(str(e))
-                _LOAD_FAILED[key] = (reason_text, time.monotonic(),
-                                     isinstance(e, SpeechUnavailable))
-                logger.warning("could not load speech model %s (%s)", model.name, e)
-                if isinstance(e, SpeechUnavailable):
-                    raise SpeechUnavailable(reason_text) from e
-                raise SpeechUnavailableError(reason_text) from e
-            _ENGINE_KEY = key
-            _livefeed.kick("speech model loaded")
-            logger.info("speech model ready: %s (%d Hz, projector on %s)", model.name,
-                        _ENGINE.sample_rate, "GPU" if _ENGINE.projector_on_gpu else "CPU")
-            if claim:
-                _ENGINE.claim()
-            return _ENGINE
+    finally:
+        load_lease.release(lease)
 
 
 def synthesize(model: SpeechModel, text: str, *, language: Optional[str] = None,

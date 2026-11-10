@@ -1057,6 +1057,7 @@ def pull_model(
     dest_dir: Optional[Path] = None,
     register: bool = True,
     type_is_hint: bool = False,
+    allow_local: bool = True,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -1078,6 +1079,10 @@ def pull_model(
     result's badge), not the user's choice: the entry is registered with it, and
     the registry sync may still correct it. Without it an explicit *model_type*
     is recorded as ``type_user_set``.
+
+    *allow_local* False treats *model_spec* as a remote spec even when it names
+    an existing file or folder, so nothing on this machine is registered, copied
+    or moved.
     """
     spec = _mm.resolve_spec(model_spec)
     type_is_auto = (model_type == "auto")
@@ -1099,7 +1104,8 @@ def pull_model(
     from rich.markup import escape
     try:
         local = Path(model_spec).expanduser()
-        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
+        is_local_path = (allow_local and local.exists()
+                         and (local.is_absolute() or local.is_file()))
     except OSError:
         is_local_path = False
     if is_local_path:
@@ -3318,6 +3324,44 @@ def _pull_hf_snapshot(
         return False
 
 
+def _snapshot_unsafe_name(dest: Path, names) -> Optional[str]:
+    """The first of *names* (repo-relative file names from a HuggingFace
+    listing, ``/``-separated) that a download into *dest* must refuse, or None.
+    Each path component must pass :func:`_safe_models_filename` against the
+    folder it lands in: no reserved character (``:`` included), no reserved
+    device name, no trailing dot or space, no ``.``/``..`` or empty component,
+    and no OS short-name alias of a different existing file."""
+    for raw in names:
+        name = str(raw or "")
+        base = dest
+        for part in name.split("/"):
+            if _safe_models_filename(part, base) is None:
+                return name
+            base = base / part
+    return None
+
+
+def _snapshot_listing_names(repo_id: str, repo_siblings,
+                            commit: Optional[str]) -> tuple[Optional[list], Optional[str]]:
+    """``(names, commit)``: the file names of *repo_id* and the commit they were
+    read at. From *repo_siblings* (read at *commit*) when the listing was read;
+    else from ``list_repo_files`` at *commit*, or, without one, at the commit
+    ``repo_info`` reports for the default branch. ``(None, None)`` when no list
+    can be read, or no commit is known for it."""
+    if repo_siblings is not None:
+        return [str(getattr(s, "rfilename", "") or "") for s in repo_siblings], commit
+    try:
+        api = _hf_api()
+        if commit is None:
+            commit = _valid_commit(getattr(api.repo_info(repo_id), "sha", None))
+        if commit is None:
+            return None, None
+        return list(api.list_repo_files(repo_id, revision=commit)), commit
+    except Exception as e:
+        logger.debug("could not list the files of %s: %s", repo_id, e)
+        return None, None
+
+
 def _pull_hf_snapshot_locked(
     repo_id: str,
     model_name: str,
@@ -3503,6 +3547,23 @@ def _pull_hf_snapshot_locked(
                                  max(0, total_size - _disk_bytes())):
         return False
 
+    names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
+    if names is None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] its file list could not be "
+            "read from Hugging Face, so the file names it would write cannot be "
+            "checked. Retry when Hugging Face answers.")
+        return False
+    commit = listed_at
+    unsafe = _snapshot_unsafe_name(dest, names)
+    if unsafe is not None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] it contains a file named "
+            f"{escape(repr(unsafe))}, which is not a plain file name on this computer "
+            "(a reserved character or device name, a trailing dot or space, a path "
+            "step, or another name for a file already there).")
+        return False
+
     _mm.ensure_dirs()
     from ..storekit import atomic_write
     created = not dest.exists()
@@ -3623,7 +3684,8 @@ def _ssrf_resolve_final_url(url: str) -> str:
         netpolicy.check_url(current, allow_when_off=allow_off)
         try:
             resp = netpolicy.pinned_request(
-                "HEAD", current, allow_redirects=False, timeout=10)
+                "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         except netpolicy.NetworkPolicyError:
             raise                       # a policy refusal / rebind must NOT be swallowed into a silent GET
         except Exception:
@@ -3677,7 +3739,8 @@ def _policy_head(url: str):
                    if urllib.parse.urlparse(current).hostname == hub_host
                    else None)
         resp = netpolicy.pinned_request(
-            "HEAD", current, allow_redirects=False, timeout=10, headers=headers)
+            "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10, headers=headers)
         location = (resp.headers.get("Location")
                     if resp.status_code in (301, 302, 303, 307, 308) else None)
         if not location or len(history) == 5:
@@ -4285,7 +4348,8 @@ def _pull_url_locked(
     # non-fatal; the GET still fails closed.
     head_etag = None
     try:
-        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
+        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         total = int(head.headers.get("content-length", 0))
         head_etag = head.headers.get("etag")
     except NetworkPolicyError as e:
@@ -4331,13 +4395,15 @@ def _pull_url_locked(
         # revalidate immediately before the connect
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")
@@ -4623,13 +4689,15 @@ def _pull_civitai_file_locked(
     try:
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")

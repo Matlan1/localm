@@ -1776,7 +1776,7 @@ def vision_input_guidance(mmproj_failed: bool = False,
             f"library. GGUF vision works too (the built-in mtmd path) - pull "
             f"a vision-capable GGUF model with its projector, e.g. "
             f"`localm pull <repo> --mmproj <repo>:<file>`. Or install the "
-            f"HuggingFace stack (`pip install \"localm[gpu]\"`) and load a "
+            f"HuggingFace stack (see docs/gpu-setup.md) and load a "
             f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")
 
 

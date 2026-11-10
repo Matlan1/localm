@@ -137,8 +137,14 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # the config and the disk would then disagree with no sign of it.
     if tag is not None or rollback:
         force = True
+        installed = _sl._provisioned_backend(target)
+        # With no backend named, the build change applies to the installed
+        # backend when it is one a release provides; otherwise the backend is
+        # detected.
+        if backend.lower() == "auto" and installed in BACKENDS:
+            backend = installed
         # A build change of the installed backend is not a backend choice.
-        if backend.lower() in ("auto", _sl._provisioned_backend(target) or ""):
+        if backend.lower() in ("auto", installed or ""):
             keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
 

@@ -191,9 +191,8 @@ def test_stop_by_id_graceful_shutdown_success(monkeypatch):
 
 
 def test_stop_falls_back_to_kill_pid_when_graceful_shutdown_denied(monkeypatch):
-    # A plain local instance with no LOCALM_API_KEY set refuses an unauthenticated
-    # shutdown request (the open-mode management gate), the same 403 `localm unload`
-    # hits unauthenticated, so `stop` falls back to killing the process directly.
+    # The server answers the shutdown request with 403: `stop` ends the process
+    # directly and names LOCALM_API_KEY as the way to a clean shutdown.
     entry = _entry("abcd1234ef", 111, "/proj/demo")
     monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])

@@ -98,8 +98,8 @@ def _privacy_mode() -> bool:
     """True when nothing may be written to disk. An unresolvable mode counts as
     privacy mode."""
     try:
-        from localm.audit import SessionMode, effective_mode
-        return effective_mode("server") == SessionMode.PRIVACY
+        from localm.audit import automatic_write_allowed
+        return not automatic_write_allowed("server")
     except Exception:
         return True
 
@@ -119,25 +119,33 @@ def _clean_entry(entry) -> Optional[dict]:
     return {"number": number, "title": str(entry.get("title") or "")[:200]}
 
 
-def _read_disk() -> list:
+def _read_disk(strict: bool = False) -> list:
     """The recorded entries on disk, oldest first. A missing file is an empty
-    list; an unreadable or malformed one, or one with no list under ``issues``, is
-    logged at WARNING and read as empty."""
+    list. An unreadable or malformed one, or one with no list under ``issues``,
+    is logged at WARNING and read as empty; with *strict* it raises ``OSError``
+    or ``ValueError`` instead, so a writer never replaces a file it could not
+    read."""
     path = _record_path()
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
     except OSError as e:
+        if strict:
+            raise
         logger.warning("could not read %s: %s", path, e)
         return []
     try:
         data = json.loads(raw)
     except (ValueError, RecursionError) as e:
+        if strict:
+            raise ValueError(f"{path} is not valid JSON: {e}") from e
         logger.warning("%s is not valid JSON: %s", path, e)
         return []
     items = data.get("issues") if isinstance(data, dict) else None
     if not isinstance(items, list):
+        if strict:
+            raise ValueError(f"{path} has no list of issues")
         logger.warning("%s has no list of issues", path)
         return []
     return [c for c in (_clean_entry(i) for i in items) if c]
@@ -170,7 +178,8 @@ def record_filed(number, title: str = "") -> bool:
                     _SESSION_ONLY.append(entry)
                     del _SESSION_ONLY[:-MAX_RECORDED]
                 return True
-            items = [e for e in _read_disk() if e["number"] != entry["number"]]
+            items = [e for e in _read_disk(strict=True)
+                     if e["number"] != entry["number"]]
             items.append(entry)
             path = _record_path()
             path.parent.mkdir(parents=True, exist_ok=True)

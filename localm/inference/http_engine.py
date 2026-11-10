@@ -100,7 +100,8 @@ class HttpEngine:
         try:
             import requests
             resp = requests.get(f"{self._base}/config",
-                                headers=self._headers(), timeout=15)
+                                headers=self._headers(), timeout=15,
+                                allow_redirects=False)
             if resp.status_code == 200:
                 v = resp.json().get("effective_ctx_max")
                 if isinstance(v, int) and v > 0:
@@ -150,7 +151,8 @@ class HttpEngine:
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
-        and ``RuntimeError`` for an unreachable server, other error responses, or a
+        and ``RuntimeError`` for an unreachable server, a redirect (never followed),
+        other error responses, or a
         stream that ends with ``finish_reason: "error"`` (its message is the last
         content piece, the server's error text). A refusal the server sends
         in-stream (``localm_error``, on a stream it opened before it finished
@@ -182,10 +184,16 @@ class HttpEngine:
         try:
             resp = requests.post(f"{self._base}/chat/completions",
                                  json=body, headers=self._headers(),
-                                 stream=True, timeout=300)
+                                 stream=True, timeout=300, allow_redirects=False)
         except requests.RequestException as e:
             raise RuntimeError(
                 f"Could not reach the localm server at {self._base}: {e}") from e
+
+        if 300 <= resp.status_code < 400:
+            resp.close()
+            raise RuntimeError(
+                f"The localm server at {self._base} answered with a redirect "
+                f"(HTTP {resp.status_code}); localm does not follow it.")
 
         if resp.status_code >= 400:
             detail = _error_detail(resp)
@@ -256,8 +264,8 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
 
       - ``("loaded", "<id>")``  the server reports a model (its id).
       - ``("empty",  None)``    the server ANSWERED (200) but reports no model.
-      - ``("unknown", None)``   we could not tell: unreachable, an auth/scope error,
-        or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
+      - ``("unknown", None)``   we could not tell: unreachable, a redirect (never
+        followed), an auth/scope error, or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
         needs the ``models`` scope, so an attach token scoped only for chat gets a 403
         here while chatting still works. Callers must not claim "no model loaded" on
         ``unknown``.
@@ -267,8 +275,8 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         r = requests.get(f"{base_url.rstrip('/')}/models",
-                         headers=headers, timeout=timeout)
-        if r.status_code >= 400:
+                         headers=headers, timeout=timeout, allow_redirects=False)
+        if r.status_code >= 300:
             return "unknown", None
         data = (r.json() or {}).get("data") or []
         # /v1/models lists EVERY registered model (sorted), each with a `loaded`
@@ -302,3 +310,82 @@ def remote_active_model(base_url: str, token: Optional[str] = None,
     label. Prefer ``remote_model_status`` when you must distinguish "no model" from
     "could not read the model list" (see that function)."""
     return remote_model_status(base_url, token, timeout=timeout)[1]
+
+
+def remote_model_identity(base_url: str, token: Optional[str], model_id: str,
+                          *, timeout: float = 5.0) -> dict:
+    """The file identity a server reports for *model_id* via
+    ``GET /v1/models/{model_id}``: ``{"file", "size", "sha256"}``, where ``file``
+    is the model file's base name. Each value is None when the server did not
+    report it; all three are None when the request fails or is refused."""
+    import requests
+    from urllib.parse import quote
+    ident: dict = {"file": None, "size": None, "sha256": None}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = requests.get(f"{base_url.rstrip('/')}/models/{quote(model_id, safe='')}",
+                         headers=headers, timeout=timeout, allow_redirects=False)
+        if r.status_code != 200:
+            return ident
+        body = r.json()
+    except Exception:
+        return ident
+    if not isinstance(body, dict):
+        return ident
+    if isinstance(body.get("path"), str) and body["path"]:
+        ident["file"] = body["path"]
+    if isinstance(body.get("size_bytes"), int) and not isinstance(body["size_bytes"], bool):
+        ident["size"] = body["size_bytes"]
+    if isinstance(body.get("sha256"), str) and body["sha256"]:
+        ident["sha256"] = body["sha256"].lower()
+    return ident
+
+
+def requested_model_identity(requested: str) -> Optional[dict]:
+    """The local file identity of a model named on the command line: a registered
+    name or a path on disk (registry.get_operator_model_info). Returns
+    ``{"path", "size", "sha256"}`` (sha256 only for a registered name that records
+    one), or None when *requested* resolves to no model file."""
+    from pathlib import Path
+    from localm.model_manager import load_registry
+    from localm.model_manager.registry import get_operator_model_info
+    try:
+        reg = load_registry()
+        info = get_operator_model_info(requested, reg=reg)
+        if info is None or not info[0]:
+            return None
+        path = Path(info[0]).resolve()
+        ident: dict = {"path": str(path), "size": None, "sha256": None}
+        if path.is_file():
+            ident["size"] = path.stat().st_size
+    except (OSError, ValueError):
+        return None
+    entry = reg.get(requested)
+    if isinstance(entry, dict) and isinstance(entry.get("sha256"), str) and entry["sha256"]:
+        ident["sha256"] = entry["sha256"].lower()
+    return ident
+
+
+def served_model_is_requested(base_url: str, token: Optional[str], active: str,
+                              requested: str) -> bool:
+    """True when the server's *active* model is the model *requested* on the
+    command line, by name or by file.
+
+    Same name, or two registered names for one file (names_same_model), is True
+    without a request. Otherwise the requested name or path is resolved locally
+    (requested_model_identity), the server's identity for *active* is read
+    (remote_model_identity) and the two are compared with
+    peer_routing._same_file: same path or sha256, or the same base name and byte
+    size. False when they differ, when *requested* resolves to no model file, or
+    when the server's identity cannot be read."""
+    from localm.model_manager import names_same_model
+    if not active or not requested:
+        return False
+    if names_same_model(active, requested):
+        return True
+    mine = requested_model_identity(requested)
+    if mine is None:
+        return False
+    theirs = remote_model_identity(base_url, token, active)
+    from localm.peer_routing import _same_file
+    return _same_file(mine, theirs) is True

@@ -39,6 +39,7 @@ from typing import Callable
 from typing import Optional
 
 from localm.debuglog import logger
+from localm.storeformat import StoreFormatTooNew, check_stamp
 
 ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
@@ -233,6 +234,12 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     return {}
 
 
+def _record_event(kind: str, **fields) -> None:
+    """Append a management event; never raises into the key operation."""
+    from localm import config, mgmt_events
+    mgmt_events.record(kind, home=config.HOME_DIR, **fields)
+
+
 def set_api_key(key: Optional[str]) -> None:
     """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
     or None *key* clears it, returning the server to open mode.
@@ -270,6 +277,7 @@ def set_api_key(key: Optional[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with _cross_process_lock(path):
         _atomic_write_private(path, key.strip() + "\n", retrying=True)
+    _record_event("key_minted", principal="owner")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
@@ -306,6 +314,7 @@ def clear_api_key() -> list[dict[str, str]]:
     ``--debug``, so a caller reporting the outcome has to read this return value:
     a surviving key STILL GRANTS ACCESS."""
     failures: list[dict[str, str]] = []
+    had_key = key_file().exists() or keystore_file().exists()
     try:
         key_file().unlink(missing_ok=True)
     except OSError as e:
@@ -339,6 +348,8 @@ def clear_api_key() -> list[dict[str, str]]:
                          "path": str(owner_kdf_file()),
                          "error": f"{type(e).__name__}: {e}"})
     _forget_cached_digests()
+    if had_key and not failures:
+        _record_event("key_revoked", principal="all")
     return failures
 
 
@@ -645,6 +656,12 @@ def _load_owner_kdf() -> list:
                        "the next successful verify", path, e)
         return []
     if not isinstance(data, dict):
+        return []
+    try:
+        check_stamp(data.get("v"), 1, path, "owner key record file")
+    except StoreFormatTooNew as e:
+        logger.warning("%s; its records are not used and a fresh derivation "
+                       "record is minted", e)
         return []
     recs = data.get("records")
     return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
@@ -1146,6 +1163,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         records = _load_keystore_for_write()
         records.append(record)
         _save_keystore(records)
+    _record_event("key_minted", principal=record["id"])
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "expires": record["expires"],
             "fs_access": record["fs_access"], "rag_roots": record["rag_roots"],
@@ -1169,6 +1187,7 @@ def revoke_key(key_id: str) -> bool:
         if len(remaining) == len(records):
             return False
         _save_keystore(remaining)
+    _record_event("key_revoked", principal=key_id)
     if target and target.get("hash"):
         try:
             from localm import sessions
@@ -1263,6 +1282,23 @@ def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
             if exp is not None and now > float(exp):
                 return None
             return set(r.get("scopes", []))
+    return None
+
+
+def rag_roots_for_key_hash(key_hash: Optional[str]) -> Optional[list]:
+    """The per-key RAG folder allowlist of the LIVE keystore key with this sha256
+    *key_hash*: its normalised ``rag_roots``, ``[]`` when it has none, or None
+    when no live key matches (missing, expired, or an unreadable keystore). Same
+    liveness rules as ``scopes_for_key_hash``; does not resolve the owner key."""
+    if not key_hash:
+        return None
+    now = time.time()
+    for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            if exp is not None and now > float(exp):
+                return None
+            return norm_rag_roots(r.get("rag_roots", []))
     return None
 
 

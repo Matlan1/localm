@@ -161,8 +161,12 @@ def remote_hold_reason(model: str) -> Optional[str]:
     discovery across registries would turn the skip into a false all-clear for
     a file held under a different name elsewhere.
 
-    With no server running at all, ``instances.snapshot`` yields nothing to
-    loop over and this returns None.
+    An ``--isolated`` server is not in that listing; it leaves a hold-check-only
+    marker in the same run dir (``instances.list_hold_markers``), asked the same
+    way.
+
+    With no server running at all, nothing is left to loop over and this
+    returns None.
     """
     from localm import instances
     from localm.bindhost import self_connect_host, url_host
@@ -172,6 +176,7 @@ def remote_hold_reason(model: str) -> Optional[str]:
     # attach token a genuinely open (keyless) instance's middleware requires.
     # The token is used for the request only, never displayed.
     rows = instances.snapshot(home_dir(), include_token=True)
+    rows = rows + instances.list_hold_markers(home_dir())
     for e in rows:
         scheme = e.get("scheme", "http")
         where = (scheme + "://"
@@ -242,8 +247,7 @@ def resolve_self_url(app) -> Optional[str]:
 
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None,
-                  instance_token: Optional[str] = None,
-                  allow_redirects: bool = True) -> requests.Response:
+                  instance_token: Optional[str] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
@@ -268,10 +272,7 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     ``requests.Response`` and never raises for a non-2xx status, leaving
     per-endpoint success/error handling to the caller.
 
-    *allow_redirects* defaults to True (``requests``' own default). A caller
-    that has independently confirmed *base_url* is an address this machine
-    holds and wants a single-hop request - never redirected to somewhere
-    else - passes False.
+    A redirect is never followed: a 3xx is returned to the caller.
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")
@@ -281,4 +282,4 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=headers,
                             timeout=timeout, verify=_tls.requests_verify(url),
-                            allow_redirects=allow_redirects)
+                            allow_redirects=False)

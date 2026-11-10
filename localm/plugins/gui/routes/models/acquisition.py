@@ -15,8 +15,9 @@ from localm import scopes
 from localm.debuglog import logger
 from localm.inference._threadpool_timeout import (ThreadCallTimeout,
                                                   run_in_threadpool_bounded)
-from localm.inference.http_server import (path_formatter, principal_id,
-                                          require_fs_host, require_scope)
+from localm.inference.http_server import (effective_fs_access, path_formatter,
+                                          principal_id, require_fs_host,
+                                          require_scope)
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
@@ -52,10 +53,9 @@ def _spec_names_a_host_path(spec: str) -> bool:
     which also requires the path to exist: a non-existent absolute path is
     refused here even though pull.py would treat it as a remote spec.
 
-    RESIDUAL: a relative spec with no ".." component that names an existing FILE
-    is still registered in place without this gate firing. Its reach is bounded
-    by the server's working directory, and closing it would need a filesystem
-    answer."""
+    A relative spec with no ".." component is not a host path here; the pull of
+    a caller without host filesystem access carries ``--remote-only`` (see
+    ``_remote_only_args``), so it is never registered from this machine."""
     s = spec.strip()
     if not s:
         return False
@@ -74,6 +74,12 @@ def _spec_names_a_host_path(spec: str) -> bool:
         if any(part == ".." for part in pure.parts):
             return True
     return False
+
+
+def _remote_only_args(request: Request) -> list[str]:
+    """``["--remote-only"]`` for a caller without host filesystem access, else
+    ``[]``. Decided from the key alone, never from the spec or the disk."""
+    return [] if effective_fs_access(request) == "host" else ["--remote-only"]
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -122,7 +128,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                      f"instead of starting a second one.")
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
-        args = ["pull"]
+        args = ["pull", *_remote_only_args(request)]
         if req.name:
             args += ["--name", req.name]
         if req.mmproj:
@@ -280,7 +286,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if check["changed"]:
                 return {"status": "changed", "detail": check["detail"], "spec": spec}
             note = check["detail"]
-        job = jobs.start_cli("pull", ["pull", *pending_pulls.resume_args(rec)], extra_env={
+        job = jobs.start_cli("pull", ["pull", *_remote_only_args(request),
+                                      *pending_pulls.resume_args(rec)], extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }, host_label=f"Model pull {spec}", owner=principal_id(request))

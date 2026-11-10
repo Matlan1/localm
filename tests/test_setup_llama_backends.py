@@ -42,9 +42,9 @@ def test_recommended_install_backend_policy(monkeypatch):
         monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
         return hwdetect.recommended_install_backend(
             hwdetect.Detection(vendors=vendors, gpu_names=names))
-    # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
+    # AMD on Windows: only RX 6000 (gfx103X) gets the self-contained ROCm build...
     assert rec(["amd"], "amd radeon rx 6900 xt") == "amd-rocm"
-    assert rec(["amd"], "amd radeon graphics") == "amd-rocm"
+    assert rec(["amd"], "amd radeon graphics") == "vulkan"
     # ...but a CLEARLY non-gfx103X AMD with no ROCm/HIP toolkit detected
     # downgrades to the universal Vulkan build.
     assert rec(["amd"], "amd radeon rx 7800 xt") == "vulkan"
@@ -124,7 +124,10 @@ def test_auto_backend_mixed_amd_nvidia(monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="amd-rocm bundled build is Windows-only")
 def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
-    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["amd"], "vulkan"))
+    monkeypatch.setattr(
+        hwdetect, "detect",
+        lambda: hwdetect.Detection(vendors=["amd"], recommended="vulkan",
+                                   gpu_names="amd radeon rx 6800 xt"))
     assert sl._auto_backend() == "amd-rocm"
 
 

@@ -37,10 +37,10 @@ latter would flag these two as violations:
                                  the same classification as coder/plug.py and
                                  jobs/runner.py's chat/completions calls.
 
-  localm/inference/http_engine.py, HttpEngine._headers() and
-  remote_model_status()
+  localm/inference/http_engine.py, HttpEngine._headers(),
+  remote_model_status() and remote_model_identity()
                                  route the `localm run`/`chat` ATTACH flow.
-                                 These two are a generic HTTP client: they
+                                 These three are a generic HTTP client: they
                                  send whatever *token* the caller passes in,
                                  so they never need to call resolve_bearer_*
                                  themselves. RESOLVING the right token is the
@@ -202,6 +202,7 @@ _REVIEWED_SITES = {
     ("localm/cli/rag.py", "_cli_rag_embed_fn._embed", "f'Bearer {key}'"),
     ("localm/inference/http_engine.py", "HttpEngine._headers", "f'Bearer {self._token}'"),
     ("localm/inference/http_engine.py", "remote_model_status", "f'Bearer {token}'"),
+    ("localm/inference/http_engine.py", "remote_model_identity", "f'Bearer {token}'"),
     ("localm/plugins/coder/backends/http.py", "HTTPBackend._headers", "f'Bearer {self._api_key}'"),
     ("localm/plugins/gui/cli.py", "_mount_remote_gui", "f'Bearer {token}'"),
     ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),

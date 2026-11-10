@@ -153,8 +153,7 @@ def register(app: FastAPI, ctx) -> None:
         if is_own_address(dial):
             try:
                 resp = self_request("POST", "/server/shutdown", base_url=base_url,
-                                    timeout=5, instance_token=entry.get("token"),
-                                    allow_redirects=False)
+                                    timeout=5, instance_token=entry.get("token"))
                 if resp.status_code in (401, 403):
                     # The target's open-mode management gate refuses an
                     # unauthenticated shutdown from a caller with no shell/API-key

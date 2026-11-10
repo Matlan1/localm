@@ -468,7 +468,10 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     # (not installed, or missing its pip extras), say so right here.
     try:
         from localm.plugins.engine import PluginManager
-        warns = PluginManager(None).scope_deps_warnings(list(scopes))
+        mgr = PluginManager(None)
+        warns = mgr.scope_deps_warnings(list(scopes))
+        warns += S.unknown_scope_warnings(
+            list(scopes), {(sp.scope or n) for n, sp in mgr.discover().items()})
     except Exception:
         warns = []
     for w in warns:
