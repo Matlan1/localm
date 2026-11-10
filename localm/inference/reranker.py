@@ -172,8 +172,11 @@ def registered_rerankers() -> list[str]:
                   if isinstance(entry, dict) and entry_is_reranker(name, entry))
 
 
+_HTTP_MODEL_FIELD = "the request's model field"
+
+
 def resolve_reranker(model: Optional[str], *,
-                     where: str = "the request's model field") -> tuple[str, str]:
+                     where: str = _HTTP_MODEL_FIELD) -> tuple[str, str]:
     """``(registry name, GGUF path)`` for the reranker a request names.
 
     An omitted or ``localm`` model resolves to the only registered reranker.
@@ -197,6 +200,7 @@ def resolve_reranker(model: Optional[str], *,
                 "Several rerankers are registered (" + ", ".join(names) +
                 "); name one in " + where + ".", 400)
         name = names[0]
+    http = where == _HTTP_MODEL_FIELD
     entry = reg.get(name)
     if not isinstance(entry, dict):
         raise RerankerModelError(f"Model {name!r} is not registered.", 404)
@@ -206,13 +210,13 @@ def resolve_reranker(model: Optional[str], *,
     if kind != "embedding":
         what = _KIND_WORDS.get(kind, f"a {kind} model")
         raise RerankerModelError(
-            f"Model {name!r} is {what}, not a reranker; /v1/rerank needs a "
-            "reranker GGUF.", 422)
+            f"Model {name!r} is {what}, not a reranker; "
+            + ("/v1/rerank" if http else "reranking") + " needs a reranker GGUF.", 422)
     if not entry_is_reranker(name, entry):
         raise RerankerModelError(
             f"Model {name!r} is an embedding model, not a reranker: it has no "
-            "classifier head to score a query against a document. Use "
-            "/v1/embeddings for it.", 422)
+            "classifier head to score a query against a document."
+            + (" Use /v1/embeddings for it." if http else ""), 422)
     path = _registered_model_path(name)
     if path is None:
         raise RerankerModelError(

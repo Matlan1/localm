@@ -173,3 +173,23 @@ def test_rerank_without_a_reranker_names_the_cli_option(env):
     r = CliRunner().invoke(main, ["rerank", "q", "doc"])
     assert r.exit_code == 1
     assert "request" not in r.output and "--model" in r.output
+
+
+def test_rerank_cli_refusal_of_a_non_reranker_names_no_http_route(env):
+    (env / "registry.json").write_text(json.dumps({
+        "chat-model": {"path": str(env / "c.gguf"), "source": "local"},
+        "emb": {"path": str(env / "e.gguf"), "source": "local",
+                "model_type": "embedding"}}), encoding="utf-8")
+    for name in ("chat-model", "emb"):
+        r = CliRunner().invoke(main, ["rerank", "q", "doc", "--model", name])
+        assert r.exit_code == 1
+        assert "/v1/" not in r.output, r.output
+
+
+def test_the_http_reranker_refusal_still_names_its_route(env):
+    from localm.inference import reranker
+    (env / "registry.json").write_text(json.dumps({
+        "chat-model": {"path": str(env / "c.gguf"), "source": "local"}}), encoding="utf-8")
+    with pytest.raises(reranker.RerankerModelError) as ei:
+        reranker.resolve_reranker("chat-model")
+    assert "/v1/rerank" in str(ei.value)
