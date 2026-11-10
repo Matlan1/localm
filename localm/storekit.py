@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 def atomic_write(path: Path, data: str | Iterable[str]) -> None:
@@ -57,6 +57,51 @@ def atomic_write(path: Path, data: str | Iterable[str]) -> None:
             # Best-effort: the write's outcome is already decided.
             from localm.debuglog import logger
             logger.debug("storekit: could not remove temp file %s (%s)", tmp, e)
+
+
+def read_json_checked(path: Path, default):
+    """``(value, read_ok)`` for the JSON store at *path*. ``read_ok`` is True
+    only when *path* itself parsed or no file exists; it is False when a file is
+    present and *path* could not be read, whether the ``.bak`` then parsed (the
+    value is the previous generation) or not (the value is *default*)."""
+    from localm import config
+    return config._read_json_checked(path, default)
+
+
+def read_for_write(path: Path, default, shape: type, refusal: str):
+    """The store at *path* for a read-modify-write: the parsed value, which has
+    type *shape*. Raises ``config.ConfigUnreadable`` with the message *refusal*
+    when a file is present but *path* could not be read, or it parses to
+    another type, because writing back would replace the store with an older
+    generation or with *default*. The caller holds :func:`store_lock` for the
+    whole read-modify-write."""
+    from localm import config
+    data, read_ok = config._read_json_checked(path, default)
+    if not read_ok or not isinstance(data, shape):
+        raise config.ConfigUnreadable(refusal)
+    return data
+
+
+def store_lock(path: Path, *, timeout: Optional[float] = None):
+    """Context manager holding the cross-process lock on the store at *path*.
+    A holder proven running keeps the lock however long it holds it; one proven
+    gone is reclaimed at once. Raises ``config.ConfigLockTimeout`` when another
+    process holds it for the whole wait (*timeout* seconds; None for the default
+    budget), writing nothing. Yields a handle with ``assert_held()``."""
+    from localm import config
+    return config._cross_process_lock(path, timeout=timeout)
+
+
+def write_private(path: Path, text: str, *, retrying: bool = True) -> bool:
+    """Write *text* to the store at *path* atomically and owner-restricted, via
+    a temp file unique to the writer. Re-checks this process's
+    :func:`store_lock` on *path* immediately before the replace, raising
+    ``config.ConfigLockLost`` (nothing written) when it was taken over. Returns
+    whether the pre-rename restriction succeeded. *retrying* rides out a
+    transient Windows sharing violation on the replace."""
+    from localm import config
+    config.assert_store_lock_held(path)
+    return config.atomic_write_private(path, text, retrying=retrying)
 
 
 class NamespaceLockRegistry:

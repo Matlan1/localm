@@ -940,8 +940,9 @@ def test_atomic_write_private_passes_retrying_through(auth, monkeypatch, tmp_pat
 
 
 def test_keystore_is_saved_indented_through_the_retrying_writer(auth, monkeypatch):
+    import localm.config as cfg
     seen = []
-    monkeypatch.setattr(auth, "_atomic_write_private",
+    monkeypatch.setattr(cfg, "atomic_write_private",
                         lambda path, text, **kw: seen.append((path, text, kw)))
     auth._save_keystore([{"id": "a"}])
     assert seen == [(auth.keystore_file(), '[\n  {\n    "id": "a"\n  }\n]',

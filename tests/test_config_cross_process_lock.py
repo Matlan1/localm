@@ -294,6 +294,8 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     # Two genuinely separate OS processes have different real pids; fake that
     # here so this exercises the stale-reclaim/fencing path rather than the
     # same-process reentrancy guard.
+    from localm import instances
+    monkeypatch.setattr(instances, "process_start_identity", lambda pid: None)
     monkeypatch.setattr(cfg.os, "getpid", lambda: 111111)
     cm_a = cfg._cross_process_lock(cfg.CONFIG_FILE)
     cm_a.__enter__()  # simulated "process A" acquires

@@ -337,17 +337,23 @@ def test_read_json_checked_falls_back_to_the_bak_and_calls_a_default(cfg_home):
     assert cfg._read_json_checked(target, dict) == ({"a": 1}, True)
 
 
-def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys):
+def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys, caplog):
+    import logging
     target = cfg_home / "x.json"
     target.write_text("{bad", encoding="utf-8")
-    assert cfg._read_json_checked(target, {}) == ({}, False)
-    err = capsys.readouterr().err
-    assert err.startswith("[localm] x.json is unreadable (")
-    assert err.endswith("); falling back.\n")
+    cfg._warned_unreadable.clear()
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert cfg._read_json_checked(target, {}) == ({}, False)
+    assert capsys.readouterr().err == ""
+    [msg] = [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()]
+    assert msg.startswith("x.json is unreadable (") and msg.endswith(")")
 
 
 def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
-        cfg_home, monkeypatch, capsys):
+        cfg_home, monkeypatch, capsys, caplog):
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cfg, "os", _OsAs("nt"))
@@ -356,12 +362,16 @@ def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
     assert cfg._read_json_checked(target, {}) == ({}, False)
     assert len(calls) == cfg._REPLACE_RETRIES
     assert len(sleeps) == cfg._REPLACE_RETRIES - 1
-    assert capsys.readouterr().err == (
-        f"[localm] x.json is unreadable ({calls[-1]}); falling back.\n")
+    assert capsys.readouterr().err == ""
+    assert [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()] == [
+        f"x.json is unreadable ({calls[-1]})"]
 
 
 def test_read_json_checked_on_windows_does_not_retry_a_stable_denial(
-        cfg_home, monkeypatch, capsys):
+        cfg_home, monkeypatch, capsys, caplog):
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cfg, "os", _OsAs("nt"))
@@ -369,8 +379,9 @@ def test_read_json_checked_on_windows_does_not_retry_a_stable_denial(
     calls = _deny_open(monkeypatch, target, 1314)
     assert cfg._read_json_checked(target, {}) == ({}, False)
     assert len(calls) == 1 and sleeps == []
-    assert capsys.readouterr().err == (
-        f"[localm] x.json is unreadable ({calls[-1]}); falling back.\n")
+    assert capsys.readouterr().err == ""
+    assert [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()] == [
+        f"x.json is unreadable ({calls[-1]})"]
 
 
 def test_non_dict_config_warning_is_once_per_config_file(cfg_home, monkeypatch, capsys):
