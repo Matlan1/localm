@@ -121,6 +121,28 @@ service name a proxy container uses (`http://localm:8642`). List those names in
 `docker run -e LOCALM_ALLOWED_HOSTS=nas,nas.local ...`. The `allowed_hosts`
 setting in the data volume works too.
 
+### A client in a container: `host.docker.internal`
+
+A client running in a container (Open WebUI, for example) that reaches a localm
+on the Docker host as `http://host.docker.internal:<port>` sends that name as
+its `Host`, and localm refuses it with `400 Host not allowed` until the name is
+listed. List it on the machine that runs localm, not in the client container:
+
+```bash
+localm config allowed_hosts host.docker.internal
+```
+
+or start localm with `LOCALM_ALLOWED_HOSTS=host.docker.internal`, then restart
+it. localm never accepts the name on its own.
+
+Docker's documentation says `host.docker.internal` resolves to the host's
+internal IP address (on Linux Docker Engine, add
+`--add-host=host.docker.internal:host-gateway` to the client container). It does
+not say that a service listening only on `127.0.0.1` is reachable that way, and
+localm's own tests do not cover it, so if the client cannot connect at all,
+bind localm past loopback (`-H 0.0.0.0`, which needs an API key) and point the
+client at the key.
+
 ## What lives where
 
 | Path | Contents |

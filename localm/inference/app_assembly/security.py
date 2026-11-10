@@ -13,10 +13,12 @@ bound to), never ``request.client.host``: behind portmux every peer is
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import secrets
 import socket
+import time
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -499,11 +501,28 @@ def add_docs_loopback_gate(app: FastAPI) -> None:
 
 
 HOST_REFUSED_DETAIL = (
-    "Host not allowed: this server answers only to its own names and addresses. "
-    "To reach it through another name (a reverse proxy or your own DNS name), add "
-    "that name to the 'allowed_hosts' setting and restart localm.")
+    "Host not allowed: this request has no usable Host header, and this server "
+    "answers only to its own names and addresses.")
+
+HOST_POLICY_REFRESH_SECONDS = 30.0
+
+
+def host_refused_detail(name: Optional[str]) -> str:
+    """The refusal message for a request for *name* (None: missing or
+    malformed ``Host``), naming the setting and the environment variable that
+    would accept it."""
+    if name is None:
+        return HOST_REFUSED_DETAIL
+    return (f"Host not allowed: {name!r} is not one of this server's names. To "
+            f"accept it (a reverse proxy, your own DNS name, or a container using "
+            f"host.docker.internal), add {name} to the 'allowed_hosts' setting or "
+            f"set LOCALM_ALLOWED_HOSTS={name}, then restart localm.")
+
 
 _log = logging.getLogger("localm.security")
+
+_monotonic = time.monotonic
+
 
 def _ip_literal(name: str):
     try:
@@ -541,11 +560,15 @@ def _cert_dns_names(certfile: Optional[str]) -> set[str]:
     return {h.strip().lower().rstrip(".") for h in hosts if h and h.strip()}
 
 
-def own_host_names(certfile: Optional[str] = None) -> set[str]:
+def own_host_names(certfile: Optional[str] = None, refresh: bool = False) -> set[str]:
     """This machine's own DNS names: its hostname (short and fully qualified),
     ``<hostname>.local``, the mDNS name, the Tailscale names, and the DNS names
-    in the certificate at *certfile*. May block on name lookups."""
+    in the certificate at *certfile*. *refresh* re-runs ``tailscale status``
+    first instead of using the process's memoized answer. May block on name
+    lookups."""
     from localm import netname
+    if refresh:
+        netname.tailscale_status(refresh=True)
     names: set[str] = {"localhost"}
     for lookup in (socket.gethostname, socket.getfqdn):
         try:
@@ -625,14 +648,16 @@ class HostPolicy:
         return bool(head and rest) and rest in self.wildcards
 
 
-def build_host_policy(bind_host: str, certfile: Optional[str]) -> HostPolicy:
+def build_host_policy(bind_host: str, certfile: Optional[str],
+                      refresh: bool = False) -> HostPolicy:
     """The policy for an app bound to *bind_host*: the ``allowed_hosts``
     setting, plus on a network bind this machine's own names (see
-    :func:`own_host_names`) and *bind_host* itself."""
+    :func:`own_host_names`, which *refresh* is passed to) and *bind_host*
+    itself."""
     configured, any_host = configured_allowed_hosts()
     names = set(configured)
     if not _hs._is_loopback_host(bind_host):
-        names.update(own_host_names(certfile))
+        names.update(own_host_names(certfile, refresh=refresh))
         norm = normalize_host_name(bind_host)
         if norm:
             names.add(norm)
@@ -649,13 +674,20 @@ class HostHeaderGuard:
     sets it). Accepted: ``localhost``, ``*.localhost`` and loopback addresses on
     every bind; on a network bind (``app.state.bind_host`` not loopback) also any
     IP literal, this machine's own names and the certificate's names; on every
-    bind the ``allowed_hosts`` setting and ``LOCALM_ALLOWED_HOSTS``. The port is not compared. Refused:
-    anything else, and a missing, empty, repeated or malformed ``Host``. HTTP
-    gets a 400 JSON reply, a WebSocket a close before accept (code 1008, which
-    uvicorn answers as HTTP 403). The
-    policy is built once per app, in a worker thread, the first time a name
-    needs it. The first refusal per app is logged at WARNING, later ones at
-    DEBUG."""
+    bind the ``allowed_hosts`` setting and ``LOCALM_ALLOWED_HOSTS``. The port
+    is not compared. Refused: anything else, and a missing, empty, repeated or
+    malformed ``Host``. HTTP gets a 400 JSON reply carrying
+    :func:`host_refused_detail` under both ``detail`` and ``error`` (the Ollama
+    shape), a WebSocket a close before accept (code 1008, which uvicorn answers
+    as HTTP 403).
+
+    The policy is built in a worker thread the first time a name needs it and
+    kept on ``app.state.host_policy``. A name the kept policy refuses rebuilds
+    it, re-reading the settings and ``tailscale status``, when it is at least
+    ``HOST_POLICY_REFRESH_SECONDS`` old. One build runs at a time per app
+    (``app.state.host_policy_lock``); a request waiting on it uses the policy
+    that build produced. The first refusal per app is logged at WARNING, later
+    ones at DEBUG."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -678,7 +710,8 @@ class HostHeaderGuard:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
-        resp = JSONResponse(status_code=400, content={"detail": HOST_REFUSED_DETAIL},
+        detail = host_refused_detail(name)
+        resp = JSONResponse(status_code=400, content={"detail": detail, "error": detail},
                             headers={"X-Content-Type-Options": "nosniff",
                                      "Cache-Control": "no-store"})
         await resp(scope, receive, send)
@@ -690,13 +723,24 @@ class HostHeaderGuard:
         bind_host = getattr(st, "bind_host", "127.0.0.1")
         if not _hs._is_loopback_host(bind_host) and _ip_literal(name) is not None:
             return True
-        policy = getattr(st, "host_policy", None)
-        if policy is None:
-            import anyio
-            policy = await anyio.to_thread.run_sync(
-                build_host_policy, bind_host, getattr(st, "tls_certfile", None))
-            st.host_policy = policy
-        return policy.allows(name)
+        kept = getattr(st, "host_policy", None)
+        if kept is not None:
+            if kept[0].allows(name):
+                return True
+            if _monotonic() - kept[1] < HOST_POLICY_REFRESH_SECONDS:
+                return False
+        lock = getattr(st, "host_policy_lock", None)
+        if lock is None:
+            lock = st.host_policy_lock = asyncio.Lock()
+        async with lock:
+            current = getattr(st, "host_policy", None)
+            if current is kept:
+                import anyio
+                policy = await anyio.to_thread.run_sync(
+                    build_host_policy, bind_host, getattr(st, "tls_certfile", None),
+                    kept is not None)
+                current = st.host_policy = (policy, _monotonic())
+        return current[0].allows(name)
 
     @staticmethod
     def _log_refusal(st, name: Optional[str]) -> None:
@@ -706,7 +750,8 @@ class HostHeaderGuard:
             return
         st.host_refusal_logged = True
         _log.warning("refused a request for host %s: not a name of this server "
-                     "(add it to allowed_hosts to accept it)", shown)
+                     "(add it to allowed_hosts or LOCALM_ALLOWED_HOSTS to accept it)",
+                     shown)
 
 
 def add_host_header_guard(app: FastAPI) -> None:

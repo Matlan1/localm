@@ -99,7 +99,11 @@ owner-only `allowed_hosts` setting or the comma-separated `LOCALM_ALLOWED_HOSTS`
 environment variable are accepted on every bind (`*.example.com` covers one
 label, `"*"` turns the check off). Anything else, and a missing, repeated or
 malformed `Host`, gets `400` (a WebSocket upgrade `403`) before any route, CORS
-reply or static file. The port is not compared. This stops DNS rebinding: a page on an attacker's
+reply or static file. The port is not compared. When a request names a host the
+current list refuses and the list is at least 30 seconds old, the list is built
+again (settings, environment and `tailscale status` re-read), so a Tailscale
+name that comes up after localm started is accepted without a restart. The name
+`host.docker.internal` is never accepted unless it is listed. This stops DNS rebinding: a page on an attacker's
 domain whose DNS answer is switched to `127.0.0.1` is same-origin to the browser,
 so without this check it would also pass the same-origin checks below and, with
 no key set, the keyless inference API.

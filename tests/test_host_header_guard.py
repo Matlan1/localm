@@ -36,7 +36,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     monkeypatch.setattr(security, "own_host_names",
-                        lambda certfile=None: {"localhost", "mybox", "mybox.local"})
+                        lambda certfile=None, refresh=False: {"localhost", "mybox", "mybox.local"})
     return home
 
 
@@ -81,7 +81,9 @@ def test_loopback_bind_accepts_loopback_names_and_addresses(home, host):
 def test_loopback_bind_refuses_every_other_host(home, host):
     r = _get(TestClient(_app()), "/health", host)
     assert r.status_code == 400, (host, r.text)
-    assert r.json() == {"detail": security.HOST_REFUSED_DETAIL}
+    body = r.json()
+    assert set(body) == {"detail", "error"} and body["detail"] == body["error"]
+    assert body["detail"].startswith("Host not allowed")
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers["cache-control"] == "no-store"
 
@@ -108,7 +110,7 @@ def test_a_rebound_page_reaches_no_route(home, method, path, body):
     r = client.request(method, path, json=body,
                        headers={"host": host, "origin": f"http://{host}"})
     assert r.status_code == 400, (path, r.text)
-    assert r.json() == {"detail": security.HOST_REFUSED_DETAIL}
+    assert r.json()["detail"] == security.host_refused_detail("evil.example")
 
 
 def test_the_same_requests_still_work_on_localhost(home):
@@ -363,6 +365,98 @@ def test_a_setting_of_the_wrong_type_is_logged_and_ignored(home, caplog):
                for r in caplog.records)
 
 
+def test_the_refusal_names_the_exact_fix(home):
+    r = _get(TestClient(_app()), "/v1/models", "host.docker.internal:8642")
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "'host.docker.internal'" in detail
+    assert "add host.docker.internal to the 'allowed_hosts' setting" in detail
+    assert "LOCALM_ALLOWED_HOSTS=host.docker.internal" in detail
+    assert r.json()["error"] == detail
+
+
+def test_a_malformed_host_gets_the_generic_refusal(home):
+    r = _get(TestClient(_app()), "/health", "[::1")
+    assert r.json()["detail"] == security.HOST_REFUSED_DETAIL
+
+
+def test_host_docker_internal_is_not_accepted_by_default(home):
+    for bind in ("127.0.0.1", "0.0.0.0"):
+        r = _get(TestClient(_app(bind)), "/health", "host.docker.internal:8642")
+        assert r.status_code == 400, bind
+
+
+def test_host_docker_internal_is_accepted_once_listed(home, monkeypatch):
+    monkeypatch.setenv(security.ALLOWED_HOSTS_ENV, "host.docker.internal")
+    r = _get(TestClient(_app("0.0.0.0")), "/health", "host.docker.internal:8642")
+    assert r.status_code == 200
+
+
+def test_a_tailscale_name_that_comes_up_later_is_accepted_after_the_refresh_interval(
+        home, monkeypatch):
+    names = {"localhost", "mybox"}
+    calls = []
+
+    def _own(certfile=None, refresh=False):
+        calls.append(refresh)
+        return set(names)
+
+    clock = [1000.0]
+    monkeypatch.setattr(security, "own_host_names", _own)
+    monkeypatch.setattr(security, "_monotonic", lambda: clock[0])
+    client = TestClient(_app("0.0.0.0"))
+    assert _get(client, "/health", "mybox.tail1.ts.net").status_code == 400
+    names.add("mybox.tail1.ts.net")
+    clock[0] += security.HOST_POLICY_REFRESH_SECONDS - 1
+    assert _get(client, "/health", "mybox.tail1.ts.net").status_code == 400
+    clock[0] += 2
+    assert _get(client, "/health", "mybox.tail1.ts.net").status_code == 200
+    assert calls == [False, True]
+    assert _get(client, "/health", "evil.example").status_code == 400
+    assert calls == [False, True]
+
+
+def test_the_refresh_calls_tailscale_status_again(monkeypatch):
+    from localm import netname
+    refreshed = []
+    monkeypatch.setattr(netname, "tailscale_status",
+                        lambda refresh=False: refreshed.append(refresh) or None)
+    monkeypatch.setattr(netname, "cert_hostnames", lambda: [])
+    security.own_host_names(None, refresh=True)
+    security.own_host_names(None)
+    assert refreshed == [True]
+
+
+def test_concurrent_requests_share_one_build(home, monkeypatch):
+    import threading
+    import time
+
+    import httpx
+
+    built = []
+    entered = threading.Event()
+
+    def _slow(*a, **kw):
+        built.append(a)
+        entered.set()
+        time.sleep(0.2)
+        return security.HostPolicy(frozenset({"ok.example"}), frozenset(), False)
+
+    monkeypatch.setattr(security, "build_host_policy", _slow)
+    app = _app()
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://x") as c:
+            hosts = ["ok.example", "evil.example"] * 5
+            return await asyncio.gather(*(c.get("/health", headers={"host": h})
+                                          for h in hosts))
+
+    replies = asyncio.run(_run())
+    assert [r.status_code for r in replies] == [200, 400] * 5
+    assert len(built) == 1
+
+
 def test_the_policy_is_built_once_per_app(home, monkeypatch):
     built = []
     real = security.build_host_policy
@@ -376,7 +470,7 @@ def test_the_policy_is_built_once_per_app(home, monkeypatch):
     for _ in range(3):
         assert _get(client, "/health", "evil.example").status_code == 400
     assert _get(client, "/health", "localhost").status_code == 200
-    assert built == [("127.0.0.1", None)]
+    assert built == [("127.0.0.1", None, False)]
 
 
 def test_only_the_first_refusal_is_a_warning(home, caplog):

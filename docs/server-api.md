@@ -38,6 +38,17 @@ Ollama.
 The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
 on the same port; see [ollama-api.md](ollama-api.md).
 
+The server answers only to its own names: `localhost`, loopback addresses and,
+on a network bind, its IP addresses, host name, mDNS and Tailscale names and
+certificate names. A request with any other `Host` gets `400` with
+`{"detail": ..., "error": ...}` (both carry the same message, which names the
+refused host and the fix) before any route runs. A client that reaches localm
+under another name, such as a container calling `http://host.docker.internal:8642`
+or a reverse proxy that forwards its own host name, needs that name in the
+`allowed_hosts` setting or the `LOCALM_ALLOWED_HOSTS` environment variable,
+then a restart; see [docker.md](docker.md#a-client-in-a-container-hostdockerinternal)
+and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
+
 Open mode does not open the management routes. With no key configured, every
 state-changing request and every `GET` under `/api/` or `/v1/` outside the
 inference routes and the routes above that carry their own credential still
