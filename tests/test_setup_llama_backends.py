@@ -124,7 +124,10 @@ def test_auto_backend_mixed_amd_nvidia(monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="amd-rocm bundled build is Windows-only")
 def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
-    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["amd"], "vulkan"))
+    monkeypatch.setattr(
+        hwdetect, "detect",
+        lambda: hwdetect.Detection(vendors=["amd"], recommended="vulkan",
+                                   gpu_names="amd radeon rx 6800 xt"))
     assert sl._auto_backend() == "amd-rocm"
 
 

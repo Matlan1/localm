@@ -1471,6 +1471,7 @@ def test_a_failed_taskkill_after_a_clock_step_is_not_an_identity_mismatch(
     try:
         with job._lock, monkeypatch.context() as m:
             step_the_clock(m, a_forward_step_past_boot())
+            m.setattr("localm.sysprog.find", lambda name: name)
             m.setattr(bg.subprocess, "run", _taskkill_exits_255)
             m.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
             job._terminate(force=False)
