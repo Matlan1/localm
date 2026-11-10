@@ -15,8 +15,9 @@ def test_a_save_over_an_unreadable_file_keeps_the_good_backup(tmp_path):
     bak = tmp_path / "config.json.bak"
     bak.write_text('{"plugins_enabled": ["chat"], "n_ctx": 4096}', encoding="utf-8")
 
-    stored, read_ok = config._read_json_checked(path, {})
-    assert read_ok and stored == {"plugins_enabled": ["chat"], "n_ctx": 4096}
+    stored, state = config._read_json_state(path, {})
+    assert state == config.READ_FROM_BACKUP
+    assert stored == {"plugins_enabled": ["chat"], "n_ctx": 4096}
     stored["max_tokens"] = 1024
     config._atomic_write_json(path, stored)
 
