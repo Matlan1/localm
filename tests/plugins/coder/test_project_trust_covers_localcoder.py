@@ -367,10 +367,12 @@ def test_restricted_gui_session_cannot_remember(tmp_path):
 
     class _Req:
         text = "x"
+
+    from types import SimpleNamespace
+    request = SimpleNamespace(state=SimpleNamespace(coder_session=_S()))
     import asyncio
-    with patch.object(plug, "_get_session", return_value=_S()):
-        with pytest.raises(HTTPException) as e:
-            asyncio.run(plug.session_remember("id", _Req(), None))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(plug.session_remember("id", _Req(), request))
     assert e.value.status_code == 403
 
 
