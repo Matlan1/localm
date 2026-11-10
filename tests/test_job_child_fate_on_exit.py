@@ -33,7 +33,7 @@ import weakref
 import pytest
 
 from localm.inference import http_server as hs
-from localm.plugins.gui import jobs as J
+from localm import jobmanager as J
 
 
 # --------------------------------------------------------------------------- #

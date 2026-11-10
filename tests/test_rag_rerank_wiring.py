@@ -162,7 +162,7 @@ class TestRealReranker:
 def rag_app(home, fake_reranker, tmp_path):
     from fastapi import FastAPI
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     app = FastAPI()
     PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
     app.state.jobs = JobManager()
