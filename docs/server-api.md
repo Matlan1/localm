@@ -17,17 +17,19 @@ scoped key minted with `localm key create` / the GUI's key manager /
 public once a key exists. In open mode only `GET /api/session` is exempt from the
 management gate: `POST /api/session` without the GUI shell token is a 403 from that
 gate, and with it a 400 (there is no key to log in with). `POST /v1/surfaces/gui` and `GET /v1/instances/status`, `POST /v1/instances/status`, `POST
-/v1/instances/vouch` and `POST /v1/instances/cooperate-unload` take no bearer key
-either, but carry a credential of their own (an attach token or an instance
+/v1/instances/vouch` and `POST /v1/instances/cooperate-unload` are not gated by the
+route scopes below, but carry a credential of their own (an attach token or an instance
 vouch; see [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md)). Most authenticated
 routes also check the caller's key for a specific scope (noted per section
 below; the `admin` scope implies every other one). CORS is locked to
 localhost by default; widen it with the `cors_origins` config key. See
 [tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
-The OpenAI-compatible inference routes below (`/v1/chat/completions`,
-`/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/v1/audio/transcriptions` and
-`/v1/images/generations`) are the one exception: they accept a
+The inference routes below (`/v1/chat/completions`, `/v1/completions`,
+`/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/v1/embeddings`,
+`/v1/rerank`, `/v1/audio/transcriptions`, `/v1/audio/speech` and
+`/v1/images/generations`, and the Ollama routes `/api/chat`, `/api/generate`,
+`/api/embed`, `/api/embeddings` and `/api/show`) are the exception: they accept a
 cross-origin request from any local app - LM Studio/Ollama-style clients and
 AI browsers included - without needing `cors_origins` widened first, so
 pointing one at localm works the same way it would against LM Studio or
@@ -505,8 +507,11 @@ covered.
 
 Scope: any valid key (no specific scope required once auth is enabled).
 
-Raw text completion (streaming and non-streaming), same request extras as
-chat. Its usage block is narrower than chat's - see the table above.
+Raw text completion (streaming and non-streaming). Of the chat extras it takes
+`top_k`, `repeat_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy` and
+`grammar_triggers`) and `cache_prompt`; `tools`, `response_format`,
+`chat_template_kwargs` and the routing fields are chat-only and are ignored
+here. Its usage block is narrower than chat's - see the table above.
 `prompt` is one string, or a list holding exactly one string. `echo: true`
 starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
 `min_p` and `stream_options` work as on chat. `logprobs` (0 to 20) returns the
@@ -792,8 +797,9 @@ generation failed or did not end within its frame budget, `409` cancelled.
 
 Scope: `models:read`.
 
-Lists every registered model (and the startup model when it is not
-registered) as `{"object": "list", "data": [{"id", "object": "model",
+Lists the registered models (and the startup model when it is not
+registered), leaving out support files such as projectors, VAEs, text encoders
+and LoRAs and entries of type `unknown`, as `{"object": "list", "data": [{"id", "object": "model",
 "created", "owned_by", "loaded", "active"}]}`, each row also carrying `vision`
 and `audio_input` (true or false) when the model's files could be inspected.
 `GET /v1/models/{id}` (same
@@ -947,10 +953,11 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
-`GET /v1/config` returns the whole config plus seven read-only extras:
+`GET /v1/config` returns the whole config plus eight read-only extras:
 `effective_mode`, `effective_chat_mode`, `effective_coder_mode`,
-`effective_ctx_max`, `effective_ctx_model`, `instance_id` and `instance_port`.
-PATCH ignores those seven, so a client can send back what it read, and returns
+`effective_ctx_max`, `effective_ctx_model`, `effective_ctx_model_key`,
+`instance_id` and `instance_port`.
+PATCH ignores those eight, so a client can send back what it read, and returns
 the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them
@@ -1005,7 +1012,8 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/issues` | `config:read` | List the bug reports this install filed, newest first (up to 30), each looked up by number through the bug-report proxy. Takes no parameters. Returns `{"available": true, "issues": [...], "persisted": bool, "issues_url": "..."}`, or `{"available": false, "issues": []}` when no tracker is configured. Each row is `{number, title, state, closed_at, html_url}`; a row whose lookup failed or found nothing carries an `error` string instead of `state`, and so does a row the lookups did not reach within their 30 second budget. `persisted` is false when the record of filed numbers is kept in memory only (privacy mode). |
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. Returns `{"available": true, "current", "latest", "newer", "comparable", "notes", "published_at", "asset", "signature"}`; `{"available": false}` when no updater is configured; `{"available": true, "error": "..."}` when the check fails. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. Returns `{"available": true, "version", "markdown"}` with the released history and without the `[Unreleased]` section, or `{"available": false}` when the file is absent from this build. |
-| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
+| `GET /api/update/releases` | `config:read` | The releases that can be installed. Read-only. Returns `{"available": true, "current", "releases"}`, or `{"available": false}` when no updater is configured. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. A JSON body `{"version": "<V>"}` installs that release instead of the latest, older ones included; that form needs an owner (`admin`) key (403 otherwise) and answers 400 for an invalid `version` or `sha256`. A build whose signature does not verify is not installed: the reply is `{"applied": false, "needs_confirmation": "unverified", "version", "reason", "sha256"}`, and repeating the request with `"allow_unverified": true` and that `sha256` installs it. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
 | `GET /api/update/parts` | `config:read` | Which version each part of the install is at against the installed localm version. Read-only. Returns `{"app", "install_record", "install_record_matches", "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent", "last_steps"}`: `install_record` is the version of localm's record in its environment (null when there is none to compare), `runtime` is `{"backend", "current", "target", "matches"}`, each `components` entry is `{"name", "label", "current", "target", "matches"}`, `problems` has one line per part that differs, and `last_steps` lists the runtime and component update results of the last day as `{"part", "state", "note", "at"}` (both scrubbed for a scoped key). |
 | `POST /api/update/repair` | `admin` | Bring every part of the install to the installed localm version: reinstall its packages when they differ (put back as they were if that fails), then re-provision the native runtime and update the components during the restart that follows. Returns `{"repaired": true, "notes", "restarting"}`, or `{"repaired": false, "error"}` when a step failed; 403 for a key without `admin`. |
 | `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `{"available", "backup", "version", "current"}`, with `version` null when the backup does not record one. `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
@@ -1136,9 +1144,9 @@ a trust boundary and are owner-only; see the note under
 ## Plugin management endpoints
 
 These endpoints are present under `localm serve` too, not just `localm gui`.
-They are scope-gated: `GET /api/plugins` requires `PLUGINS_READ`, and the
-mutations require `PLUGINS_ADMIN` - except the install-deps event stream
-below, which is a `GET` that also requires `PLUGINS_ADMIN`. A `{name}` that is
+They are scope-gated: `GET /api/plugins` requires `plugins:read`, and the
+mutations require `plugins:admin` - except the install-deps event stream
+below, which is a `GET` that also requires `plugins:admin`. A `{name}` that is
 not a legal plugin id is a 404 on every `{name}` route.
 
 ### `GET /api/plugins`
@@ -1182,16 +1190,16 @@ unknown name returns 200 the same as a real one.
 
 ### `POST /api/plugins/install-external`
 
-`PLUGINS_ADMIN` scope, same as the routes above. Installs a third-party
+`plugins:admin` scope, same as the routes above. Installs a third-party
 plugin from a local directory (`{"source": "/path/to/plugin"}`, which must
 contain a `plugin.toml`; `force` replaces an installed copy) - the HTTP sibling
-of `localm plugin install <dir>`. The plugin loads on the next server start.
+of `localm plugin install <dir>`. The plugin is loaded the next time `GET /api/plugins` is called, with no restart.
 Returns `{"status": "installed", "name", "version"}`; a missing `source`, a
 directory without a `plugin.toml`, or a rejected plugin is a 400.
 
 ### `POST /api/plugins/{name}/install-deps` / `GET /api/plugins/{name}/install-deps/events`
 
-`PLUGINS_ADMIN` scope. Installs a plugin's pip extras on this host (the HTTP
+`plugins:admin` scope. Installs a plugin's pip extras on this host (the HTTP
 sibling of `localm plugin install-deps NAME`). The POST starts the install in the
 background and returns `{"status": "running"|"done"|"error", "name", "missing",
 "lines"}`; an unknown plugin is a 404. Both routes are a 403 on a server bound
@@ -1203,7 +1211,9 @@ when no install was ever started for that plugin.
 
 ### `POST /api/models/packages/plan` / `POST /api/models/packages/install` / `GET /api/models/packages/install/events`
 
-`PLUGINS_ADMIN` scope, and a 403 on a server bound beyond loopback. These add the
+GUI routes: unlike the plugin routes above, they exist only under `localm gui`
+(or once a `localm gui` has attached to a running `localm serve`).
+`plugins:admin` scope, and a 403 on a server bound beyond loopback. These add the
 Python packages a trusted Hugging Face model's own code needs (the HTTP sibling of
 `localm install-packages`). A row of `GET /api/models` carries `packages: {"missing",
 "addable", "installable"}` when its code needs packages this install lacks.
@@ -1224,7 +1234,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
@@ -1334,7 +1344,7 @@ namespace.
 | `DELETE /api/memory/{id}` | Delete one record. Returns `{"status", "id"}` with `status` `deleted` or `absent`; an unknown id is a `200` with `absent`. |
 | `POST /api/memory/corrections/{id}/accept` | Apply a proposed correction (the auto-synthesis job spotted a new fact that contradicts a saved one): replaces or deletes the target record, archiving its old value. Returns `{"status", "id", "target_id", "action"}` with `status` `updated`, `deleted` or `target_gone`; `404` for an unknown correction, `500` when the old value could not be archived (nothing is applied). |
 | `POST /api/memory/corrections/{id}/reject` | Discard a proposed correction, leaving the target record untouched. Returns the same object with `status` `rejected` or `target_gone`, and fails like accept. |
-| `POST /api/memory/consolidate` | Distil durable facts from recent sessions now; `503` until a model is loaded. Returns `{"status", "added", "updated", "deleted", "proposed", "pending", "episodic", "pruned", "facts"}`, or `{"status": "skipped", "reason": "no_sessions", "added": 0}` when there is no session to read. |
+| `POST /api/memory/consolidate` | Distil durable facts now, from the conversation in the optional body `{"messages": [{"role", "content"}, ...]}` or, without one, from recent sessions; `503` until a model is loaded, `500` when the model's reply held no fact list. Returns `{"status", "added", "updated", "deleted", "proposed", "pending", "episodic", "pruned", "facts"}`, or `{"status": "skipped", "reason": "no_sessions", "added": 0}` when there is no session to read. |
 | `GET /api/memory/forgotten` | Archived (forgotten) records available for recovery - read-only, available even in privacy mode. Returns `{"items": [{"id", "text", "importance", "source", "kind", "forgotten_at"}]}`. |
 | `POST /api/memory/forgotten/{id}/restore` | Recover one archived record back into the live store; `404` if no matching archive entry exists. Returns `{"status": "restored", "item"}`. |
 
@@ -1423,8 +1433,11 @@ for chunk in stream:
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the
   ceiling get a clear error instead of an OOM.
-- **GUI-only routes**: only a handful of `/api/models/*` model-switching
-  routes are actually gated behind `localm gui`. Everything else
+- **GUI-only routes**: the routes the GUI surface itself adds exist only under
+  `localm gui` (or after one attaches to a running `localm serve`): the
+  `/api/models/*` management routes, `/api/fs/*`, `/api/doctor`, `/api/stats`,
+  `/api/upload`, `/api/comfy/*`, `/api/runtime/*` and `/api/pairing/qr` among
+  them. Everything
   plugin-contributed - coder sessions (`/api/coder/*`), the Knowledge routes
   above, image/music/video generation, and the `/api/plugins*` management
   routes above - mounts the moment its plugin is enabled, on a headless

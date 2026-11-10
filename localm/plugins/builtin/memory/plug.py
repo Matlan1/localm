@@ -138,9 +138,11 @@ def _home() -> Path:
 def _persist_enabled() -> bool:
     """Memory recall AND writes are off in privacy mode (the default). Unlike the
     rest of the app, memory treats privacy as FULLY off: this gates recall too, so
-    no past facts are injected in privacy mode (not just "no new traces")."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    no past facts are injected in privacy mode (not just "no new traces"). A
+    request that carries privacy mode to a server in another mode
+    (``audit.request_is_privacy``) counts as privacy mode."""
+    from localm.audit import SessionMode, effective_mode, request_is_privacy
+    return not request_is_privacy() and effective_mode("chat") != SessionMode.PRIVACY
 
 
 def _recall_enabled() -> bool:
@@ -282,9 +284,13 @@ async def _off_loop(fn, *, embedder_bound: bool = True):
     timeout. Pass embedder_bound=False only for a call that never resolves the
     embedder (e.g. memory_delete), so it never queues behind an unrelated
     embedder load. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
+
+    *fn* runs inside the caller's ``audit.request_privacy`` scope, if any.
     """
+    from localm.audit import carry_request_privacy
     from localm.rag.collection_lock import CollectionLockedError
     loop = asyncio.get_running_loop()
+    fn = carry_request_privacy(fn)
     try:
         if embedder_bound:
             from localm.inference import http_server as _hs

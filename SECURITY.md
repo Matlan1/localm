@@ -60,7 +60,7 @@ A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
 `auth.key` by hand) can be short or memorable, so its fingerprint - recorded in
 `sessions.json` and `jobs.json` to check ownership - uses a slow, salted
 derivation (scrypt) rather than a fast hash, so it cannot be brute-forced
-offline from those files. A key localm generates for you is random and long
+offline from those files. A named key localm generates (`localm key create`) is random and long
 enough that this does not matter, and keeps using the cheap path.
 `localm key set` / `POST /api/auth/key/rotate` refuse a key under 8 characters
 outright; that floor is enforced only when the key is CHOSEN through localm,
@@ -338,13 +338,12 @@ this section states the security properties and, more importantly, their edges.
   update check run regardless of `off`. `net_allow_model_downloads` lets the
   downloads you trigger yourself proceed under `off`: model pulls and
   HuggingFace search, the vision-projector, voice, embedding-model, browser-build
-  and TTS model fetches. It never applies to model-initiated access (the
+  and TTS model fetches, and the native runtime downloads (`localm setup-llama`,
+  `localm setup-sdcpp`, `localm setup-music`). It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
-  bug-report upload (sent only when you press Send), requests to your
-  configured ComfyUI (see *What it does not cover* above), and the native
-  runtime downloads (`localm setup-llama` and the native image and music
-  runtimes). Nothing else opts out of `off`; the issues list is refused under
+  bug-report upload (sent only when you press Send), and requests to your
+  configured ComfyUI (see *What it does not cover* above). Nothing else opts out of `off`; the issues list is refused under
   it.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
@@ -387,8 +386,8 @@ and search snippets are untrusted input to the model, and
   loopback bind is plain HTTP and generates no certificate at all, which is why
   a normal local install has none.
 - **What the certificate covers.** The SANs are built from this host's own
-  addresses (via the OS resolver), its primary outbound LAN address, any
-  Tailscale address, and the mDNS/Tailscale MagicDNS names - all stdlib-only,
+  addresses (via the OS resolver), its primary outbound LAN address (a
+  Tailscale address only when the OS resolver returns it), and the mDNS/Tailscale MagicDNS names - all stdlib-only,
   so this works with no optional dependency. Reaching localm over a VPN or
   overlay network may therefore land on an address the certificate does not
   name. A VPN's own tunnel adapter is deliberately excluded from the LAN
@@ -396,7 +395,8 @@ and search snippets are untrusted input to the model, and
   (psutil) widens a *different*, non-security-relevant address list - the
   addresses shown on the phone-pairing card - not the certificate's SANs.
 - **Regeneration.** The leaf is regenerated when it no longer covers a required
-  name, not on every address change.
+  name or address, nears expiry (about 30 days before), or no longer chains to
+  the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
   the moment they exist, then restricted to the current user: `chmod` on
   POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
@@ -482,8 +482,9 @@ GET is a read-only check for whether a backup exists and which build it would
 restore; the POST requires the `admin` scope specifically (not merely
 `config:write`) and restores the previous build's files from the local backup
 with **no signature check and no network request** - it is not a download, so
-the signing model above does not apply to it. It restores files only, not a
-deps-class update's package installs.
+the signing model above does not apply to it. It restores every part the update replaced: the files,
+the virtual environment as it was before the update's dependency step, the
+native runtime and the components.
 
 **A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
 checks a downloaded release Asset (`localm-<version>.zip` plus its signature envelope,

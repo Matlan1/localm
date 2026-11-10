@@ -10,7 +10,8 @@ features except this small static catalog, which lets it:
      commands but it is not installed ("that needs the image plugin - install
      it?"). The suggestion can be turned off (config: suggest_plugins=False).
   2. Resolve WHERE to install a first-party plugin from: the bundled store on
-     disk, or - if the plugin is missing from the store - its known GitHub repo.
+     disk. A plugin missing from the store has no source today; install raises
+     NotImplementedError when the entry carries a repo URL and KeyError otherwise.
   3. List what is available to install (the catalog minus what is installed).
 
 This module holds NO plugin code and imports nothing heavy; it is just data.
@@ -22,9 +23,8 @@ import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
-# Base for first-party plugin repos. Left blank until the plugins are published
-# to their own repos; the install fallback only tries GitHub when a repo is set
-# (until then a first-party plugin is always sourced from the bundled store).
+# Base for first-party plugin repos; blank, so a first-party plugin is always
+# sourced from the bundled store. A set repo URL is not fetched.
 GITHUB_BASE = ""
 
 

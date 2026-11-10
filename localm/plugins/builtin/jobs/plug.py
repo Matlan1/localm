@@ -494,7 +494,8 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
                 store.release_claim(job_id, claimed.claim)
                 raise
 
-    result = await loop.run_in_executor(None, _run_guarded)
+    from localm.audit import carry_request_privacy
+    result = await loop.run_in_executor(None, carry_request_privacy(_run_guarded))
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")

@@ -407,9 +407,9 @@ family):
 - **Fresh rebuild** (old DLLs, or when the request outgrows the live context):
   the context is freed and re-created at the next dynamic-window size
   (`n_ctx_grow` steps up to `n_ctx_max`), then the full prompt is prefilled.
-- Prefill is chunked to a fixed 2048-token constant, not the context's actual
-  `n_batch` (which is `min(n_ctx, 2048)` and can be smaller on a small-context
-  configuration): a single oversized `llama_decode` batch aborts the native
+- Prefill is chunked to at most 2048 tokens: a fixed 2048-token constant on the
+  reuse and full-clear paths, and the new context's `n_batch`
+  (`min(n_ctx, 2048)`) after a rebuild: a single oversized `llama_decode` batch aborts the native
   process rather than returning an error.
 
 ```
@@ -779,7 +779,7 @@ Many models signal end-of-turn with multi-token sequences (e.g. `<|im_end|>` →
 - When a complete stop string appears anywhere in the buffer, yields the text before it and returns
 - Flushes the remaining buffer at end-of-stream
 
-Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`. For a harmony (gpt-oss) vocabulary, where `<|return|>` and `<|call|>` each tokenize to a single end-of-generation token, `<|end|>` is dropped from the set (`model_stop_strings`): there it ends one message of a reply, not the reply.
+Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`, `<|role_end|>`. For a harmony (gpt-oss) vocabulary, where `<|return|>` and `<|call|>` each tokenize to a single end-of-generation token, `<|end|>` is dropped from the set (`model_stop_strings`): there it ends one message of a reply, not the reply.
 
 ### Sampler chain
 
