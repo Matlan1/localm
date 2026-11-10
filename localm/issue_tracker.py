@@ -98,8 +98,8 @@ def _privacy_mode() -> bool:
     """True when nothing may be written to disk. An unresolvable mode counts as
     privacy mode."""
     try:
-        from localm.audit import SessionMode, effective_mode
-        return effective_mode("server") == SessionMode.PRIVACY
+        from localm.audit import automatic_write_allowed
+        return not automatic_write_allowed("server")
     except Exception:
         return True
 
