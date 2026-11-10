@@ -456,7 +456,8 @@ def detect_context_params_layout(
         if moe is None:
             assumed = True
             notes.append(
-                "context_params moe_cache probe was inconclusive; assuming "
+                "context_params moe_cache_size / moe_cache_cpu_share probe was "
+                "inconclusive; assuming "
                 f"the {CONTEXT_PARAMS_V2} llama_context_params layout")
         else:
             layout = moe
