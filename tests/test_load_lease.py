@@ -138,8 +138,12 @@ def test_a_reused_pid_with_another_start_identity_is_reclaimed(tmp_path):
         _write_lease(root, "gpu0", {"pid": child.pid, "space": instances.pid_space_id(),
                                     "start": other, "token": "old"})
         taken = load_lease.acquire(["gpu0"], timeout=0.5, root=root)
-        load_lease.release(taken, root=root)
+        try:
+            rec = json.loads((root / "gpu0.lease" / "owner.json").read_text())
+        finally:
+            load_lease.release(taken, root=root)
         assert taken == ("gpu0",)
+        assert rec["token"] == load_lease._TOKEN
     finally:
         child.kill()
         child.wait()
