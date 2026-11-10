@@ -44,14 +44,6 @@ echo
 echo "  LocaLM graphical setup"
 echo
 
-# A headless box (no DISPLAY) has no window to show: say so and point at the
-# console installer, before any question is asked or uv is installed.
-if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
-    echo "      Use the console installer instead:  ./setup.sh"
-    exit 1
-fi
-
 # ---- portable vs shared: where localm's Python tooling lives ----------------
 # The question setup.sh asks, asked once, here. The window reads the answer from
 # LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV, and
@@ -100,6 +92,14 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     rm -rf "$UVTMP"
     rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
+
+# A headless box (no DISPLAY) has no window to show: say so and point at the
+# console installer, before any question is asked or uv is installed.
+if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
+    echo "      Use the console installer instead:  ./setup.sh"
+    exit 1
+fi
 
 echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
