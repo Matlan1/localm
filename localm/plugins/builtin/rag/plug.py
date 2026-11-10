@@ -44,7 +44,7 @@ import base64
 import json
 from pathlib import Path
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -1553,7 +1553,7 @@ async def rag_extract(req: RagExtractRequest):
             "truncated": len(text) > max_chars}
 
 
-_host = None
+_host: Any = None
 
 
 def register(host) -> None:
