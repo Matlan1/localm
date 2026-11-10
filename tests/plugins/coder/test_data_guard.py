@@ -8,6 +8,7 @@ explicit approval of that exact call, and is denied when no one can be asked.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -247,7 +248,11 @@ def test_auto_approved_write_cannot_change_the_settings(keyed):
         _call("write_file", path=str(cfg), content='{"require_auth": false}'),
         interactive=False)
     assert not result.ok
-    assert cfg.read_text(encoding="utf-8") == '{"require_auth": true}'
+    # Building the Agent discovers plugins, which provisions and enables the
+    # protected chat plugin in config.json; only the model's write is refused.
+    stored = json.loads(cfg.read_text(encoding="utf-8"))
+    assert stored["require_auth"] is True
+    assert set(stored) <= {"require_auth", "plugins_enabled"}
 
 
 def test_the_approval_handler_is_asked_for_that_exact_call(keyed):
