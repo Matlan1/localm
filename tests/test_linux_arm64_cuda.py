@@ -138,13 +138,15 @@ def test_cudart_for_an_unpinned_tag_with_no_listing_is_refused(machine):
         sl._resolve_linux_cudart_asset("b1", "cuda-13")
 
 
-def test_cudart_digest_comes_from_the_listing_when_it_has_one(machine):
+def test_a_cudart_listing_digest_that_disagrees_with_the_pin_is_refused(machine):
+    from localm.setup_llama.download import ArtifactError
     rows = _listing()
     for row in rows:
         if row["name"] == CUDART:
             row["digest"] = "sha256:" + "ab" * 32
     machine("arm64", rows)
-    assert sl._resolve_linux_cudart_asset(PIN, "cuda-13")[1] == "ab" * 32
+    with pytest.raises(ArtifactError):
+        sl._resolve_linux_cudart_asset(PIN, "cuda-13")
 
 
 # ------------------------------ provisioning -------------------------------- #

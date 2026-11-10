@@ -24,17 +24,12 @@ LOCAL_ORIGIN_PATTERN = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 
 
 def normalise_host(host) -> str:
-    """*host* as the local-host predicates compare it: stripped, lower-cased,
-    one pair of IPv6 square brackets removed. A non-string or empty value is
-    ``""``. A trailing dot (``localhost.``) and non-dotted-quad IPv4 spellings
-    (``2130706433``, ``127.1``) are left as they are, so none of the predicates
-    below treats them as local."""
-    if not isinstance(host, str):
-        return ""
-    h = host.strip().lower()
-    if h.startswith("[") and h.endswith("]"):
-        h = h[1:-1]
-    return h
+    """*host* as the local-host predicates compare it: the string itself, or
+    ``""`` for a non-string. Nothing else is rewritten: case, surrounding
+    whitespace, IPv6 square brackets, a trailing dot (``localhost.``) and
+    non-dotted-quad IPv4 spellings (``2130706433``, ``127.1``) all make a host
+    non-local in every predicate below."""
+    return host if isinstance(host, str) else ""
 
 
 def is_loopback_host(host: str) -> bool:

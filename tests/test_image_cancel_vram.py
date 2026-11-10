@@ -150,7 +150,7 @@ def test_generate_reports_done_when_reload_raises_after_success(monkeypatch):
     req = plug.ImagineRequest(prompt="a cat")
     asyncio.run(plug.imagine(req, request))
 
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     real_job = JobManager().start_fn("imagine", captured["fn"])
     _wait_for_terminal(real_job)
 

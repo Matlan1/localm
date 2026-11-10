@@ -1372,7 +1372,8 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     if not model:
         raise HTTPException(400, "No model given")
     import localm.inference.http_server as _hs
-    if not _hs.caller_is_operator(request):
+    is_owner = _hs.caller_is_operator(request)
+    if not is_owner:
         raise HTTPException(
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "
@@ -1393,7 +1394,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     jobs = _require_jobs(request)
 
     def _setup(job):
-        from localm.config import update_config
+        from localm.config_write import set_global_config_key
         from localm.inference.embedder import (
             get_embedder, last_error, reset_embedder, resolve_embedding_model_path)
 
@@ -1402,7 +1403,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
         # Persist the choice and drop any cached embedder so the running server
         # switches to the new model without a restart.
-        update_config(lambda c: c.__setitem__("embedding_model", model))
+        set_global_config_key("embedding_model", model, is_owner=is_owner)
         reset_embedder()
         line(f"Selected embedding model: {model}")
         # Resolve, downloading an internal key if it is not on disk yet (the

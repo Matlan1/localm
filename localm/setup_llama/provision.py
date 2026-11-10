@@ -12,7 +12,7 @@ from typing import Optional
 import click
 
 from localm.setup_llama._common import console
-from localm.setup_llama.pins import _PINNED_FALLBACK_SHA256, _PINNED_TAG
+from localm.setup_llama.pins import _PINNED_TAG
 from localm.setup_llama.download import _human_mb, ArtifactError
 from localm.setup_llama.runtime_dir import _exit_runtime_in_use, RuntimeInUseError
 from localm.setup_llama.versions import _tag_for, tracks_latest
@@ -67,12 +67,8 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             _sl._fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
             return tag
 
-        # Resolve build sha256
-        build_digest = build.get("digest")
-        build_sha = build_digest.split("sha256:")[-1].strip() if build_digest and "sha256:" in build_digest else None
-        if not build_sha:
-            build_sha = _PINNED_FALLBACK_SHA256.get(build["name"])
-        
+        build_sha = _sl._asset_sha256(build)
+
         console.print(f"[dim]CUDA build:[/dim] {build['name']} ({_human_mb(build.get('size'))})")
         _sl._fetch_verified(build["browser_download_url"], target, sha256 or build_sha, "CUDA build asset")
         if cudart is not None:
@@ -82,12 +78,8 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                 # by the pinned digest (upstream publishes no per-asset hash here).
                 console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only.")
             
-            # Resolve cudart sha256
-            cudart_digest = cudart.get("digest")
-            cudart_sha = cudart_digest.split("sha256:")[-1].strip() if cudart_digest and "sha256:" in cudart_digest else None
-            if not cudart_sha:
-                cudart_sha = _PINNED_FALLBACK_SHA256.get(cudart["name"])
-            
+            cudart_sha = _sl._asset_sha256(cudart)
+
             console.print(f"[dim]CUDA runtime:[/dim] {cudart['name']} "
                           f"({_human_mb(cudart.get('size'))}) - no Toolkit install needed")
             _sl._fetch_and_place(cudart["browser_download_url"], target, cudart_sha)

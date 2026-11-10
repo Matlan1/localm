@@ -12,12 +12,18 @@ CDN. Each keeps its own license:
 
 | Component | Used for | License | Copyright |
 |---|---|---|---|
-| marked | Markdown rendering | MIT | (c) 2018-2026 MarkedJS, (c) 2011-2018 Christopher Jeffrey |
+| marked | Markdown rendering | MIT | (c) 2018-2026 MarkedJS, (c) 2011-2018 Christopher Jeffrey; its license file also carries the Markdown notice, (c) 2004 John Gruber |
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
 | KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2020 Khan Academy and other contributors |
 | Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
 | jsQR | QR-code camera scanning (phone pairing) | Apache-2.0 | (c) Cosmo Wolfe and contributors |
+
+Each license text sits beside the vendored files in
+`localm/plugins/gui/static/vendor/`, copied unchanged from the upstream release
+that is vendored: `LICENSE.marked`, `LICENSE.dompurify` (Apache-2.0) and
+`LICENSE.dompurify-mpl` (MPL-2.0), `LICENSE.highlightjs`, `LICENSE.katex`,
+`LICENSE.jsqr` and `inter/OFL.txt`.
 
 The TTS plugin vendors a separate browser bundle (`kokoro.min.js`) under
 `localm/plugins/builtin/tts/static/vendor/`. Its components and licenses are
@@ -56,8 +62,8 @@ binaries also ships their license text:
 
 | Component | License |
 |---|---|
-| llama.cpp | MIT (c) 2023-2024 The ggml authors |
-| ggml | MIT (c) 2023-2024 The ggml authors |
+| llama.cpp | MIT (c) 2023-2026 The ggml authors |
+| ggml | MIT (c) 2023-2026 The ggml authors |
 | AMD ROCm runtime libraries (GPU builds) | Permissive (MIT / BSD-style); see AMD's distribution |
 | libgomp (GCC's OpenMP runtime, Linux; from Debian's `libgomp1` package) | GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1; `setup-llama` writes the notice beside it as `LICENSE.libgomp` |
 
@@ -65,7 +71,20 @@ Two more native runtimes are downloaded from their upstream releases at the
 user's request and are not redistributed by this repository:
 stable-diffusion.cpp (MIT; `localm setup-sdcpp`, loaded into a localm worker
 process) and KoboldCpp (AGPL-3.0; `localm setup-music`, run as a separate
-program, see the arm's-length section below).
+program, see the arm's-length section below). localm unpacks each as upstream
+ships it and adds or removes no license file: the stable-diffusion.cpp archive
+carries `stable-diffusion.cpp.txt` and `ggml.txt` (both MIT texts), and the
+KoboldCpp runtime carries `LICENSE.md` (AGPL-3.0) and a `vendor_licenses/`
+folder; both stay in the runtime folder beside the binaries.
+
+The NVIDIA CUDA runtime libraries (cudart and cuBLAS) are proprietary, not open
+source. They are downloaded only when the user picks a CUDA build
+(`localm setup-llama --backend cuda`, `localm setup-sdcpp --backend cuda`): from
+NVIDIA's own PyPI packages (`nvidia-cuda-runtime`, `nvidia-cublas` and their
+`-cu12` variants, which declare `LicenseRef-NVIDIA-Proprietary`) on Linux, and
+from the `cudart` bundle of the upstream llama.cpp or stable-diffusion.cpp
+release on Windows. They are not part of this repository, and localm copies the
+library files without a license file; NVIDIA's CUDA license terms apply to them.
 
 ## Python dependencies (installed from PyPI, not redistributed here)
 

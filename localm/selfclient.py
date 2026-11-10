@@ -240,20 +240,6 @@ def resolve_self_url(app) -> Optional[str]:
     return None
 
 
-def local_request(method: str, url: str, *, timeout, **kwargs) -> requests.Response:
-    """The one helper for requests to this machine's own server and to peer
-    instances on loopback: ``requests`` with redirects off. A 3xx response is
-    returned to the caller, never followed. Callers cannot pass
-    ``allow_redirects``."""
-    kwargs["allow_redirects"] = False
-    verb = method.upper()
-    if verb == "GET":
-        return requests.get(url, timeout=timeout, **kwargs)
-    if verb == "POST":
-        return requests.post(url, timeout=timeout, **kwargs)
-    return requests.request(verb, url, timeout=timeout, **kwargs)
-
-
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None,
                   instance_token: Optional[str] = None) -> requests.Response:
@@ -289,5 +275,6 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     headers = resolve_bearer_headers(instance_token)
     from localm import tls as _tls
     url = f"{base_url}{path}"
-    return local_request(method, url, json=json, headers=headers,
-                         timeout=timeout, verify=_tls.requests_verify(url))
+    return requests.request(method, url, json=json, headers=headers,
+                            timeout=timeout, verify=_tls.requests_verify(url),
+                            allow_redirects=False)

@@ -414,7 +414,7 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
         verify = requests_verify(url)
     except FileNotFoundError:
         verify = False
-    from localm.selfclient import local_request
+    from localm.loopback_http import local_request
     resp = local_request("GET", _peer_url(probe, "/api/session"),
                          headers=_auth_headers(api_key), timeout=timeout,
                          verify=verify)
@@ -489,7 +489,7 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
         verify = False
     headers = {**_auth_headers(api_key), SESSION_MODE_HEADER: SessionMode(mode).value}
     try:
-        from localm.selfclient import local_request
+        from localm.loopback_http import local_request
         resp = local_request("GET", url, headers=headers, timeout=timeout,
                              verify=verify)
     except requests.RequestException as e:
@@ -632,7 +632,7 @@ async def forward(route: PeerRoute, request, path: str, *,
     except FileNotFoundError:
         verify = False
 
-    from localm.selfclient import local_request
+    from localm.loopback_http import local_request
 
     def _send():
         return local_request(

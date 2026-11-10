@@ -21,6 +21,15 @@ headroom, with no per-device split shortfall. Anything else falls back to
 single-resident. A wrong PERMIT ends in a native OOM or a driver TDR, not a
 graceful error.
 
+Scope: admission is single-process. The free-VRAM reading and the decision are
+not a reservation, so two localm processes that read before either allocates
+can both admit. Other instances are only asked to unload through
+``localm.gpu_registry``, which finds them by listening port and so never sees a
+process that does not listen (``localm run``, ``localm job run``, the stdio MCP
+server). The embedder and reranker are not residents here: an embedder load
+asks the chat owners to unload (``localm.vram.evict_chat_for_embedder``), but
+admission never treats a loaded embedder as a resident it could evict.
+
 Two optional knobs sit on top of the VRAM arithmetic, both OFF by default:
 
     max_resident_models  cap the number of concurrent resident chat models

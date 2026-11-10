@@ -117,7 +117,7 @@ class _Resp:
         self.status = status
         self._body = body.encode("utf-8")
 
-    def read(self) -> bytes:
+    def read(self, n=-1) -> bytes:
         return self._body
 
     def __enter__(self):

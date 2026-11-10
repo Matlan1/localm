@@ -46,6 +46,7 @@ _CLASSIFIED = {
     ("inference/http_engine.py", "remote_model_status"): "operator-cli",
     ("instances.py", "fetch_any_whoami"): "peer",
     ("media/comfy_client.py", "comfy_port_holder"): "comfy",
+    ("media/comfy_client.py", "_localm_unload"): "self",
     ("media/koboldcpp/server.py", "_Server.__init__"): "fixed-host",
     ("netpin.py", "pinned_session"): "fixed-host",
     ("plugins/coder/backends/http.py", "_post_with_retry"): "operator-cli",
@@ -59,7 +60,8 @@ _CLASSIFIED = {
     ("plugins/gui/cli.py", "_serve_beside_native_window"): "fixed-host",
     ("selfclient.py", "read_activity"): "self",
     ("selfclient.py", "read_model_file_hold"): "self",
-    ("selfclient.py", "local_request"): "self",
+    ("loopback_http.py", "local_request"): "self",
+    ("selfclient.py", "self_request"): "self",
 }
 
 
@@ -152,7 +154,7 @@ def test_every_raw_outbound_call_site_is_classified():
     unclassified = sorted(_all_sites() - set(_CLASSIFIED))
     assert not unclassified, (
         "raw outbound call sites with no class word in _CLASSIFIED (route the "
-        "request through netpolicy, selfclient.local_request or verified_urlopen, "
+        "request through netpolicy, loopback_http.local_request or verified_urlopen, "
         f"or classify it here): {unclassified}")
 
 

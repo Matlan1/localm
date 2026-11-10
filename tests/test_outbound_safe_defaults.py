@@ -12,7 +12,7 @@ import requests
 
 from localm import bindhost, netpolicy, peer_routing
 from localm import http_ssl
-from localm.selfclient import local_request
+from localm.loopback_http import local_request
 
 
 # --------------------------------------------------------------------------- #
@@ -238,10 +238,10 @@ _AGREEMENT = {
     "127.0.0.1": (True, False, True, True),
     "127.0.0.2": (True, False, True, True),
     "::1": (True, False, True, True),
-    "[::1]": (True, False, True, True),
+    "[::1]": (False, False, False, False),
     "localhost": (True, False, True, True),
-    "LOCALHOST": (True, False, True, True),
-    " localhost ": (True, False, True, True),
+    "LOCALHOST": (False, False, False, False),
+    " localhost ": (False, False, False, True),
     "0.0.0.0": (False, True, True, True),
     "::": (False, True, True, True),
     "": (False, False, False, True),

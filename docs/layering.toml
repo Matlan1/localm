@@ -48,6 +48,11 @@ role = "Model inference (engine, backends, the HTTP server and its routes) and G
 units = ["inference", "discover"]
 
 [[tier]]
+name = "jobs"
+role = "The background job manager: job subprocesses, their event stream, the job registry and the exit-time child cleanup. Below the server, the engine and every plugin that reports progress, above the model registry whose progress markers it parses."
+units = ["jobmanager"]
+
+[[tier]]
 name = "models"
 role = "The model registry (selection, pull, scan) and the ComfyUI generation backends. Peers: the three generators share the media runtime below and never import each other or the registry at module level."
 units = ["model_manager", "image_gen", "music_gen", "video_gen"]
@@ -65,7 +70,7 @@ name = "services"
 role = "Host services composed from one or more platform units: browser sessions over the key store, the cross-install GPU registry over instance discovery, agent memory over the rag store, the self-updater and the proxy client over failure reporting, the native app identity, the remote-model gate, the issue tracker, web retrieval (search providers, page reading and evidence selection) over the network policy."
 units = [
     "sessions", "gpu_registry", "memory", "updater", "_apply_update", "_proxy",
-    "issue_tracker", "applaunch", "remotegate", "web_retrieval",
+    "issue_tracker", "applaunch", "remotegate", "web_retrieval", "config_write",
 ]
 
 [[tier]]
@@ -74,7 +79,7 @@ role = "The host as localm sees it, built on the foundation alone: identity and 
 units = [
     "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
     "peer_routing", "selfclient", "instances", "listeners", "gpu_usage", "hwdetect",
-    "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest", "uv_tool",
+    "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest", "uv_tool", "pyinstall",
     "setup_spec",
     "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
     "bugreport", "_log_digest",
@@ -87,5 +92,5 @@ units = [
     "config", "debuglog", "console", "jsonl", "jsonreply", "storekit", "pathsafe", "pathscrub",
     "textguard", "textnorm", "elf_deps", "executor", "bindhost", "netlisten", "scopes",
     "readline_privacy", "_version", "_venvguard", "_mp_spawn", "stdio", "kv_cache",
-    "multipartform", "voice_formats", "wav_audio", "sysprog", "livefeed",
+    "multipartform", "voice_formats", "wav_audio", "sysprog", "livefeed", "loopback_http",
 ]

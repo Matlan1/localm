@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from localm.plugins.gui import jobs as J
+from localm import jobmanager as J
 
 
 # --------------------------------------------------------------------------- #
