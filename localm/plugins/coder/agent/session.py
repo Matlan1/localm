@@ -302,7 +302,7 @@ class _SessionMixin:
 
         - Closes the audit log (``log`` and ``full`` modes).
         - Writes a Markdown transcript to ``.localcoder/sessions/`` in
-          ``full`` mode.
+          ``full`` mode, except for a restricted session.
 
         Returns the path of the Markdown file, or None.
         Called automatically by the CLI's ``finally`` block.
@@ -313,7 +313,7 @@ class _SessionMixin:
             self._audit.close()
             if self.parent is None:
                 unregister_coder_session_mode(self.mode)
-        if self.mode == SessionMode.FULL:
+        if self.mode == SessionMode.FULL and not self.restricted:
             return self._write_session_markdown()
         return None
 

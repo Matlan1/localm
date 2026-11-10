@@ -1765,6 +1765,127 @@ class TestRagRepairRouteKeyScopedRoots:
             assert job.status == "done", f"job ended {job.status}"
 
 
+class TestRagWriteRoutesKeyScopedRoots:
+    def test_add_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        (granted / "mine.md").write_text("granted notes", encoding="utf-8")
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            owner_doc = _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(granted / "mine.md")],
+                                  "embed": False}, headers=hdr)
+            assert r.status_code == 403, r.text
+            docs = client.get("/api/rag/collections/kb",
+                              headers=owner_hdr).json()["docs"]
+            assert [d["path"] for d in docs] == [owner_doc]
+
+    def test_upload_refused_for_collection_with_content_outside_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        content = base64.b64encode(b"planted text").decode()
+        with TestClient(app) as client:
+            owner_doc = _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/upload",
+                            json={"files": [{"filename": "notes.txt",
+                                             "content_b64": content}],
+                                  "embed": False}, headers=hdr)
+            assert r.status_code == 403, r.text
+            docs = client.get("/api/rag/collections/kb",
+                              headers=owner_hdr).json()["docs"]
+            assert [d["path"] for d in docs] == [owner_doc]
+
+    def test_add_allowed_for_collection_within_granted_root(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, _home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            _index_via(client, app, hdr, "kb", granted)
+            (granted / "b.md").write_text("more notes", encoding="utf-8")
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(granted / "b.md")],
+                                  "embed": False}, headers=hdr)
+            assert r.status_code == 200, r.text
+            assert _await_job(app, r.json()["job_id"]).status == "done"
+
+    def test_owner_add_and_upload_unaffected(self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        app, _home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                           rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        content = base64.b64encode(b"owner upload").decode()
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", outside_dir)
+            r = client.post("/api/rag/collections/kb/upload",
+                            json={"files": [{"filename": "notes.txt",
+                                             "content_b64": content}],
+                                  "embed": False}, headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            assert _await_job(app, r.json()["job_id"]).status == "done"
+
+
+class TestRagRepairRouteFolderPolicy:
+    def test_repair_skips_a_source_the_folder_policy_now_refuses(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        docs_dir = home / "docs"
+        docs_dir.mkdir()
+        with TestClient(app) as client:
+            doc = _index_via(client, app, owner_hdr, "kb", docs_dir)
+            from localm.config import load_config, save_config
+            cfg = load_config()
+            cfg["rag_indexing_mode"] = "blacklist"
+            cfg["rag_denied_roots"] = [str(docs_dir)]
+            save_config(cfg)
+            r = client.post("/api/rag/collections/kb/repair", json={},
+                            headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
+            texts = [e.get("text", "") for e in job._history]
+            assert any(t.startswith(f"skipping {doc}:") for t in texts), texts
+            assert not any(t.startswith("repaired:") for t in texts), texts
+
+    def test_repair_reindexes_a_source_the_policy_allows(
+            self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        docs_dir = home / "docs"
+        docs_dir.mkdir()
+        with TestClient(app) as client:
+            _index_via(client, app, owner_hdr, "kb", docs_dir)
+            r = client.post("/api/rag/collections/kb/repair", json={},
+                            headers=owner_hdr)
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
+            assert job.status == "done", job.status
+            texts = [e.get("text", "") for e in job._history]
+            assert any(t.startswith("repaired: 1 re-indexed") for t in texts), texts
+
+
 class TestRagReembedRouteKeyScopedRoots:
     def test_refused_for_collection_with_content_outside_granted_root(
             self, tmp_path, monkeypatch):

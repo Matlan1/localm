@@ -110,6 +110,10 @@ collection route:
 
 - **Indexing** (`POST /api/rag/collections/{name}/add`) refuses a path
   outside the granted roots.
+- **Adding and uploading** (`.../add`, `.../upload`) are refused (403) for a
+  collection that already holds any document indexed from outside the
+  granted roots, so such a key cannot add to it or replace an uploaded
+  document in it.
 - **Listing** (`GET /api/rag/collections`) leaves out a collection that
   holds any document from outside the granted roots entirely, rather than
   showing a name the key cannot then use.
@@ -120,8 +124,11 @@ collection route:
   by a different, less-restricted key.
 
 A document added through `.../upload` (bytes from the caller's own device,
-never a host filesystem read) is not subject to this check - it never named a
-host path to confine. Only the owner key (or a key holding `admin`) may set `rag_roots` on another key
+never a host filesystem read) is not itself path-confined - it never named a
+host path to confine. `.../repair` re-checks every recorded source against the
+caller's own indexing policy (the folder policy above, or the key's own
+`rag_roots`) and skips a source that policy refuses, naming it in the job
+log. Only the owner key (or a key holding `admin`) may set `rag_roots` on another key
 over the API (`POST /v1/keys`), and `localm key create --rag-root` from this
 machine's terminal; the owner's own reach, and open mode
 (no key configured), are never confined by it. See
