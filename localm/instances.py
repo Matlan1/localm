@@ -809,7 +809,7 @@ def entry_process_state(entry: dict) -> tuple[str, str]:
     except Exception as e:
         logger.debug("entry_process_state: liveness of pid %s unreadable (%s)", pid, e)
         return "unknown", (f"localm could not tell whether pid {pid} is still "
-                           f"running ({e}).")
+                           f"running.")
     recorded = entry.get("start_identity")
     space = entry.get("pid_space")
     if not isinstance(recorded, dict) or not isinstance(space, str):
