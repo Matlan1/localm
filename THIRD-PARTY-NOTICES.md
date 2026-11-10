@@ -83,8 +83,12 @@ source. They are downloaded only when the user picks a CUDA build
 NVIDIA's own PyPI packages (`nvidia-cuda-runtime`, `nvidia-cublas` and their
 `-cu12` variants, which declare `LicenseRef-NVIDIA-Proprietary`) on Linux, and
 from the `cudart` bundle of the upstream llama.cpp or stable-diffusion.cpp
-release on Windows. They are not part of this repository, and localm copies the
-library files without a license file; NVIDIA's CUDA license terms apply to them.
+release on Windows (and of llama.cpp on Linux ARM64). They are not part of this repository; NVIDIA's CUDA license
+terms apply to them. On Linux, localm keeps each wheel's own NVIDIA license file
+beside the libraries in the runtime folder, as `LICENSE.<package>` (for example
+`LICENSE.nvidia-cublas-cu12`). The `cudart` bundles carry no license file, so
+localm writes `LICENSE.nvidia-cuda` beside their libraries, naming NVIDIA's CUDA
+license (<https://docs.nvidia.com/cuda/eula/index.html>).
 
 ## Python dependencies (installed from PyPI, not redistributed here)
 
