@@ -104,9 +104,44 @@ services:
       - localm-data:/data
     environment:
       LOCALM_API_KEY: ${LOCALM_API_KEY:?set LOCALM_API_KEY in .env}
+      LOCALM_ALLOWED_HOSTS: localm,nas,nas.local
 volumes:
   localm-data:
 ```
+
+## Host names
+
+The server answers only to names it knows as its own (see the Host check in
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding)).
+Inside a container those are `localhost`, the container id and IP addresses, so
+an IP address always works, but a name you reach it by gets `400 Host not
+allowed`: the Docker host's name (`https://nas:8642`, `nas.local`) or the compose
+service name a proxy container uses (`http://localm:8642`). List those names in
+`LOCALM_ALLOWED_HOSTS`, comma-separated, as in the compose file above, or with
+`docker run -e LOCALM_ALLOWED_HOSTS=nas,nas.local ...`. The `allowed_hosts`
+setting in the data volume works too.
+
+### A client in a container: `host.docker.internal`
+
+A client running in a container (Open WebUI, for example) that reaches a localm
+on the Docker host as `http://host.docker.internal:<port>` sends that name as
+its `Host`, and localm refuses it with `400 Host not allowed` until the name is
+listed. List it on the machine that runs localm, not in the client container:
+
+```bash
+localm config allowed_hosts host.docker.internal
+```
+
+or start localm with `LOCALM_ALLOWED_HOSTS=host.docker.internal`, then restart
+it. localm never accepts the name on its own.
+
+Docker's documentation says `host.docker.internal` resolves to the host's
+internal IP address (on Linux Docker Engine, add
+`--add-host=host.docker.internal:host-gateway` to the client container). It does
+not say that a service listening only on `127.0.0.1` is reachable that way, and
+localm's own tests do not cover it, so if the client cannot connect at all,
+bind localm past loopback (`-H 0.0.0.0`, which needs an API key) and point the
+client at the key.
 
 ## What lives where
 

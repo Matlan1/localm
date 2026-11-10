@@ -391,15 +391,32 @@ _ATTACH_CONFLICT_FLAGS = {
 }
 
 
+FORWARDED_EXPLICIT_KEY = "localm.gui.forwarded_explicit"
+
+
 def _explicit(ctx, name: str) -> bool:
     """True when *name* came from the command line (not its default). Lets us tell
     an explicit `--port 8794` apart from the unset default so we only object to
-    flags the user actually typed."""
+    flags the user actually typed.
+
+    A command that runs this one through ``ctx.invoke`` (``localm serve``) puts
+    the names its own user typed in ``ctx.meta[FORWARDED_EXPLICIT_KEY]``; those
+    count as explicit too."""
     from click.core import ParameterSource
     try:
-        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+        if ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE:
+            return True
     except Exception:
         return False
+    return name in (ctx.meta.get(FORWARDED_EXPLICIT_KEY) or ())
+
+
+def _existing_base_url(existing: dict) -> str:
+    """The ``/v1`` base URL this machine dials to reach the instance *existing*."""
+    from localm.bindhost import self_connect_host, url_host
+    scheme = existing.get("scheme") or "http"
+    _h = url_host(self_connect_host(existing.get("host")))
+    return f"{scheme}://{_h}:{existing.get('port')}/v1"
 
 
 def _probe_active_model(existing: dict):
@@ -409,13 +426,19 @@ def _probe_active_model(existing: dict):
     running server actually serves."""
     try:
         from localm.inference.http_engine import remote_model_status
-        scheme = existing.get("scheme") or "http"
-        from localm.bindhost import self_connect_host, url_host
-        _h = url_host(self_connect_host(existing.get("host")))
-        base = f"{scheme}://{_h}:{existing.get('port')}/v1"
-        return remote_model_status(base, existing.get("token"))[1]
+        return remote_model_status(_existing_base_url(existing),
+                                   existing.get("token"))[1]
     except Exception:
         return None
+
+
+def _serves_requested_model(existing: dict, active: str, model: str) -> bool:
+    """True when the instance *existing*, whose active model is *active*, serves
+    the *model* named on the command line, by name or by file
+    (http_engine.served_model_is_requested). False when that cannot be shown."""
+    from localm.inference.http_engine import served_model_is_requested
+    return served_model_is_requested(_existing_base_url(existing),
+                                     existing.get("token"), active, model)
 
 
 def _attach_conflicts(ctx, existing: dict, model: str) -> list:
@@ -443,8 +466,7 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
     # `localm run`; same model -> attach). Never silently serve a different model.
     if model and _explicit(ctx, "model"):
         active = _probe_active_model(existing)
-        from localm.model_manager import names_same_model
-        if active and not names_same_model(active, model):
+        if active and not _serves_requested_model(existing, active, model):
             conflicts.append(
                 f"model {model} (the running server serves {active})")
     # everything else: an attach cannot retroactively set the running server's
@@ -777,13 +799,20 @@ def _resolve_startup_model_file(console, model, registry, *, model_less: bool):
     *model* may be a registered name or a path on disk
     (registry.get_operator_model_info); display_name is the name when it is
     registered, else the resolver's display hint. Exits 1 when *model*
-    resolves to nothing."""
+    resolves to nothing or is a model chat cannot load (an embedding model, a
+    reranker, a text-to-speech model, a vision projector)."""
     if model_less:
         return None, None, ""
     from localm.model_manager.registry import get_operator_model_info
     info = get_operator_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
+        sys.exit(1)
+    from localm.model_manager.registry import chat_load_refusal
+    refusal = chat_load_refusal(model, registry)
+    if refusal is not None:
+        from rich.markup import escape
+        console.print(f"[red]{escape(refusal)}[/red]")
         sys.exit(1)
     model_path, display_hint = info
     return info, model_path, (model if model in registry else display_hint)

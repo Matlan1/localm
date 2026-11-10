@@ -274,9 +274,12 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
             return SessionMode.PRIVACY
 
     try:
-        from localm.config import load_config
+        from localm.config import load_config, load_config_checked
         cfg = load_config()
+        read_ok = load_config_checked()[1]
     except Exception:
+        return SessionMode.PRIVACY
+    if not read_ok:
         return SessionMode.PRIVACY
 
     if surface in ("chat", "coder"):
@@ -289,6 +292,22 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
         return SessionMode(glob.strip().lower())
 
     return SessionMode.PRIVACY
+
+
+def automatic_write_allowed(surface: str, cwd=None) -> bool:
+    """
+    True when localm may write conversation-derived data to disk on its own for
+    *surface* ("chat" | "coder" | "server"), resolved fresh from
+    :func:`effective_mode`. False in privacy mode and whenever the mode cannot be
+    resolved. Never raises.
+
+    The one question every automatic writer asks. Explicit user-requested exports
+    and the management-event log are not automatic writes and do not ask it.
+    """
+    try:
+        return effective_mode(surface, cwd=cwd) != SessionMode.PRIVACY
+    except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
+        return False
 
 
 _MODE_PERSISTENCE = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1,

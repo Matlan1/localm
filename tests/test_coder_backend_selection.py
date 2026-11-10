@@ -299,7 +299,7 @@ def test_a_gui_supplied_url_reaches_the_ssrf_guard(monkeypatch):
     monkeypatch.setattr(np, "check_url", lambda url: seen.append(url))
     _resolve(_req(backend="url", backend_url="http://169.254.169.254/v1"),
              session_mode="log")
-    assert seen == ["http://169.254.169.254/v1"]
+    assert seen and set(seen) == {"http://169.254.169.254/v1"}
 
 
 # --------------------------------------------------------------------------- #

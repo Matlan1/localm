@@ -55,6 +55,14 @@ _PATCH_MODE_ELIGIBLE_TOOLS: frozenset[str] = _UNDOABLE_TOOLS | frozenset({
     "search_replace",
 })
 
+# Read tools that, in patch mode, take the session's captured writes into
+# account (the dispatcher injects the overlay as ``_overlay``).
+_PATCH_OVERLAY_READ_TOOLS: frozenset[str] = frozenset({"read_file", "grep", "search_replace"})
+
+# Write tools patch mode refuses: their output (an image file) has no text diff,
+# so they neither run nor are captured while patch mode is on.
+_PATCH_MODE_REFUSED_TOOLS: frozenset[str] = frozenset({"generate_image"})
+
 # Tools whose target paths are NESTED inside a collection arg instead of a
 # top-level `path` arg. Maps tool name -> (collection arg, key within each item).
 # Every path-consuming site (scope check, undo snapshot, changed-file tracker,

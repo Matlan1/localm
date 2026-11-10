@@ -33,6 +33,8 @@ def _safe_echo(message: object = "", **kwargs) -> None:
     click.echo(strip_controls(str(message)), **kwargs)
 
 import localm.plugins.coder.cli as _cli
+from localm.netpolicy import NetworkPolicyError
+from localm.remotegate import OffMachineModelRefused
 from localm.stdio import force_utf8_stdio
 from ..backends.http import (
     HTTPBackend,
@@ -338,7 +340,8 @@ def main(
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci,
-        machine_output=bool(task) and output_format in ("json", "jsonl"))
+        machine_output=bool(task) and output_format in ("json", "jsonl"),
+        session_mode=session_mode)
     # Every coder request needs structured tool calls. A localm server answers
     # one --model cannot serve with an installed model that can, unless pinned;
     # any other server ignores both.
@@ -528,7 +531,7 @@ def main(
         sys.exit(2 if ci else 1)
     finally:
         # Flush patch output before closing
-        if patch_mode and agent._patch_chunks:
+        if patch_mode and agent.has_patch():
             patch_content = agent.flush_patch()
             if patch_mode == "-":
                 sys.stdout.write(patch_content)
@@ -796,8 +799,95 @@ def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
     return platform != "win32" and (machine_output or not stdout_tty)
 
 
+AUTOSTART_LOG_PREFIX = "localm-coder-autostart-"
+
+
+def _open_autostart_log():
+    """Create the temp file an auto-started server's output goes to.
+
+    Returns ``(file, path)``; *file* is open for writing and can be passed to
+    ``subprocess.Popen`` as stdout. On Windows the handle is opened with
+    ``FILE_SHARE_DELETE``, so :func:`_discard_autostart_log` can remove the
+    path while the child still holds the inherited handle, as unlink does on
+    POSIX."""
+    import os
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix=AUTOSTART_LOG_PREFIX, suffix=".log")
+    if sys.platform != "win32":
+        return os.fdopen(fd, "w", encoding="utf-8", errors="replace"), path
+    os.close(fd)
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                           ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                           wintypes.HANDLE]
+        create.restype = wintypes.HANDLE
+        generic_write = 0x40000000
+        share_all = 0x1 | 0x2 | 0x4
+        truncate_existing = 5
+        attribute_normal = 0x80
+        handle = create(path, generic_write, share_all, None, truncate_existing,
+                        attribute_normal, None)
+        if handle in (None, wintypes.HANDLE(-1).value):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            wfd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+        except Exception:
+            kernel32.CloseHandle(wintypes.HANDLE(handle))
+            raise
+        return os.fdopen(wfd, "w", encoding="utf-8", errors="replace"), path
+    except Exception:
+        _discard_autostart_log(path)
+        raise
+
+
+def _discard_autostart_log(path) -> bool:
+    """Remove an auto-start log. Returns True when the path is gone; on
+    failure prints a warning naming the file and returns False. Never raises."""
+    import os
+    if not path:
+        return True
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        click.echo(f"Warning: could not delete the auto-started server's output "
+                   f"log {path}: {exc}", err=True)
+        return False
+    return True
+
+
+def _keep_autostart_log_on_timeout(session_mode) -> bool:
+    """Whether a failed attach keeps the server's output log: outside privacy
+    mode, or when keep diagnostics is on."""
+    if session_mode != SessionMode.PRIVACY:
+        return True
+    from localm.config import keep_diagnostics_enabled
+    return keep_diagnostics_enabled()
+
+
+def _gate_mode(session_mode):
+    """The off-machine gate's mode string for a resolved SessionMode, or None."""
+    return getattr(session_mode, "value", session_mode)
+
+
+def _url_typed_on_command_line() -> bool:
+    """True when ``--url`` came from the command line rather than the
+    ``LOCALCODER_URL`` environment variable or a default."""
+    from click.core import ParameterSource
+    ctx = click.get_current_context(silent=True)
+    return (ctx is not None
+            and ctx.get_parameter_source("url") == ParameterSource.COMMANDLINE)
+
+
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
-                   force_new, work_dir, ci, probe_only=False, machine_output=False):
+                   force_new, work_dir, ci, probe_only=False, machine_output=False,
+                   session_mode=None):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
@@ -807,7 +897,24 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     WITHOUT starting a server, so the caller can report whether it answers.
 
     ``machine_output`` is True for a ``--output-format json|jsonl`` run, whose
-    stdout carries only the result document or the event lines."""
+    stdout carries only the result document or the event lines.
+
+    A provider flag or a ``--url`` typed on the command line passes the
+    off-machine gate's "user typed it" override; ``LOCALCODER_URL`` does not,
+    so privacy mode refuses it. *session_mode* is the session's resolved mode
+    (None resolves the ambient coder mode)."""
+    try:
+        return _build_backend_gated(
+            provider, url, model, api_key, native_tools, port, no_server,
+            force_new, work_dir, ci, probe_only, machine_output, session_mode)
+    except (OffMachineModelRefused, NetworkPolicyError) as e:
+        print_error(str(e))
+        sys.exit(2 if ci else 1)
+
+
+def _build_backend_gated(provider, url, model, api_key, native_tools, port,
+                         no_server, force_new, work_dir, ci, probe_only,
+                         machine_output, session_mode):
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -824,21 +931,27 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     if provider == "openai":
         if not model:
             model = "gpt-4o"
-        backend = make_openai_backend(model=model)
+        backend = make_openai_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif provider == "anthropic":
         if not model:
             model = "claude-opus-4-5"
         # Anthropic Messages API (x-api-key + anthropic-version + /v1/messages).
-        backend = make_anthropic_backend(model=model)
+        backend = make_anthropic_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif url:
         # Explicit URL - no server management
         if not model:
             print_error("--url requires --model")
             sys.exit(2 if ci else 1)
-        backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key,
-                              native_tools=native_tools)
+        backend = HTTPBackend(
+            url.rstrip("/"), model, api_key=api_key, native_tools=native_tools,
+            gate_mode=_gate_mode(session_mode),
+            user_typed_remote=_url_typed_on_command_line())
         backend.assume_ctx_window = True
 
     else:
@@ -919,6 +1032,15 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     cmd.append("--no-model")
                 if port:
                     cmd.extend(["-p", str(port)])
+                # --new: the child starts its own server even while another one
+                # serves this project, and the wait below skips every instance
+                # that was registered before the spawn.
+                preexisting_ids: frozenset = frozenset()
+                if force_new:
+                    cmd.append("--new")
+                    preexisting_ids = frozenset(
+                        e.get("instance_id") for e in instances.list_entries(home_dir())
+                        if e.get("instance_id"))
 
                 import os
                 kwargs = {}
@@ -943,11 +1065,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 child_log_path = None
                 child_log = None
                 if headless:
-                    import tempfile
-                    fd, child_log_path = tempfile.mkstemp(
-                        prefix="localm-coder-autostart-", suffix=".log")
-                    child_log = os.fdopen(fd, "w", encoding="utf-8",
-                                          errors="replace")
+                    child_log, child_log_path = _open_autostart_log()
                     kwargs["stdout"] = child_log
                     kwargs["stderr"] = subprocess.STDOUT
                     if sys.platform == "win32":
@@ -980,12 +1098,14 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                         return ""
 
                 try:
-                    proc = subprocess.Popen(cmd, **kwargs)
-                    if child_log is not None:
-                        # The child holds its own handle from here; closing ours
-                        # flushes anything buffered before the early-exit read
-                        # below.
-                        child_log.close()
+                    try:
+                        proc = subprocess.Popen(cmd, **kwargs)
+                    finally:
+                        if child_log is not None:
+                            # The child holds its own handle from here; closing
+                            # ours flushes anything buffered before the
+                            # early-exit read below.
+                            child_log.close()
                     from ..display import ActivitySpinner
                     _tgt = None
                     with ActivitySpinner("Waiting for localm server to start..."):
@@ -994,10 +1114,12 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                             if proc.poll() is not None:
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
-                            _tgt = instances.attach_target(home_dir(), _root)
+                            _tgt = instances.attach_target(
+                                home_dir(), _root, exclude_ids=preexisting_ids)
                             if _tgt:
                                 break
                     if _tgt:
+                        _discard_autostart_log(child_log_path)
                         attach_key = api_key
                         if not _api_key_explicit:
                             from localm.auth import resolve_bearer_token
@@ -1011,6 +1133,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                                       f"{show_url(_tgt['base_url'])}[/dim]")
                     elif proc.poll() is not None:
                         tail = _child_log_tail()
+                        _discard_autostart_log(child_log_path)
                         if tail:
                             detail = f" Its output:\n{tail}"
                         elif headless:
@@ -1024,12 +1147,19 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                         )
                         sys.exit(2 if ci else 1)
                     else:
-                        hint = (f" Its output log: {child_log_path}"
-                                if child_log_path else "")
+                        hint = ""
+                        if child_log_path:
+                            if _keep_autostart_log_on_timeout(session_mode):
+                                hint = f" Its output log: {child_log_path}"
+                            elif _discard_autostart_log(child_log_path):
+                                hint = (" Its output log was not kept (privacy "
+                                        "mode; turn on keep diagnostics to "
+                                        "keep it).")
                         print_error(
                             f"Failed to attach to the auto-started server.{hint}")
                         sys.exit(2 if ci else 1)
                 except Exception as e:
+                    _discard_autostart_log(child_log_path)
                     print_error(f"Failed to start server: {e}")
                     sys.exit(2 if ci else 1)
 

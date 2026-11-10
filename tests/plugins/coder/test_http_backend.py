@@ -1,3 +1,4 @@
+import pytest
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.coder.backends.http - usage capture from responses."""
 
@@ -10,6 +11,13 @@ import requests
 
 from localm.netpolicy import NetworkPolicyError
 from localm.plugins.coder.backends.http import CoderServerError, HTTPBackend
+
+
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
 
 
 def _make_backend():
@@ -321,6 +329,7 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
 class TestHTTPBackendRefusesRedirects(unittest.TestCase):
     """The coder backend never follows a redirect - see _raise_on_redirect."""
 
+    @pytest.mark.usefixtures("open_gate")
     def test_chat_refuses_a_redirect_and_the_target_is_never_dialed(self):
         """Unfixed code (allow_redirects left at the requests default of True)
         would auto-follow into 127.0.0.1: urls would carry a second entry for
@@ -390,6 +399,7 @@ def _fake_pinned_session(calls, ips):
     return _make
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_pinned_chat_dials_the_validated_ip_not_the_hostname():
     """The pinned path resolves via netpolicy (which pins netpin's session to
     the validated IP) instead of a plain requests.post - see HTTPBackend's
@@ -413,6 +423,7 @@ def test_pinned_chat_dials_the_validated_ip_not_the_hostname():
     assert kw["allow_redirects"] is False
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_pinned_chat_fails_closed_when_the_host_is_unresolvable():
     """A DNS-rebind attacker answers OK at check-time and NXDOMAIN (or a
     private address) at connect-time; _resolve_pinned refuses rather than

@@ -119,7 +119,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 #  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|[ \t]*=[ \t]*[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
@@ -138,7 +138,7 @@ _QUERY_SECRET_RE = re.compile(
     #    superlinear on hostile pasted text.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)"
+    r")[ \t]*=[ \t]*(?![ \t]))"
     # Leave a value that cannot be a secret alone (true/false/none/0/1/...);
     # the literal must be the whole value, closing markup aside.
     r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
@@ -157,9 +157,12 @@ _AUTH_HEADER_RE = re.compile(
     r"[\"']?\s*(?:[,}\]]|$))"
     r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
     r"|\[[^\]\r\n]*\]?"
-    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
-    r"(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*)|[^\s,]+)"
-    r"(?:(?:,[ \t]*|[ \t]+)[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|[^\s,]*))*)"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
+    r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?![A-Za-z0-9_-]+[\"']?:(?:\s|$))"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"|[^\s,]+)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
 # _JSON_SECRET_RE in localm/bugreport/scrub.py.

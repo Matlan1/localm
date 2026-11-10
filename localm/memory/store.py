@@ -37,6 +37,7 @@ from localm.rag import BM25
 from localm.rag.collection_lock import CollectionLockedError
 from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
+from localm.storeformat import StoreFormatTooNew, check_stamp
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 
 from .corrections import PendingCorrection
@@ -95,9 +96,9 @@ class DeferredEmbed:
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
 # (files written before versioning are format 1). Bump this on a breaking
-# MemoryRecord schema change and branch on the stored value in _load(): _save()
-# rewrites the whole file, so an unrecognized line that is merely skipped is
-# erased by the next write.
+# MemoryRecord schema change and branch on the stored value in _load(). A line
+# stamped newer than this value makes _load() raise StoreFormatTooNew; a line
+# that does not parse is kept verbatim and written back by _save().
 #
 # Also reused, unchanged, as the "v" stamp for the three correction sidecars
 # (.corrections.jsonl, .forgotten.jsonl, .corrections-dismissed.json) - a SHARED
@@ -514,7 +515,7 @@ class MemoryStore:
 
     def _load(self) -> None:
         self._records = []
-        skipped = 0
+        self._carried = []
         if self._file.is_file():
             # split_jsonl, not splitlines(): splitlines() also breaks on
             # U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=False) writes
@@ -528,18 +529,18 @@ class MemoryStore:
                     data = json.loads(line)
                     if not isinstance(data, dict):
                         raise ValueError("memory record line is not a JSON object")
+                    check_stamp(data.get("v"), FORMAT_VERSION, self._file,
+                                "memory store")
                     self._records.append(MemoryRecord.from_dict(data))
+                except StoreFormatTooNew:
+                    raise
                 except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
-                    # A partial/corrupt line must not break recall, but it may
-                    # not vanish silently either: _save() rewrites the whole
-                    # file, so every skipped line is erased by the next write
-                    # (warned about below).
-                    skipped += 1
-        if skipped:
+                    self._carried.append(line)
+        if self._carried:
             from localm.debuglog import logger as _dbg
             _dbg.warning(
-                "memory store %s: skipped %d unparseable line(s) on load; "
-                "the next save will drop them permanently", self._file, skipped)
+                "memory store %s: %d unparseable line(s) kept unchanged and "
+                "written back on save", self._file, len(self._carried))
         self._vectors = {}
         self._dim = None
         vf = self._vec_file()
@@ -577,6 +578,8 @@ class MemoryStore:
         body = "\n".join(json.dumps({"v": FORMAT_VERSION, **r.to_dict()},
                                     ensure_ascii=False)
                          for r in self._records)
+        if self._carried:
+            body = "\n".join(part for part in (body, *self._carried) if part)
         self._atomic_write(self._file, body + ("\n" if body else ""))
         vf = self._vec_file()
         if self._vectors:
@@ -727,6 +730,7 @@ class MemoryStore:
         """
         with self._wlock('a clear'):
             self._records = []
+            self._carried = []
             self._vectors = {}
             self._dim = None
             self._save()

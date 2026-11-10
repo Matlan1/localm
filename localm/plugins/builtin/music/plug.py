@@ -83,6 +83,31 @@ def _music_path(name: str) -> Path:
     return confined_file(_music_dir(), name, "track")
 
 
+async def _require_native_acceptance(req: MusicRequest) -> None:
+    """A 400 for settings the native backend refuses, before a job exists.
+    Other backends keep their own checks."""
+    from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+
+    def _check() -> str | None:
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Music")
+        if s.get("backend") != "native":
+            return None
+        from .backends import native
+        return native.refusal(
+            model_overrides=req.model_overrides, sampler_name=req.sampler_name,
+            scheduler=req.scheduler, lyrics_strength=req.lyrics_strength)
+    try:
+        bad = await run_in_threadpool_bounded(_check, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the music backend settings timed out: {e}") from e
+    if bad:
+        raise HTTPException(400, bad)
+
+
 @_router.post("/api/music")
 async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
@@ -92,6 +117,9 @@ async def music(req: MusicRequest, request: Request):
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
+    if (req.sampler_name is not None or req.scheduler is not None
+            or req.lyrics_strength is not None or req.model_overrides):
+        await _require_native_acceptance(req)
     from localm.debuglog import logger
     logger.info("music: %d-char tags (duration=%gs)",
                 len(req.tags), req.duration_seconds)

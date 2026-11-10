@@ -165,6 +165,11 @@ class ExllamaBackend(BaseBackend):
         self.last_finish_reason = "stop"
 
     @property
+    def supports_raw_prompt(self) -> bool:
+        """True: the worker's tokenizer takes a raw prompt."""
+        return True
+
+    @property
     def loaded(self) -> bool:
         """True while the worker that loaded the model is alive."""
         if not self._loaded:
@@ -276,9 +281,11 @@ class ExllamaBackend(BaseBackend):
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
         """Stream the reply from the worker. Refuses images and grammars before
-        the worker is asked; ``cache_prompt`` changes nothing."""
+        the worker is asked; ``cache_prompt`` changes nothing; *raw_prompt* is
+        passed on when set."""
         if messages_contain_image(messages):
             raise UnsupportedInputError(image_unsupported_message(None))
         if messages_contain_audio(messages):
@@ -293,6 +300,8 @@ class ExllamaBackend(BaseBackend):
                            ("frequency_penalty", frequency_penalty)):
             if value is not None:
                 extra[key] = value
+        if raw_prompt is not None:
+            extra["raw_prompt"] = raw_prompt
         yield from self._runner.chat_stream(
             first_chunk_timeout=HFBackend._first_token_timeout_seconds(),
             on_status=on_status,

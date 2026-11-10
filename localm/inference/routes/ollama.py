@@ -24,6 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
@@ -33,7 +34,7 @@ from localm import peer_routing, scopes
 from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
-from localm.inference.protocol import ChatRequest, EmbeddingRequest
+from localm.inference.protocol import ChatRequest, CompletionRequest, EmbeddingRequest
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
 )
@@ -239,18 +240,23 @@ def register(app: FastAPI, ctx) -> None:
     @route("/api/ps", methods=["GET"], dependencies=read_models)
     async def ollama_ps():
         from localm.config import load_registry
-        listed = _listed_models(load_registry())
-        loaded = [(name, listed[name], engine)
+        registry = load_registry()
+        listed = _listed_models(registry)
+        loaded = [(name, listed.get(name), engine)
                   for name, engine in list(_hs._engines.items())
-                  if name in listed and engine.loaded]
+                  if engine.loaded and (name in listed or name not in registry)]
 
         def _collect() -> list[dict]:
             out = []
             ttl = _hs._idle_unload_ttl()
             now = time.monotonic()
             for name, entry, engine in loaded:
-                obj = _tag_object(name, entry, _file_facts(entry))
-                obj.pop("modified_at")
+                if entry is None:
+                    obj = {"name": name, "model": name, "size": 0,
+                           "digest": "", "details": {}}
+                else:
+                    obj = _tag_object(name, entry, _file_facts(entry))
+                    obj.pop("modified_at")
                 last = _hs._last_activity_per_model.get(name)
                 obj["expires_at"] = P.expiry_iso(
                     ttl, None if last is None else now - last)
@@ -361,6 +367,26 @@ def register(app: FastAPI, ctx) -> None:
         return JSONResponse(P.reply_object(
             kind, name, done=True, reason="unload" if unload else "load"))
 
+    async def _unload_after_reply(request: Request, name: str, reply: Response,
+                                  force: bool) -> Response:
+        """Unload *name* once *reply* has been sent. A caller without the
+        unload permission is answered normally and the model stays loaded; the
+        reply says so in `x-localm-keep-alive`."""
+        try:
+            _require_unload_allowed(request)
+        except (P.OllamaError, HTTPException):
+            reply.headers["x-localm-keep-alive"] = "ignored: unloading needs models:write"
+            return reply
+        resolved = _canonical(name)
+        if peer_routing.get_route(resolved) is not None:
+            return reply
+
+        async def _unload() -> None:
+            await _hs.unload_one_model(resolved, force=force)
+
+        reply.background = BackgroundTask(_unload)
+        return reply
+
     async def _run_chat(request: Request, plan: P.Plan, kind: str, name: str):
         started = time.perf_counter()
         try:
@@ -370,6 +396,19 @@ def register(app: FastAPI, ctx) -> None:
         derived = derived_request(
             request, "/v1/chat/completions", json.dumps(plan.body).encode("utf-8"))
         inner = await _endpoint(request.app, "/v1/chat/completions")(chat_req, derived)
+        return await _reply(inner, plan, kind, name, started)
+
+    async def _run_completion(request: Request, plan: P.Plan, kind: str, name: str):
+        started = time.perf_counter()
+        try:
+            completion_req = CompletionRequest(**plan.body)
+        except ValidationError as exc:
+            raise P.OllamaError(400, validation_text(exc.errors())) from None
+        derived = derived_request(
+            request, "/v1/completions", json.dumps(plan.body).encode("utf-8"))
+        inner = await _endpoint(request.app, "/v1/completions")(completion_req, derived)
+        if not isinstance(inner, Response):
+            inner = JSONResponse(inner)
         return await _reply(inner, plan, kind, name, started)
 
     async def _reply(inner: Response, plan: P.Plan, kind: str, name: str,
@@ -421,7 +460,10 @@ def register(app: FastAPI, ctx) -> None:
                 force=P.unload_forced(req))
         plan = P.plan_chat(req, _canonical(name))
         _note_ignored(plan, req)
-        return await _run_chat(request, plan, "chat", name)
+        reply = await _run_chat(request, plan, "chat", name)
+        if P.keep_alive_is_zero(req.keep_alive):
+            return await _unload_after_reply(request, name, reply, P.unload_forced(req))
+        return reply
 
     @route("/api/generate", methods=["POST"], dependencies=[Depends(_require_auth)])
     async def ollama_generate(req: P.OllamaGenerateRequest, request: Request):
@@ -432,7 +474,14 @@ def register(app: FastAPI, ctx) -> None:
                 force=P.unload_forced(req))
         plan = P.plan_generate(req, _canonical(name))
         _note_ignored(plan, req)
-        return await _run_chat(request, plan, "generate", name)
+        if plan.raw:
+            reply = await _run_completion(request, plan, "generate", name)
+        else:
+            reply = await _run_chat(request, plan, "generate", name)
+        if P.keep_alive_is_zero(req.keep_alive):
+            return await _unload_after_reply(request, name, reply, P.unload_forced(req))
+        return reply
+
 
     # ---------------------------------------------------------------- #
     #  Embeddings                                                       #

@@ -260,6 +260,20 @@ def _download(url: str, dest: Path, on_progress: Progress, label: str) -> None:
         socket.setdefaulttimeout(prev)
 
 
+# The notice written beside the NVIDIA CUDA runtime libraries of a cudart
+# bundle, which carries no license file of its own. Same text as
+# localm.setup_llama.cuda.NVIDIA_CUDA_LICENSE_NOTICE (see
+# test_sdcpp_nvidia_notice_matches_setup_llama).
+NVIDIA_CUDA_LICENSE_NOTICE = """\
+The NVIDIA CUDA runtime libraries in this folder (cudart, cuBLAS, cuBLASLt)
+are proprietary NVIDIA software, not open source. They are covered by the
+NVIDIA CUDA Toolkit End User License Agreement:
+https://docs.nvidia.com/cuda/eula/index.html
+"""
+
+NVIDIA_CUDA_LICENSE = "LICENSE.nvidia-cuda"
+
+
 def _fetch_into(name: str, sha256: str, staging: Path, tmp: Path,
                 on_progress: Progress) -> None:
     from localm.setup_llama.download import ArtifactError, _extract_archive, _validate_archive
@@ -327,6 +341,10 @@ def install(backend: str, *, force: bool = False,
         except netpolicy.NetworkPolicyError as e:
             raise DownloadError(f"the download was refused by the network policy: {e}") from e
         _flatten(staging)
+        if any(name.startswith("cudart-")
+               for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
+            (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
+                                                       encoding="utf-8")
         if dest.exists():
             try:
                 shutil.rmtree(dest)

@@ -1,3 +1,4 @@
+import pytest
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """When the coder auto-starts a `localm gui` server and it dies fast (a busy
 --port, or any other quick non-zero exit), the CLI must surface the real reason
@@ -13,6 +14,13 @@ from click.testing import CliRunner
 
 import localm.instances as instances
 import localm.plugins.coder.cli as ccli
+
+
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
 
 
 def _bypass_plugin_gate(monkeypatch):
@@ -186,6 +194,7 @@ class TestWhereAnAutoStartedServersOutputGoes:
         assert seen.get("machine_output") is False
 
 
+@pytest.mark.usefixtures("open_gate")
 def test_a_backend_built_from_url_assumes_a_window_and_a_preset_does_not():
     import click
 
@@ -200,3 +209,164 @@ def test_a_backend_built_from_url_assumes_a_window_and_a_preset_does_not():
     assert by_url.assume_ctx_window is True
     assert preset.assume_ctx_window is False
     assert make_openai_backend().assume_ctx_window is False
+
+
+class _LiveProc:
+    """Stand-in for a server that is still running."""
+
+    returncode = None
+
+    def poll(self):
+        return None
+
+
+def _flat(captured):
+    """Captured stdout and stderr with all whitespace removed, so a wrapped
+    console line still matches."""
+    return "".join((captured.out + captured.err).split())
+
+
+def _autostart_logs(directory):
+    from localm.plugins.coder.cli._main import AUTOSTART_LOG_PREFIX
+    return sorted(p.name for p in directory.iterdir()
+                  if p.name.startswith(AUTOSTART_LOG_PREFIX))
+
+
+def _headless_autostart(monkeypatch, tmp_path, popen, attach_after=None,
+                        session_mode=None):
+    """Run the auto-start branch of _build_backend with the output captured to
+    a log in *tmp_path*. *attach_after* is how many polls pass before the new
+    server is found (None: never)."""
+    import click
+    import tempfile
+
+    from localm.plugins.coder.cli import _main
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(_main, "_captures_child_output", lambda *a: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(instances, "resolve_root_dir", lambda **kw: str(tmp_path))
+    calls = {"n": 0}
+
+    def attach_target(*a, **kw):
+        if kw.get("exclude_ids") is None:
+            return None
+        calls["n"] += 1
+        if attach_after is not None and calls["n"] > attach_after:
+            return {"base_url": "http://127.0.0.1:1", "port": 1, "token": None}
+        return None
+
+    monkeypatch.setattr(instances, "attach_target", attach_target)
+    monkeypatch.setattr("subprocess.Popen", popen)
+    work = tmp_path / "proj"
+    work.mkdir(exist_ok=True)
+    with click.Context(ccli.main):
+        try:
+            return _main._build_backend(None, None, "m", "k", False, None, False,
+                                        False, work, False,
+                                        session_mode=session_mode), None
+        except SystemExit as exc:
+            return None, exc
+
+
+@pytest.mark.usefixtures("open_gate")
+class TestTheAutoStartLogIsNotLeftBehind:
+    """The temp file a headless auto-start sends the server's output to must
+    not stay on disk: removed after an early exit's tail is read, removed once
+    the attach succeeds (while the server still runs), and kept after a failed
+    attach only outside privacy mode or with keep diagnostics on."""
+
+    def test_an_early_exit_reports_the_output_and_removes_the_file(
+            self, monkeypatch, tmp_path, capsys):
+        def popen(cmd, **kw):
+            kw["stdout"].write("Model not found: m\n")
+            return _DeadProc(1)
+
+        _, exc = _headless_autostart(monkeypatch, tmp_path, popen)
+        assert exc is not None and exc.code == 1
+        assert "Modelnotfound:m" in _flat(capsys.readouterr())
+        assert _autostart_logs(tmp_path) == []
+
+    def test_a_successful_attach_removes_the_file_while_the_server_runs(
+            self, monkeypatch, tmp_path):
+        real_popen = subprocess.Popen
+        children = []
+
+        def popen(cmd, **kw):
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            child = real_popen(
+                [sys.executable, "-c",
+                 "import sys, time\n"
+                 "print('started', flush=True)\n"
+                 "for _ in range(60):\n"
+                 "    time.sleep(0.1)\n"
+                 "    if sys.stdin.read(1) == '': break\n"
+                 "print('still writing', flush=True)\n"],
+                stdin=subprocess.PIPE, stdout=kw["stdout"],
+                stderr=subprocess.STDOUT, creationflags=flags)
+            children.append(child)
+            return child
+
+        try:
+            backend, exc = _headless_autostart(monkeypatch, tmp_path, popen,
+                                               attach_after=1)
+            assert exc is None and backend is not None
+            assert children and children[0].poll() is None, (
+                "the stand-in server must still be running at this point")
+            assert _autostart_logs(tmp_path) == []
+            children[0].stdin.close()
+            assert children[0].wait(timeout=30) == 0, (
+                "the server must keep writing to its output after the log is "
+                "removed")
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=30)
+        assert _autostart_logs(tmp_path) == []
+
+    def test_a_failed_attach_in_privacy_mode_removes_the_file(
+            self, monkeypatch, tmp_path, capsys):
+        import localm.config
+        from localm.plugins.coder.audit import SessionMode
+
+        monkeypatch.setattr(localm.config, "keep_diagnostics_enabled",
+                            lambda: False)
+        _, exc = _headless_autostart(monkeypatch, tmp_path,
+                                     lambda cmd, **kw: _LiveProc(),
+                                     session_mode=SessionMode.PRIVACY)
+        assert exc is not None and exc.code == 1
+        out = _flat(capsys.readouterr())
+        assert "Failedtoattachtotheauto-startedserver" in out
+        assert "wasnotkept" in out
+        assert _autostart_logs(tmp_path) == []
+
+    def test_a_failed_attach_with_keep_diagnostics_keeps_the_file(
+            self, monkeypatch, tmp_path, capsys):
+        import localm.config
+        from localm.plugins.coder.audit import SessionMode
+
+        monkeypatch.setattr(localm.config, "keep_diagnostics_enabled",
+                            lambda: True)
+        _, exc = _headless_autostart(monkeypatch, tmp_path,
+                                     lambda cmd, **kw: _LiveProc(),
+                                     session_mode=SessionMode.PRIVACY)
+        assert exc is not None and exc.code == 1
+        kept = _autostart_logs(tmp_path)
+        assert len(kept) == 1
+        assert kept[0] in _flat(capsys.readouterr())
+
+    def test_a_failed_attach_outside_privacy_mode_keeps_the_file(
+            self, monkeypatch, tmp_path, capsys):
+        import localm.config
+        from localm.plugins.coder.audit import SessionMode
+
+        monkeypatch.setattr(localm.config, "keep_diagnostics_enabled",
+                            lambda: False)
+        _, exc = _headless_autostart(monkeypatch, tmp_path,
+                                     lambda cmd, **kw: _LiveProc(),
+                                     session_mode=SessionMode.LOG)
+        assert exc is not None and exc.code == 1
+        kept = _autostart_logs(tmp_path)
+        assert len(kept) == 1
+        assert kept[0] in _flat(capsys.readouterr())

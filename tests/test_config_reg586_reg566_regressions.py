@@ -175,11 +175,15 @@ def _deny_reads(monkeypatch, target, err):
     return attempts
 
 
-def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sleep, capsys):
+def test_posix_permission_denied_falls_back_immediately(
+        home, monkeypatch, no_sleep, caplog):
     """THE REGRESSION. On POSIX, EACCES from open() is a stable state - the file
     is mode 000 or root-owned. Retrying it 16 times burns ~1s of time.sleep while
     holding _io_lock (serializing config access process-wide, including the
     per-request auth path) and cannot ever succeed. Fall back at once instead."""
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     monkeypatch.setattr(cfg.os, "name", "posix")
     target = home / "config.json"
     target.write_text("{}", encoding="utf-8")
@@ -188,7 +192,8 @@ def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sl
     assert cfg._read_json(target, {"fell_back": True}) == {"fell_back": True}
     assert len(attempts) == 1, f"retried a stable EACCES {len(attempts)} times"
     assert no_sleep == [], f"stalled {sum(no_sleep):.2f}s under _io_lock for nothing"
-    assert "unreadable" in capsys.readouterr().err, "the failure must still be surfaced"
+    assert any("unreadable" in r.getMessage() for r in caplog.records), (
+        "the failure must still be surfaced")
 
 
 def test_windows_transient_sharing_violation_is_still_ridden_out(home, monkeypatch, no_sleep):

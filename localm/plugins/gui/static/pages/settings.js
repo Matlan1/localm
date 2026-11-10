@@ -1616,7 +1616,7 @@ async function browserPluginEntry() {
   }
 }
 
-/** The "Browser setup" box under Settings > Network: whether the configured
+/** The "Browser setup" box under Settings > Server & network: whether the configured
  *  browser engine can start a browser, the one-time download of the bundled
  *  browser when that is what is missing, and a switch to the bundled browser
  *  when no installed browser was found. */

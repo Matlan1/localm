@@ -14,4 +14,4 @@ data_subdir = "memory"
 # it from the Plugins page to turn chat memory on. Existing memory data under
 # <home>/memory is preserved and reactivates the moment the plugin is enabled.
 # Headless (no [surface] tab): it adds the /api/memory* routes + the chat recall
-# and consolidation hooks, and its settings render under the plugin's own section.
+# and consolidation hooks, and its settings render under Settings > Privacy & data.

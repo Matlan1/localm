@@ -463,3 +463,88 @@ class TestRmRealHttp:
             "ruled itself out, and the model file was deleted")
         assert code != 0
         assert "could not be reached" in output, output
+
+
+class TestRmIsolatedServer:
+    """An --isolated server is in no discovery listing, yet it holds files. It
+    leaves a hold-check-only marker in the shared run dir that `rm` reads."""
+
+    def _advertise(self, rs, home):
+        from localm import instances
+        return instances.advertise(
+            rs.app, home, host="127.0.0.1", port=rs.port, mode="open",
+            isolated=True)
+
+    def test_refuses_when_an_isolated_server_holds_the_file(
+            self, home, monkeypatch):
+        from localm import instances
+        path = _model_file(home)
+        _register(home, {"victim": {"path": str(path), "source": "test"}})
+        rs = _start_real_server()
+        try:
+            with self._advertise(rs, home):
+                _put_resident(monkeypatch, "victim", path)
+                assert instances.list_entries(home) == []
+                assert instances.snapshot(home, include_token=True) == []
+                output, code = _rm("victim")
+        finally:
+            rs.stop()
+
+        assert path.exists(), (
+            "an --isolated server had this file loaded and `localm rm` "
+            "deleted it")
+        assert code != 0
+        assert "Refusing to remove" in output
+
+    def test_removes_when_the_isolated_server_rules_itself_out(
+            self, home, monkeypatch):
+        path = _model_file(home)
+        _register(home, {"victim": {"path": str(path), "source": "test"}})
+        rs = _start_real_server()
+        asked = []
+        import localm.selfclient as sc
+        real = sc.read_model_file_hold
+
+        def _spy(*a, **kw):
+            asked.append(a[1])
+            return real(*a, **kw)
+
+        monkeypatch.setattr(sc, "read_model_file_hold", _spy)
+        try:
+            with self._advertise(rs, home):
+                output, code = _rm("victim")
+        finally:
+            rs.stop()
+
+        assert asked == [rs.port], "the isolated server was never asked"
+        assert code == 0, output
+        assert not path.exists()
+
+    def test_marker_is_removed_when_the_server_leaves(self, home):
+        from localm import instances
+        rs = _start_real_server()
+        try:
+            with self._advertise(rs, home):
+                assert len(list(instances.run_dir(home).glob("*.hold"))) == 1
+            assert list(instances.run_dir(home).glob("*.hold")) == []
+        finally:
+            rs.stop()
+
+    def test_marker_of_a_dead_process_is_reaped_and_does_not_block(
+            self, home):
+        from localm import instances
+        path = _model_file(home)
+        _register(home, {"victim": {"path": str(path), "source": "test"}})
+        p = instances.register_hold_marker(
+            home, instance_id="deadbeef", port=1, host="127.0.0.1",
+            token="t")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data["pid"] = 2 ** 22 + 12345
+        p.write_text(json.dumps(data), encoding="utf-8")
+        assert not instances.pid_alive(data["pid"])
+
+        output, code = _rm("victim")
+
+        assert code == 0, output
+        assert not p.exists()
+        assert not path.exists()

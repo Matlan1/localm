@@ -291,3 +291,39 @@ def test_read_json_of_a_hostile_file_is_none(tmp_path, doc):
     path = tmp_path / "meta.json"
     path.write_text(doc, encoding="utf-8")
     assert runtime._read_json(path) is None
+
+
+def _make_cudart_zip(path: Path) -> str:
+    """A zip shaped like cudart-sd-bin-win-cu12-x64.zip: the three NVIDIA DLLs
+    at the top level and no license file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for name in ("cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll"):
+            zf.writestr(name, os.urandom(100 * 1024))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_cuda_runtime_keeps_an_nvidia_license_notice(fake_release, tmp_path, monkeypatch):
+    name = "cudart-sd-bin-win-cu12-x64.zip"
+    sha = _make_cudart_zip(tmp_path / "release" / name)
+    monkeypatch.setitem(pins.EXTRA_ASSETS, ("windows", "cuda"), [(name, sha)])
+    build = pins.ASSETS[("windows", "cuda")][0]
+    served = {name: tmp_path / "release" / name, build: tmp_path / "release" / build}
+    monkeypatch.setattr(runtime, "_download",
+                        lambda url, dest, on_progress, label: shutil.copyfile(served[label], dest))
+    rt = runtime.install("cuda", probe=_ok_probe)
+    assert (rt.path / "cudart64_12.dll").is_file()
+    assert ((rt.path / runtime.NVIDIA_CUDA_LICENSE).read_text(encoding="utf-8")
+            == runtime.NVIDIA_CUDA_LICENSE_NOTICE)
+    assert runtime.NVIDIA_CUDA_LICENSE == "LICENSE.nvidia-cuda"
+
+
+def test_a_runtime_without_a_cudart_bundle_gets_no_nvidia_notice(fake_release):
+    rt = runtime.install("vulkan", probe=_ok_probe)
+    assert not (rt.path / runtime.NVIDIA_CUDA_LICENSE).exists()
+
+
+def test_sdcpp_nvidia_notice_matches_setup_llama():
+    from localm.setup_llama import cuda
+    assert runtime.NVIDIA_CUDA_LICENSE_NOTICE == cuda.NVIDIA_CUDA_LICENSE_NOTICE
+    assert runtime.NVIDIA_CUDA_LICENSE == cuda.NVIDIA_CUDA_LICENSE
