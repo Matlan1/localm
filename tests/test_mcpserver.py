@@ -2823,6 +2823,10 @@ class TestToolTablePathArguments:
         resp = _req(server, "tools/call",
                     {"name": tool, "arguments": {**base, arg: _DEVICE}})
         assert resp["result"]["isError"] is True, resp
+        text = " ".join(c.get("text", "") for c in resp["result"]["content"])
+        assert "not a directory" not in text, text
+        if tool in ("run_coder_task", "pull_model"):
+            assert "UNC or device" in text, text
 
 
 class TestCoderFlags:
