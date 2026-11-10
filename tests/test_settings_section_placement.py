@@ -91,7 +91,7 @@ VISIBLE_FIELD_GROUP = {
     "gui_preview_enabled": "Chat", "gui_preview_owner_only": "Chat",
     "port": "Server", "bind_host": "Server", "tls_enabled": "Server",
     "tls_cert": "Server", "tls_key": "Server", "cors_origins": "Server",
-    "mdns_name": "Server", "metrics_enabled": "Server", "mdns_enabled": "Server",
+    "allowed_hosts": "Server", "mdns_name": "Server", "metrics_enabled": "Server", "mdns_enabled": "Server",
     "require_auth": "Security", "allow_network_drives": "Security",
     "coder_remember_projects": "Coder", "coder_projects_remembered": "Coder",
     "coder_rail_side": "Coder", "coder_confirm_timeout": "Coder",
