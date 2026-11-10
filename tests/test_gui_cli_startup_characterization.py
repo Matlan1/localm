@@ -892,6 +892,20 @@ class TestAttachOrNew:
         assert len(gui.opened) == 1
         assert gui.served == []
 
+    def test_a_second_serve_reports_an_api_instance_and_mounts_nothing(self, gui):
+        gui.running_instance(mode="api", token="peer-token")
+        r = gui.invoke("serve", command=localm.cli.main)
+        assert r.exit_code == 0, r.output
+        assert (f"Attaching to the localm already running for "
+                f"{instances.resolve_root_dir()} (pid {os.getpid()}, "
+                f"port {PEER_PORT}).") in r.flat
+        assert gui.mounts == []
+        assert "Mounted the GUI" not in r.flat
+        assert "Could not mount the GUI" not in r.flat
+        assert f"http://127.0.0.1:{PEER_PORT}/" in r.flat
+        assert gui.served == [] and gui.apps == []
+        assert gui.windows == [] and gui.opened == []
+
     def test_a_failed_mount_still_opens_the_address(self, gui):
         gui.running_instance(mode="api")
         gui.mount_status = 404

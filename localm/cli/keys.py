@@ -219,7 +219,7 @@ def key_clear(yes):
     Removing the last key needs an interactive terminal and always asks, --yes
     included; piped input is refused."""
     from localm import auth, sessions
-    if auth.get_api_key() is None:
+    if not auth.any_key_configured():
         console.print("[dim]No API key set (already open mode).[/dim]")
         return
     last = auth.removal_leaves_no_key(clear_all=True)
