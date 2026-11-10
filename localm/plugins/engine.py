@@ -33,15 +33,17 @@ from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
                                      InferenceBackendDescriptor,
                                      PluginSettingField, PluginSpec, Surface)
 from localm.plugins.ids import _check_plugin_name, _is_valid_plugin_name
+from localm.plugins.lookup import SOURCE_MARKER
 
 # Logger for the sequential plugin load, one line per plugin.
 _log = logging.getLogger("localm.plugins")
 
 # Provenance sidecar written into an installed plugin dir. Records where the
-# copy came from ('store' = the bundled first-party shelf, 'external' = a
-# third-party source dir) and a content hash of that source at install time.
-# Hidden, so discovery (which only walks directories) ignores it.
-_PLUGIN_MARKER = ".localm-source.json"
+# install came from ('store' = the bundled first-party shelf, with
+# ``package = true`` for a marker-only install; 'external' = a third-party
+# source dir, with a content hash of that source at install time). Hidden, so
+# discovery (which only walks directories) ignores it.
+_PLUGIN_MARKER = SOURCE_MARKER
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +162,17 @@ def _write_marker(dest: Path, source: str, src_hash: str) -> None:
         pass
 
 
+def _write_store_install(dest: Path, src: Path) -> None:
+    """Make *dest* the installed marker of the store plugin in *src*: a copy of
+    its manifest and a provenance marker recording ``source = "store"`` and
+    ``package = true``. No code is copied; the plugin runs from *src*. Raises
+    OSError when either file cannot be written."""
+    import shutil
+    shutil.copyfile(Path(src) / "plugin.toml", Path(dest) / "plugin.toml")
+    (Path(dest) / _PLUGIN_MARKER).write_text(
+        json.dumps({"source": "store", "package": True}), encoding="utf-8")
+
+
 def _purge_plugin_modules(uniq: str) -> None:
     """Remove a plugin's module namespace ("<uniq>" and every "<uniq>.*"
     submodule) from sys.modules so the next import reads fresh from disk."""
@@ -274,10 +287,47 @@ def _entry_module_file(base: Path, mod_name: str) -> Optional[Path]:
     return next((c for c in candidates if c.is_file()), None)
 
 
+def _package_module_name(spec: PluginSpec, mod_name: str) -> Optional[str]:
+    """The real module name of *mod_name* when *spec* is a first-party plugin
+    whose folder is in the localm package, else None."""
+    if not spec.builtin or not spec.path:
+        return None
+    from localm.plugins.lookup import PACKAGE, package_root
+    try:
+        d = Path(spec.path).resolve()
+        if d.parent != package_root().resolve():
+            return None
+    except OSError:
+        return None
+    if not (d.name.isidentifier()
+            and all(p.isidentifier() for p in mod_name.split("."))):
+        return None
+    return f"{PACKAGE}.{d.name}.{mod_name}"
+
+
+def _is_package_module(uniq: str) -> bool:
+    """True when *uniq* is a module of the localm package (a first-party plugin
+    loaded under its real name), which is never dropped from sys.modules."""
+    from localm.plugins.lookup import PACKAGE
+    return uniq == PACKAGE or uniq.startswith(PACKAGE + ".")
+
+
+def _drop_plugin_modules(uniq: str) -> None:
+    """``_purge_plugin_modules`` for a plugin loaded from a copied folder; a
+    no-op for a first-party plugin loaded from the localm package, so it keeps
+    one module instance per process."""
+    if not _is_package_module(uniq):
+        _purge_plugin_modules(uniq)
+
+
 def _import_module(spec: PluginSpec):
-    """Import the plugin's module fresh from its directory. The module name in
-    register_entry is '<module>' or '<module>:<attr>'; we import <module>.py (or
-    <module>/__init__.py) and return (module, register_attr_name)."""
+    """Import the plugin's module. The module name in register_entry is
+    '<module>' or '<module>:<attr>'. A first-party plugin whose folder is in
+    the localm package is imported by its real name
+    (``localm.plugins.builtin.<name>.<module>``, reusing an already imported
+    module); any other plugin is imported fresh from <module>.py (or
+    <module>/__init__.py) in its directory under a synthetic name. Returns
+    (module, register_attr_name, module_name)."""
     entry = spec.register_entry or "plugin"
     mod_name, _, attr = entry.partition(":")
     attr = attr or "register"
@@ -285,6 +335,9 @@ def _import_module(spec: PluginSpec):
     mod_file = _entry_module_file(base, mod_name)
     if mod_file is None:
         raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
+    real = _package_module_name(spec, mod_name)
+    if real is not None:
+        return importlib.import_module(real), attr, real
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     # Drop modules cached from a PRIOR load of this plugin: the top-level name
     # and its submodules (e.g. <uniq>.backend), so every module loads from the
@@ -328,8 +381,10 @@ def import_tool_module(spec: PluginSpec):
     if not entry:
         raise ValueError(f"plugin {spec.name!r}: no entry module for tool exports")
     use = dataclasses.replace(spec, register_entry=entry)
-    uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     mod_name = entry.partition(":")[0]
+    if _package_module_name(spec, mod_name) is not None:
+        return _import_module(use)[0]
+    uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     base = Path(spec.path or ".")
     want = _entry_module_file(base, mod_name)
     cached = sys.modules.get(uniq)
@@ -729,22 +784,25 @@ _UNSET = object()      # sentinel: distinguish "builtin_root not passed" from "=
 
 
 def _store_root() -> Optional[Path]:
-    """The bundled STORE shelf: first-party plugins ship here but are NOT loaded
-    from here. Core only reads it to copy a plugin into the installed folder on
-    install. (Directory still named 'builtin' on disk.)"""
-    d = Path(__file__).resolve().parent / "builtin"
+    """The bundled STORE shelf (the ``localm.plugins.builtin`` package). An
+    installed first-party plugin is a marker folder in the installed folder;
+    its manifest and code are read from here."""
+    from localm.plugins.lookup import package_root
+    d = package_root()
     return d if d.is_dir() else None
 
 
 class PluginManager:
     """Discovers INSTALLED plugins (in the installed folder) and loads / unloads /
-    enables / disables them at runtime on *app*; installs plugins by copying them
-    from the bundled store into the installed folder.
+    enables / disables them at runtime on *app*. Installing a first-party plugin
+    writes a marker folder (its manifest and a provenance marker) into the
+    installed folder; installing a third-party plugin copies its source there.
 
-    Two locations: the STORE (bundled shelf, ``store_root``, read only on install)
-    and the INSTALLED folder (``installed_root``, the ONLY place discovery/loading
-    looks). A plugin not in the installed folder does not exist as far as localm is
-    concerned. "Installed" therefore means physically present in installed_root;
+    Two locations: the STORE (bundled shelf, ``store_root``: the manifest and code
+    of every first-party plugin) and the INSTALLED folder (``installed_root``, the
+    ONLY place discovery looks for what is installed). A plugin not in the
+    installed folder does not exist as far as localm is concerned. "Installed"
+    therefore means physically present in installed_root;
     "enabled" is a config toggle within installed; active = installed AND enabled.
     """
 
@@ -892,7 +950,11 @@ class PluginManager:
                     continue
                 try:
                     warns: list = []
-                    spec = parse_spec(child, builtin=False, warnings=warns)
+                    store_src = self._store_source_for(child)
+                    if store_src is not None:
+                        spec = parse_spec(store_src, builtin=True, warnings=warns)
+                    else:
+                        spec = parse_spec(child, builtin=False, warnings=warns)
                     if not spec.compatible():
                         raise ValueError(
                             f"api_version {spec.api_version} != {API_VERSION}")
@@ -938,6 +1000,17 @@ class PluginManager:
             return None
         d = Path(self._store_root) / name
         return d if (d / "plugin.toml").is_file() else None
+
+    def _store_source_for(self, installed: Path) -> Optional[Path]:
+        """The store folder an installed folder was installed from: the store
+        has a plugin of the same name and the folder's marker does not record
+        a third-party source. None for a third-party install. The spec, and for
+        the bundled store the code, of a first-party install come from there."""
+        from localm.plugins.lookup import installed_from_store
+        src = self._store_dir(Path(installed).name)
+        if src is None or not installed_from_store(installed):
+            return None
+        return src
 
     def store_catalog(self) -> dict[str, PluginSpec]:
         """Parse the bundled store shelf (the available first-party plugins). Used
@@ -1029,7 +1102,7 @@ class PluginManager:
         ``on_event(name, status, error)`` with status "loaded" or "failed". A
         raising callback is ignored so it can never break startup."""
         self._ensure_preinstalled()                # first-run: provision chat etc.
-        self._refresh_installed_builtins()         # upgrade: re-copy stale builtins
+        self._refresh_installed_builtins()         # upgrade: convert old copied installs
         self.discover()
         enabled = self._enabled_set()
 
@@ -1158,7 +1231,7 @@ class PluginManager:
         module, attr, uniq = _import_module(spec)
         register = getattr(module, attr, None)
         if not callable(register):
-            sys.modules.pop(uniq, None)
+            _drop_plugin_modules(uniq)
             raise ValueError(f"plugin {spec.name!r}: no callable {attr!r}")
         host = PluginHost(self.app, self, spec)
         try:
@@ -1172,7 +1245,7 @@ class PluginManager:
             # (routes, static mounts, chat hooks, deferred on_startup
             # callbacks), so a failed load leaves nothing mounted.
             host.unmount()
-            _purge_plugin_modules(uniq)
+            _drop_plugin_modules(uniq)
             raise
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
@@ -1220,8 +1293,7 @@ class PluginManager:
             _log.warning("plugin %s: unregister failed during unload: %s", name, e,
                          exc_info=True)
         host.unmount()
-        _purge_plugin_modules(uniq)     # drop the whole namespace so a re-enable
-        #                                 re-imports every module fresh from disk
+        _drop_plugin_modules(uniq)      # a copied plugin re-imports fresh on re-enable
 
     def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
         """Call an optional plugin lifecycle hook if the loaded module defines it.
@@ -1276,8 +1348,10 @@ class PluginManager:
             return False
 
     def _provision_from_store(self, name: str) -> bool:
-        """Copy the plugin from the bundled store into the installed folder. No-op
-        if it is already installed. Raises NotImplementedError when the plugin is
+        """Install the plugin from the store: create its folder in the installed
+        folder holding only its manifest and the provenance marker
+        (``_write_store_install``); the code stays in the store. No-op if it is
+        already installed. Raises NotImplementedError when the plugin is
         missing from the store but its catalog entry has a repo URL (not fetched),
         and KeyError when no source exists.
 
@@ -1304,8 +1378,16 @@ class PluginManager:
         src = self._store_dir(name)
         if src is not None:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, dest)
-            _write_marker(dest, "store", _dir_content_hash(src))
+            tmp = dest.parent / f".{name}.install.tmp"
+            try:
+                if tmp.exists():
+                    shutil.rmtree(tmp)
+                tmp.mkdir()
+                _write_store_install(tmp, src)
+                tmp.rename(dest)
+            except BaseException:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise
             return True
         from localm.plugins import catalog as _cat
         entry = _cat.get(name)
@@ -1352,135 +1434,118 @@ class PluginManager:
             return not d.is_dir()
         return not d.is_dir()
 
-    # ---- refresh stale builtin copies (upgrade safety) ---------------------
-    # An installed builtin is a COPY of the bundled store source taken at
-    # install time, and install/provision no-ops while that directory exists.
-    # Staleness is detected by a CONTENT HASH of the store source recorded in
-    # the provenance marker, not by the plugin version.
-    def _maybe_refresh_builtin(self, name: str) -> bool:
-        """Re-copy an installed builtin from the bundled store when the shipped
-        source changed since it was installed. Returns True if a refresh ran.
+    # ---- convert copied first-party installs (upgrade from copy installs) ----
+    # An older localm installed a first-party plugin as a full copy of its store
+    # folder. The engine no longer imports that copy (discover() takes the spec
+    # and the code from the store); this deletes the copied code and keeps every
+    # other file found in the folder.
+    def _migrate_installed_copy(self, name: str) -> bool:
+        """Turn an installed folder that holds a copy of the store plugin
+        *name* into the marker-only install (``_write_store_install``). Files at
+        a path the store plugin also ships, and compiled ``__pycache__`` /
+        ``*.pyc`` files, are deleted; any other file is kept in place and logged
+        at WARNING. Returns True when a copy was converted, False when there was
+        nothing to convert (no store plugin of that name, not installed, a
+        third-party install, or already a marker-only install).
 
-        Raises RuntimeError when a refresh was due but the fresh copy could not
-        be swapped in (the installed copy is left in place; the log says why).
-
-        Safe by construction:
-          - Only plugins WITH a bundled-store source are considered; a third-party
-            plugin (no store dir, or a marker recording ``source != "store"``) is
-            never touched.
-          - User config is NOT in the plugin dir (it lives in config.json under
-            ``plugins.<name>``); plugin data lives under ``data_subdir`` in the
-            data dir. Re-copying the plugin dir therefore preserves both.
-          - The swap goes through temp/backup siblings so a failure leaves the
-            existing copy intact.
-        """
+        The marker is written before anything is deleted, so an interrupted
+        conversion leaves a folder the engine already treats as a marker-only
+        install; the next call deletes what remains. Raises RuntimeError when
+        some copied files could not be deleted (the plugin still runs from the
+        store; the log names each file)."""
         store_src = self._store_dir(name)
         if store_src is None:
-            return False                              # not a bundled/builtin plugin
-        dest = self._installed_dir(name)
-        if not (dest / "plugin.toml").is_file():
-            return False                              # not installed on disk
-        marker = _read_marker(dest)
-        if marker and marker.get("source") not in (None, "store"):
-            return False                              # third-party: never clobber
-        cur = _dir_content_hash(store_src)
-        # What we last synced FROM: the recorded source hash, or - for a legacy
-        # copy with no marker - the installed copy's own current content.
-        known = marker.get("src_hash") if marker else _dir_content_hash(dest)
-        if known == cur:
-            if marker is None:                        # adopt provenance, no re-copy
-                _write_marker(dest, "store", cur)
             return False
-        if not self._swap_in_store_copy(name, store_src, dest, cur):
+        dest = self._installed_dir(name)
+        if self._store_source_for(dest) is None:
+            return False
+        leftovers = self._copied_files(dest, store_src)
+        marker = _read_marker(dest)
+        if marker and marker.get("package") and not leftovers:
+            return False
+        _write_store_install(dest, store_src)
+        failed, kept = [], []
+        for path, copied in leftovers.items():
+            rel = path.relative_to(dest).as_posix()
+            if not copied:
+                kept.append(rel)
+                continue
+            try:
+                path.unlink()
+            except OSError as e:
+                failed.append(f"{rel} ({e})")
+        self._prune_empty_dirs(dest)
+        if kept:
+            _log.warning(
+                "plugin %s: the old installed copy held files the plugin does not "
+                "ship; they are kept in %s but the plugin now runs from the localm "
+                "package and does not read them: %s", name, dest, ", ".join(kept))
+        if failed:
+            _log.warning("plugin %s: could not delete old copied files: %s",
+                         name, "; ".join(failed))
             raise RuntimeError(
-                f"the bundled copy of {name} could not be swapped in; the installed "
-                f"copy is unchanged (the log says why)")
-        # If the plugin is live on an app, reload it so the new code takes effect.
-        if self.app is not None and name in self._loaded:
-            self._unload(name)
-            self.discover()
-            if name in self._specs and name in self._enabled_set():
-                self._safe_load(self._specs[name])
-        _log.info("plugin %s refreshed from the bundled store", name)
+                f"the old installed copy of {name} could not be fully removed "
+                f"({len(failed)} file(s) left; the log names them); the plugin "
+                f"runs from the localm package")
+        _log.info("plugin %s: the old installed copy was converted; the plugin "
+                  "runs from the localm package", name)
         return True
 
-    def _swap_in_store_copy(self, name: str, store_src: Path, dest: Path,
-                            cur_hash: str) -> bool:
-        """Replace *dest* with a fresh copy of *store_src* (+ marker) as safely as
-        the platform allows. The original install is never deleted until the new
-        copy is in place, so any failure leaves a usable plugin dir. Returns True
-        only on a completed swap."""
-        import shutil
-        tmp = dest.parent / f".{name}.refresh.tmp"
-        backup = dest.parent / f".{name}.refresh.bak"
-        # The staging paths interpolate the name into a basename, so re-check
-        # the name and that tmp, backup and dest all sit directly in the
-        # installed root before the copytree, renames and rmtrees below.
-        if (not _is_valid_plugin_name(name)
-                or dest.parent != Path(self._installed_root)
-                or tmp.parent != dest.parent or backup.parent != dest.parent):
-            raise ValueError(
-                f"refusing to stage a refresh for {name!r}: the staging paths "
-                f"do not sit in the installed root")
-        # Stage 1 - build the fresh copy in a temp sibling. A failure here leaves
-        # the existing install completely untouched.
+    @staticmethod
+    def _copied_files(dest: Path, store_src: Path) -> dict:
+        """Every file under *dest* except its manifest and provenance marker,
+        mapped to True when it is copied code (a path *store_src* also has, or a
+        compiled file) and False when it is something else."""
+        out: dict = {}
         try:
-            for stale in (tmp, backup):
-                if stale.exists():
-                    shutil.rmtree(stale)
-            shutil.copytree(store_src, tmp)
-            _write_marker(tmp, "store", cur_hash)
-        except OSError as e:
-            shutil.rmtree(tmp, ignore_errors=True)
-            _log.warning("plugin %s: could not stage a refresh: %s", name, e)
-            return False
-        # Stage 2 - swap it into place. Move the stale copy aside first; if the
-        # move-in fails, put it back. The original is kept at dest, or at the
-        # backup if even the restore fails.
+            files = [p for p in Path(dest).rglob("*") if p.is_file() or p.is_symlink()]
+        except OSError:
+            return out
+        for p in files:
+            rel = p.relative_to(dest)
+            if rel.as_posix() in ("plugin.toml", _PLUGIN_MARKER):
+                continue
+            compiled = p.suffix == ".pyc" or "__pycache__" in rel.parts
+            out[p] = compiled or (Path(store_src) / rel).is_file()
+        return out
+
+    @staticmethod
+    def _prune_empty_dirs(root: Path) -> None:
+        """Remove every empty directory below *root*, deepest first."""
         try:
-            dest.rename(backup)
-        except OSError as e:
-            shutil.rmtree(tmp, ignore_errors=True)
-            _log.warning("plugin %s: could not refresh stale copy: %s", name, e)
-            return False
-        try:
-            tmp.rename(dest)
-        except OSError as e:
+            dirs = sorted((p for p in Path(root).rglob("*")
+                           if p.is_dir() and not p.is_symlink()),
+                          key=lambda p: len(p.parts), reverse=True)
+        except OSError:
+            return
+        for d in dirs:
             try:
-                backup.rename(dest)                   # restore the original
-            except OSError as restore_err:
-                _log.error("plugin %s: refresh failed and the original could not "
-                           "be restored; the previous copy is kept at %s (%s)",
-                           name, backup, restore_err)
-                shutil.rmtree(tmp, ignore_errors=True)
-                return False
-            shutil.rmtree(tmp, ignore_errors=True)
-            _log.warning("plugin %s: could not refresh stale copy: %s", name, e)
-            return False
-        shutil.rmtree(backup, ignore_errors=True)
-        return True
+                d.rmdir()
+            except OSError:
+                pass
 
     def _refresh_installed_builtins(self) -> None:
-        """Refresh every installed builtin whose bundled-store source changed
-        since install (an upgrade left a stale copy). Best-effort; never raises -
-        a failing refresh must not break startup."""
+        """Convert every installed first-party plugin that is still a full copy
+        of its store folder (``_migrate_installed_copy``). Best-effort; never
+        raises: a failure is recorded as a provisioning error and logged."""
         if not self._store_root:
             return
         for name in sorted(self._installed_set()):
             try:
-                self._maybe_refresh_builtin(name)
+                self._migrate_installed_copy(name)
                 self._clear_provision_error(name, "refresh")
             except Exception as e:
                 self._note_provision_error(name, f"refresh: {e}")
 
     def refresh(self, name: Optional[str] = None) -> list:
-        """Re-sync installed builtin plugins with the bundled store, re-copying
-        any whose shipped source changed since install. With *name*, refresh just
-        that plugin (KeyError if it is not an installed builtin). Returns the
-        names actually refreshed. A live, active plugin is reloaded in place.
-        Without *name*, a plugin whose refresh failed is left out of the result
-        and listed in ``last_refresh_failures`` (name to error); with *name*, the
-        failure raises."""
+        """Convert installed first-party plugins that are still full copies of
+        their store folder into marker-only installs
+        (``_migrate_installed_copy``). A first-party plugin runs from the store,
+        so an upgraded store takes effect without a refresh. With *name*, just
+        that plugin (KeyError if it is not an installed first-party plugin).
+        Returns the names converted. Without *name*, a plugin whose conversion
+        failed is left out of the result and listed in ``last_refresh_failures``
+        (name to error); with *name*, the failure raises."""
         self.last_refresh_failures = {}
         self.discover()
         if name is not None:
@@ -1488,11 +1553,11 @@ class PluginManager:
                 raise KeyError(f"no such builtin plugin: {name}")
             if not (self._installed_dir(name) / "plugin.toml").is_file():
                 raise KeyError(f"plugin {name!r} is not installed")
-            return [name] if self._maybe_refresh_builtin(name) else []
+            return [name] if self._migrate_installed_copy(name) else []
         refreshed = []
         for n in sorted(self._installed_set()):
             try:
-                if self._maybe_refresh_builtin(n):
+                if self._migrate_installed_copy(n):
                     refreshed.append(n)
             except Exception as e:
                 _log.warning("plugin %s: refresh failed: %s", n, e)
@@ -1594,9 +1659,9 @@ class PluginManager:
 
     # ---- public lifecycle (install/uninstall = store<->installed) -----------
     def install(self, name: str) -> None:
-        """Install a plugin: copy it from the bundled store
-        into the installed folder, then load + enable it on the live app. Rolls
-        back the copy if it does not load. KeyError if no such plugin exists."""
+        """Install a plugin from the bundled store into the installed folder
+        (``_provision_from_store``), then load + enable it on the live app. Rolls
+        back the install if it does not load. KeyError if no such plugin exists."""
         copied = self._provision_from_store(name)    # may raise KeyError
         # Roll back only the copy this call created; see _provision_from_store.
         self._provision_and_verify(name, rollback_on_fail=copied)
@@ -1647,11 +1712,11 @@ class PluginManager:
             raise self._resolve_missing_plugin_error(name)
         self._require_deps_installed(name)
         try:
-            self._maybe_refresh_builtin(name)         # pick up an upgraded builtin
+            self._migrate_installed_copy(name)        # convert an old copied install
         except RuntimeError as e:
-            # The installed copy is intact; enable it as it is.
+            # The plugin runs from the store whatever the old copy still holds.
             self._note_provision_error(name, f"refresh: {e}")
-        self.discover()                               # re-read the refreshed spec
+        self.discover()
         if name not in self._loaded:
             self._load(self._specs[name])             # load first; surface errors
         self._set_enabled(name, True)
@@ -1809,12 +1874,12 @@ class PluginManager:
         return task
 
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
-        """CLI/headless install/uninstall WITHOUT loading routes: copy store ->
-        installed (or remove the installed dir); the GUI server reconciles via
+        """CLI/headless install/uninstall WITHOUT loading routes: install from
+        the store (or remove the installed dir); the GUI server reconciles via
         load_enabled on its next start. Installing also enables by default;
         uninstalling disables. Honours protection on uninstall."""
         if on:
-            copied = self._provision_from_store(name)  # copy store -> installed (raises if unknown)
+            copied = self._provision_from_store(name)  # raises if unknown
             # Roll back ONLY what this call created - see _provision_from_store.
             self._provision_and_verify(name, rollback_on_fail=copied)
             if enable:

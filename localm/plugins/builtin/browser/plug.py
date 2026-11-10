@@ -224,8 +224,8 @@ def _viewable_agent_browsers(request: Request) -> list:
     if mgr is None:
         return []
     try:
-        from localm.plugins.builtin.coder.plug import _principal_from_request
-        is_owner, principal = _principal_from_request(request)
+        from localm.plugins.lookup import plugin_api
+        is_owner, principal = plugin_api("coder", "plug")._principal_from_request(request)
     except Exception:                      # noqa: BLE001
         return []                          # no identity: show nothing
     found = []

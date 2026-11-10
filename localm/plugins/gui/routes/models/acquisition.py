@@ -466,21 +466,20 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager.comfy_resolve import (
             cached_comfy_download, curated_comfy_download, search_refusal,
         )
+        from localm.plugins.lookup import PluginUnavailable, plugin_api
 
         def _native_check():
             """The preflight answer when the image or video plugin runs the
             native backend, or None when it runs ComfyUI. With no model set,
             ``missing`` lists every recommended file not yet downloaded."""
-            from importlib import import_module
-
             from localm.config import load_config
             from localm.media import backend_choice
-            plugin_backend = import_module(f"localm.plugins.builtin.{kind}.backend")
+            plugin_backend = plugin_api(kind, "backend")
             s = backend_choice.refine_auto(plugin_backend.settings(load_config()),
                                            kind.capitalize())
             if s.get("backend") != "native":
                 return None
-            native = import_module(f"localm.plugins.builtin.{kind}.backends.native")
+            native = plugin_api(kind, "backends.native")
             s = apply_choice(s, native_choice)
             return native_offer.from_status(s, native.status(s))
 
@@ -490,11 +489,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             download), or None when it runs ComfyUI."""
             from localm.config import load_config
             from localm.media import backend_choice
-            from localm.plugins.builtin.music import backend as music_backend
-            s = backend_choice.refine_auto(music_backend.settings(load_config()), "Music")
+            s = backend_choice.refine_auto(
+                plugin_api("music", "backend").settings(load_config()), "Music")
             if s.get("backend") != "native":
                 return None
-            from localm.plugins.builtin.music.backends import native
+            native = plugin_api("music", "backends.native")
             s = apply_choice(s, native_choice)
             return native_offer.from_music_status(s, native.status(s))
 
@@ -523,6 +522,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 try:
                     native_answer = (_native_music_check() if kind == "music"
                                      else _native_check())
+                except PluginUnavailable as e:
+                    return {"status": "unavailable", "missing": [], "warning": str(e)}
                 except Exception as e:
                     logger.warning("%s backend preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],

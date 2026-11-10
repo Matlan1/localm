@@ -346,18 +346,39 @@ def _flux_models(main: dict) -> dict:
 
 
 def _builtin_data() -> list[tuple[str, dict]]:
+    """Every built-in starter workflow as ``(media, raw workflow)``. The image
+    and video entries come from those plugins' native backends and are left out
+    while that plugin is not installed and enabled."""
     from localm.media.koboldcpp import models as ace
-    from localm.plugins.builtin.image.backends.native import RECOMMENDED_MODELS
-    from localm.plugins.builtin.video.backends.native import RECOMMENDED_VIDEO_MODELS
-    turbo = RECOMMENDED_MODELS[0]
-    wan = RECOMMENDED_VIDEO_MODELS[0]
-    wan_models = {p.role: _ref({"repo": p.repo, "file": p.file, "sha256": p.sha256,
-                                "size_bytes": p.size_bytes, "model_type": p.model_type})
-                  for p in wan.parts}
+    from localm.plugins.lookup import PluginUnavailable, plugin_api
     ace_models = {c: _ref({"repo": ace.DEFAULT_REPO, "file": ace.DEFAULT_FILES[c],
                            "sha256": ace.DEFAULT_SHA256[c], "size_bytes": ace.DEFAULT_SIZES[c],
                            "model_type": ace.REGISTRY_TYPES[c]})
                   for c in ace.COMPONENTS}
+    out: list[tuple[str, dict]] = []
+    try:
+        image_native = plugin_api("image", "backends.native")
+    except PluginUnavailable:
+        image_native = None
+    if image_native is not None:
+        out += _image_builtin_data(image_native.RECOMMENDED_MODELS[0])
+    try:
+        video_native = plugin_api("video", "backends.native")
+    except PluginUnavailable:
+        video_native = None
+    if video_native is not None:
+        out += _video_builtin_data(video_native.RECOMMENDED_VIDEO_MODELS[0])
+    out.append(
+        ("music", {"slug": "ace-step-1.5-turbo", "name": "ACE-Step 1.5 turbo (default set)",
+                   "description": "The default ACE-Step 1.5 GGUF parts: turbo diffusion model, "
+                                  "text encoder, VAE and planner.",
+                   "models": ace_models, "params": {}}))
+    return out
+
+
+def _image_builtin_data(turbo) -> list[tuple[str, dict]]:
+    """The image starter workflows; *turbo* is the image plugin's first
+    recommended native model."""
     return [
         ("image", {"slug": "sd-turbo", "name": "SD-Turbo (fast, 512 px)",
                    "description": "Stable Diffusion Turbo in 2 steps at CFG 1. Small and quick; "
@@ -379,16 +400,22 @@ def _builtin_data() -> list[tuple[str, dict]]:
                    "models": _flux_models(FLUX_DEV_Q4),
                    "params": {"steps": 20, "cfg": 1.0, "guidance": 3.5,
                               "width": 1024, "height": 1024}}),
+    ]
+
+
+def _video_builtin_data(wan) -> list[tuple[str, dict]]:
+    """The video starter workflow; *wan* is the video plugin's first
+    recommended native model."""
+    wan_models = {p.role: _ref({"repo": p.repo, "file": p.file, "sha256": p.sha256,
+                                "size_bytes": p.size_bytes, "model_type": p.model_type})
+                  for p in wan.parts}
+    return [
         ("video", {"slug": "wan2.1-t2v-1.3b", "name": "Wan 2.1 text to video 1.3B",
                    "description": "Wan 2.1 T2V 1.3B with the UMT5 encoder and the Wan 2.1 VAE.",
                    "models": wan_models,
                    "params": {"steps": wan.steps, "cfg": wan.cfg_scale,
                               "flow_shift": wan.flow_shift, "width": wan.width,
                               "height": wan.height, "negative_prompt": wan.negative_prompt}}),
-        ("music", {"slug": "ace-step-1.5-turbo", "name": "ACE-Step 1.5 turbo (default set)",
-                   "description": "The default ACE-Step 1.5 GGUF parts: turbo diffusion model, "
-                                  "text encoder, VAE and planner.",
-                   "models": ace_models, "params": {}}),
     ]
 
 

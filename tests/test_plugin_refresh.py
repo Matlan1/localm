@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Refreshing stale installed builtin-plugin copies on upgrade.
+"""Installed first-party plugins run from the store, and old copied installs
+are converted.
 
-Enabling a first-party plugin copies it from the bundled store into the data
-dir. A copy that is never refreshed keeps SHADOWING the newer store source after
-a localm upgrade, so the user silently runs stale plugin code (including missing
-bug and security fixes). These tests cover the content-hash + provenance-marker
-refresh: a stale copy is re-synced, user config survives, an externally-installed
-plugin is never clobbered, and an up-to-date copy is left alone. They also pin
-the sys.modules submodule purge that lets a reload pick up freshly written code.
+Installing a first-party plugin writes a marker folder (manifest + provenance
+marker) into the data dir; its code is read from the store. An install made by
+an older localm is a full copy of the store folder: it is never imported, and
+``refresh`` / ``load_enabled`` / ``enable`` delete its copied code. These tests
+cover that conversion, that user config survives, that an externally-installed
+plugin is never touched, and the sys.modules purge for plugins loaded under a
+synthetic name.
 """
+
 
 import textwrap
 
@@ -84,38 +86,33 @@ def _enable(name):
     save_config(cfg)
 
 
+
 # --------------------------------------------------------------------------- #
-#  Core: a stale builtin is refreshed on launch                               #
+#  An old copied install is converted, and the store code is what runs         #
 # --------------------------------------------------------------------------- #
 
-def test_stale_builtin_refreshed_on_load(env):
-    """load_enabled re-copies an installed builtin whose store source changed,
-    and the LIVE route then serves the fresh code. Negative-testable: without
-    the refresh the stale v1 copy loads and /val returns 1."""
-    from localm.plugins.engine import (
-        PluginManager, _dir_content_hash, _read_marker)
+def test_old_copy_is_converted_on_load_and_the_store_code_runs(env):
+    """load_enabled converts an installed full copy into a marker-only install
+    and the LIVE route serves the store's code, not the copy's."""
+    from localm.plugins.engine import PluginManager, _read_marker
     store, inst = env / "store", env / "installed"
-    _valued_plugin(store, "ref1", 2)            # bundled store: fresh (v2)
-    _valued_plugin(inst, "ref1", 1)             # installed: stale (v1), no marker
+    _valued_plugin(store, "ref1", 2)            # bundled store: v2
+    _valued_plugin(inst, "ref1", 1)             # installed: an old v1 copy, no marker
     _enable("ref1")
 
     app = FastAPI()
     PluginManager(app, store_root=store, installed_root=inst).load_enabled()
 
-    # on-disk copy now matches the store, byte for byte (marker excluded)
-    assert _dir_content_hash(inst / "ref1") == _dir_content_hash(store / "ref1")
-    assert (inst / "ref1" / "backend.py").read_text() == \
-        (store / "ref1" / "backend.py").read_text()
-    m = _read_marker(inst / "ref1")
-    assert m and m["source"] == "store"
-    # and the running plugin serves the refreshed code
+    assert sorted(p.name for p in (inst / "ref1").iterdir()) == [
+        ".localm-source.json", "plugin.toml"]
+    assert _read_marker(inst / "ref1") == {"source": "store", "package": True}
     with TestClient(app) as c:
         assert c.get("/api/ref1/val").json()["val"] == 2
 
 
-def test_refresh_preserves_user_config(env):
-    """Per-plugin user config lives in config.json (NOT the plugin dir), so a
-    dir re-copy must leave it intact."""
+def test_conversion_preserves_user_config(env):
+    """Per-plugin user config lives in config.json (NOT the plugin dir), so the
+    conversion leaves it intact."""
     from localm.config import load_config, save_config
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
@@ -129,15 +126,15 @@ def test_refresh_preserves_user_config(env):
     PluginManager(FastAPI(), store_root=store, installed_root=inst).load_enabled()
 
     assert load_config()["plugins"]["ref2"] == {"backend": "custom", "knob": 7}
-    assert (inst / "ref2" / "backend.py").read_text().strip().endswith("return 2")
+    assert not (inst / "ref2" / "backend.py").exists()
 
 
 # --------------------------------------------------------------------------- #
-#  Safety: never clobber a third-party (externally-installed) plugin          #
+#  Safety: never touch a third-party (externally-installed) plugin            #
 # --------------------------------------------------------------------------- #
 
-def test_third_party_install_never_refreshed(env):
-    """A plugin with no bundled-store counterpart is never a refresh target."""
+def test_third_party_install_never_converted(env):
+    """A plugin with no bundled-store counterpart is never a conversion target."""
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
     src = env / "thirdparty"
@@ -146,67 +143,68 @@ def test_third_party_install_never_refreshed(env):
     mgr.set_installed_from_dir(src / "tp1")     # external install (marker=external)
     before = (inst / "tp1" / "plug.py").read_text()
 
-    assert mgr.refresh() == []                  # nothing to refresh
+    assert mgr.refresh() == []
     assert (inst / "tp1" / "plug.py").read_text() == before
 
 
-def test_external_marker_blocks_refresh_even_for_store_name(env):
+def test_external_marker_keeps_its_own_code_even_for_store_name(env):
     """Even when a store plugin of the SAME name exists, an installed copy that
-    declares external provenance is left untouched (defends a user who shadowed a
-    builtin name with their own plugin)."""
+    declares external provenance is left untouched and its own code runs."""
     from localm.plugins.engine import (
         PluginManager, _dir_content_hash, _write_marker)
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "ref3", 2)            # a builtin of this name exists
     pdir = _valued_plugin(inst, "ref3", 1)      # but the install is "external"
     _write_marker(pdir, "external", _dir_content_hash(pdir))
-    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=store, installed_root=inst)
 
     assert mgr.refresh() == []
     assert (inst / "ref3" / "backend.py").read_text().strip().endswith("return 1")
+    mgr.enable("ref3")
+    with TestClient(app) as c:
+        assert c.get("/api/ref3/val").json()["val"] == 1
 
 
 # --------------------------------------------------------------------------- #
-#  Idempotence: an up-to-date copy is not re-copied                           #
+#  A marker-only install needs no refresh                                     #
 # --------------------------------------------------------------------------- #
 
-def test_uptodate_builtin_not_recopied(env):
-    """A fresh install records the source hash; a later refresh is a no-op."""
+def test_fresh_install_is_a_marker_and_refresh_is_a_no_op(env):
     from localm.plugins.engine import PluginManager, _read_marker
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "up1", 5)
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
     mgr.install("up1")
-    m = _read_marker(inst / "up1")
-    assert m and m["source"] == "store"
+    assert _read_marker(inst / "up1") == {"source": "store", "package": True}
+    assert not (inst / "up1" / "plug.py").exists()
 
-    assert mgr.refresh() == []                  # whole-set refresh: nothing changed
-    assert mgr.refresh("up1") == []             # targeted refresh: still a no-op
+    assert mgr.refresh() == []
+    assert mgr.refresh("up1") == []
 
 
-def test_legacy_identical_copy_adopts_marker_without_recopy(env):
-    """A pre-feature install (no marker) that already matches the store adopts
-    the provenance marker WITHOUT a re-copy."""
-    from localm.plugins.engine import PluginManager, _read_marker
+def test_a_changed_store_takes_effect_on_reload_without_a_refresh(env):
+    """The store is the code: after the store changes, a disable + enable serves
+    the new code with no refresh step."""
+    from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
-    _valued_plugin(store, "leg1", 5)
-    _valued_plugin(inst, "leg1", 5)             # identical content, no marker
-    assert _read_marker(inst / "leg1") is None
-    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    _valued_plugin(store, "rel2", 1)
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=store, installed_root=inst)
+    mgr.install("rel2")
+    with TestClient(app) as c:
+        assert c.get("/api/rel2/val").json()["val"] == 1
 
-    assert mgr.refresh() == []                  # identical -> not re-copied
-    m = _read_marker(inst / "leg1")
-    assert m and m["source"] == "store"         # but provenance is now recorded
+    _valued_plugin(store, "rel2", 2)            # ship a newer store version
+    mgr.disable("rel2")
+    mgr.enable("rel2")
+    with TestClient(app) as c:
+        assert c.get("/api/rel2/val").json()["val"] == 2
 
-
-# --------------------------------------------------------------------------- #
-#  Robustness: a reload after on-disk change picks up the new code            #
-# --------------------------------------------------------------------------- #
 
 def test_unload_purges_submodules_from_sys_modules(env):
-    """_unload must drop the WHOLE plugin namespace - the top-level module AND
-    its submodules (e.g. '<uniq>.backend'). Popping only the top-level name
-    leaves a stale '.backend' cached that shadows a later load."""
+    """_unload drops the WHOLE namespace of a plugin loaded under a synthetic
+    name: the top-level module AND its submodules (e.g. '<uniq>.backend')."""
     import sys
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
@@ -218,28 +216,6 @@ def test_unload_purges_submodules_from_sys_modules(env):
     mgr._unload("rel1")
     assert "_localm_plugin_rel1" not in sys.modules
     assert "_localm_plugin_rel1.backend" not in sys.modules   # purged, not just top
-
-
-def test_runtime_refresh_reloads_fresh_code(env):
-    """End-to-end runtime refresh: a newer store version is detected, the live
-    plugin is re-copied AND reloaded, and the route serves the new code. This
-    passes only because both the on-disk re-copy and the sys.modules submodule
-    purge work together (a stale cached '.backend' would otherwise shadow it)."""
-    from localm.plugins.engine import PluginManager
-    store, inst = env / "store", env / "installed"
-    _valued_plugin(store, "rel2", 1)
-    app = FastAPI()
-    mgr = PluginManager(app, store_root=store, installed_root=inst)
-    mgr.install("rel2")
-    with TestClient(app) as c:
-        assert c.get("/api/rel2/val").json()["val"] == 1
-
-    _valued_plugin(store, "rel2", 2)            # ship a newer store version
-    assert mgr.refresh("rel2") == ["rel2"]
-    assert (inst / "rel2" / "backend.py").read_text() == \
-        (store / "rel2" / "backend.py").read_text()
-    with TestClient(app) as c:
-        assert c.get("/api/rel2/val").json()["val"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -257,7 +233,7 @@ def test_refresh_endpoint_over_real_builtins(env, monkeypatch):
         assert c.post("/api/plugins/voice/install").status_code == 200
         r = c.post("/api/plugins/voice/refresh")
         assert r.status_code == 200
-        assert r.json()["status"] in ("refreshed", "up-to-date")
+        assert r.json()["status"] == "up-to-date"
         assert c.post("/api/plugins/ghost/refresh").status_code == 404
 
 
@@ -268,52 +244,60 @@ def test_refresh_unknown_name_raises(env):
         mgr.refresh("ghost")                    # no such builtin
 
 
-def test_a_failed_swap_is_reported_not_called_up_to_date(env, monkeypatch, caplog):
+def _undeletable(monkeypatch, path):
+    """Make Path.unlink fail for *path* only."""
+    from pathlib import Path
+    real = Path.unlink
+
+    def unlink(self, *a, **kw):
+        if Path(self) == path:
+            raise PermissionError("locked")
+        return real(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_a_failed_conversion_is_reported_not_called_up_to_date(env, monkeypatch, caplog):
     import logging
 
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "ref9", 2)
     _valued_plugin(inst, "ref9", 1)
-    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
-                        lambda self, *a, **kw: False)
+    _undeletable(monkeypatch, inst / "ref9" / "backend.py")
     mgr = PluginManager(None, store_root=store, installed_root=inst)
 
-    with pytest.raises(RuntimeError, match="could not be swapped in"):
-        mgr.refresh("ref9")
     with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        with pytest.raises(RuntimeError, match="could not be fully removed"):
+            mgr.refresh("ref9")
         assert mgr.refresh() == []
     assert "ref9" in mgr.last_refresh_failures
-    assert any("ref9" in r.getMessage() for r in caplog.records)
-    assert (inst / "ref9" / "backend.py").read_text() != \
-        (store / "ref9" / "backend.py").read_text()
+    assert any("backend.py" in r.getMessage() for r in caplog.records)
+    assert (inst / "ref9" / "backend.py").is_file()
 
 
-def test_refresh_routes_report_a_failed_swap(env, monkeypatch):
-    from localm.plugins.engine import PluginManager, attach_engine
+def test_refresh_routes_report_a_failed_conversion(env, monkeypatch):
+    from localm.plugins.engine import attach_engine
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "ref9", 2)
     _valued_plugin(inst, "ref9", 1)
-    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
-                        lambda self, *a, **kw: False)
+    _undeletable(monkeypatch, inst / "ref9" / "backend.py")
     monkeypatch.setattr("localm.plugins.engine._store_root", lambda: store)
     monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: inst)
     app = FastAPI()
     attach_engine(app)
     with TestClient(app) as c:
         one = c.post("/api/plugins/ref9/refresh")
-        assert one.status_code == 500 and "could not be swapped in" in one.json()["detail"]
+        assert one.status_code == 500 and "could not be fully removed" in one.json()["detail"]
         every = c.post("/api/plugins/refresh").json()
         assert every["status"] == "partial" and "ref9" in every["failed"]
 
 
-def test_enable_keeps_the_installed_copy_when_the_refresh_swap_fails(env, monkeypatch):
+def test_enable_runs_the_store_code_when_the_conversion_fails(env, monkeypatch):
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "ref9", 2)
     _valued_plugin(inst, "ref9", 1)
-    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
-                        lambda self, *a, **kw: False)
+    _undeletable(monkeypatch, inst / "ref9" / "backend.py")
     app = FastAPI()
     mgr = PluginManager(app, store_root=store, installed_root=inst)
     mgr.discover()
@@ -321,5 +305,5 @@ def test_enable_keeps_the_installed_copy_when_the_refresh_swap_fails(env, monkey
     mgr.enable("ref9")
 
     with TestClient(app) as c:
-        assert c.get("/api/ref9/val").json()["val"] == 1
-    assert "could not be swapped in" in mgr.api_state()["errors"].get("ref9", "")
+        assert c.get("/api/ref9/val").json()["val"] == 2
+    assert "could not be fully removed" in mgr.api_state()["errors"].get("ref9", "")

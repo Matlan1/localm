@@ -1742,10 +1742,12 @@ def rename(old_name, new_name):
     done = _rename_on_running_server(old_name, new_name)
     if done is not None:
         sys.exit(0 if done else 1)
-    from ..plugins.builtin.chat.plug import rename_notes as _chat_rename
-    from ..plugins.builtin.jobs.plug import rename_notes as _jobs_rename
-    register_rename_hook("saved chats", _chat_rename)
-    register_rename_hook("scheduled jobs", _jobs_rename)
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    for hook_name, plugin in (("saved chats", "chat"), ("scheduled jobs", "jobs")):
+        try:
+            register_rename_hook(hook_name, plugin_api(plugin, "plug").rename_notes)
+        except PluginUnavailable:
+            continue
     if not rename_model(old_name, new_name):
         sys.exit(1)
 
