@@ -24,7 +24,9 @@ address*.
 1. **Bind to your network.** By default `localm gui` listens only on this machine
    (`127.0.0.1`). To let your phone reach it, bind to all interfaces - and set an
    API key first, because the GUI also exposes the coder agent:
-   - set an API key: *Settings > Security > Owner key > Generate new key*, or
+   - set an API key: *Settings > Security > Keys & devices > Create & show QR*
+     (the first key created there also sets the owner key and signs this
+     browser in; after that, *Settings > Security > Owner key* rolls it), or
      `localm key generate`, or set `LOCALM_API_KEY` to something only you
      know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows PowerShell:
      `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's Generate

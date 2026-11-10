@@ -231,7 +231,7 @@ embedder too rather than quietly returning those vectors.
   chunk.
 - **Reranking.** The first search ranks every chunk with a cheap score, so the
   best excerpt is often present but not first. When a reranker model is
-  installed, the best 20 hits (Settings > Knowledge > Reranker candidates, 5 to
+  installed, the best 20 hits (Settings > Plugins > Knowledge (RAG) > Reranker candidates, 5 to
   100) are re-scored by it against the question and the top few are kept, each
   carrying a `rerank_score` next to its `score`. It runs on this machine and
   adds a fraction of a second to a second per question; more candidates find
@@ -249,7 +249,7 @@ embedder too rather than quietly returning those vectors.
   candidates before the reranker sees them, as does a question that points back
   at the conversation (with no `context`) and a reranker that fails.
   To gate on the reranker score for another reranker, or with another cut-off,
-  set Settings > Knowledge > Reranker minimum score (`rag_rerank_min_score`) to
+  set Settings > Plugins > Knowledge (RAG) > Reranker minimum score (`rag_rerank_min_score`) to
   the lowest score an excerpt may have, in that reranker's own scale (the
   Qwen3-Reranker score is a probability from 0 to 1; bge-reranker gives a
   logit); blank keeps the measured value, or the floor.

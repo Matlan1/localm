@@ -244,7 +244,7 @@ class _Reply:
     def __init__(self, status=201, body=b'{"ok": true, "url": "https://example.invalid/1", "number": 1}'):
         self.status, self._body = status, body
 
-    def read(self):
+    def read(self, n=-1):
         return self._body
 
     def __enter__(self):
@@ -571,7 +571,7 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
     class _Resp:
         status = 201
 
-        def read(self):
+        def read(self, n=-1):
             return b'{"url": "https://github.com/x/localm/issues/7"}'
 
         def __enter__(self):

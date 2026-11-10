@@ -255,7 +255,7 @@ time limit, so a long index is never cut short; a holder that dies stops
 reporting and its lock is reclaimed automatically.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
-or denied folder policy as an interactive add (Settings > Knowledge), including
+or denied folder policy as an interactive add (Settings > Plugins > Knowledge (RAG)), including
 the always-refused credential folders. A folder that was legal when it was
 indexed but is outside the policy now is skipped and reported, never indexed.
 Secret-looking files dropped into an indexed folder are filtered exactly as they
