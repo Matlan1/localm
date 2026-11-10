@@ -21,6 +21,14 @@ from localm.plugins.builtin.video.backends import native as video_native
 
 
 @pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
+@pytest.fixture(autouse=True)
 def _reference_box(monkeypatch):
     from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
     pin_rx6900xt(monkeypatch)
@@ -963,7 +971,7 @@ def media_app(flux_set, runner, tmp_path, monkeypatch):
     from localm.config import update_config
     from localm.media import backend_choice
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     monkeypatch.setattr(backend_choice, "managed_comfy_active", lambda cfg=None: False)
     monkeypatch.setattr(cc, "is_comfy_confirmed", lambda api_url=None: False)
     monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=3.0: False)

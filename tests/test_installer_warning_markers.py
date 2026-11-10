@@ -72,6 +72,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Could not set up the setup journal - if this setup is interrupted',
         'if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.',
         'if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.',
+        'echo  [^^!] These programs could not be stopped:',
         'if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.',
     ]
     for site in sites:

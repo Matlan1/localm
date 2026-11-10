@@ -322,6 +322,7 @@ class TestMessages:
         assert sa.degraded_load_confirm("m", budget, 3000 * MB) == {
             "status": "confirm_required", "model": "m", "reason": "degraded_load",
             "plan_mb": 4800, "full_mb": 4800, "free_mb": 3000, "moe": False,
+            "experts_on_disk": False,
             "unloaded": [], "unloads_shared": False, "unloads_peers": False,
             "detail": ("'m' does not fit: every layer on the GPU needs about 4800 MB "
                        "of free VRAM, and about 3000 MB is free. Loading it anyway "

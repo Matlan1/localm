@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .agent import Agent
-from .agent.constants import _SHELL_EXEC_TOOLS
+from .agent.constants import EXECUTES_PROJECT_CODE
 from .audit import SessionMode, parse_mode
 from .display import print_warning
 from .project_config import load_project_config
@@ -121,7 +121,9 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
 
     With *unattended*, a project ``mode`` that would persist more than the mode
     configured without the project file is ignored (see
-    ``localm.audit.effective_unattended_mode``).
+    ``localm.audit.effective_unattended_mode``), and so is the project's
+    ``auto_approve``. ``auto_approve``, ``verify``, ``model`` and a widening
+    ``mode`` apply only once the project is trusted (``load_project_config``).
 
     Raises ``ProjectConfigUnreadable`` when the project config exists but
     cannot be read, and ``InvalidSessionMode`` for an unknown mode."""
@@ -143,11 +145,11 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
         temperature = float(proj_cfg["temperature"])
     if seed is None and "seed" in proj_cfg:
         seed = int(proj_cfg["seed"])
-    if not yes and proj_cfg.get("auto_approve"):
+    if not yes and not unattended and proj_cfg.get("auto_approve"):
         yes = True
     always_confirm: set = set()
     if interactive_confirm:
-        always_confirm.update(_SHELL_EXEC_TOOLS)
+        always_confirm.add(EXECUTES_PROJECT_CODE)
     cfg_confirm = proj_cfg.get("always_confirm", [])
     if isinstance(cfg_confirm, list):
         always_confirm.update(cfg_confirm)
@@ -181,8 +183,9 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
 
 
 def unattended_shell_gated(task: str, auto_approve: bool) -> bool:
-    """True when a one-shot task runs without ``--yes``: the shell tools then
-    need a confirmation the run cannot give, so they are denied."""
+    """True when a one-shot task runs without ``--yes``: every tool that runs
+    project code (``ToolDef.executes_project_code``) then needs a confirmation
+    the run cannot give, so it is denied."""
     return bool(task) and not auto_approve
 
 
@@ -196,9 +199,11 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
                 server_side: bool = False) -> Agent:
     """Construct the Agent for a session the way the CLI does.
 
-    A one-shot task auto-approves file writes; without ``auto_approve`` the
-    shell tools are added to ``always_confirm`` so an unattended run denies
-    them instead of executing unconfirmed.
+    A one-shot task auto-approves file writes; without ``auto_approve``
+    ``EXECUTES_PROJECT_CODE`` is added to ``always_confirm`` so an unattended
+    run denies every tool that runs project code instead of executing it
+    unconfirmed. Only ``auto_approve`` (``--yes``) turns off the re-armed
+    confirmation after untrusted content (``taint_rearms_confirm``).
 
     ``max_tokens_explicit`` should be ``TaskConfig.max_tokens_explicit`` from
     the same ``resolve_task_config`` call that produced ``gen_kw``, so a later
@@ -210,8 +215,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
     a key on the server's console."""
     always_confirm = set(always_confirm or ())
     if unattended_shell_gated(task, auto_approve):
-        always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
-    return Agent(
+        always_confirm = set(always_confirm) | {EXECUTES_PROJECT_CODE}
+    agent = Agent(
         backend=backend,
         cwd=work_dir,
         name="localcoder",
@@ -232,6 +237,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         interactive_tools=not task,
         **(gen_kw or {}),
     )
+    agent.taint_rearms_confirm = not auto_approve
+    return agent
 
 
 def warn_unfinished_background(agent) -> None:

@@ -8,6 +8,7 @@
 // --- ES module imports ---
 import { recordGuiError, setGuiErrorAuth } from "./client-log.js";
 import { t } from "./i18n.js";
+import { I18N_EN } from "./i18n-en.js";
 
 export const $ = (id) => document.getElementById(id);
 
@@ -260,9 +261,16 @@ let _toastErrorAnnounce = null;
  *  raises that one's count instead, and the error is recorded in the recent
  *  errors list and the server log. #toast always holds the latest message and
  *  carries the "error" class for an error; it is shown only for an info toast. */
+/** *text* from the server with its English bundled-code notes in the GUI's language. */
+export function localizeServerNotes(text) {
+  return String(text ?? "")
+    .replace(I18N_EN["models.bundledCodeNote"], t("models.bundledCodeNote"))
+    .replace(I18N_EN["models.bundledCodeAlwaysNote"], t("models.bundledCodeAlwaysNote"));
+}
+
 export function toast(msg, isError = false) {
   const el = $("toast");
-  const text = String(msg ?? "");
+  const text = localizeServerNotes(msg);
   el.textContent = text;
   clearTimeout(el._t);
   if (isError) {
@@ -1118,15 +1126,13 @@ export function artifactSrcdoc(code, lang) {
       + "</head><body>" + code + "</body></html>";
   }
   if (/<!doctype\s+html/i.test(code) || /<html[\s>]/i.test(code)) {
-    // Full document: the CSP meta must be parsed BEFORE any executable node, or
-    // a <script> the artifact placed before its own <head> runs pre-CSP and can
-    // still hit the network (R41-D4). Anchor on <html> FIRST: inject our own
-    // <head> carrying the CSP immediately after the <html ...> tag, so the CSP
-    // precedes anything between <html> and the artifact's own <head>. Only fall
-    // back to splicing an existing <head> (no <html> tag) or prepending.
-    if (/<html[^>]*>/i.test(code)) return code.replace(/<html([^>]*)>/i, "<html$1><head>" + csp + "</head>");
-    if (/<head[\s>]/i.test(code)) return code.replace(/<head([^>]*)>/i, "<head$1>" + csp);
-    return csp + code;
+    // Full document: our own <head> carrying the CSP comes first in the string,
+    // before any artifact markup, so it is parsed before any artifact node. The
+    // artifact's <html>/<body> attributes merge onto ours and its head elements
+    // join our head after the CSP. A doctype is emitted only when the artifact
+    // has one, so a document without one keeps its rendering mode.
+    const doctype = /<!doctype\s+html/i.test(code) ? "<!doctype html>" : "";
+    return doctype + "<html><head><meta charset=\"utf-8\">" + csp + "</head>" + code;
   }
   // A fragment: wrap it in a minimal document.
   return "<!doctype html><html><head><meta charset=\"utf-8\">" + csp + "</head><body>"
@@ -1188,6 +1194,17 @@ export function openArtifact(code, lang) {
   frame.setAttribute("sandbox", "allow-scripts");   // NO allow-same-origin
   frame.setAttribute("referrerpolicy", "no-referrer");
   frame.srcdoc = artifactSrcdoc(code, lang);
+  // The first load is the srcdoc; any later load means the artifact navigated
+  // its frame, so the frame is torn down and the pane says why.
+  let loads = 0;
+  frame.addEventListener("load", () => {
+    loads += 1;
+    if (loads < 2 || !frame.isConnected) return;
+    const note = document.createElement("p");
+    note.className = "artifact-navigated";
+    note.textContent = t("common.artifact.navigated");
+    body.replaceChildren(note);
+  });
   body.appendChild(frame);
   const title = pane.querySelector(".artifact-title");
   if (title) title.textContent = t("common.artifact.title", { lang });
@@ -1846,6 +1863,159 @@ function _offerModelDownload(missingModel, log, plugin) {
   });
 }
 
+/** Offer, in ONE box, to download every file of *parts* (entries with
+ *  native: true and a source, as the preflight and a job's "missing_model"
+ *  event list them). One confirmation starts every download in turn, and
+ *  *log*, when given, gets each file's progress lines. Resolves "done" when
+ *  every file downloaded, "declined" when the person chose Not now or closed the
+ *  box (nothing was downloaded), "failed" when a download did not finish, and
+ *  "blocked" (with the reason shown, and no box offered) when the network
+ *  policy refuses model downloads. */
+export async function offerNativeDownloads(parts, log) {
+  const names = parts.map((m) => m.filename).join(", ");
+  const say = (msg, isError) => {
+    if (isError || !log) toast(msg, !!isError);
+    if (log) {
+      log.style.display = "block";
+      log.textContent += msg + "\n";
+      log.scrollTop = log.scrollHeight;
+    }
+  };
+  if (parts.some((m) => m.blocked)) {
+    say(t("common.modelDownload.blockedOff", { names }), true);
+    return "blocked";
+  }
+  const outcome = await new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const close = () => {
+      if (watch) clearInterval(watch);
+      watch = null;
+      $("modal").style.display = "none";
+    };
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      close();
+      resolve(value);
+    };
+    const single = parts.length === 1;
+    const total = parts.reduce((n, m) => n + (m.source.size_bytes || 0), 0);
+    const title = single
+      ? t("common.modelDownload.title", { filename: parts[0].filename })
+      : t("common.modelDownload.titleMany", { count: parts.length });
+    openModal(title, (body) => {
+      if (single) {
+        const { filename, source } = parts[0];
+        body.appendChild(el("p", "", source.size_bytes
+          ? t("common.modelDownload.bodyNative", { filename, size: fmtBytes(source.size_bytes) })
+          : t("common.modelDownload.bodyNativeNoSize", { filename })));
+        body.appendChild(el("p", "",
+          t("common.modelDownload.source", { repo: source.repo, file: source.file })));
+      } else {
+        body.appendChild(el("p", "", total
+          ? t("common.modelDownload.bodyNativeMany",
+            { count: parts.length, size: fmtBytes(total) })
+          : t("common.modelDownload.bodyNativeManyNoSize", { count: parts.length })));
+        const list = el("ul", "");
+        for (const { filename, source } of parts) {
+          const item = el("li", "", source.size_bytes
+            ? t("common.modelDownload.partItem", { filename, size: fmtBytes(source.size_bytes) })
+            : filename);
+          item.appendChild(el("div", "sub",
+            t("common.modelDownload.source", { repo: source.repo, file: source.file })));
+          list.appendChild(item);
+        }
+        body.appendChild(list);
+      }
+      const row = el("div", "actions");
+      const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
+      skip.onclick = () => finish("declined");
+      const dl = el("button", "btn-secondary", t("common.modelDownload.download"));
+      dl.onclick = async () => {
+        dl.disabled = true; skip.disabled = true; dl.textContent = t("common.modelDownload.starting");
+        let closed = false;
+        try {
+          for (let i = 0; i < parts.length; i++) {
+            const { filename, source } = parts[i];
+            const r = await fetch("/api/models/pull", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({
+                spec: source.spec, name: source.name || null,
+                sha256: source.sha256 || null, model_type: source.model_type,
+                type_is_hint: true,
+              }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || r.statusText);
+            if (!closed) { closed = true; settled = true; close(); }
+            say(single
+              ? t("common.modelDownload.progress", { filename, repo: source.repo })
+              : t("common.modelDownload.progressItem",
+                { index: i + 1, count: parts.length, filename, repo: source.repo }));
+            const end = await streamJob(data.job_id, (line) => {
+              if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
+            });
+            if (end.status !== "done") {
+              toast(t("common.modelDownload.ended", { status: end.status, filename }), true);
+              resolve("failed");
+              return;
+            }
+          }
+          resolve("done");
+        } catch (e) {
+          if (!closed) { settled = true; close(); }
+          toast(t("common.modelDownload.failed", { message: e.message }), true);
+          resolve("failed");
+        }
+      };
+      row.appendChild(skip);
+      row.appendChild(dl);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish("declined");
+    }, 200);
+  });
+  if (outcome === "declined") say(t("common.modelDownload.declined", { names }));
+  else if (outcome === "done") say(t("common.modelDownload.allDone", { names }));
+  return outcome;
+}
+
+/** The handlers for a media job's stream that keep a "missing_model" event
+ *  (a native model that is not downloaded) apart from the text line that
+ *  repeats it, which names a command: `onEvent` goes to streamJob's last
+ *  argument, `show(line)` says whether a line belongs in the log, and
+ *  `offer()` after the job ended offers the download in the usual box and
+ *  resolves its outcome ("done", "declined", "failed", "blocked"), or null when
+ *  the job named nothing missing. A "done" outcome tells the person to press
+ *  Generate again. */
+export function createMissingModelOffer(log) {
+  let pending = null;
+  let hidden = null;
+  return {
+    onEvent(ev) {
+      if (ev && ev.type === "missing_model" && Array.isArray(ev.missing)) {
+        const parts = ev.missing.filter((m) => m && m.native && m.source);
+        if (!parts.length) return;
+        pending = parts;
+        hidden = typeof ev.text === "string" ? ev.text : null;
+      }
+    },
+    show(line) {
+      return hidden === null || line !== hidden;
+    },
+    async offer() {
+      if (!pending) return null;
+      const parts = pending;
+      pending = null;
+      const outcome = await offerNativeDownloads(parts, log);
+      if (outcome === "done") toast(t("common.modelDownload.pressGenerate"));
+      return outcome;
+    },
+  };
+}
+
 /** Report ONE missing model localm cannot download: a toast and a log line
  *  naming the file and the workflow input that needs it. *status* is the
  *  source lookup's outcome ("not_found", "offline", "failed") when a search
@@ -1968,7 +2138,11 @@ function _reportPreflightUnavailable(kind, log) {
  *  preflight_models() failure. When the server reports
  *  status "unavailable" (the check itself could not run), that is reported
  *  too via _reportPreflightUnavailable rather than read as "nothing missing".
- *  Always resolves true (proceed) - no path here blocks generation on its own
+ *  The files a native backend still has to download are offered together in
+ *  one box (offerNativeDownloads); the result is false when they were not all
+ *  downloaded (declined, failed or refused by the network policy), so the
+ *  caller does not start a generation that would only stop on the missing file.
+ *  Every other path resolves true (proceed) - none blocks generation on its own
  *  account. Best-effort: any failure to reach the pre-check itself also
  *  resolves true. */
 export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
@@ -1987,11 +2161,14 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
     return true;
   }
   const missing = (data && data.missing) || [];
+  const natives = missing.filter((m) => m.native && m.source);
   for (const m of missing) {
+    if (m.native && m.source) continue;
     if (m.source) await _offerModelDownload(m, log, kind);
     else if (m.searchable) await _offerModelSearch(m, log, kind);
     else _reportUncuratedMiss(m, log);
   }
+  if (natives.length) return (await offerNativeDownloads(natives, log)) === "done";
   return true;
 }
 

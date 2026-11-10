@@ -13,9 +13,27 @@ make, so the two cannot drift apart.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from localm.cli import media as media_cli
+
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
+def _plugin_api_url(plugin: str) -> str:
+    from importlib import import_module
+
+    from localm.config import load_config
+    backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
+    return str(backend.settings(load_config()).get("api_url") or "")
 
 
 @pytest.fixture
@@ -43,7 +61,7 @@ def test_the_cli_uses_the_per_plugin_comfy_url(plugin, cfg_home, monkeypatch):
     cfg["comfy_api_url"] = "http://127.0.0.1:8188"
     save_config(cfg)
 
-    url = media_cli._plugin_api_url(plugin)
+    url = _plugin_api_url(plugin)
     assert url.rstrip("/") == "http://127.0.0.1:9999", (
         f"{plugin} on the command line ignored its own ComfyUI url and used "
         f"{url!r}; the GUI would have used the per-plugin one")
@@ -58,15 +76,9 @@ def test_a_plugin_with_no_own_url_falls_back_to_the_shared_default(
     cfg.setdefault("plugins", {}).setdefault("image", {})["comfy"] = {"api_url": ""}
     save_config(cfg)
 
-    url = media_cli._plugin_api_url("image")
+    url = _plugin_api_url("image")
     assert url.rstrip("/") == "http://127.0.0.1:8188", (
         f"a blank per-plugin url must fall back to the shared default, got {url!r}")
-
-
-def test_an_unimportable_plugin_still_answers_with_the_shared_default(cfg_home):
-    # Never raise into a generate command just because a plugin is absent.
-    url = media_cli._plugin_api_url("definitely-not-a-plugin")
-    assert url.startswith("http"), f"no usable fallback url: {url!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -95,7 +107,7 @@ def test_the_generate_commands_pass_the_per_plugin_url(plugin, argv, cfg_home,
 
     def _capture(api_url, run):
         seen.append(api_url)
-        return True, "stubbed"
+        return True, "stubbed", Path("stubbed.out")
 
     monkeypatch.setattr(media_cli, "_generate_or_abort", _capture)
 

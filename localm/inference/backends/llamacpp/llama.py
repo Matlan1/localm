@@ -2278,6 +2278,9 @@ class LlamaCpp:
                         decoder_kv = self._decoder_kv_bytes_per_token(n_head_kv)
                         if decoder_kv:
                             return decoder_kv
+                    stated = self._stated_kv_head_width()
+                    if stated:
+                        return self.n_layers * n_head_kv * stated * 2
                     head_dim = n_embd // n_head
                     return self.n_layers * n_head_kv * head_dim * 2 * 2
         except Exception as exc:
@@ -2312,6 +2315,18 @@ class LlamaCpp:
         except (TypeError, ValueError):
             return 0
         return value if value > 0 else 0
+
+    def _stated_kv_head_width(self) -> int:
+        """``key_length + value_length`` from the loaded model's metadata, or 0
+        when it does not state both. Several architectures set a head width
+        that is not ``n_embd / n_head`` (Nanbeige4.2, Gemma 3), and the cache
+        is sized by the stated one."""
+        arch = self._architecture()
+        if not arch:
+            return 0
+        k_len = self._meta_int(f"{arch}.attention.key_length")
+        v_len = self._meta_int(f"{arch}.attention.value_length")
+        return k_len + v_len if k_len and v_len else 0
 
     def _decoder_kv_bytes_per_token(self, n_head_kv: int) -> int:
         """f16 KV-cache bytes per token of an encoder-decoder model's decoder
@@ -3374,13 +3389,11 @@ class LlamaCpp:
         splice each item in at its place.
 
         Raises ``AudioInputError`` for an audio part when *audio_rate* is 0 and
-        for a clip that cannot be decoded, ``ImageLimitError`` for an image that
-        cannot be decoded, ``VisionInputError`` for an image that cannot be
-        fetched, and ``AudioDecodeCancelled`` once *should_stop* returns True
+        for a clip that cannot be decoded, ``VisionInputError`` for an image that
+        cannot be decoded or fetched, and ``AudioDecodeCancelled`` once *should_stop* returns True
         while an audio clip decodes."""
         from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, ImageLimitError, UnsupportedInputError,
-            VisionInputError)
+            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, UnsupportedInputError, VisionInputError)
         from localm.inference.media import (
             ImageBudget, decode_audio_clip, decode_image_url)
         from localm.netpolicy import NetworkPolicyError
@@ -3408,9 +3421,9 @@ class LlamaCpp:
                         raise VisionInputError(
                             f"The attached image could not be fetched: {e}") from e
                     except Exception as e:
-                        raise ImageLimitError(
-                            f"The attached image could not be read "
-                            f"({type(e).__name__}).") from e
+                        raise VisionInputError(
+                            f"The attached image could not be read: "
+                            f"{type(e).__name__}: {str(e)[:200]}") from e
                     media.append((pil.width, pil.height, pil.tobytes()))
                     parts.append(marker)
                 elif part.get("type") == "input_audio":
@@ -5636,6 +5649,7 @@ class LlamaCpp:
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
         **_ignored,
     ):
         """
@@ -5670,6 +5684,12 @@ class LlamaCpp:
         cache: the reply is computed from a full prefill into an emptied cache,
         alone (see :meth:`_generate`). Encoder-decoder and diffusion models never
         keep one.
+
+        *raw_prompt*, when given, is the whole prompt: it is tokenised as given
+        (control tokens parsed, the vocabulary's BOS added when it asks for one),
+        with no chat template, no reasoning-channel edit and no media; *messages*
+        and *thinking* are then not read. An encoder-decoder model reads it as its
+        encoder input.
         """
         if (logprobs is None) != (logprob_sink is None):
             raise ValueError("logprobs and logprob_sink must be passed together")
@@ -5689,6 +5709,8 @@ class LlamaCpp:
             raise UnsupportedInputError(
                 "min_p, presence_penalty and frequency_penalty cannot be applied "
                 "by a diffusion language model")
+        if raw_prompt is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
                 messages,
@@ -5706,44 +5728,54 @@ class LlamaCpp:
                 logprobs=logprobs,
             ), stream, logprob_sink)
 
-        # Use the model's embedded chat template when available (Gemma, Llama3,
-        # Mistral, etc.) so we don't force ChatML on every model.
-        prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
-        if fallback_reason:
-            self.chat_template_fallback_reason = fallback_reason
-
-        # If the template already encodes a BOS marker (e.g. Gemma's "<bos>"),
-        # parse_special=True (used inside encode) will convert it to the BOS
-        # token, so we must NOT also ask for add_special=True to avoid doubling.
-        # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
-        bos_markers = ("<bos>", "<s>", "﻿")
-        add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, messages_contain_audio,
-            messages_contain_image)
-        has_audio = messages_contain_audio(messages)
-        if has_audio and not self.supports_audio:
-            raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
-        going_to_vision = (getattr(self, "_mtmd", None) is not None
-                           and (has_audio or messages_contain_image(messages)))
-        if going_to_vision:
-            untrusted_ranges = ()
-            if any(untrusted_spans_of(m.get("content")) for m in messages):
-                from localm.debuglog import logger
-                logger.warning(
-                    "textguard: this request takes the vision path, which "
-                    "tokenises the whole prompt through mtmd in one call, so "
-                    "untrusted spans keep special-token parsing ON; only the "
-                    "text-level defang applies to this request")
+        if raw_prompt is not None:
+            going_to_vision = False
+            tokens = self._loaded_tokenizer().encode(
+                raw_prompt,
+                add_bos=not raw_prompt.startswith(("<bos>", "<s>", "\ufeff")))
+            if not tokens:
+                from localm.inference.backends.base import (
+                    EMPTY_RAW_PROMPT_MESSAGE, UnsupportedInputError)
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
         else:
-            untrusted_ranges = _untrusted_prompt_ranges(
-                self._model_ptr, messages, prompt, fallback_reason)
-        if thinking is False and not going_to_vision:
-            from localm.inference.backends.base import no_think_prompt
-            prompt = no_think_prompt(
-                prompt, api.llama_model_chat_template(self._model_ptr))
-        tokens = self._tokenizer.encode(
-            prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
+            # Use the model's embedded chat template when available (Gemma, Llama3,
+            # Mistral, etc.) so we don't force ChatML on every model.
+            prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
+            if fallback_reason:
+                self.chat_template_fallback_reason = fallback_reason
+
+            # If the template already encodes a BOS marker (e.g. Gemma's "<bos>"),
+            # parse_special=True (used inside encode) will convert it to the BOS
+            # token, so we must NOT also ask for add_special=True to avoid doubling.
+            # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
+            bos_markers = ("<bos>", "<s>", "﻿")
+            add_bos = not any(prompt.startswith(m) for m in bos_markers)
+            from localm.inference.backends.base import (
+                AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, messages_contain_audio,
+                messages_contain_image)
+            has_audio = messages_contain_audio(messages)
+            if has_audio and not self.supports_audio:
+                raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
+            going_to_vision = (getattr(self, "_mtmd", None) is not None
+                               and (has_audio or messages_contain_image(messages)))
+            if going_to_vision:
+                untrusted_ranges = ()
+                if any(untrusted_spans_of(m.get("content")) for m in messages):
+                    from localm.debuglog import logger
+                    logger.warning(
+                        "textguard: this request takes the vision path, which "
+                        "tokenises the whole prompt through mtmd in one call, so "
+                        "untrusted spans keep special-token parsing ON; only the "
+                        "text-level defang applies to this request")
+            else:
+                untrusted_ranges = _untrusted_prompt_ranges(
+                    self._model_ptr, messages, prompt, fallback_reason)
+            if thinking is False and not going_to_vision:
+                from localm.inference.backends.base import no_think_prompt
+                prompt = no_think_prompt(
+                    prompt, api.llama_model_chat_template(self._model_ptr))
+            tokens = self._tokenizer.encode(
+                prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
         if self.is_diffusion:
             gen = self._generate_diffusion(

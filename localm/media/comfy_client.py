@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from localm import netpolicy
 from localm.http_ssl import verified_urlopen
@@ -301,10 +301,9 @@ def resolve_media_placement(config: Optional[dict], api_url: str):
     from localm.discover import applied_split_device_count, plan_media_placement
     if applied_split_device_count(cfg) < 2:
         return None, media_split_notice(cfg)
-    # Gate 3 - the running ComfyUI must actually offer the Select*Device nodes AND
-    # enumerate 2+ GPUs (probe /object_info). An older ComfyUI (including localm's own
-    # managed pin) or a single visible card declines with a stated reason, never a
-    # graph ComfyUI would reject.
+    # Gate 3 - the running ComfyUI must offer the Select*Device nodes and enumerate
+    # 2+ GPUs (probe /object_info). A ComfyUI without the nodes, or with one visible
+    # card, declines with a stated reason, never a graph ComfyUI would reject.
     cap = probe_placement_capability(api_url)
     plan = plan_media_placement(cfg, gpu_options=cap.gpu_options) if cap.available else None
     return plan, media_split_notice(cfg, placement=plan, capability=cap)
@@ -721,9 +720,27 @@ def slot_is_satisfied(slot: dict) -> bool:
 #  VRAM management
 # ---------------------------------------------------------------------------
 
+def localm_v1_base(url: Optional[str]) -> Optional[str]:
+    """*url* as a ``/v1`` base: a server root (what ``LOCALM_URL`` holds) gets
+    ``/v1`` appended, an address already ending in ``/v1`` is kept. None and
+    empty stay None."""
+    from localm.localm_url import v1_base
+    return v1_base(url)
+
+
+def unload_failed_notice(reason: str, label: str = "media") -> str:
+    """The one-line notice for a chat-model unload that did not happen."""
+    hint = (" Set LOCALM_API_KEY to that server's key."
+            if reason in ("HTTP 401", "HTTP 403") else "")
+    return (f"Could not unload the chat model ({reason}) - the {label} model may "
+            f"run low on VRAM.{hint}")
+
+
 def _localm_unload(localm_url: Optional[str] = None,
                     instance_token: Optional[str] = None, *,
-                    media: bool = True) -> Optional[dict]:
+                    media: bool = True,
+                    on_failure: Optional[Callable[[str], None]] = None,
+                    label: str = "media") -> Optional[dict]:
     """
     Ask a localm server to release its model from GPU memory. With *media*
     False the server's own idle native media runtimes stay loaded
@@ -741,7 +758,13 @@ def _localm_unload(localm_url: Optional[str] = None,
     as the media-job model reload does (``localm.tls.requests_verify``); plain
     ``urllib`` would reject the self-signed cert and silently skip the unload.
 
-    *instance_token*: this is a FALLBACK path, reached only when the primary,
+    *on_failure*: when the URL is set and the unload did not happen, called
+    once with ``unload_failed_notice(reason, label)``, where *reason* names the
+    HTTP status (``HTTP 403``), a refused redirect, or the connection error.
+
+    *instance_token*: when None, the attach token of this home's registry
+    entry at exactly that address is used (``localm_url.registry_token``).
+    Otherwise this is a FALLBACK path, reached only when the primary,
     already-authenticated ``vram.unload_chat_for_media`` call (which threads
     the same instance token) reported failure. A genuinely open (keyless)
     server still needs a credential here for the same reason it needs one on
@@ -758,28 +781,41 @@ def _localm_unload(localm_url: Optional[str] = None,
     than a real True/False - see http_server._add_vram_fields. A box with no VRAM
     telemetry at all simply omits the three fields.
     """
-    url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
+    url = localm_v1_base(localm_url or os.environ.get("LOCALM_URL", ""))
     if not url:
         return None
-    try:
-        import requests as _rq
 
+    def _failed(reason: str) -> None:
+        if on_failure is not None:
+            on_failure(unload_failed_notice(reason, label))
+
+    try:
         from localm import tls as _tls
         from localm.auth import resolve_bearer_headers
+        from localm.loopback_http import local_request
+        if instance_token is None:
+            from localm.localm_url import registry_token
+            instance_token = registry_token(url)
         headers = resolve_bearer_headers(instance_token)
         # Unload waits for any in-flight generation to finish AND for VRAM to be
         # actually reclaimed before it returns (it must not free the context
-        # mid-decode), so give it time.
+        # mid-decode), so give it time. A redirect is returned, not followed,
+        # and counts as a failed unload.
         target = f"{url}/models/unload" + ("" if media else "?media=false")
-        resp = _rq.post(target, headers=headers, timeout=180,
-                        verify=_tls.requests_verify(url))
+        resp = local_request("POST", target, headers=headers, timeout=180,
+                             verify=_tls.requests_verify(url))
+        if 300 <= resp.status_code < 400:
+            _failed(f"redirect HTTP {resp.status_code} refused")
+            return None
         if not resp.ok:
+            _failed(f"HTTP {resp.status_code}")
             return None
         try:
             return resp.json()
         except Exception:
             return {"status": "unloaded"}
-    except Exception:
+    except Exception as e:
+        _failed(f"{type(e).__name__}: {e}")
         return None
 
 
@@ -1545,9 +1581,6 @@ def is_own_comfy_process(api_url: str, pid: Optional[int]) -> bool:
         return False
 
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
-
-
 def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
     """Who holds the TCP port of a local *api_url*, or ``None``.
 
@@ -1567,9 +1600,10 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError:
         return None
-    if host not in _LOOPBACK_HOSTS:
+    from localm.bindhost import is_local_dial_host, self_connect_host
+    if not is_local_dial_host(host):
         return None
-    probe_host = "127.0.0.1" if host in ("localhost", "0.0.0.0") else host
+    probe_host = self_connect_host(host)
     try:
         with socket.create_connection((probe_host, port), timeout=timeout):
             pass
@@ -1861,12 +1895,13 @@ def _kill_process_tree(proc) -> None:
     import signal as _signal
     import subprocess as _sp
     import sys as _sys
+    from localm import sysprog as _sysprog
     pid = getattr(proc, "pid", None)
     if not pid:
         return
     if _sys.platform == "win32":
         try:
-            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+            _sp.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],
                     capture_output=True, timeout=15)
         except Exception:
             try:
@@ -1924,18 +1959,21 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
         holder = comfy_port_holder(api_url)
         if holder is not None:
             return False, comfy_port_held_message(api_url, holder)
-    interrupt_comfy(api_url)                       # abort render + clear queue
-    try:
-        free_comfy_vram(api_url)
-    except Exception:
-        pass
+    interrupted = interrupt_comfy(api_url)         # abort render + clear queue
+    freed = free_comfy_vram(api_url)
     proc = _take_spawned(api_url)
     if proc is None:
         if _comfy_alive(api_url, timeout=2.0):
             mark_comfy_alive(api_url)   # localm did not launch it and did not stop it
-            return True, ("Aborted the in-flight render and cleared the queue. "
-                          "localm did not launch this ComfyUI, so its process was "
-                          "left running - stop it where you started it.")
+            left = ("localm did not launch this ComfyUI, so its process was "
+                    "left running - stop it where you started it.")
+            if not interrupted:
+                return False, ("ComfyUI did not accept the request to abort its "
+                               "render, so a render may still be running. " + left)
+            vram = ("Freed its VRAM." if freed else
+                    "It did not free its VRAM (no /free on this build, or the "
+                    "request failed).")
+            return True, f"Aborted the in-flight render. {vram} {left}"
         return True, "ComfyUI is not running."
     try:
         if proc.poll() is not None:
@@ -1988,9 +2026,9 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
         not_ours_and_still_alive = not launched_by_us and is_comfy_confirmed(url)
     if not_ours_and_still_alive:
         return True, (
-            "Aborted the in-flight render and cleared the queue, but localm "
-            "did not launch this ComfyUI, so nothing was restarted - restart "
-            "it where you started it."
+            "Aborted the in-flight render, but localm did not launch this "
+            "ComfyUI, so nothing was restarted - restart it where you started "
+            "it."
         )
     return ensure_comfy(api_url=api_url, on_progress=on_progress,
                         wait_seconds=wait_seconds, launch_cmd=launch_cmd,

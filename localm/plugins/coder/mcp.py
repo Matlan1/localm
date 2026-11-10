@@ -452,6 +452,8 @@ def register_mcp_tools(cwd: Path, servers: Optional[dict[str, dict]] = None,
                 params=_schema_to_params(tool.get("inputSchema", {})),
                 # External code - confirm unless the config marks it trusted
                 destructive=not server.trusted,
+                executes_project_code=not server.trusted,
+                confirm_always=not server.trusted,
                 source_label="MCP",
                 registered=registered,
                 warnings=warnings,

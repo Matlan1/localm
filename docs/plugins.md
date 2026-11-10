@@ -40,9 +40,12 @@ localm plugin uninstall <name>  # remove from the installed folder (keeps data u
 localm plugin refresh [<name>]  # re-copy installed builtins whose store code changed
 ```
 
-A running GUI server picks up newly enabled HTTP plugins on its next start;
+A plugin installed or enabled from the terminal while a server is running is
+mounted the next time the GUI reads the plugin list (reload the page);
 toggling a plugin while the server runs (via the GUI Plugins page or the
 `/api/plugins/{name}/...` routes) mounts/unmounts it without a restart.
+A plugin disabled or uninstalled from the terminal stays loaded in a running
+server until that server restarts.
 
 ### Upgrades: refreshing a stale installed copy
 
@@ -98,7 +101,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
                              # "module:attr" is also accepted
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
-capabilities = ["feature"]   # declared capabilities (parsed and stored; not surfaced anywhere yet)
+capabilities = ["feature"]   # declared capabilities; "inference-backend" is the one the engine reads (see Inference backends)
 data_subdir = "my_data"      # storage under the data dir (<data dir>/my_data); "" = none
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
@@ -161,6 +164,11 @@ A plugin whose `on_install` does real work (the bundled `voice` plugin prefetche
 its Whisper model there) must not assume it ran; use `on_first_use` for anything
 that has to happen regardless of install path.
 
+`on_uninstall` has the mirror-image limit: it runs only when the plugin is loaded
+at that moment, that is for an active plugin uninstalled through the GUI or
+`POST /api/plugins/{name}/uninstall`. `localm plugin uninstall`, the MCP
+`uninstall_plugin` tool and the uninstall of a disabled plugin never call it.
+
 ### The Host API
 
 | Method | Purpose |
@@ -178,11 +186,11 @@ that has to happen regardless of install path.
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
 | `audit(event, data)` | Log a plugin event (debug level). |
-| `browse_dirs(path)` | Server-side folder picker helper. |
+| `browse_dirs(path, request)` | Server-side folder picker helper. Raises `PermissionError` unless the caller of `request` has host filesystem access. |
+| `track(stop_callable)` | Run `stop_callable()` when the plugin is unmounted (disable, uninstall or a failed load). Use it to stop a thread or timer the plugin started. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 | `register_model_role(descriptor)` | Declare a model slot the plugin needs, by registry `model_type` (see [Model roles](#model-roles)). |
 | `register_inference_backend(descriptor)` | Offer a backend for model files or folders the built-in GGUF and Hugging Face backends refuse (see [Inference backends](#inference-backends)). |
-| `has_scope(scope)`, `require_scope(scope)` | Not implemented: both raise `NotImplementedError`. Scopes are enforced per request on the routes mounted via `mount_router`. |
 
 A routes-only plugin (`voice`) is:
 
@@ -205,8 +213,11 @@ def unregister():
 
 Every plugin declares a `scope` (default: its name). `mount_router` gates all of
 the plugin's routes behind that scope, enforced per-request when an API key is
-configured (the server is fail-open with no key, unless `LOCALM_REQUIRE_AUTH`
-or the `require_auth` setting forces fail-closed). Scopes keep a plugin's reach explicit and let a key be
+configured. With no key the scope is not checked, but the open-mode gate still
+applies: a state-changing request, and any GET under `/api/` or `/v1/`, needs
+this instance's shell token (the GUI has it) or attach token, so mount routes
+under `/api/<plugin>/`. `LOCALM_REQUIRE_AUTH` or the `require_auth` setting
+refuses keyless use altogether. Scopes keep a plugin's reach explicit and let a key be
 issued for a subset of capabilities. A third-party plugin cannot claim a scope
 localm reserves (a kernel scope, a first-party plugin scope or `coder:full`) or
 one another installed plugin already uses.
@@ -263,8 +274,8 @@ built-in tts block, which ships a fixed schema). This is the seam
 ## Shipping client-side assets
 
 Set `assets_dir` and `client_entry` in `[surface]`. The engine serves the dir at
-`/plugins/<name>/`, and the SPA fetches `/api/plugins`, then `import()`s each
-active plugin's `client_entry` module and calls its exported `register(ctx)`.
+`/plugins/<name>/`, and the SPA fetches `/api/capabilities`, then `import()`s each
+active plugin's `client_entry` module (only the plugins the current key's scopes grant) and calls its exported `register(ctx)`.
 This lets a plugin add browser-side behaviour with no tab and no Python backend.
 
 The `tts` plugin is the worked example: it ships `static/tts.js`, which loads
@@ -299,6 +310,10 @@ never registered as a coder tool.** That split is a real limitation of the
 current loader, not a convention: a plugin that wants both surfaces has to
 declare `entry` as well as `register`.
 
+A manifest with only `entry` is a coder-tool plugin: the plugin engine lists it
+on the Plugins page and loads nothing for it. A manifest with neither `entry` nor
+`register` is reported there as a load failure.
+
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
 keyword. Three optional attributes describe it to the model:
@@ -315,21 +330,27 @@ declare itself asks for confirmation rather than silently acting.
 Registered names are namespaced `plugin_<plugin>_<export>`, with hyphens in the
 plugin name converted to underscores, so an export cannot shadow a built-in.
 
-One current limit worth knowing: an exported tool cannot mark its output as
-untrusted. The built-in network tools are recognised by name rather than by a
-flag, so a plugin tool that returns fetched content is not put through the
-untrusted-content handling that `fetch_url` gets.
+An exported tool that returns fetched or otherwise external content should
+return a `ToolResult` with `untrusted_output=True`; the coder then gives it the
+untrusted-content handling that `fetch_url` gets. A plain string return is
+treated as trusted tool output, and there is no manifest-level switch.
 
 For the built-in tools the coder already has, see the table in
 [cli.md](cli.md#built-in-tools).
 
 ## Chat pipeline hooks
 
-A plugin can intercept and transform a chat turn server-side by registering
-hooks on the kernel chat pipeline. This is the seam that wraps Open WebUI
-*Filter* functions and oobabooga input/output text modifiers (see
-[plugin-interop.md](plugin-interop.md)); it is also a clean way to inject
-context, redact, translate, or annotate every turn.
+A plugin can transform a chat turn server-side by registering hooks on the
+kernel chat pipeline. This is the seam that wraps Open WebUI *Filter* functions
+and oobabooga input/output text modifiers (see
+[plugin-interop.md](plugin-interop.md)); it is a clean way to inject context,
+translate, or annotate a turn.
+
+**Hooks are transforms, not controls.** A hook that raises is skipped, and the
+turn goes on with the value it had. Several paths never reach a hook at all
+(listed under Scope and limits). Do not use a hook to enforce a privacy or
+security rule, such as redaction: anything a hook must guarantee has to be
+enforced in the code path itself.
 
 `host.register_chat_hook(phase, fn, *, priority=0)` takes one of three phases:
 
@@ -359,7 +380,7 @@ def _inlet(messages, ctx):
     return messages
 
 def _outlet(text, messages, ctx):
-    return text.replace("secret", "[redacted]")
+    return text.rstrip() + "\n"
 
 def register(host):
     host.register_chat_hook("inlet", _inlet)
@@ -371,11 +392,24 @@ def unregister():
 
 Scope and limits:
 
-- The chain runs for **every** `/v1/chat/completions` and `/v1/completions`
-  client (the GUI, raw API callers, and the coder agent pointed at localm); a
-  `/v1/completions` prompt reaches the hooks as a single user message. It does
-  **not** run for the in-process `localm run` REPL, which calls the engine
-  directly.
+- The chain runs for **every** `/v1/chat/completions` client (the GUI, raw API
+  callers, and the coder agent pointed at localm), and for the routes that
+  answer through that handler (`/v1/messages`, `/v1/responses`, Ollama
+  `/api/chat` and `/api/generate`). On `/v1/completions` (and Ollama
+  `/api/generate` with `raw: true`) only `stream` and `outlet` run: the raw
+  prompt reaches the model as sent, with no `inlet`. It does **not** run on any
+  other path that produces a reply: the in-process `localm run` REPL (it calls
+  the engine directly), a turn forwarded to a peer (the peer runs its own hooks,
+  this host's do not), jobs, the MCP chat tool, the coder agent's own engine
+  calls and background generation.
+- A hook can tell localm's own chat from other callers by
+  `ctx.state["client_id"]`: the GUI chat and `localm run` send
+  `X-Client-Id: chat`, the coder sends `coder`, and an API client usually sends
+  nothing. The built-in chat plugin's two inlets (a style note asking the model
+  to answer directly and to speak of itself as "I", and the `<think>` note for
+  reasoning models) apply only to `chat`; an API caller's messages reach the
+  model unchanged. The `chat_style_note` setting (Settings > Chat) turns the
+  style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing

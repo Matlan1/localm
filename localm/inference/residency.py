@@ -21,6 +21,19 @@ headroom, with no per-device split shortfall. Anything else falls back to
 single-resident. A wrong PERMIT ends in a native OOM or a driver TDR, not a
 graceful error.
 
+Scope: the decision runs in one process, and the free-VRAM reading is not a
+reservation. Across processes, every caller holds the per-GPU load lease
+(``localm.inference.load_lease``) from its first VRAM reading until its load has
+allocated or failed, so a second localm process of the same data dir, listening
+or not (``localm run``, ``localm job run``, the stdio MCP server), reads free
+VRAM only after the first load's memory is on the card. Other instances are
+only asked to unload through ``localm.gpu_registry``, which finds them by
+listening port. The shared embedder, reranker and speech model are residents
+too (``shared_residents``): admission counts their VRAM in the reading, and the
+eviction ladder may release an idle one (``pick_shared_eviction_victim``) once
+no idle chat model is left; an embedder load in turn asks the chat owners to
+unload (``localm.vram.evict_chat_for_embedder``).
+
 Two optional knobs sit on top of the VRAM arithmetic, both OFF by default:
 
     max_resident_models  cap the number of concurrent resident chat models
@@ -31,7 +44,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, NamedTuple, Optional, Sequence
 
 # Multiplier from on-disk model size to the VRAM a model is expected to occupy
 # once loaded.
@@ -415,6 +428,81 @@ def exceeds_resident_cap(
     if requested in names:
         return False
     return len(names) + 1 > cap
+
+
+# --------------------------------------------------------------------------- #
+#  Shared residents: the embedder, the reranker and the speech model, loaded  #
+#  once per process beside the chat models.                                   #
+# --------------------------------------------------------------------------- #
+
+#: ``(kind, module, release function)`` of every shared resident, in the order
+#: the eviction ladder tries them.
+SHARED_RESIDENTS = (
+    ("embedding model", "localm.inference.embedder", "reset_embedder"),
+    ("reranker model", "localm.inference.reranker", "reset_reranker"),
+    ("speech model", "localm.inference.speech", "reset_speech"),
+)
+
+
+class SharedResident(NamedTuple):
+    """One loaded shared resident. ``hold`` is the VRAM bytes releasing it is
+    expected to free: 0 while a request is using it or when it runs on the
+    CPU, None when it cannot be estimated."""
+
+    kind: str
+    hold: Optional[int]
+
+
+def shared_residents() -> list:
+    """Every loaded shared resident (``SharedResident``), read from each
+    module's ``resident_vram_hold``, in ``SHARED_RESIDENTS`` order. A module
+    not imported yet has loaded nothing and is not imported here. A module
+    whose state cannot be read is logged at WARNING and listed with an
+    unknown ``hold``. Takes those
+    modules' locks: must not run on the event loop thread or while holding
+    one of them."""
+    import sys
+    out = []
+    for kind, module, _release in SHARED_RESIDENTS:
+        mod = sys.modules.get(module)
+        if mod is None:
+            continue
+        try:
+            loaded, hold = mod.resident_vram_hold()
+        except Exception as e:
+            _warn("cannot read whether the %s is loaded: %s", kind, e)
+            out.append(SharedResident(kind, None))
+            continue
+        if loaded:
+            out.append(SharedResident(kind, hold if type(hold) is int else None))
+    return out
+
+
+def pick_shared_eviction_victim(residents: Iterable) -> Optional[SharedResident]:
+    """The first shared resident worth releasing for a chat model, or None:
+    one whose ``hold`` is unknown or above 0. One a request is using (or one
+    on the CPU, which frees no VRAM) is never chosen."""
+    for r in residents:
+        if r.hold is None or r.hold > 0:
+            return r
+    return None
+
+
+def evict_shared_resident(resident: SharedResident) -> bool:
+    """Release *resident* unless a request is using it (its module's release
+    function with ``force=False``, which checks and releases in one locked
+    step). Returns whether it was released. Never raises; a failure is logged
+    at WARNING and reads as not released."""
+    import sys
+    for kind, module, release in SHARED_RESIDENTS:
+        if kind != resident.kind or sys.modules.get(module) is None:
+            continue
+        try:
+            return bool(getattr(sys.modules[module], release)(force=False))
+        except Exception as e:
+            _warn("could not release the %s: %s", kind, e)
+            return False
+    return False
 
 
 def _config(config: Optional[Mapping]) -> Mapping:

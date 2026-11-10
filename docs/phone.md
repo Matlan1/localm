@@ -24,7 +24,9 @@ address*.
 1. **Bind to your network.** By default `localm gui` listens only on this machine
    (`127.0.0.1`). To let your phone reach it, bind to all interfaces - and set an
    API key first, because the GUI also exposes the coder agent:
-   - set an API key: *Settings > Security > Owner key > Generate new key*, or
+   - set an API key: *Settings > Security > Keys & devices > Create & show QR*
+     (the first key created there also sets the owner key and signs this
+     browser in; after that, *Settings > Security > Owner key* rolls it), or
      `localm key generate`, or set `LOCALM_API_KEY` to something only you
      know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows PowerShell:
      `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's Generate
@@ -82,7 +84,8 @@ port-forwarding, no domain, and no certificate wrangling is
 1. Install Tailscale on the machine running localm **and** on your phone; sign in
    to the same account on both. They are now on one private network.
 2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set). localm detects your
-   Tailscale node name and Tailscale IP, covers both in its certificate, and prints
+   Tailscale node name, puts it in its certificate (the `100.x.y.z` address is
+   covered only where the hostname resolves to it, so prefer the name), and prints
    the reachable URL - so it serves HTTPS there too, by name.
 3. Open the machine's Tailscale address on the phone. localm prints the **name**,
    e.g. `https://mybox.tailnet.ts.net:8642/` (Tailscale MagicDNS resolves it on any
@@ -110,6 +113,11 @@ by default (`--no-tls` turns it off for a trusted, isolated LAN). On a trusted
 home LAN a key plus built-in TLS is enough; for anything reachable from the
 internet use Tailscale or a TLS reverse proxy with a real certificate. See
 [network.md](network.md).
+
+localm answers only to its own addresses and names (the LAN IP, the `.local`
+names, the Tailscale names). If you reach it under another name, such as one set
+up in your router's DNS, add that name to `allowed_hosts` in Settings > Server
+and restart; otherwise the phone gets "Host not allowed".
 
 ## What localm does NOT do (on purpose)
 

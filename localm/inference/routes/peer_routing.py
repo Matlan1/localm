@@ -59,9 +59,9 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/models/{model_id}/peer-offer",
              dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def peer_offer(model_id: str):
-        """Whether a live sibling instance already has this model loaded, and
-        if so, enough about it (never a credential) for a client to
-        decide whether to offer routing to the user."""
+        """Whether a live sibling instance already has this model loaded. If so,
+        returns enough about that instance (never a credential) for a client to
+        offer routing to the user."""
         from localm import peer_routing
         from localm.config import load_registry
         name = _resolve_requested_name(model_id)
@@ -98,9 +98,9 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/models/{model_id}/peer-route",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def accept_peer_route(model_id: str, body: PeerRouteAccept):
-        """Accept an offer: re-verify the named peer is still live and still
-        advertising a matching model, then store the route. Never trusts a
-        possibly-stale client-supplied offer without re-checking."""
+        """Accept a peer offer: check that the named peer is still live and still
+        advertises a matching model, then store the route. The offer the client
+        saw is not trusted; the peer is checked again."""
         from localm import peer_routing
         from localm.config import load_registry
         name = _resolve_requested_name(model_id)
@@ -110,6 +110,9 @@ def register(app: FastAPI, ctx) -> None:
         api_key = body.api_key.strip()
         if not instance_id:
             raise HTTPException(400, "instance_id is required")
+        if not peer_routing.api_key_is_sendable(api_key):
+            raise HTTPException(
+                400, "api_key may hold only printable ASCII characters without spaces")
         self_id = (_hs._gpu_coord or {}).get("instance_id") if _hs._gpu_coord else None
 
         # Verification only. run_in_threadpool_bounded ABANDONS the awaiting
@@ -131,7 +134,7 @@ def register(app: FastAPI, ctx) -> None:
             except peer_routing.PeerCredentialError as e:
                 return None, str(e), None
             except requests.RequestException as e:
-                return None, f"the peer could not be reached ({e})", None
+                return None, f"the peer could not be reached ({type(e).__name__})", None
             try:
                 peer_routing.ensure_peer_keeps_mode(peer, api_key, mode)
             except peer_routing.PeerUnreachable as e:

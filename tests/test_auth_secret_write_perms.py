@@ -35,6 +35,8 @@ import subprocess
 
 import pytest
 
+import localm.storekit as storekit
+
 
 @pytest.fixture
 def auth(tmp_path, monkeypatch):
@@ -73,9 +75,8 @@ def _install_spies(monkeypatch):
     Both spies delegate to the real implementation and assert nothing
     themselves.
     """
-    import localm.config as cfg
     events = []
-    real_restrict = cfg.restrict_file_perms
+    real_restrict = storekit.restrict_file_perms
     real_replace = os.replace
 
     def spy_restrict(path, **kwargs):
@@ -91,7 +92,7 @@ def _install_spies(monkeypatch):
         events.append(("replace", str(src), str(dst), *captured))
         return real_replace(src, dst, *a, **kw)
 
-    monkeypatch.setattr(cfg, "restrict_file_perms", spy_restrict)
+    monkeypatch.setattr(storekit, "restrict_file_perms", spy_restrict)
     monkeypatch.setattr(os, "replace", spy_replace)
     return events
 
@@ -115,7 +116,6 @@ def test_every_credential_writer_restricts_its_temp_before_the_rename(
     ``set_api_key`` covers two of the three by itself: it persists the key and
     then derives, which writes the owner-KDF file.
     """
-    from localm import config as cfg
 
     # The reference: what "restricted" actually looks like in THIS directory on
     # THIS box, produced by the real helper before any spy is installed.
@@ -123,7 +123,7 @@ def test_every_credential_writer_restricts_its_temp_before_the_rename(
     home.mkdir(parents=True, exist_ok=True)
     reference = home / "reference.txt"
     reference.write_text("x", encoding="utf-8")
-    assert cfg.restrict_file_perms(reference) is True
+    assert storekit.restrict_file_perms(reference) is True
     restricted = _perm_fingerprint(reference)
 
     if os.name == "posix":
@@ -178,19 +178,19 @@ def test_a_failed_restriction_still_persists_the_key_and_never_raises(
     a non-NTFS volume or when icacls is unavailable; that must not stop a user
     setting a key, and it must fall back to retrying the destination rather
     than leaving the tightening to a call that already reported failure."""
-    from localm import config as cfg
     calls = []
 
     def always_fails(path, **kwargs):
         calls.append(str(path))
         return False
 
-    monkeypatch.setattr(cfg, "restrict_file_perms", always_fails)
+    monkeypatch.setattr(storekit, "restrict_file_perms", always_fails)
     auth.set_api_key(KEY)
 
     assert auth.get_api_key() == KEY
     key_path = str(auth.key_file())
-    assert key_path + ".tmp" in calls, "the temp file was never restricted"
+    assert any(c.startswith(key_path + ".") and c.endswith(".tmp") for c in calls), (
+        "the temp file was never restricted")
     assert key_path in calls, (
         "the destination was not retried after the temp attempt reported "
         "failure - one failure would then be the single point of failure")

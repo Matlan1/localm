@@ -58,6 +58,7 @@ from .media_parts import (ACE_STEP, companion_part_of, hf_media_part,
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
+from .gguf import gguf_decision_signal
 from .gguf import gguf_mmproj_modalities
 from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -68,7 +69,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'vocoder', 'planner', 'controlnet', 'textual-inversion', 'segmentation', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'vocoder', 'planner', 'controlnet', 'textual-inversion', 'segmentation', 'decision', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -247,13 +248,14 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "segmentation", "tts"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "tts", "decision"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
 # or (unknown) the type is not known to be a chat model. A 'tts' model stays
 # listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "decision",
+                            "unknown"})
 
 
 def _no_backend_runs_file(path: str) -> bool:
@@ -301,6 +303,23 @@ def embedding_load_prompt(name: str, entry: dict) -> str:
             "you can change its type again on the Models page.")
 
 
+def _unregistered_gguf_refusal(name: str) -> Optional[str]:
+    """The refusal for *name* when it is the path of a GGUF file that is not
+    registered and whose header marks it as an embedding or reranker model, else
+    None. Reads the file header; a registered model is judged by its recorded
+    type instead, so ``localm set-type`` keeps working."""
+    if not isinstance(name, str) or not name.lower().endswith(".gguf"):
+        return None
+    try:
+        path = Path(name)
+        if not path.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    from .gguf import gguf_architecture, gguf_chat_refusal
+    return gguf_chat_refusal(gguf_architecture(path), path=path)
+
+
 def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = False) -> Optional[str]:
     """The message refusing a request that names *name* as a model to load, or
     None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
@@ -312,6 +331,8 @@ def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = Fals
     entry is refused when its file is one no backend runs; that check reads the
     file system and the backend registry."""
     entry = registry.get(name)
+    if entry is None and not allow_embedding:
+        return _unregistered_gguf_refusal(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
     if kind == "embedding" and isinstance(entry, dict):
         return None if allow_embedding else _embedding_refusal(name, entry)
@@ -330,6 +351,8 @@ def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = Fals
     if kind == "tts":
         return msg + (" Use it with 'localm speak' or POST /v1/audio/speech."
                       if _speech_route_available() else " Use it with 'localm speak'.")
+    if kind == "decision":
+        return msg + " It answers typed questions with option probabilities and cannot write replies."
     return msg + " It is a component of image, video or music generation."
 
 
@@ -340,7 +363,9 @@ async def chat_load_refusal_off_loop(name: str, registry: dict, *,
     refused), inline otherwise. For callers on the event loop."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
-    if kind == "unknown" or (kind == "embedding" and not allow_embedding):
+    unregistered_gguf = (entry is None and not allow_embedding and isinstance(name, str)
+                         and name.lower().endswith(".gguf"))
+    if kind == "unknown" or (kind == "embedding" and not allow_embedding) or unregistered_gguf:
         import asyncio
         return await asyncio.get_running_loop().run_in_executor(
             None, lambda: chat_load_refusal(name, registry, allow_embedding=allow_embedding))
@@ -568,7 +593,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     (``gguf_adapter_kind`` - ``general.type == "adapter"``; an adapter carries
     its base's ``general.architecture``) -> 'lora'; then a vision-projector
     signal (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
-    'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
+    'mmproj'; then a decision-model signal (``gguf_decision_signal`` -
+    ``pplx_decider.*`` or ``<architecture>.decision.*`` keys) -> 'decision'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
     config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
@@ -593,6 +619,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                 return "lora", gguf_metadata
             if gguf_is_mmproj(path, meta=meta):
                 return "mmproj", gguf_metadata
+            if gguf_decision_signal(path, meta=meta):
+                return "decision", gguf_metadata
             if gguf_embedding_signal(path, meta=meta):
                 return "embedding", gguf_metadata
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
@@ -1675,8 +1703,88 @@ def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
         if isinstance(e, dict):
             e["mmproj"] = resolved
     _mm.update_registry(_mutator)
-    return (f"Recorded this vision projector for '{name}' - future runs of "
+    return (f"Recorded this {_projector_kind(resolved)} for '{name}' - future runs of "
             f"{name} will use it automatically, no --mmproj needed.")
+
+
+def _projector_kind(mmproj_path: str) -> str:
+    """Words for the projector at *mmproj_path*: 'vision projector', 'audio
+    projector', 'vision and audio projector', or plain 'projector' when its
+    modalities cannot be read."""
+    from .gguf import gguf_mmproj_modalities
+    modalities = gguf_mmproj_modalities(Path(mmproj_path)) or {}
+    vision = bool(modalities.get("vision"))
+    audio = bool(modalities.get("audio"))
+    if vision and audio:
+        return "vision and audio projector"
+    if vision:
+        return "vision projector"
+    if audio:
+        return "audio projector"
+    return "projector"
+
+
+def attach_mmproj_after_add(path: str, name: Optional[str],
+                            mmproj_path: str) -> tuple[bool, str]:
+    """:func:`attach_mmproj` for the model `localm add` / `localm pull` just
+    registered from *path*: *name* when given, else the one name registered for
+    that file. ``ok`` False when no single name can be told."""
+    target = name
+    if not target:
+        try:
+            names = find_aliases_by_path(Path(path).expanduser(), _mm.load_registry())
+        except OSError:
+            names = []
+        if len(names) != 1:
+            return False, (f"the registered name of {path} is not unambiguous. Run "
+                           "`localm attach-mmproj NAME FILE` with the name from "
+                           "`localm list`.")
+        target = names[0]
+    return attach_mmproj(target, mmproj_path)
+
+
+def attach_mmproj(name: str, mmproj_path: str) -> tuple[bool, str]:
+    """Record *mmproj_path* as the projector of the registered GGUF model *name*
+    without loading anything, replacing any projector recorded before (the
+    caller asked for this one explicitly).
+
+    Returns ``(ok, message)``; on ``ok`` False nothing was written. Refused
+    when *name* is not registered, is not a single GGUF chat or speech model, or when *mmproj_path* is not an existing local GGUF
+    whose own metadata marks it as a projector."""
+    from localm.pathsafe import is_unc_or_device_path
+
+    from .gguf import gguf_is_mmproj
+    reg = _mm.load_registry()
+    entry = reg.get(name)
+    if not isinstance(entry, dict):
+        return False, f"'{name}' is not a registered model."
+    epath = _entry_path(entry)
+    if epath is None or Path(epath).is_dir() or Path(epath).suffix.lower() != ".gguf":
+        return False, f"'{name}' is not a single GGUF file, so it takes no projector."
+    if entry.get("model_type") not in ("llm", "tts"):
+        return False, (f"'{name}' is registered as {entry.get('model_type')!r}; "
+                       "a projector only applies to a GGUF chat or speech model.")
+    raw = str(mmproj_path)
+    if is_unc_or_device_path(raw):
+        return False, "The projector must be a plain local file."
+    try:
+        projector = Path(raw).expanduser().resolve()
+    except (OSError, ValueError):
+        return False, f"Cannot read the projector path {raw!r}."
+    if not projector.is_file():
+        return False, f"Projector file not found: {projector}"
+    if projector.suffix.lower() != ".gguf" or not gguf_is_mmproj(projector):
+        return False, (f"{projector.name} is not a projector (mmproj) GGUF: its "
+                       "metadata does not mark it as one.")
+    resolved = str(projector)
+
+    def _mutator(r):
+        e = r.get(name)
+        if isinstance(e, dict):
+            e["mmproj"] = resolved
+    _mm.update_registry(_mutator)
+    return True, (f"Attached the {_projector_kind(resolved)} {projector.name} "
+                  f"to '{name}'.")
 
 
 def vision_input_guidance(mmproj_failed: bool = False,
@@ -1749,7 +1857,7 @@ def vision_input_guidance(mmproj_failed: bool = False,
             f"library. GGUF vision works too (the built-in mtmd path) - pull "
             f"a vision-capable GGUF model with its projector, e.g. "
             f"`localm pull <repo> --mmproj <repo>:<file>`. Or install the "
-            f"HuggingFace stack (`pip install \"localm[gpu]\"`) and load a "
+            f"HuggingFace stack (see docs/gpu-setup.md) and load a "
             f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")
 
 
@@ -1928,13 +2036,24 @@ def relocate_model(name: str, new_path: str) -> bool:
         console.print(f"[red]Corrupt registry entry for {escape(name)}[/red]")
         return False
     new_path = str(p.resolve())
-    # Atomic read-modify-write so a concurrent registry writer (GUI thread, a
-    # parallel pull, sync_models_dir) is not clobbered by a stale save.
+    old_path = entry.get("path")
+
+    def _same_file(other: object) -> bool:
+        if not isinstance(old_path, str) or not old_path or not isinstance(other, str):
+            return False
+        if other == old_path:
+            return True
+        return os.path.normcase(os.path.abspath(other)) == os.path.normcase(os.path.abspath(old_path))
+
+    # Atomic read-modify-write: the named entry and every alias on the same old
+    # file are re-pointed together.
     def _apply(r: dict) -> None:
-        e = r.get(name)
-        if isinstance(e, dict):
-            e["path"] = new_path
-            e.pop("missing", None)          # it is present again at the new path
+        for key, e in r.items():
+            if not isinstance(e, dict):
+                continue
+            if key == name or _same_file(e.get("path")):
+                e["path"] = new_path
+                e.pop("missing", None)
     _mm.update_registry(_apply)
     # p: the caller-supplied, now-validated new_path, resolved - a real
     # filesystem path the caller named, not restricted to a safe charset.
@@ -2191,18 +2310,21 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
     """
     Change the display name of entry *old_name* to *new_name*. One registry write
     moves the key and records the old name in the entry's ``former_names``. The
-    entry's ID, its file and every stored reference stay as they are, and the
-    entry is reached through its new name from then on; *old_name* stops being a
-    name anyone can ask for.
+    entry's ID and its file stay as they are, and the entry is reached through
+    its new name from then on; *old_name* stops being a name anyone can ask for.
+    Stored references follow the entry: settings and knowledge collections
+    through its ID, media workflow files and what plugins store (saved chats,
+    scheduled jobs) through :func:`_migrate_model_references`.
 
     Other entries for the same file (aliases) are independent and untouched.
 
     Returns ``(False, [])`` when *old_name* is not registered, *new_name* has no
     usable character, or *new_name* (after the sanitizing every registered name
     gets) belongs to another entry. Renaming a name to itself is a no-op success.
-    On a rename, returns ``(True, notes)``: *notes* is empty unless recording
-    references for the first time could not finish, which does not undo the
-    rename and is retried at the next rename.
+    On a rename, returns ``(True, notes)``: what followed the new name and what
+    could not be recorded or rewritten (see :func:`_migrate_model_references`).
+    A failed step does not undo the rename; recording references for the first
+    time is retried at the next rename.
     """
     from rich.markup import escape
 
@@ -2242,6 +2364,8 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
             console.print(f"[red]Name already in use:[/red] {escape(safe_name)}")
         return False, []
 
+    notes = notes + _migrate_model_references(old_name, safe_name)
+
     # old_name: a confirmed registry key, escaped anyway - a hand-edited
     # registry.json is not restricted to a safe charset.
     console.print(
@@ -2254,12 +2378,13 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[s
 
 
 def record_stored_references() -> list[str]:
-    """Write ``model_refs`` beside every stored model name in the data dir, once
-    (the marker is ``<data dir>/model_refs.migrated``). Records written later carry
-    their own. Never raises: returns one note per place that could not be finished,
-    and without the marker the next call tries again. Reading a record does not
-    depend on this; it makes a reference hold when its old name is later given to
-    another entry."""
+    """Write ``model_refs`` beside every model name stored in the settings, the
+    knowledge collections and the media workflows of the data dir, once (the
+    marker is ``<data dir>/model_refs.migrated``). Records written later carry
+    their own. Never raises: returns one note per place that could not be
+    finished, and without the marker the next call tries again. Reading a record
+    does not depend on this; it makes a reference hold when its old name is later
+    given to another entry."""
     from localm.config import home_dir
     marker = home_dir() / "model_refs.migrated"
     if marker.exists():
@@ -2281,10 +2406,6 @@ def record_stored_references() -> list[str]:
     def _settings():
         update_config(lambda _cfg: None)
 
-    def _jobs():
-        from localm.plugins.builtin.jobs.store import JobStore
-        JobStore().rewrite()
-
     def _rag():
         from localm.rag.store import record_embedding_model_refs
         return record_embedding_model_refs()
@@ -2294,9 +2415,7 @@ def record_stored_references() -> list[str]:
         record_model_refs()
 
     _step("settings", _settings)
-    _step("scheduled jobs", _jobs)
     _step("knowledge collections", _rag)
-    _step("saved conversations", _record_conversation_refs)
     _step("media workflows", _workflows)
     if not notes:
         try:
@@ -2306,33 +2425,65 @@ def record_stored_references() -> list[str]:
     return notes
 
 
-def _record_conversation_refs() -> list[str]:
-    """Add ``model_refs`` to every saved conversation that is pinned to a model.
-    Returns the conversation ids that could not be read or written."""
-    from localm.config import home_dir, model_index
-    from localm.storekit import atomic_write
-    chats = home_dir() / "chats"
-    failed: list[str] = []
-    if not chats.is_dir():
-        return failed
-    index = model_index()
-    for path in chats.glob("*.json"):
+_RENAME_HOOKS: "dict[str, Callable[[str, str], list[str]]]" = {}
+
+
+def register_rename_hook(name: str, hook: "Callable[[str, str], list[str]]") -> None:
+    """Register *hook* to run on every model rename, after the registry entry
+    has moved. *hook* is called as ``hook(old_name, new_name)`` and returns the
+    human-readable notes to show the user (an empty list when nothing needed
+    migrating). An exception it raises is reported as a note and never undoes
+    the rename. *name* identifies the hook; registering a name again replaces
+    the earlier hook."""
+    _RENAME_HOOKS[name] = hook
+
+
+def unregister_rename_hook(name: str) -> None:
+    """Remove the hook registered as *name*; an unknown name is ignored."""
+    _RENAME_HOOKS.pop(name, None)
+
+
+def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
+    """Best-effort, after rename_model has moved the registry entry: names the
+    settings that now read as *new_name*, rewrites *old_name* in the media
+    workflow files, and runs every registered rename hook. Never raises - the
+    registry rename has already succeeded and must not be undone because a
+    secondary reference could not be updated; a site that fails is reported as a
+    note. Returns human-readable notes: what changed, and what could not be
+    reached."""
+    notes: list[str] = []
+
+    try:
+        changed = model_ids.config_keys_naming(load_config(), new_name)
+        if changed:
+            notes.append("Updated the settings that named it: " + ", ".join(changed))
+    except Exception as e:
+        logger.debug("rename_model: reading the settings failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not read config.json to list the settings that name it: {e}")
+
+    try:
+        from localm.media.native_workflows import relabel_model
+        migrated, failed = relabel_model(old_name, new_name)
+        if migrated:
+            notes.append(f"Updated {len(migrated)} media workflow(s) to the new name")
+        if failed:
+            notes.append(
+                "Could not update the media workflow(s) "
+                f"{', '.join(failed)}: they still name '{old_name}'")
+    except Exception as e:
+        logger.debug("rename_model: media workflow migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update media workflows: {e}")
+
+    for hook_name, hook in list(_RENAME_HOOKS.items()):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not (isinstance(data, dict) and data.get("pinned_model")):
-                continue
-            name = model_ids.stored_to_current(
-                data["pinned_model"], data.get(model_ids.REFS_KEY), index)
-            data["pinned_model"] = name
-            model_ids.attach_refs(data, (name,), index)
-            atomic_write(path, json.dumps(data, ensure_ascii=False))
-        except (OSError, ValueError, RecursionError) as e:
-            logger.warning("Recording the model ID of conversation %s failed: %s",
-                           path.stem, e)
-            failed.append(path.stem)
-    return failed
-
-
+            notes.extend(hook(old_name, new_name) or [])
+        except Exception as e:
+            logger.debug("rename_model: %s migration failed for %s -> %s: %s",
+                         hook_name, old_name, new_name, e)
+            notes.append(f"Could not update {hook_name}: {e}")
+    return notes
 
 
 def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
@@ -4222,7 +4373,7 @@ def _rmtree_writable(path: Path) -> None:
         shutil.rmtree(path, onerror=lambda f, p, e: _retry(f, p, e[1]))
 
 
-def remove_model(name: str) -> None:
+def remove_model(name: str) -> bool:
     # escape(): reachable via `POST /api/models/remove`, which spawns
     # `localm rm <model> --yes` and re-pushes its stdout into the GUI
     # job/activity log verbatim - so every print in this function is shown
@@ -4232,7 +4383,7 @@ def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:
         console.print(f"[red]Not found:[/red] {escape(name)}")
-        return
+        return False
 
     epath = _entry_path(reg[name])
     if epath is None:
@@ -4243,7 +4394,7 @@ def remove_model(name: str) -> None:
         # it, a single bad entry could only be cleared by hand-editing the JSON.
         _mm.update_registry(lambda r: _pop_model_entry(r, name))
         console.print(f"[green]✓[/green] Removed corrupt entry [bold]{escape(name)}[/bold]")
-        return
+        return True
 
     path = Path(epath)
 
@@ -4257,7 +4408,7 @@ def remove_model(name: str) -> None:
             f"[dim](file kept - still registered as: "
             f"{', '.join(escape(a) for a in other_aliases)})[/dim]"
         )
-        return
+        return True
 
     # Only delete files that live inside <data dir>/models/ - never touch
     # externally registered paths (Ollama blobs, user model dirs, etc.). This
@@ -4301,6 +4452,7 @@ def remove_model(name: str) -> None:
         console.print("[dim]Unregistered (file not deleted - lives outside <data dir>/models)[/dim]")
     _mm.update_registry(lambda r: _pop_model_entry(r, name))       # atomic RMW
     console.print(f"[green]✓[/green] Removed [bold]{escape(name)}[/bold]")
+    return True
 
 
 

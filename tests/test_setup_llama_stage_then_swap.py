@@ -82,3 +82,81 @@ def test_a_fill_that_raises_changes_nothing(tmp_path):
         sl._replace_target(target, fill)
     assert {p.name: p.read_bytes() for p in target.iterdir()} == before
     assert not sl._staging_path(target).exists()
+
+
+def _snapshot(target):
+    return {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()}
+
+
+def _fill_with(content):
+    def fill(staging):
+        (staging / sl._lib_name()).write_bytes(content)
+        (staging / ".localm-backend").write_text("vulkan b99999", encoding="utf-8")
+        return "b99999"
+    return fill
+
+
+def test_a_build_that_does_not_load_is_replaced_by_the_one_before(tmp_path):
+    target = tmp_path / "lib"
+    before = _installed(target)
+    failures = []
+    with pytest.raises(SystemExit) as exc:
+        with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
+            sl._replace_target(target, _fill_with(b"new build that does not load"))
+            sl._replace_target(target, _fill_with(b"fallback that does not load either"))
+            sl.sys.exit(1)
+    assert exc.value.code == 1
+    assert _snapshot(target) == before
+    assert failures == [1]
+    assert not sl._backup_path(target).exists()
+
+
+def test_a_build_that_loads_is_kept_and_the_old_one_deleted(tmp_path):
+    target = tmp_path / "lib"
+    _installed(target)
+    failures = []
+    with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
+        sl._replace_target(target, _fill_with(b"new working build"))
+    assert (target / sl._lib_name()).read_bytes() == b"new working build"
+    assert (target / ".localm-backend").read_text(encoding="utf-8") == "vulkan b99999"
+    assert not (target / "ggml-base.dll").exists()
+    assert failures == []
+    assert not sl._backup_path(target).exists()
+
+
+def test_an_exception_restores_the_runtime_too(tmp_path):
+    target = tmp_path / "lib"
+    before = _installed(target)
+    with pytest.raises(RuntimeError):
+        with sl.keep_previous_runtime(target):
+            sl._replace_target(target, _fill_with(b"new"))
+            raise RuntimeError("load test crashed")
+    assert _snapshot(target) == before
+
+
+def test_a_failure_before_any_replace_still_calls_on_failure(tmp_path):
+    target = tmp_path / "lib"
+    before = _installed(target)
+    failures = []
+    with pytest.raises(SystemExit):
+        with sl.keep_previous_runtime(target, on_failure=lambda: failures.append(1)):
+            sl.sys.exit(1)
+    assert _snapshot(target) == before
+    assert failures == [1]
+
+
+def test_a_failed_provision_puts_the_pin_back(monkeypatch):
+    import localm.config as config
+    store = {"llama_runtime_pin": "b11000"}
+    monkeypatch.setattr(config, "load_config", lambda *a, **k: dict(store))
+
+    def _update(fn, *a, **k):
+        fn(store)
+    monkeypatch.setattr(config, "update_config", _update)
+    before = sl.cli._stored_pin()
+    store["llama_runtime_pin"] = "b12345"
+    sl.cli._restore_pin(before)
+    assert store["llama_runtime_pin"] == "b11000"
+    store.pop("llama_runtime_pin")
+    sl.cli._restore_pin(None)
+    assert "llama_runtime_pin" not in store

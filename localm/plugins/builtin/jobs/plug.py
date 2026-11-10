@@ -32,7 +32,8 @@ from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
 from localm.plugins.builtin.jobs.scheduler import JobScheduler
-from localm.plugins.builtin.jobs.store import Job, JobStore, cwd_unc_error
+from localm.plugins.builtin.jobs.store import (TASK_KIND_SCOPES, Job, JobStore,
+                                              cwd_unc_error)
 
 
 def _run_job(job, *, engine=None):
@@ -161,6 +162,12 @@ def _caller_can_allow_shell(request: Request) -> bool:
     return caller_grants(request, S.CODER_FULL)
 
 
+def _caller_has_scope(request: Request, scope: str) -> bool:
+    """True in open mode, or when the caller's key grants *scope*."""
+    from localm.inference.http_server import caller_grants
+    return caller_grants(request, scope)
+
+
 def _caller_is_owner_key(request: Request) -> bool:
     """True when the caller's credential IS the owner key, i.e. the one credential
     whose authority does not come from a revocable keystore entry.
@@ -273,6 +280,29 @@ def _needs_owner_key_restamp(job: Job, request: Request) -> bool:
     return principal_id(request) == job.owner
 
 
+def _check_rag_job_confinement(task_kind, collection, request: Request) -> None:
+    """403 when *request*'s key has its own ``rag_roots`` and the existing
+    collection a ``rag`` job names holds documents from outside them. A no-op
+    for another task kind, no collection, a caller without ``rag_roots``, an
+    invalid name (refused by ``Job``) and a collection that does not exist."""
+    name = (collection or "").strip()
+    if task_kind != "rag" or not name:
+        return
+    from localm.inference.http_server import effective_rag_roots
+    key_roots = effective_rag_roots(request)
+    if not key_roots:
+        return
+    from localm.rag import Collection
+    try:
+        coll = Collection(name, load=False)
+    except ValueError:
+        return
+    if coll.exists() and not Collection.confined_to(name, key_roots):
+        raise HTTPException(
+            403, "This key's RAG access is confined to specific folders, and "
+            "this collection includes documents from outside them.")
+
+
 def _store() -> JobStore:
     return JobStore()
 
@@ -302,6 +332,7 @@ def _job_dict(job: Job) -> dict:
     d = job.to_dict()
     d.pop("owner", None)        # internal principal binding; never sent to the client
     d.pop("owner_is_owner_key", None)     # ditto: how that binding is re-validated
+    d.pop("claim", None)                  # ditto: the run claim
     return d
 
 
@@ -345,8 +376,14 @@ async def create_job(req: JobCreate, request: Request):
         raise HTTPException(
             403, "allow_shell needs the owner key or a coder:full key; a scheduled "
             "coder job otherwise runs restricted (read + confined edit, no shell).")
+    required = TASK_KIND_SCOPES.get(req.task_kind)
+    if required is not None and not _caller_has_scope(request, required):
+        raise HTTPException(
+            403, f"a {req.task_kind} job needs the {required!r} scope as well as "
+            "'jobs'.")
     _check_model_name(req.model)
     _check_cwd(req.cwd)
+    _check_rag_job_confinement(req.task_kind, req.collection, request)
     # Shape checked above; AUTHORITY checked here. A caller not allowed to choose a
     # directory gets the project root instead, and sees it in the response.
     req_cwd = _effective_cwd(req.cwd, request)
@@ -405,6 +442,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
     # PUT is the second write path into `model` (and `cwd`) and needs the same
     # gates as POST, or the create-time checks are simply routed around with an
     # update.
+    if "task_kind" in changes or "collection" in changes:
+        _check_rag_job_confinement(changes.get("task_kind", job.task_kind),
+                                   changes.get("collection", job.collection),
+                                   request)
     if "model" in changes:
         _check_model_name(changes["model"])
     if "cwd" in changes:
@@ -472,9 +513,17 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
         with run_slot() as got_slot:
             if not got_slot:
                 return None
-            return _run_job(job, engine=engine)
+            claimed = store.claim(job_id)
+            if claimed is None:
+                return None
+            try:
+                return _run_job(claimed, engine=engine)
+            except BaseException:
+                store.release_claim(job_id, claimed.claim)
+                raise
 
-    result = await loop.run_in_executor(None, _run_guarded)
+    from localm.audit import carry_request_privacy
+    result = await loop.run_in_executor(None, carry_request_privacy(_run_guarded))
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
@@ -502,7 +551,9 @@ def register(host) -> None:
     """Mount the jobs routes and start the scheduler when running under a live
     server. The host auto-scopes every route to the ``jobs`` capability."""
     global _scheduler, _host
+    from localm.model_manager import register_rename_hook
     _host = host
+    register_rename_hook("scheduled jobs", rename_notes)
     host.mount_router(_router)
     # Serve the client_entry (static/jobs.js) at /plugins/jobs/ so the GUI's
     # loadClientPlugins() can import() it; without this the Jobs view 404s and
@@ -553,9 +604,22 @@ def _publish_self_url(host) -> None:
     os.environ["LOCALM_SELF_URL"] = f"{scheme}://{host_part}:{port}/v1"
 
 
+def rename_notes(old_name: str, new_name: str) -> list[str]:
+    """The rename hook: write back the scheduled jobs that name the renamed
+    model, so each stores *new_name* with its ``model_refs``, and return the
+    notes to show the user."""
+    store = JobStore()
+    migrated = sum(1 for job in store.list() if job.model in (old_name, new_name))
+    if migrated:
+        store.rewrite()
+    return [f"Updated {migrated} scheduled job(s) to the new name"] if migrated else []
+
+
 def unregister() -> None:
     """Stop the scheduler on disable/uninstall."""
     global _scheduler, _host
+    from localm.model_manager import unregister_rename_hook
+    unregister_rename_hook("scheduled jobs")
     if _scheduler is not None:
         try:
             _scheduler.stop()

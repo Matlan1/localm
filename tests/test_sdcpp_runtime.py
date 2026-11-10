@@ -291,3 +291,158 @@ def test_read_json_of_a_hostile_file_is_none(tmp_path, doc):
     path = tmp_path / "meta.json"
     path.write_text(doc, encoding="utf-8")
     assert runtime._read_json(path) is None
+
+
+def _make_cudart_zip(path: Path) -> str:
+    """A zip shaped like cudart-sd-bin-win-cu12-x64.zip: the three NVIDIA DLLs
+    at the top level and no license file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for name in ("cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll"):
+            zf.writestr(name, os.urandom(100 * 1024))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_cuda_runtime_keeps_an_nvidia_license_notice(fake_release, tmp_path, monkeypatch):
+    name = "cudart-sd-bin-win-cu12-x64.zip"
+    sha = _make_cudart_zip(tmp_path / "release" / name)
+    monkeypatch.setitem(pins.EXTRA_ASSETS, ("windows", "cuda"), [(name, sha)])
+    build = pins.ASSETS[("windows", "cuda")][0]
+    served = {name: tmp_path / "release" / name, build: tmp_path / "release" / build}
+    monkeypatch.setattr(runtime, "_download",
+                        lambda url, dest, on_progress, label: shutil.copyfile(served[label], dest))
+    rt = runtime.install("cuda", probe=_ok_probe)
+    assert (rt.path / "cudart64_12.dll").is_file()
+    assert ((rt.path / runtime.NVIDIA_CUDA_LICENSE).read_text(encoding="utf-8")
+            == runtime.NVIDIA_CUDA_LICENSE_NOTICE)
+    assert runtime.NVIDIA_CUDA_LICENSE == "LICENSE.nvidia-cuda"
+
+
+def test_a_runtime_without_a_cudart_bundle_gets_no_nvidia_notice(fake_release):
+    rt = runtime.install("vulkan", probe=_ok_probe)
+    assert not (rt.path / runtime.NVIDIA_CUDA_LICENSE).exists()
+
+
+def test_sdcpp_nvidia_notice_matches_setup_llama():
+    from localm.setup_llama import cuda
+    assert runtime.NVIDIA_CUDA_LICENSE_NOTICE == cuda.NVIDIA_CUDA_LICENSE_NOTICE
+    assert runtime.NVIDIA_CUDA_LICENSE == cuda.NVIDIA_CUDA_LICENSE
+
+
+_REAL_DOWNLOAD = runtime._download
+
+
+def _only_cpu_installed(monkeypatch, recommended):
+    runtime.install("cpu", probe=_cpu_only_probe)
+    monkeypatch.setattr(runtime, "recommended_backend", lambda det=None: recommended)
+
+
+def test_auto_replaces_an_installed_cpu_runtime_with_the_recommended_one(fake_release,
+                                                                          monkeypatch):
+    _only_cpu_installed(monkeypatch, "rocm")
+    rt = runtime.ensure("auto", probe=_ok_probe)
+    assert rt.backend == "rocm"
+    assert fake_release == ["fake-cpu.zip", "fake-rocm.zip"]
+    assert runtime.ensure("auto", probe=_ok_probe).backend == "rocm"
+    assert fake_release == ["fake-cpu.zip", "fake-rocm.zip"]
+
+
+@pytest.mark.parametrize("backend_module", [
+    "localm.plugins.builtin.image.backends.native",
+    "localm.plugins.builtin.video.backends.native",
+])
+def test_a_generation_on_auto_replaces_an_installed_cpu_runtime(fake_release, monkeypatch,
+                                                                backend_module):
+    import importlib
+    native = importlib.import_module(backend_module)
+    _only_cpu_installed(monkeypatch, "rocm")
+    monkeypatch.setattr(runtime, "_probe", _ok_probe)
+    rt = native._ensure_runtime({"native": {"runtime": "auto"}}, lambda _m: None)
+    assert rt.backend == "rocm"
+    assert "fake-rocm.zip" in fake_release
+
+
+def test_auto_keeps_the_cpu_runtime_when_the_download_fails(fake_release, monkeypatch):
+    _only_cpu_installed(monkeypatch, "rocm")
+
+    def broken(url, dest, on_progress, label):
+        fake_release.append(label)
+        raise runtime.DownloadError("connection reset")
+
+    monkeypatch.setattr(runtime, "_download", broken)
+    said = []
+    rt = runtime.ensure("auto", on_progress=said.append, probe=_ok_probe)
+    assert rt.backend == "cpu"
+    assert fake_release == ["fake-cpu.zip", "fake-rocm.zip"]
+    assert [m for m in said if "could not be downloaded" in m] == [
+        "The rocm runtime could not be downloaded (connection reset); using the "
+        "installed cpu runtime."]
+
+
+def test_auto_keeps_the_cpu_runtime_when_the_network_policy_refuses(fake_release,
+                                                                     monkeypatch):
+    _only_cpu_installed(monkeypatch, "rocm")
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    import localm.http_ssl as http_ssl
+    import localm.netpolicy as netpolicy
+
+    def no_network(*a, **k):
+        raise AssertionError("a connection was attempted")
+
+    monkeypatch.setattr(netpolicy, "pinned_request", no_network)
+    monkeypatch.setattr(http_ssl, "verified_urlopen", no_network)
+    monkeypatch.setattr(runtime, "_download", _REAL_DOWNLOAD)
+    said = []
+    rt = runtime.ensure("auto", on_progress=said.append, probe=_ok_probe)
+    assert rt.backend == "cpu"
+    assert fake_release == ["fake-cpu.zip"]
+    assert any("network policy" in m for m in said)
+
+
+def test_auto_tries_vulkan_when_the_recommended_runtime_does_not_load(fake_release,
+                                                                       monkeypatch):
+    _only_cpu_installed(monkeypatch, "rocm")
+
+    def probe(rt):
+        if rt.backend == "rocm":
+            raise RuntimeError("no hipblas")
+        return _ok_probe(rt)
+
+    said = []
+    assert runtime.ensure("auto", on_progress=said.append, probe=probe).backend == "vulkan"
+    assert any("rocm runtime did not work" in m for m in said)
+
+
+def test_auto_keeps_the_cpu_runtime_when_every_gpu_runtime_failed_its_load_test(
+        fake_release, monkeypatch):
+    _only_cpu_installed(monkeypatch, "rocm")
+
+    def probe(rt):
+        raise RuntimeError("no gpu here")
+
+    assert runtime.ensure("auto", probe=probe).backend == "cpu"
+    downloads = list(fake_release)
+    assert runtime.ensure("auto", probe=probe).backend == "cpu"
+    assert fake_release == downloads
+
+
+@pytest.mark.parametrize("installed_backend, recommended, choice, expected", [
+    ("vulkan", "rocm", "auto", "vulkan"),
+    ("cpu", "cpu", "auto", "cpu"),
+    ("cpu", "rocm", "cpu", "cpu"),
+])
+def test_ensure_downloads_nothing_when_the_installed_runtime_stays(
+        fake_release, monkeypatch, installed_backend, recommended, choice, expected):
+    runtime.install(installed_backend,
+                    probe=_cpu_only_probe if installed_backend == "cpu" else _ok_probe)
+    monkeypatch.setattr(runtime, "recommended_backend", lambda det=None: recommended)
+    downloads = list(fake_release)
+    assert runtime.ensure(choice, probe=_ok_probe).backend == expected
+    assert fake_release == downloads
+
+
+def test_ensure_with_nothing_installed_provisions_the_recommended_runtime(fake_release,
+                                                                          monkeypatch):
+    monkeypatch.setattr(runtime, "recommended_backend", lambda det=None: "rocm")
+    assert runtime.ensure("auto", probe=_ok_probe).backend == "rocm"
+    assert fake_release == ["fake-rocm.zip"]

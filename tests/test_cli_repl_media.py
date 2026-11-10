@@ -13,6 +13,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 def _run_repl_media(command: str, generate_target: str, *, mode, api_url,
                     home_dir, engine=None):
     """Drive cli._handle_command(command) with the generator patched, returning
@@ -40,9 +46,9 @@ def _run_repl_media(command: str, generate_target: str, *, mode, api_url,
 
 @pytest.mark.parametrize("command,target,ext,subdir", [
     ("/generate-music happy lo-fi beats",
-     "localm.music_gen.comfy.generate_music", ".flac", "gui_music"),
+     "localm.music_gen.generate_music", ".flac", "gui_music"),
     ("/generate-video a cat surfing",
-     "localm.video_gen.comfy.generate_video", ".mp4", "gui_video"),
+     "localm.video_gen.generate_video", ".mp4", "gui_video"),
 ])
 def test_repl_media_privacy_no_sidecar(tmp_path, monkeypatch, command, target,
                                        ext, subdir):
@@ -68,8 +74,8 @@ def test_repl_media_privacy_no_sidecar(tmp_path, monkeypatch, command, target,
 
 
 @pytest.mark.parametrize("command,target", [
-    ("/generate-music happy lo-fi", "localm.music_gen.comfy.generate_music"),
-    ("/generate-video a cat", "localm.video_gen.comfy.generate_video"),
+    ("/generate-music happy lo-fi", "localm.music_gen.generate_music"),
+    ("/generate-video a cat", "localm.video_gen.generate_video"),
 ])
 def test_repl_media_logmode_keeps_sidecar(tmp_path, monkeypatch, command, target):
     from localm import cli
@@ -84,8 +90,8 @@ def test_repl_media_logmode_keeps_sidecar(tmp_path, monkeypatch, command, target
 
 
 @pytest.mark.parametrize("command,target", [
-    ("/generate-music x", "localm.music_gen.comfy.generate_music"),
-    ("/generate-video x", "localm.video_gen.comfy.generate_video"),
+    ("/generate-music x", "localm.music_gen.generate_music"),
+    ("/generate-video x", "localm.video_gen.generate_video"),
 ])
 def test_repl_media_no_engine_is_graceful(tmp_path, monkeypatch, command, target):
     """With no engine (e.g. model-less chat) the command must decline cleanly
@@ -101,8 +107,8 @@ def test_repl_media_no_engine_is_graceful(tmp_path, monkeypatch, command, target
 
 
 @pytest.mark.parametrize("command,target", [
-    ("/generate-music", "localm.music_gen.comfy.generate_music"),
-    ("/generate-video", "localm.video_gen.comfy.generate_video"),
+    ("/generate-music", "localm.music_gen.generate_music"),
+    ("/generate-video", "localm.video_gen.generate_video"),
 ])
 def test_repl_media_no_arg_shows_usage_no_unload(tmp_path, monkeypatch,
                                                  command, target):
@@ -121,8 +127,8 @@ def test_repl_media_no_arg_shows_usage_no_unload(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("command,target,plugin", [
     ("/generate-image a cat", "localm.image_gen.comfy.generate_image", "image"),
-    ("/generate-music happy lo-fi", "localm.music_gen.comfy.generate_music", "music"),
-    ("/generate-video a cat surfing", "localm.video_gen.comfy.generate_video", "video"),
+    ("/generate-music happy lo-fi", "localm.music_gen.generate_music", "music"),
+    ("/generate-video a cat surfing", "localm.video_gen.generate_video", "video"),
 ])
 def test_repl_media_honours_the_per_plugin_comfy_url(
         tmp_path, monkeypatch, command, target, plugin):

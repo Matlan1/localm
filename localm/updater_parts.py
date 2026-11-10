@@ -72,13 +72,9 @@ def _source_checkout(root: Path) -> bool:
 
 
 def _deps_extras() -> list:
-    """The extras the dependency step installs (``_apply_update.post_swap_command``)."""
-    import re
-
+    """The extras the dependency step installs (``_apply_update.DEPS_EXTRAS``)."""
     from localm import _apply_update as au
-    spec = (au.post_swap_command("deps", uv="uv") or [""])[-1]
-    m = re.search(r"\[([^\]]*)\]", spec)
-    return [e.strip() for e in m.group(1).split(",") if e.strip()] if m else []
+    return list(au.DEPS_EXTRAS)
 
 
 def _deps(root: Path) -> dict:
@@ -194,7 +190,8 @@ def _last_steps(version: Optional[str]) -> list:
     """The results of the runtime and component updates of the last
     :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
     recorded under another localm version than *version* is left out; one that
-    names no version (written by an older build) is kept."""
+    names no version (written by an older build) is kept. A note both parts
+    recorded (a rollback) is listed once."""
     import time
     out = []
     try:
@@ -209,7 +206,7 @@ def _last_steps(version: Optional[str]) -> list:
                 at = float(st.get("at") or 0)
             except (TypeError, ValueError):
                 continue
-            if time.time() - at < LAST_STEPS_S:
+            if time.time() - at < LAST_STEPS_S and st["note"] not in [s["note"] for s in out]:
                 out.append({"part": part, "state": st.get("state"), "note": st["note"],
                             "at": at})
     except Exception:
@@ -219,7 +216,7 @@ def _last_steps(version: Optional[str]) -> list:
 
 def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) -> str:
     """Reinstall localm and its dependencies into the venv of *root* with the
-    install's own uv (``uv pip install -e``), keeping a copy of the venv first
+    install's own uv from its ``uv.lock``, keeping a copy of the venv first
     and putting it back when the step fails. Returns a one-line note. Raises
     LocalmError."""
     from localm import _apply_update as au
@@ -227,6 +224,7 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
     from localm.bugreport import LocalmError
     cmd = list(au.post_swap_command("deps", uv=updater._uv_for_deps(root)) or [])
     updater._require_runnable(cmd, "deps")
+    updater._require_deps_source(root)
     snap = updater._updates_dir() / REPAIR_SNAPSHOT
     try:
         uc.snapshot([uc.DEPS], snap, root=root)
@@ -250,7 +248,8 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
                               "previous ones back failed", reason=f"{problem}; "
                               + "; ".join(errors))
         raise LocalmError("the dependencies could not be reinstalled; the previous ones "
-                          "were put back", reason=problem)
+                          "were put back",
+                          reason=updater.with_retry_hint(problem, root, "update --repair"))
     finally:
         uc.discard(snap)
 

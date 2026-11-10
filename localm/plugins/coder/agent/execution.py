@@ -6,6 +6,8 @@ confirm prompt, scope resolution, and the per-write project map update. Mixed in
 
 from __future__ import annotations
 
+import itertools
+import difflib
 import json
 import os
 import re
@@ -24,8 +26,8 @@ from ..display import (
     tool_call_text,
 )
 from ..diffutil import (
-    compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
-    read_old_content, read_old_content_checked, resolve_new_content,
+    compute_multifile_diff,
+    read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
 from .. import data_guard, shell_guard
@@ -37,20 +39,29 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS,
+    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_MODE_REFUSED_TOOLS,
+    _PATCH_OVERLAY_READ_TOOLS, _PROJECT_MAP_TOOLS,
     _RESTRICTED_PATH_WRITE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
     _CANCELLABLE_SUBPROCESS_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
-    HOOK_RUN_TOOL,
+    HOOK_RUN_TOOL, confirm_forced,
 )
 from .planmode import INTERACTION_TOOLS, plan_mode_refusal
 from .scope import _scope_pattern
 
 # Held while an agent's _session_allowed set is changed or copied.
 _SESSION_ALLOWED_LOCK = threading.Lock()
+_CALL_CONTEXT = threading.local()
+_CALL_SEQUENCE = itertools.count(1)
+
+
+def current_call_id() -> Optional[str]:
+    """Id of the tool call the calling thread is executing, else None."""
+    return getattr(_CALL_CONTEXT, "call_id", None)
+
 
 # Shown with each hook-run approval.
 _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each "
@@ -58,6 +69,8 @@ _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each
 
 if TYPE_CHECKING:
     from localm.audit import AuditLogT
+
+    from ..patch_overlay import PatchOverlay
 
 
 def _executed_forms(tool: str, command: str) -> list[str]:
@@ -125,6 +138,9 @@ class _ExecutionMixin:
         always_confirm: set
         confirm_handler: Any
         _project_map: Any
+        patch_mode: bool
+        _patch_overlay: PatchOverlay
+        _patch_chunks: list[str]
 
         @property
         def auto_approve(self) -> bool: ...
@@ -429,6 +445,14 @@ class _ExecutionMixin:
             return "localm's data folder (the check could not run)"
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
+        previous = getattr(_CALL_CONTEXT, "call_id", None)
+        _CALL_CONTEXT.call_id = f"c{next(_CALL_SEQUENCE)}"
+        try:
+            return self._execute_tool_body(call, interactive)
+        finally:
+            _CALL_CONTEXT.call_id = previous
+
+    def _execute_tool_body(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # A cancelled run executes nothing, whatever the model emits.
         if self.cancelled:
@@ -557,7 +581,6 @@ class _ExecutionMixin:
             chunk = self._patch_mode_intercept(call)
             duration_s = time.monotonic() - t_start
             if chunk is not None:
-                self._patch_chunks.append(chunk)
                 # Name the files the DIFF covers, not every path the call
                 # mentioned: a file whose edit produced no change is not captured.
                 # search_replace has no pre-known targets (its files are discovered
@@ -589,6 +612,17 @@ class _ExecutionMixin:
             self._emit("tool_result", tool=call.name, ok=result.ok,
                        summary=result.summary, output=result.output[:4000],
                        duration_s=duration_s)
+            return result
+
+        if getattr(self, "patch_mode", False) is True and call.name in _PATCH_MODE_REFUSED_TOOLS:
+            result = ToolResult.error(
+                f"[patch-mode] {call.name} writes a file that cannot be captured as "
+                "a diff - skipped. Turn patch mode off to run it.")
+            if interactive:
+                console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            # No duration_s: never reached tool_def.fn.
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary=f"[patch-mode] {call.name} skipped")
             return result
 
         # Scope check - reject file operations that fall outside the active glob.
@@ -639,8 +673,9 @@ class _ExecutionMixin:
         # approval of this exact call, under auto_approve too.
         data_hit = self._data_guard_verdict(call)
 
-        # Dry-run: show destructive calls but don't execute them
-        if self.dry_run and tool_def.destructive:
+        # Dry-run: show destructive and code-running calls but don't execute them
+        if self.dry_run and (tool_def.destructive
+                             or getattr(tool_def, "executes_project_code", False) is True):
             result = ToolResult.success(
                 f"[dry-run] {call.name} - skipped",
                 summary=f"[dry-run] {call.name}",
@@ -695,19 +730,46 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
-        gated = tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+        executes_code = getattr(tool_def, "executes_project_code", False) is True
+        gated = (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+                 or executes_code)
         lenient_call = isinstance(call, ToolCall) and call.lenient
-        needs_confirm = shell_unchecked or data_hit is not None or (
-            gated and (
-                not self.auto_approve or call.name in self.always_confirm
-                or lenient_call
-            )
+        # Confirmation always_confirm requires, which a session allow never waives.
+        configured = confirm_forced(self.always_confirm, call.name, tool_def)
+        forced = configured or getattr(tool_def, "confirm_always", False) is True
+        # A tool that runs project code beside the shell pair faces the hook-run
+        # gate: refused when run_shell is disabled while writes run unconfirmed,
+        # asked about when run_shell itself would ask.
+        if executes_code and call.name not in _SHELL_EXEC_TOOLS:
+            code_gate = self._hook_run_gate()
+            if code_gate == "refuse":
+                result = ToolResult.error(
+                    f"{call.name} was not run: it runs code the project controls, "
+                    "run_shell is disabled for this session and file writes run "
+                    "unconfirmed.")
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._audit.notice("code_execution_refused", result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="refused: run_shell is disabled")
+                return result
+            if code_gate == "confirm":
+                forced = configured = True
+        # After an untrusted tool result, destructive, network and code-running
+        # tools ask again until the next user message.
+        tainted = (
+            getattr(self, "_untrusted_in_context", False) is True
+            and getattr(self, "taint_rearms_confirm", True) is True
+            and (tool_def.destructive or call.name in _NETWORK_TOOLS or executes_code)
+        )
+        needs_confirm = shell_unchecked or data_hit is not None or tainted or (
+            gated and (not self.auto_approve or forced or lenient_call)
         )
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
         lenient_only = (
             lenient_call and gated and not shell_unchecked and data_hit is None
-            and self.auto_approve and call.name not in self.always_confirm
+            and not tainted and self.auto_approve and not forced
         )
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
@@ -715,7 +777,7 @@ class _ExecutionMixin:
         allow_key = self._session_allow_key(call)
         session_allowable = (
             allow_key is not None and not shell_unchecked and not lenient_call
-            and data_hit is None and call.name not in self.always_confirm
+            and data_hit is None and not configured and not tainted
         )
         # session_allowable already excludes a failed shell check, a lenient
         # call and always_confirm, which the read-only shortcut honours too.
@@ -748,7 +810,7 @@ class _ExecutionMixin:
                 # that can be session-allowed. A GUI handler never sets the
                 # answer flags, so consuming them there reads False and "".
                 with offering_session_allow(session_allowable), \
-                        requiring_exact_approval(data_hit is not None):
+                        requiring_exact_approval(data_hit is not None or tainted):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())
@@ -772,6 +834,13 @@ class _ExecutionMixin:
                         "needs an explicit approval of this exact call, and this "
                         "run is non-interactive with no approval handler - denied.")
                     reason = "localm-data"
+                elif tainted and not (gated and (not self.auto_approve or forced)):
+                    result = ToolResult.error(
+                        f"{call.name} requires confirmation: this run has read "
+                        "untrusted content (a web page, search result, MCP or "
+                        "skill output) since the last user message, and this "
+                        "run is non-interactive with no approval handler - denied.")
+                    reason = "untrusted-content"
                 elif lenient_only:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: the call was not "
@@ -866,6 +935,10 @@ class _ExecutionMixin:
         # cannot win.
         if call.name == "search_replace" or call.name in DIAGNOSED_TOOLS:
             args["_restricted"] = self.restricted
+        # In patch mode the read tools see the session's captured writes; outside
+        # it they get None.
+        if call.name in _PATCH_OVERLAY_READ_TOOLS:
+            args["_overlay"] = self._patch_overlay if self.patch_mode else None
         # The interaction tools prompt this session's user (tools/interact.py).
         # Injected after the copy, so a model-supplied "_session" or
         # "_interactive" cannot win.
@@ -984,26 +1057,32 @@ class _ExecutionMixin:
         without confirmation (under auto_approve, or allowed for the session
         with "a" or GUI "always allow") but run_shell does not, a hook run is
         gated: "refuse" when run_shell is disabled, else "confirm" unless
-        run_shell runs without confirmation too. None when trust is enough."""
+        run_shell runs without confirmation too. None when trust is enough.
+        The same answer gates the verify step and every tool other than the
+        shell pair that sets ``executes_project_code``."""
         disabled = self.disabled_tools
         confirmed = set(self.always_confirm)
         allowed = self._session_allowed_tools()
+        registry = _agent.TOOL_REGISTRY
 
         def unconfirmed(name: str) -> bool:
             if name in disabled:
                 return False
             if name in allowed:
                 return True
-            return self.auto_approve and name not in confirmed
+            td = registry.get(name)
+            return self.auto_approve and not (
+                confirm_forced(confirmed, name, td)
+                or getattr(td, "confirm_always", False) is True)
 
         writes_unconfirmed = any(
             td.destructive and name not in _SHELL_EXEC_TOOLS and unconfirmed(name)
-            for name, td in _agent.TOOL_REGISTRY.items())
+            for name, td in registry.items())
         if not writes_unconfirmed:
             return None
         if "run_shell" in disabled:
             return "refuse"
-        if "run_shell" in allowed or (self.auto_approve and "run_shell" not in confirmed):
+        if unconfirmed("run_shell"):
             return None
         return "confirm"
 
@@ -1054,6 +1133,24 @@ class _ExecutionMixin:
             consume_confirm_always()
             return None if approved else "the user declined to run it"
         return _permit
+
+    def _verify_refusal(self, label: str, interactive: bool) -> Optional[str]:
+        """Whether the verify command *label* may run, decided by the hook-run
+        gate exactly as for one hook run: None to run it, else the reason it
+        does not."""
+        permit = self._hook_permit(interactive)
+        if permit is None:
+            return None
+
+        class _VerifySpec:
+            def __init__(self, text: str):
+                self.label = "verify"
+                self._text = text
+
+            def command_text(self, limit: int) -> str:
+                return self._text[:limit]
+
+        return permit(_VerifySpec(label))
 
     def _hook_project_dir(self, hooks) -> Path:
         """The folder hooks run in for this agent: the project folder, or, for a
@@ -1236,28 +1333,86 @@ class _ExecutionMixin:
 
     def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
         """
-        Compute a unified diff for a write/edit/patch call without touching disk.
+        Capture a write/edit/patch call into the session overlay without
+        touching disk.
 
-        Returns the diff string, or None if the diff cannot be computed.
+        Returns the diff this call alone contributed (used to name the files it
+        covered), or None when the call changes nothing or cannot be captured.
+        The patch handed to the user is built from the overlay, one diff per
+        file, so repeated edits of one file stay applicable.
         """
-        # edit_files spans several files, so it has no single old_content: without
-        # this branch compute_tool_diff returns None and the intercept reports
-        # "cannot be captured".
+        overlay = self._patch_overlay
         if call.name == "edit_files":
-            return compute_multifile_diff(self.cwd, call.args.get("edits"))
-        # search_replace's targets are a glob + regex sweep, not a `path` arg, so
-        # there is no old_content to read ahead of time. It gets its own helper,
-        # which runs the real sweep via dry_run rather than touching disk.
+            return self._capture_edit_files(call.args.get("edits"))
         if call.name == "search_replace":
-            return compute_search_replace_diff(
+            from ..tools.files import tool_search_replace
+            result = tool_search_replace(
                 self.cwd, call.args.get("pattern", ""),
                 call.args.get("replacement", ""),
                 call.args.get("glob", "**/*"),
-                restricted=self.restricted,
-            )
+                dry_run=True, _restricted=self.restricted, _overlay=overlay)
+            if not result.ok or not result.changes:
+                return None
+            return self._capture_changes(
+                [(rel, new_text) for rel, _old, new_text in result.changes])
         path_arg = call.args.get("path", "")
-        old_text = read_old_content(self.cwd, path_arg)
-        return compute_tool_diff(call.name, call.args, old_text)
+        old_text = overlay.read(path_arg)
+        if call.name == "patch_file":
+            diff = call.args.get("diff", "")
+            if not diff:
+                return None
+            from .._patch import apply_diff, PatchError
+            try:
+                new_text = apply_diff(old_text, diff)
+            except PatchError:
+                self._patch_chunks.append(diff)
+                return diff
+        else:
+            new_text = resolve_new_content(call.name, call.args, old_text)
+        if new_text is None or new_text == old_text:
+            return None
+        return self._capture_changes([(path_arg, new_text)])
+
+    def _capture_edit_files(self, edits: object) -> Optional[str]:
+        """Capture an ``edit_files`` batch: every edit composes onto the overlay
+        content of its file, and one unmatched edit rejects the whole batch,
+        like the real tool."""
+        if not isinstance(edits, list) or not edits:
+            return None
+        texts: dict[str, str] = {}
+        paths: dict[str, str] = {}
+        for item in edits:
+            if not isinstance(item, dict):
+                return None
+            path_arg = str(item.get("path") or "")
+            old_str = str(item.get("old") or "")
+            new_str = str(item.get("new") or "")
+            if not path_arg or not old_str:
+                return None
+            key = str((self.cwd / path_arg).resolve())
+            if key not in texts:
+                texts[key] = self._patch_overlay.read(path_arg)
+                paths[key] = path_arg
+            if old_str not in texts[key]:
+                return None
+            texts[key] = texts[key].replace(old_str, new_str, 1)
+        return self._capture_changes([(paths[k], t) for k, t in texts.items()])
+
+    def _capture_changes(self, changes: list) -> Optional[str]:
+        """Record ``(path, new_text)`` pairs in the overlay. Returns the diff
+        this call added, or None when no file differs from what a tool sees now."""
+        overlay = self._patch_overlay
+        chunks = []
+        for path_arg, new_text in changes:
+            path_arg = str(path_arg)
+            current = overlay.read(path_arg)
+            if current == new_text:
+                continue
+            chunks.append("".join(difflib.unified_diff(
+                current.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                fromfile=f"a/{path_arg}", tofile=f"b/{path_arg}")))
+            overlay.record(path_arg, new_text)
+        return "".join(chunks) or None
 
     def current_patch(self) -> str:
         """The accumulated unified diff so far, WITHOUT clearing the buffer.
@@ -1265,7 +1420,8 @@ class _ExecutionMixin:
         For readers that only want to LOOK: a GUI "show me the patch" request, a
         status poll, a preview. :meth:`flush_patch` clears the buffer.
         """
-        return "\n".join(c for c in self._patch_chunks if c)
+        return self._patch_overlay.diff() + "\n".join(
+            c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
         """Is there anything in the patch buffer? Cheap, and exactly equivalent
@@ -1274,7 +1430,7 @@ class _ExecutionMixin:
         ``CoderSession.info()`` needs only the boolean and is called once per
         session by the session-list route.
         """
-        return any(c for c in self._patch_chunks)
+        return self._patch_overlay.has_changes() or any(c for c in self._patch_chunks)
 
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
         """
@@ -1284,6 +1440,7 @@ class _ExecutionMixin:
         """
         content = self.current_patch()
         self._patch_chunks.clear()
+        self._patch_overlay.clear()
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(content, encoding="utf-8")

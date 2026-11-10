@@ -54,11 +54,88 @@ def _make_tool_plugin(root):
     return d
 
 
+def _isolate(tmp_path, monkeypatch, enabled=("issues", "evilp", "plain", "dotted"), root=None):
+    """Point the plugin engine at *tmp_path* as the installed folder, with a
+    private config whose ``plugins_enabled`` is *enabled*."""
+    import localm.config as cfg
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: root or tmp_path)
+    cfg.update_config(lambda c: c.__setitem__("plugins_enabled", list(enabled)))
+
+
+def _make_dotted_plugin(root, entry):
+    d = root / "dotted"
+    (d / "pkg").mkdir(parents=True)
+    (d / "plugin.toml").write_text(
+        f'[plugin]\nname = "dotted"\nentry = "{entry}"\n\n[tools]\nexports = ["tool_hi"]\n',
+        encoding="utf-8")
+    (d / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (d / "pkg" / "helper.py").write_text('WORD = "hi"\n', encoding="utf-8")
+    (d / "pkg" / "tools.py").write_text(
+        'from .helper import WORD\n\n\ndef setup():\n    pass\n\n\n'
+        'def tool_hi(cwd):\n    """Say hi."""\n    return WORD\n', encoding="utf-8")
+    return d
+
+
+class TestDottedEntryModule:
+    def test_a_dotted_entry_module_is_imported_from_its_package(self, tmp_path, monkeypatch):
+        _make_dotted_plugin(tmp_path, "pkg.tools:setup")
+        _isolate(tmp_path, monkeypatch)
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warns = register_plugin_tools()
+            assert names == ["plugin_dotted_tool_hi"]
+            assert warns == []
+            assert coder_tools.TOOL_REGISTRY["plugin_dotted_tool_hi"].fn(tmp_path).output == "hi"
+
+    def test_a_dotted_entry_module_that_does_not_exist_is_a_warning(self, tmp_path, monkeypatch):
+        _make_dotted_plugin(tmp_path, "pkg.absent:setup")
+        _isolate(tmp_path, monkeypatch)
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warns = register_plugin_tools()
+            assert names == []
+            assert len(warns) == 1 and "'pkg.absent' not found" in warns[0]
+
+    def test_a_dotted_entry_does_not_leave_the_plugin_directory(self, tmp_path, monkeypatch):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "tools.py").write_text("def tool_hi(cwd):\n    return 'out'\n", encoding="utf-8")
+        plugins = tmp_path / "plugins"
+        _make_dotted_plugin(plugins, "...outside.tools:setup")
+        _isolate(tmp_path, monkeypatch, root=plugins)
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warns = register_plugin_tools()
+            assert names == []
+            assert len(warns) == 1 and "not found" in warns[0]
+
+
 class TestRegisterPluginTools:
-    def _setup(self, tmp_path, monkeypatch):
+    def _setup(self, tmp_path, monkeypatch, enabled=("issues",)):
         _make_tool_plugin(tmp_path)
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir",
-                            lambda: tmp_path)
+        _isolate(tmp_path, monkeypatch, enabled)
+
+    def test_disabled_plugin_registers_no_tools(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, enabled=())
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, _ = register_plugin_tools()
+            assert names == []
+            assert "plugin_issues_tool_echo" not in coder_tools.TOOL_REGISTRY
+
+    def test_uninstalled_but_enabled_name_registers_nothing(self, tmp_path, monkeypatch):
+        _isolate(tmp_path, monkeypatch, enabled=("issues",))
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, _ = register_plugin_tools()
+            assert names == []
+
+    def test_scope_colliding_plugin_registers_no_tools(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        toml = (tmp_path / "issues" / "plugin.toml")
+        toml.write_text(toml.read_text(encoding="utf-8").replace(
+            'name = "issues"', 'name = "issues"\nscope = "chat"'), encoding="utf-8")
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, _ = register_plugin_tools()
+            assert names == []
 
     def test_registers_exported_tool_with_metadata(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -149,7 +226,7 @@ class TestRegisterPluginTools:
         d.mkdir(parents=True)
         (d / "plugin.toml").write_text(toml, encoding="utf-8")
         (d / "ep.py").write_text(entry, encoding="utf-8")
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: tmp_path)
+        _isolate(tmp_path, monkeypatch)
         with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
             register_plugin_tools()
             td = coder_tools.TOOL_REGISTRY["plugin_evilp_tool_x"]
@@ -171,8 +248,7 @@ class TestRegisterPluginTools:
         (d / "p.py").write_text(
             "import click\n@click.command()\ndef main():\n    pass\n",
             encoding="utf-8")
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir",
-                            lambda: tmp_path)
+        _isolate(tmp_path, monkeypatch)
         with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
             names, _ = register_plugin_tools()
             assert names == []

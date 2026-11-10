@@ -368,6 +368,12 @@ _VRAM_TOPOLOGY_INTERVAL_S = 300.0
 _VRAM_UNCOVERED_INTERVAL_S = 60.0
 
 _vram_lock = threading.Lock()
+_vram_cond = threading.Condition(_vram_lock)   # notified when a probe lands
+_vram_force_full = False                   # the next probe may not reuse a reading: set by
+                                           # refresh_vram_now, consumed by _refresh_vram
+_vram_claims = 0                           # probes started so far; never reset
+_vram_probe_claim = 0                      # the claim number of the probe now in flight
+_vram_last_claim = 0                       # the claim number of the probe behind _vram_last
 _vram_inflight = False
 _vram_last: dict | None = None      # last COMPLETED reading. May be {} (looked,
                                     # found nothing); None means no attempt has
@@ -405,7 +411,11 @@ def _reset_vram_probe_cache() -> None:
     that write a no-op - see :func:`_vram_probe`."""
     global _vram_last, _vram_last_at, _vram_inflight, _vram_probe_epoch
     global _vram_ready, _vram_last_is_seed, _vram_full_at, _vram_devices_shown
+    global _vram_probe_claim, _vram_last_claim, _vram_force_full
     with _vram_lock:
+        _vram_force_full = False
+        _vram_probe_claim = 0
+        _vram_last_claim = 0
         _vram_full_at = None
         _vram_devices_shown = None
         _vram_last = None
@@ -671,7 +681,7 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
 
     The device list is ``last_known_gpus()``, so a probe any other caller took
     is picked up at once. May raise; :func:`_vram_probe` is the boundary."""
-    global _vram_devices_shown
+    global _vram_devices_shown, _vram_force_full
     from localm import discover
 
     def _full() -> tuple[dict | None, str | None]:
@@ -683,6 +693,8 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
 
     with _vram_lock:
         full_at = _vram_full_at
+        forced = _vram_force_full
+        _vram_force_full = False
     if full_at is None or discover._torch_is_resident():
         return _full()
     age = time.monotonic() - full_at
@@ -693,6 +705,8 @@ def _refresh_vram() -> tuple[dict | None, str | None]:
     if age >= limit:
         return _full()
     if fresh is None:
+        if forced:
+            return _full()
         if devices == _vram_devices_shown:
             return None, None
         _vram_devices_shown = devices
@@ -722,7 +736,7 @@ def _vram_probe(my_epoch: int) -> None:
     means :func:`_reset_vram_probe_cache` retired it in the meantime, so its
     reading is discarded instead of racing whatever probe holds the slot now."""
     global _vram_inflight, _vram_last, _vram_last_at, _vram_last_is_seed
-    global _vram_full_at
+    global _vram_full_at, _vram_last_claim
     with _vram_lock:
         first_ever = _vram_last is None
     if first_ever:
@@ -765,7 +779,9 @@ def _vram_probe(my_epoch: int) -> None:
         elif computed is not None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
+        _vram_last_claim = _vram_probe_claim
         _vram_inflight = False
+        _vram_cond.notify_all()
     _vram_ready.set()
 
 
@@ -788,7 +804,7 @@ def _vram(wait_first: bool = False) -> dict:
     is genuinely in flight, block for up to the underlying probe's own
     cold-init-tolerant deadline instead of omitting VRAM. Default False keeps
     the non-blocking contract for every repeating-poll caller."""
-    global _vram_inflight
+    global _vram_inflight, _vram_claims, _vram_probe_claim
     now = time.monotonic()
     start_probe = False
     my_epoch = 0
@@ -798,6 +814,8 @@ def _vram(wait_first: bool = False) -> dict:
         probe_running = _vram_inflight
         if stale and not _vram_inflight:
             _vram_inflight = True
+            _vram_claims += 1
+            _vram_probe_claim = _vram_claims
             start_probe = True
             my_epoch = _vram_probe_epoch
         last = _vram_last
@@ -821,6 +839,48 @@ def _vram(wait_first: bool = False) -> dict:
             with _vram_lock:
                 last = _vram_last
     return last if last is not None else {}
+
+
+def refresh_vram_now(timeout: float = 3.0) -> bool:
+    """Take a VRAM reading now instead of waiting out ``_VRAM_REFRESH_INTERVAL_S``.
+
+    Blocks the calling thread, so call it off the event loop. A probe already
+    in flight began before this call and so may predate the change that
+    prompted it; its reading is not counted, and a second probe is started when
+    it lands. Returns True once a probe that began after this call has landed
+    (whatever it found), False when *timeout* seconds pass first - the last
+    completed reading then stays in place and the probe keeps running."""
+    global _vram_last_at, _vram_force_full
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _vram_lock:
+        claimed_before = _vram_claims
+
+    def landed() -> bool:
+        return _vram_last_claim > claimed_before
+
+    while True:
+        with _vram_cond:
+            if landed():
+                return True
+            if not _vram_inflight:
+                _vram_last_at = None
+                _vram_force_full = True
+        _vram()
+        with _vram_cond:
+            if landed():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _vram_cond.wait(remaining)
+
+
+def fresh_stats(*, timeout: float = 3.0) -> dict:
+    """:func:`system_stats` with the VRAM reading taken now
+    (:func:`refresh_vram_now`). Blocks up to *timeout* for it; when it does not
+    land in time the VRAM section is the last completed reading."""
+    refresh_vram_now(timeout)
+    return system_stats()
 
 
 _GPU_UTIL_REFRESH_INTERVAL_S = 2.0    # do not re-probe more often than the GUI polls
@@ -848,10 +908,11 @@ def _gpu_util_probe() -> None:
     last value; nothing user-facing blocks."""
     global _gpu_util_inflight, _gpu_util_last, _gpu_util_last_at
     import subprocess
+    from localm import sysprog
     pct = None
     try:
         p = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu",
+            [sysprog.require("nvidia-smi"), "--query-gpu=utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
         )

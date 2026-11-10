@@ -376,15 +376,23 @@ def test_install_backend_win_amd_rx7000_with_rocm_is_hip(monkeypatch):
     assert hwdetect.recommended_install_backend(d) == "hip"
 
 
-def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
-    # An UNKNOWN AMD card on Windows defaults to the bundled gfx103X build
-    # (amd-rocm), with setup-llama's load-test + vulkan fallback as the net.
-    # Empty gpu_names ("could not read the adapter name") is the unknown case, so
-    # it is amd-rocm and not vulkan, even with a system ROCm toolkit present.
+@pytest.mark.parametrize("name", [
+    "", "amd radeon(tm) graphics", "amd radeon pro w6800", "amd radeon rx 580",
+    "amd radeon rx 5700", "amd radeon vii", "amd instinct mi100",
+])
+def test_install_backend_win_amd_not_gfx103x_without_rocm_is_vulkan(monkeypatch, name):
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
+    assert hwdetect.recommended_install_backend(
+        Detection(vendors=["amd"], gpu_names=name)) == "vulkan"
+
+
+@pytest.mark.parametrize("name", ["", "amd radeon(tm) graphics", "amd radeon rx 580"])
+def test_install_backend_win_amd_unknown_name_with_rocm_is_hip(monkeypatch, name):
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     assert hwdetect.recommended_install_backend(
-        Detection(vendors=["amd"], gpu_names="")) == "amd-rocm"
+        Detection(vendors=["amd"], gpu_names=name)) == "hip"
 
 
 def test_install_backend_win_amd_order_must_be_exact(monkeypatch):
@@ -513,19 +521,6 @@ def test_amd_gfx_family(name, fam):
     assert hwdetect.amd_gfx_family(name) == fam
 
 
-@pytest.mark.parametrize("name,known", [
-    ("rx 5700", True),
-    ("rx 7900", True),
-    ("rx 9070", True),
-    ("radeon vii", True),
-    ("instinct mi100", True),
-    ("rx 6800", False),
-    ("", False),
-])
-def test_amd_known_non_gfx103x(name, known):
-    assert hwdetect._amd_known_non_gfx103x(name) is known
-
-
 # ------------------------- torch_pip_args (wheel source) -------------------
 
 def test_torch_pip_args_cuda(monkeypatch):
@@ -533,6 +528,33 @@ def test_torch_pip_args_cuda(monkeypatch):
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
     assert "cu126" in args and args.startswith("torch torchvision")
+
+
+def test_torch_pip_args_cuda_on_linux_brings_the_triton_kernels_for_linear_attention(monkeypatch):
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
+    assert args.split() == ["torch", "torchvision", "fla-core==0.6.0", "--torch-backend=cu126"]
+
+
+@pytest.mark.parametrize("plat", ["win32", "darwin"])
+def test_torch_pip_args_cuda_elsewhere_does_not(monkeypatch, plat):
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
+    monkeypatch.setattr(hwdetect.sys, "platform", plat)
+    args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
+    assert args.split() == ["torch", "torchvision", "--torch-backend=cu126"]
+
+
+def test_torch_pip_args_only_cuda_brings_the_triton_kernels(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    for backend, det in (("cpu", Detection(vendors=[])), ("rocm", Detection(vendors=["amd"], gpu_names="rx 6800")),
+                         ("sycl", Detection(vendors=["intel"]))):
+        assert "fla-core" not in hwdetect.torch_pip_args(backend, det)
+
+
+def test_the_setup_pin_of_fla_core_is_the_version_localm_offers_on_demand():
+    from localm.model_manager.model_packages import ON_DEMAND
+    assert hwdetect._FLA_CORE_LINUX_CUDA == f"fla-core=={ON_DEMAND['fla'].floor}"
 
 
 def test_torch_pip_args_cpu_is_empty():

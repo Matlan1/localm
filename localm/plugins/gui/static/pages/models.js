@@ -49,11 +49,12 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
   ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner",
-   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"];
+   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "decision", "unknown"];
 
 // Types whose purpose is not obvious from the name: what the model is for, shown
 // under the type pill and in its tooltip.
 const TYPE_HINT_KEYS = {
+  "decision": "models.typeHint.decision",
   "text-encoder": "models.typeHint.textEncoder",
   "vocoder": "models.typeHint.vocoder",
   "planner": "models.typeHint.planner",
@@ -585,6 +586,11 @@ export async function refreshModelsPage() {
     if (m.part_of) {
       nameLine.appendChild(el("span", "arch-badge", t("models.partOf", { model: m.part_of })));
     }
+    if (m.own_code_off) {
+      const ownCode = el("span", "moe-badge moe-likely", t("models.ownCodeOff"));
+      ownCode.title = t("models.ownCodeOffHint");
+      nameLine.appendChild(ownCode);
+    }
     if (m.expert_count > 0) {
       nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
@@ -789,9 +795,11 @@ export async function refreshModelsPage() {
         let msg = t("models.rename.toast", { name: data.new_name || name.trim() });
         // Notes the server returned are shown to the user.
         if (Array.isArray(data.notes) && data.notes.length) {
-          msg += ". " + data.notes.join(" ");
+          msg += ". " + data.notes.map((n) => String(n).replace(/\.+$/, "")).join(". ") + ".";
         }
         toast(msg);
+        window.dispatchEvent(new CustomEvent("localm:model-renamed",
+          { detail: { from: m.name, to: data.new_name || name.trim() } }));
         refreshModelsPage();
       } else toast(data.detail || t("models.rename.failed"), true);
     };
@@ -1279,6 +1287,7 @@ function discRepoRow(m, gpus) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, t(FIT_TEXT[m.fit])));
+      if (m.exceeds_memory) head.appendChild(el("span", "sub split-hint", t("models.fit.exceedsMemory")));
       // "fits"/"tight" already account for a configured split (the server sums
       // capacity across it - see discover.vram_capacity), so no split hint.
       const hint = (m.fit === "fits" || m.fit === "tight")
@@ -1880,8 +1889,12 @@ export async function refreshInstancesCard() {
               { method: "POST", headers: authHeaders() });
             const d = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(d.detail || resp.statusText);
-            toast(t("settings.instances.stoppedToast",
-              { name: inst.root_dir || inst.instance_id }));
+            if (d.status === "stale") {
+              toast(t("settings.instances.staleToast", { pid: d.pid ?? inst.pid }));
+            } else {
+              toast(t("settings.instances.stoppedToast",
+                { name: inst.root_dir || inst.instance_id }));
+            }
             refreshInstancesCard();
           } catch (e) {
             toast(t("settings.instances.stopFailed", { message: e.message }), true);

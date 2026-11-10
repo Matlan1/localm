@@ -37,6 +37,7 @@ from localm.rag import BM25
 from localm.rag.collection_lock import CollectionLockedError
 from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
+from localm.storeformat import StoreFormatTooNew, check_stamp
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 
 from .corrections import PendingCorrection
@@ -45,12 +46,59 @@ from .relevance import generic_tokens, lexical_match
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
 
+
+class EmbedderUnavailable(Exception):
+    """Raised by a DeferredEmbed that resolved to no embedding model. The store
+    treats it as "no vector for this record", never as an error."""
+
+
+class DeferredEmbed:
+    """An embed callable that resolves its embedder on the first call.
+
+    *resolve* returns the embed callable, or None when no embedding model is
+    available. It runs at most once, on the first ``ensure()`` or call; the
+    outcome (including "unavailable") is kept. A call with no embedder raises
+    EmbedderUnavailable, which the store's writers treat as "store without a
+    vector", the same as ``embed_fn=None``. ``unavailable`` is True only once the
+    resolution found no embedder, so ``_vector_status`` reports ``no_embedder``
+    only when that is true.
+
+    ``ensure()`` resolves now and returns whether an embedder exists. Resolving
+    must not happen while the namespace lock is held: a caller that is about to
+    take the lock and knows a vector will be needed calls ``ensure()`` first."""
+
+    def __init__(self, resolve: Callable[[], Optional[EmbedFn]]):
+        self._resolve = resolve
+        self._fn: Optional[EmbedFn] = None
+        self._resolved = False
+
+    @property
+    def unavailable(self) -> bool:
+        return self._resolved and self._fn is None
+
+    @property
+    def resolved(self) -> bool:
+        return self._resolved
+
+    def ensure(self) -> bool:
+        if not self._resolved:
+            self._fn = self._resolve()
+            self._resolved = True
+        return self._fn is not None
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        self.ensure()
+        fn = self._fn
+        if fn is None:
+            raise EmbedderUnavailable("no embedding model is available")
+        return fn(texts)
+
 # ---- on-disk format -------------------------------------------------------- #
 # Stamped on every JSONL line at save ("v"). Load tolerates lines without it
 # (files written before versioning are format 1). Bump this on a breaking
-# MemoryRecord schema change and branch on the stored value in _load(): _save()
-# rewrites the whole file, so an unrecognized line that is merely skipped is
-# erased by the next write.
+# MemoryRecord schema change and branch on the stored value in _load(). A line
+# stamped newer than this value makes _load() raise StoreFormatTooNew; a line
+# that does not parse is kept verbatim and written back by _save().
 #
 # Also reused, unchanged, as the "v" stamp for the three correction sidecars
 # (.corrections.jsonl, .forgotten.jsonl, .corrections-dismissed.json) - a SHARED
@@ -273,10 +321,9 @@ def _namespace_lock(ns_hash: str):
 # from its own process too (cli/maintenance.py).
 #
 # The cross-process lock is rag's heartbeat-based collection_write_lock, NOT
-# config._cross_process_lock: that one reclaims any holder older than 30s as
-# abandoned, and store.add()/replace() resolve the embedder INSIDE the lock, which
-# can trigger a VRAM swap lasting minutes - a wall-clock reclaim would reap a live
-# holder and let both write. collection_lock has no wall-clock limit and keys
+# storekit.store_lock: a waiter on that one gives up after 10 s, and
+# store.add()/replace() resolve the embedder INSIDE the lock, which can trigger a
+# VRAM swap lasting minutes. collection_lock has no wall-clock limit and keys
 # staleness on a heartbeat instead.
 
 # How long recall's reinforcement waits for a busy namespace before skipping the
@@ -467,7 +514,7 @@ class MemoryStore:
 
     def _load(self) -> None:
         self._records = []
-        skipped = 0
+        self._carried = []
         if self._file.is_file():
             # split_jsonl, not splitlines(): splitlines() also breaks on
             # U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=False) writes
@@ -481,18 +528,18 @@ class MemoryStore:
                     data = json.loads(line)
                     if not isinstance(data, dict):
                         raise ValueError("memory record line is not a JSON object")
+                    check_stamp(data.get("v"), FORMAT_VERSION, self._file,
+                                "memory store")
                     self._records.append(MemoryRecord.from_dict(data))
+                except StoreFormatTooNew:
+                    raise
                 except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
-                    # A partial/corrupt line must not break recall, but it may
-                    # not vanish silently either: _save() rewrites the whole
-                    # file, so every skipped line is erased by the next write
-                    # (warned about below).
-                    skipped += 1
-        if skipped:
+                    self._carried.append(line)
+        if self._carried:
             from localm.debuglog import logger as _dbg
             _dbg.warning(
-                "memory store %s: skipped %d unparseable line(s) on load; "
-                "the next save will drop them permanently", self._file, skipped)
+                "memory store %s: %d unparseable line(s) kept unchanged and "
+                "written back on save", self._file, len(self._carried))
         self._vectors = {}
         self._dim = None
         vf = self._vec_file()
@@ -530,6 +577,8 @@ class MemoryStore:
         body = "\n".join(json.dumps({"v": FORMAT_VERSION, **r.to_dict()},
                                     ensure_ascii=False)
                          for r in self._records)
+        if self._carried:
+            body = "\n".join(part for part in (body, *self._carried) if part)
         self._atomic_write(self._file, body + ("\n" if body else ""))
         vf = self._vec_file()
         if self._vectors:
@@ -572,6 +621,8 @@ class MemoryStore:
             return None
         try:
             vec = embed_fn([text])[0]
+        except EmbedderUnavailable:
+            return None
         except Exception as e:
             from localm.debuglog import debug_content_enabled, logger as _dbg
             # The FAILURE is always reported. *text* is a memory RECORD, i.e.
@@ -678,6 +729,7 @@ class MemoryStore:
         """
         with self._wlock('a clear'):
             self._records = []
+            self._carried = []
             self._vectors = {}
             self._dim = None
             self._save()
@@ -731,6 +783,8 @@ class MemoryStore:
             return -1, 0.0
         try:
             qvec = embed_fn([text])[0]
+        except EmbedderUnavailable:
+            return -1, 0.0
         except Exception as e:
             from localm.debuglog import logger as _dbg
             _dbg.debug("memory semantic_nearest query embed failed: %s", e)
@@ -747,6 +801,12 @@ class MemoryStore:
             if s > best_s:
                 best_i, best_s = i, s
         return best_i, best_s
+
+    def lacks_vector(self, records=None) -> bool:
+        """Whether any of *records* (default: every record in the store) has no
+        vector yet. Side-effect free; reads the in-memory state without a reload."""
+        return any(r.id not in self._vectors
+                   for r in (self._records if records is None else records))
 
     def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64) -> int:
         """Embed records that have no vector yet, up to *limit* per call, and
@@ -831,7 +891,7 @@ class MemoryStore:
         (records not embedded yet, e.g. before ``setup-embeddings``),
         ``low_coverage`` (< VEC_COVERAGE of records carry a vector), ``dim_mismatch``
         (mixed vector dimensions in the sidecar)."""
-        if embed_fn is None:
+        if embed_fn is None or getattr(embed_fn, "unavailable", False):
             return False, "no_embedder"
         if not self._vectors:
             return False, "no_vectors"

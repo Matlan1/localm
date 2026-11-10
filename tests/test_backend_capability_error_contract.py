@@ -432,7 +432,10 @@ class TestBothPathsAgree:
         assert backend.chat_stream_calls[0]["grammar"] == _GRAMMAR
 
     def test_the_completions_route_refuses_a_grammar_identically(self):
-        backend = _MinimalBackend()
+        class _RawPromptBackend(_MinimalBackend):
+            supports_raw_prompt = True
+
+        backend = _RawPromptBackend()
         engine = _EngineWithBackend(backend)
         r = _post(engine, {"model": "test-model", "prompt": "hi",
                            "grammar": _GRAMMAR, "stream": False},

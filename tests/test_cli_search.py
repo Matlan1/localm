@@ -53,7 +53,7 @@ def test_search_files_fit_reflects_combined_split_capacity(cli_runner):
     assert "24 GB combined across your 2-GPU split" in result.output
     assert "total VRAM" not in result.output
     assert "fits" in result.output
-    assert "too big" not in result.output
+    assert "needs partial CPU offload" not in result.output
 
 
 def test_search_files_stale_split_does_not_claim_combined(cli_runner):

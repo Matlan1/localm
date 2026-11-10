@@ -53,6 +53,7 @@ def _signed_build(version, deps):
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("VERSION", version)
         z.writestr("pyproject.toml", pyproject)
+        z.writestr("uv.lock", "version = 1\n")
         z.writestr("localm/__init__.py", f"# {version}")
     data = buf.getvalue()
     sig = envelope(data, [_PRIV])

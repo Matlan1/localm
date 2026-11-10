@@ -35,6 +35,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 def _sink_probe(monkeypatch):
     """Patch netpolicy.is_link_local_host to record, per call, whether it
     ran on a running asyncio event loop. Returns the calls list. Always
@@ -154,11 +162,9 @@ def test_generate_route_defers_settings_to_the_job_thread(
 # --------------------------------------------------------------------------- #
 
 def _installed_backend(plugin: str):
-    """The backend module the INSTALLED plugin actually uses. PluginManager
-    loads a plugin under a synthetic package name, so patching the canonical
-    localm.plugins.builtin.<x>.backend silently patches nothing the installed
-    plugin's own route code sees."""
-    mod = sys.modules.get(f"_localm_plugin_{plugin}.backend")
+    """The backend module the INSTALLED plugin actually uses: a first-party
+    plugin loads under its real name, ``localm.plugins.builtin.<plugin>``."""
+    mod = sys.modules.get(f"localm.plugins.builtin.{plugin}.backend")
     assert mod is not None, (
         f"the installed {plugin} plugin's backend module was not found - the "
         "plugin loader's naming changed and this test would silently patch nothing")
@@ -331,7 +337,7 @@ def test_pull_comfy_source_route_offloads_settings_dns_lookup(
     _set_hostname_comfy_config(tmp_path)
     calls = _sink_probe(monkeypatch)
     started = []
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli",
                         lambda self, kind, cli_args, **kw: started.append(cli_args)
                         or type("Job", (), {"id": "job-test"})())
 

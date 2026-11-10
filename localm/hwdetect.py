@@ -291,16 +291,6 @@ def detect() -> Detection:
                                   else "the display-adapter enumeration did not run"))
 
 
-def _amd_known_non_gfx103x(names: str) -> bool:
-    """True when the AMD adapter name CLEARLY indicates a family the self-contained
-    gfx103X (RDNA2 / RX 6000) ROCm build does NOT cover: RDNA1 (RX 5000), RDNA3
-    (RX 7000), RDNA4 (RX 9000), Radeon VII, Instinct. Conservative - an unknown or
-    RX 6000 name returns False so the self-contained build stays the default (the
-    setup-llama load-test + vulkan fallback is the net if this guess is ever wrong)."""
-    return any(tag in names for tag in
-               ("rx 5", "rx 7", "rx 9", "radeon vii", "instinct"))
-
-
 def _rocm_toolkit_present() -> bool:
     """Whether a working system ROCm/HIP toolkit is installed on THIS machine,
     independent of GPU-name matching - the SAME signal ``detect()`` probes
@@ -392,7 +382,7 @@ def _hardware_install_backend(d: Detection) -> str:
     if "nvidia" in d.vendors:
         return "cuda"
     if d.vendors == ["amd"]:
-        if sys.platform == "win32" and not _amd_known_non_gfx103x(d.gpu_names):
+        if sys.platform == "win32" and amd_gfx_family(d.gpu_names) == "gfx103x":
             return "amd-rocm"
         if _rocm_toolkit_present():
             return "hip"
@@ -456,6 +446,7 @@ _TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
+_FLA_CORE_LINUX_CUDA = "fla-core==0.6.0"
 # uv's `--torch-backend` values for the same variants. See
 # test_torch_backend_avoids_the_setuptools_conflict_index_url_hits.
 _TORCH_BACKEND = {
@@ -559,7 +550,9 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
 
       * cuda            -> CUDA wheels (cu126, or the Blackwell-and-newer line
                            when this machine has one - see pytorch_index_url);
-                           any OS with NVIDIA
+                           any OS with NVIDIA. On Linux also fla-core, the Triton
+                           kernels of linear-attention models; the Linux CUDA wheels
+                           bring Triton
       * xpu             -> Intel wheels (self-provision the oneAPI runtime)
       * rocm, Linux     -> upstream ROCm wheels (broad gfx support)
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
@@ -573,7 +566,8 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
         key = "cuda-blackwell" if _cuda_is_blackwell() else "cuda"
-        return f"torch torchvision --torch-backend={_TORCH_BACKEND[key]}"
+        kernels = f" {_FLA_CORE_LINUX_CUDA}" if sys.platform.startswith("linux") else ""
+        return f"torch torchvision{kernels} --torch-backend={_TORCH_BACKEND[key]}"
     if variant == "xpu":
         return f"torch torchvision --torch-backend={_TORCH_BACKEND['xpu']}"
     if variant == "rocm":

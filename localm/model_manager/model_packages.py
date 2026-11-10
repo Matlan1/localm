@@ -562,12 +562,18 @@ def folder_state(folder: Path) -> FolderState:
     install lacks, sorted into ones localm ships here (the install is incomplete),
     ones it cannot add here (including a shipped module this platform does not
     get), and ones it can add. Never touches the network."""
-    from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
+    from localm.inference.backends.hf import (
+        _declares_custom_code,
+        _trust_remote_code_enabled,
+        uses_transformers_classes,
+    )
     from localm.model_manager.missing_packages import is_importable, shipped_here
     if not folder.is_dir() or not _declares_custom_code(str(folder)):
         return FolderState(True, [], [], [], [])
     if not _trust_remote_code_enabled():
         return FolderState(False, [], [], [], [])
+    if uses_transformers_classes(str(folder)):
+        return FolderState(True, [], [], [], [])
     missing = sorted(m for m in _folder_imports(folder) if not is_importable(m))
     shipped = [m for m in missing if shipped_here(m)]
     others = [m for m in missing if not shipped_here(m)]

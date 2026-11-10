@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localm"
-version = "0.3.2"
+version = "0.3.3"
+dynamic = ["scripts"]
 description = "Local AI platform - offline LLM inference, model management, and extensible agent plugins"
 readme = "docs/pypi-readme.md"
 license = { text = "AGPL-3.0-or-later" }
@@ -312,7 +313,7 @@ monitor = [
 # decoding needs no C compiler, Triton build or CUDA toolkit. On Windows this
 # extra also pulls triton-windows (upstream Triton ships no Windows wheels),
 # which the native FP8 path imports; grammar masking does not use it.
-# Install with:  pip install "localm[gpu,grammar]"
+# Install with:  uv pip install -e ".[gpu,grammar]"  (from a source checkout)
 # ExLlama runtimes for the exllama plugin (EXL2 and EXL3 models), Linux only.
 # They run on an NVIDIA GPU with CUDA and compile their extension on first
 # import, which needs the CUDA toolkit and a C++ compiler. The plugin also needs
@@ -380,10 +381,14 @@ docs = [
     "mkdocs-material>=9.7.7,<10",
 ]
 
-[project.scripts]
+# The console scripts, supplied by hatch_build.py.
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.metadata.hooks.custom.console-scripts]
 # console_main wraps the CLI group with the venv guard (NEW-J); the bare `main`
 # stays importable for in-process callers (tests, the `localm coder` route).
-localm    = "localm.cli:console_main"
+localm = "localm.cli:console_main"
 # backward-compat alias for `localm coder`; installed with every localm install.
 localcoder = "localm.plugins.coder.cli:console_main"
 
@@ -690,6 +695,7 @@ only-include = [
   "tests",
   "docs",
   "pyproject.toml",
+  "hatch_build.py",
   "README.md",
   "LICENSE",
   "VERSION",

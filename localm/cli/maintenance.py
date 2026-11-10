@@ -261,7 +261,9 @@ def setup_embeddings(model, yes=False):
         if pending or unreadable_ns:
             if pending:
                 console.print(f"  Embedding {pending} stored memory item(s) ...")
-            res = backfill_all(_root, embed_texts)
+            from ..debuglog import native_console_paused
+            with native_console_paused():
+                res = backfill_all(_root, embed_texts)
             if res["remaining"] or res["unreadable"]:
                 bits = []
                 if res["embedded"]:
@@ -384,7 +386,7 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     if not description and not what_happened:
         console.print("[yellow]Describe the problem first (-m/-w, or answer the "
                       "prompt) - an empty report helps no one.[/yellow]")
-        return
+        sys.exit(1)
 
     summary = bugreport.report_title("", what_happened, description)
     console.print(f"[bold]Filing a bug report:[/bold] {escape(summary)}")

@@ -27,7 +27,7 @@ section.
 Set globally (`mode`), per surface (`chat_mode`, `coder_mode`, which inherit the
 global when unset), by the `--mode` flag on `localm gui` / `serve` / `run`, by the
 `LOCALM_MODE` environment variable, in the desktop launcher's Privacy card, or in
-the app under Settings > Privacy. The `--mode` flag works by setting the
+the app under Settings > Privacy & data. The `--mode` flag works by setting the
 `LOCALM_MODE` environment variable for the process (and its children), so the two
 are one precedence level, not two. Precedence: `LOCALM_MODE` env (direct, or via
 `--mode`) > a project's `.localcoder/config.toml` `mode` (coder surface only) >
@@ -36,7 +36,7 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 
 | Mode | What it saves automatically |
 | --- | --- |
-| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
+| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). The one automatic write is the content-free [management log](#the-management-log-written-in-every-mode). This is the "no traces" mode. |
 | **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
@@ -70,6 +70,7 @@ audit log). They are not the whole of what localm writes to disk. A few
 kinds of data are explicit, deliberate assets - like a file you save
 yourself - and are written in every session mode, privacy included:
 
+- **The management log.** `<data dir>/logs/management.jsonl` records that a key was created or revoked, a login was refused, an update was applied or a setting was saved, without any key, setting value or conversation content (see [The management log](#the-management-log-written-in-every-mode)). It is written in every session mode.
 - **Scheduled job results.** Every run of a chat or coder job writes its
   prompt, the full reply, status, and timing to
   `<data dir>/jobs/results/<job_id>/<timestamp>.json`, on its own schedule,
@@ -143,7 +144,8 @@ or replies.
 asyncio task list on demand, independent of the watchdog. It needs full host
 filesystem access - the owner key, or a key explicitly granted it - and in open
 mode (no key configured) it additionally requires the per-process shell token
-the loopback GUI shell holds, because open mode grants every caller host access
+the loopback GUI shell holds (or this instance's attach token, which only a
+local process running as you can read), because open mode grants every caller host access
 and so would otherwise leave this unauthenticated. Directory prefixes in the
 returned frames (your data directory, the install location, the Python
 environment) are redacted; the file, line and function are kept.
@@ -158,7 +160,9 @@ model name or a model path, in any session mode. It writes nothing to disk.
 
 `localm gui --debug` (or `LOCALM_DEBUG=1`) writes a debug log under
 `<data dir>/logs/`, captures native llama.cpp stderr (model metadata/timings), and
-logs each request (method, path, status, timing - never request bodies). It does
+logs each request (method, path, status, timing - never request bodies; for a
+refused or failed request the server's reason is logged too, which can name a
+file you attached or a site that was contacted). It does
 NOT record your chat content in privacy mode (see the guarantee below).
 
 ### GUI error messages
@@ -189,7 +193,7 @@ Without it, privacy mode saves no such bug report: a command that fails at a
 terminal asks whether to save one (the default is no), and an error with no
 terminal to ask (a background task, a server) saves nothing.
 
-Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
+Set it in **Settings > Privacy & data** (in-app, persistent), with the **desktop
 launcher** checkbox, with `--keep-diagnostics` on `localm gui` (`serve` and
 `run` have no such flag - use the `LOCALM_KEEP_DIAGNOSTICS` environment
 variable for those, a per-run override either way). The hang watchdog trace
@@ -207,7 +211,7 @@ trace and the bug report follow the toggle at once.
 
 ## 3. Bug reports: what's redacted, and what needs your OK
 
-Filing a bug report - Settings > Report a problem in the GUI, `localm
+Filing a bug report - Settings > System > Report a bug in the GUI, `localm
 bug-report` at a terminal, or the standalone `report-issue.bat` /
 `report-issue.sh` (repo root) that works even when localm cannot start at
 all - is one of the deliberate actions above, but it is worth its own
@@ -218,14 +222,20 @@ equivalent (`report_issue.ps1`) when even that cannot run. It needs a git
 clone of the repo, so it is not available after `pip install localm`; if
 localm will not start at all on a pip install, file an
 [Issue](https://github.com/Matlan1/localm/issues) directly instead, since
-`localm bug-report` itself needs a working localm to run.
+`localm bug-report` itself needs a working localm to run. The Python standalone reporter attaches the same
+log digest as the in-app reporter, with the records that carry chat content
+left out (no log at all when it cannot load that filter), and the
+PowerShell one attaches no log tail when the log holds such a record.
 
-**You always see the full report before anything is sent, and sending needs
-your explicit OK.** In the GUI, "Send to maintainer" saves the report and
+**In the GUI and the standalone reporter you see the full report before
+anything is sent, and sending needs your explicit OK.** `localm bug-report`
+saves the report and prints its path so you can open or edit it; it is sent
+only when you choose to send it at the prompt, or at once when you pass
+`--send` (no prompt, also without a terminal). In the GUI, "Send to maintainer" saves the report and
 shows its whole text; nothing is uploaded until you press "Send this
 report", and what is uploaded is that saved text, apart from its closing
 note about editing the report, which is left out. The standalone reporter
-and `localm bug-report` preview the same text at a terminal prompt - and when
+previews the same text at a terminal prompt - and when
 there is no terminal to prompt (piped/redirected stdin, or run
 non-interactively), every standalone reporter (Python, PowerShell, and the
 `report-issue.sh` curl fallback used when there is no Python) treats that
@@ -268,7 +278,10 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   kept.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
-  never stored in config and never included.
+  never stored in config and never included. A few of those keys hold text
+  you typed (the ComfyUI launch command, folder and URL, the search URL, the
+  allowed CORS origins, the coder reviewer); they pass through the same
+  redaction as the rest of the report.
 
 **What a report deliberately keeps**, because it is what makes the report
 useful to debug: your install location, data directory path, native runtime
@@ -290,17 +303,21 @@ a newer release exists. This is a network behaviour, not something that writes t
 disk, so it isn't one of the two dials - it's covered by the [network
 policy](network.md) instead.
 
-- **When it fires.** A quiet check at most once every 6 hours while the GUI is
-  open (a client-side throttle - there is no background daemon; a headless
+- **When it fires.** A quiet check at most once every 6 hours per browser while
+  the GUI is open (a client-side throttle kept in that browser's storage, so a
+  browser that blocks storage checks on every load - there is no background daemon; a headless
   `localm serve` that nobody opens the GUI on never checks), plus whenever you
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
 - **What it sends, and what it does not.** A bare GET request identifying itself
-  as `localm`, plus a shared-secret header if one is configured. The request path
-  names the release channel (stable, or prerelease if you opted in). It does
-  **not** send your installed version or chat content - the comparison to the
-  latest release happens locally, on your machine. What it does expose to
-  the update server is your IP address, the time you checked, and the fact that
+  as `localm`, plus a shared-secret header (the one localm ships with, or the
+  `update_token` you configure). The query string
+  carries your installed localm version (`client=<version>`, which the update
+  server uses to decide which release to offer) and, if you opted into
+  prereleases, `channel=prerelease`. It does **not** send chat content, settings
+  or an identifier of your install - the comparison to the latest release
+  happens locally, on your machine. What it does expose to the update server is
+  your IP address, the time you checked, your localm version, and the fact that
   a localm install checked in.
 - **It obeys `net_mode`.** The update check reads the network mode you set
   (`localm/netpolicy.py`) and is blocked when it is `off`, failing honestly
@@ -320,6 +337,12 @@ policy](network.md) instead.
 
 ---
 
+## The management log (written in every mode)
+
+localm appends one line to `logs/management.jsonl` in the data folder when an API key is created or revoked, a login with a wrong key is refused, an update is applied, a setting is saved or a plugin is installed or removed. A line holds the time, the kind of event, a key id or a fixed label (never a key), the names of the settings a save changed (never their values), the plugin name and versions, and for a refused login only whether the client was on this machine. It holds no conversation content and no secret, so privacy mode writes it too. The file is capped at 1 MB and one earlier file (`management.jsonl.1`) is kept. If it cannot be written, localm logs a warning and carries on with the operation.
+
+---
+
 ## The guarantee: no chat content in the debug log in privacy mode
 
 Even with the debug log on (via `--debug` or "Keep diagnostics"), **your chat
@@ -330,3 +353,17 @@ relevant session surface in privacy - which fails safe to "no content" if the
 mode cannot be resolved. Operational lines (requests, timings, native metadata,
 stack traces) are unaffected. In `log`/`full` mode, `--debug` still records raw
 model output as before, since those modes already persist your sessions.
+
+The guarantee follows each chat, not only the server. A privacy-mode session
+that attaches to a server running in `log` or `full` mode with the debug log on
+(`localm run MODEL --mode privacy`, or a coder session in privacy mode) has
+none of its messages, replies or raw model output written to that server's
+debug log, and memory treats it as privacy mode (nothing stored, and nothing
+recalled unless you opted into read-only recall in privacy mode).
+While such a request is being answered, the debug log holds back the content
+of every other chat on that server as well.
+
+The browser plugin's log lines (a request it refused, a request that failed,
+a window it replaced) name the host only; the full address (path and query
+string) is logged only when the debug log is on and no session is in privacy
+mode.

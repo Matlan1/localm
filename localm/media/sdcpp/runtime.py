@@ -260,6 +260,20 @@ def _download(url: str, dest: Path, on_progress: Progress, label: str) -> None:
         socket.setdefaulttimeout(prev)
 
 
+# The notice written beside the NVIDIA CUDA runtime libraries of a cudart
+# bundle, which carries no license file of its own. Same text as
+# localm.setup_llama.cuda.NVIDIA_CUDA_LICENSE_NOTICE (see
+# test_sdcpp_nvidia_notice_matches_setup_llama).
+NVIDIA_CUDA_LICENSE_NOTICE = """\
+The NVIDIA CUDA runtime libraries in this folder (cudart, cuBLAS, cuBLASLt)
+are proprietary NVIDIA software, not open source. They are covered by the
+NVIDIA CUDA Toolkit End User License Agreement:
+https://docs.nvidia.com/cuda/eula/index.html
+"""
+
+NVIDIA_CUDA_LICENSE = "LICENSE.nvidia-cuda"
+
+
 def _fetch_into(name: str, sha256: str, staging: Path, tmp: Path,
                 on_progress: Progress) -> None:
     from localm.setup_llama.download import ArtifactError, _extract_archive, _validate_archive
@@ -327,6 +341,10 @@ def install(backend: str, *, force: bool = False,
         except netpolicy.NetworkPolicyError as e:
             raise DownloadError(f"the download was refused by the network policy: {e}") from e
         _flatten(staging)
+        if any(name.startswith("cudart-")
+               for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
+            (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
+                                                       encoding="utf-8")
         if dest.exists():
             try:
                 shutil.rmtree(dest)
@@ -415,3 +433,41 @@ def provision(choice: str = "auto", *, force: bool = False,
             say(f"The {b} runtime did not work here ({e}); trying the next one.")
     raise ProvisionError("no stable-diffusion.cpp runtime works on this machine: "
                          + "; ".join(errors))
+
+
+def ensure(choice: str = "auto", *, on_progress: Optional[Progress] = None,
+           probe: Optional[Callable[[Runtime], dict]] = None) -> Runtime:
+    """The runtime a generation uses for *choice*, installing one when needed.
+
+    An explicit backend returns its installed runtime, else :func:`provision`
+    installs it. ``auto`` with nothing installed calls :func:`provision`.
+    ``auto`` with an installed GPU runtime returns it. ``auto`` with only the
+    cpu runtime installed, on a machine whose recommended backend is a GPU one,
+    installs the recommended backend (then vulkan), skipping a backend whose
+    load test failed at this tag; when the download fails or is refused, or no
+    GPU runtime loads, it returns the cpu runtime and reports why through
+    *on_progress*. Raises :class:`ProvisionError` only when no runtime can be
+    used."""
+    say = on_progress or (lambda _m: None)
+    choice = (choice or "auto").strip().lower()
+    rt = resolve(choice)
+    if choice != "auto":
+        return rt if rt is not None else provision(choice, on_progress=say, probe=probe)
+    if rt is None:
+        return provision("auto", on_progress=say, probe=probe)
+    best = recommended_backend()
+    if rt.backend != "cpu" or best == "cpu":
+        return rt
+    plat = platform_key()
+    for b in dict.fromkeys([best, "vulkan"]):
+        if (plat, b) not in pins.ASSETS or load_test_failed(b):
+            continue
+        try:
+            return install(b, on_progress=say, probe=probe)
+        except DownloadError as e:
+            say(f"The {b} runtime could not be downloaded ({e}); using the installed "
+                "cpu runtime.")
+            return rt
+        except ProvisionError as e:
+            say(f"The {b} runtime did not work here ({e}); trying the next one.")
+    return rt

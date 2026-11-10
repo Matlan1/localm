@@ -15,8 +15,8 @@ cd "$(dirname "$0")"
 
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
-UV_INSTALLER_VERSION="0.13.6"
-UV_INSTALLER_SHA256="f7a56e7afaec49a3bcbc3ac3cdbe917e7c6ce30e0d815308a12e531aa5ef23b7"
+UV_INSTALLER_VERSION="0.13.7"
+UV_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -93,6 +93,14 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
 
+# A headless box (no DISPLAY) has no window to show: say so and point at the
+# console installer, before any question is asked or uv is installed.
+if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
+    echo "      Use the console installer instead:  ./setup.sh"
+    exit 1
+fi
+
 echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
 echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
@@ -147,14 +155,6 @@ fi
 # ---- open the installer window ----------------------------------------------
 # --no-project so uv never resolves this repo as its own project, and an explicit
 # --python so the interpreter is the managed 3.12 the install targets.
-#
-# A headless box (no DISPLAY) has no window to show: say so and point at the
-# console installer rather than failing with a tkinter traceback.
-if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
-    echo "      Use the console installer instead:  ./setup.sh"
-    exit 1
-fi
 
 export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."

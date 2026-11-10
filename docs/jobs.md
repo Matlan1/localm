@@ -66,6 +66,15 @@ localm job enable <job_id>
 localm job remove <job_id>      # delete the job and its stored results
 ```
 
+`localm job run` runs the job inside the localm server already running for this
+data folder and directory (it sends the owner key, or the server's instance
+token in open mode, like `localm unload`). A chat or memory job then uses the
+model the server has loaded, a coder job runs in the server, and a knowledge
+re-sync runs there too. If another job is already running in the server, the
+command says so and exits 1 instead of loading a second model. With no server
+running, the job runs in the terminal's own process and a chat or memory job
+loads its model there.
+
 `localm job add` options:
 
 | Option | Meaning |
@@ -76,7 +85,7 @@ localm job remove <job_id>      # delete the job and its stored results
 | `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday; 7 is also accepted as Sunday). Mutually exclusive with `--every`. |
 | `--every SECONDS` | Interval schedule in seconds (1 or more). Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
-| `--cwd DIR` | Working directory for a coder job. |
+| `--cwd DIR` | Working directory for a coder job (required with `--coder`). |
 | `--scope GLOB` | File-access glob for a coder job. Confines the file tools only: `run_shell`/`run_tests` execute a process and cannot be bounded by a path check, so leave `--allow-shell` off (the default) if you need the scope to be a hard boundary. |
 | `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents, no MCP servers, no writes inside `.localcoder` or `.git`) unless you pass this. |
 | `--model M` | Registered model to run the job with (a name from `localm list`, not a path; an unregistered name is refused when the job is created). Without one, the active model runs it unless it needs something that model lacks (a coder job always needs structured tool calls; a chat job needs them only when web access is on, or when its prompt needs a longer window than the model supports), in which case an installed model that has them answers instead. |
@@ -112,14 +121,20 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server - jobs never stack model loads. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
 `rag` - the memory and rag kinds mirror the CLI's `--memory` / `--rag` flags and
 need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 (seconds as an integer, or a 5-field cron string), and the optional `model`,
-`cwd`, `scope`, `collection`, `allow_shell`, and `enabled` fields.
+`cwd` (required for a `coder` job), `scope`, `collection`, `allow_shell`, and `enabled` fields.
+Creating a job needs the scope for its task kind as well as `jobs`: `chat`,
+`coder`, `memory` or `rag` (a `jobs`-only key gets `403`). At run time a job
+created by a key other than the owner key runs only while that key still exists
+and still holds that scope; a job whose creating key was revoked, expired or
+narrowed is not run and records an error result instead. Jobs created with the
+owner key, or in open mode, are not affected.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.
@@ -127,7 +142,12 @@ A caller without the owner key or a `coder:full` key cannot choose a coder job's
 `cwd`: the job is stored with the instance's project root instead, and the
 response shows the `cwd` that will be used. `model` must be a registered model
 name, and a UNC or device-path `cwd` is refused. `collection` is required for a
-`rag` job and refused at creation if it is not a valid collection name.
+`rag` job and refused at creation if it is not a valid collection name. A key
+confined to RAG folders (`rag_roots`) gets `403` when it creates a `rag` job, or
+points one with an update, at an existing collection holding documents from
+outside those folders. At run time such a job re-syncs under its creating key's
+folders, and is not run (an error result is recorded) when they no longer cover
+the collection.
 
 ## Two things live under `/api/jobs`
 
@@ -148,12 +168,14 @@ not exist does, and the two kinds of id look identical, so the path you call is
 what decides which registry answers.
 
 `GET /api/activity` is how you find those in-flight operations without already
-holding an id. It answers `{"now": <server clock>, "operations": [...]}`, where
+holding an id. It answers `{"now": <server clock>, "operations": [...], "stalls": [...]}`, where
 each entry carries `id`, `kind`, `status`, `created_at`, `finished_at` (null
-while it runs), `cancellable`, a `label` that is set for a model pull, a
-ComfyUI setup or update, a llama.cpp runtime setup or update, and system
-diagnostics (other kinds fall back to `kind`), and `pct`/`phase` once the
-operation has something real to report. `pct` is absent, never `0`, before then. Compute an
+while it runs), `cancellable`, a `label` (null unless the operation has one: a model pull, a
+ComfyUI setup or update, a llama.cpp runtime setup or update, system
+diagnostics, a browser session, view or download, and text-to-speech; show
+`kind` when it is null), and `pct`/`phase` once the
+operation has something real to report, with `detail` when the last progress
+report carried one. `pct` is absent, never `0`, before then. Compute an
 age as `now - created_at`, using the server's `now` rather than your own clock.
 It is deliberately not under `/api/jobs`, so that one prefix does not mean two
 things. `localm status` and the MCP activity tool read this same route; on a
@@ -173,9 +195,9 @@ as a generated image, leaves nothing under `activity/` and is not listed after a
 restart.
 
 For a caller using a key without the owner scope, every text in an operation's
-row and event stream has local paths replaced (`<data>`, `<install>`, `~`, and
-`<path>` for the folders of any other path on the machine), as in the other
-routes such a key reaches.
+row and event stream has local paths replaced (`<data>`, `<install>`, `<env>`, `~`, `<redacted>` for another account's
+name, and `<path>` for the folders of any other path on the machine), as in the
+other routes that report local paths to such a key in messages and errors.
 
 What it does not promise beyond that: a finished operation is dropped about an
 hour after it finishes, and only when some new operation starts, so an idle
@@ -247,7 +269,7 @@ time limit, so a long index is never cut short; a holder that dies stops
 reporting and its lock is reclaimed automatically.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
-or denied folder policy as an interactive add (Settings > Knowledge), including
+or denied folder policy as an interactive add (Settings > Plugins > Knowledge (RAG)), including
 the always-refused credential folders. A folder that was legal when it was
 indexed but is outside the policy now is skipped and reported, never indexed.
 Secret-looking files dropped into an indexed folder are filtered exactly as they

@@ -138,9 +138,11 @@ def _home() -> Path:
 def _persist_enabled() -> bool:
     """Memory recall AND writes are off in privacy mode (the default). Unlike the
     rest of the app, memory treats privacy as FULLY off: this gates recall too, so
-    no past facts are injected in privacy mode (not just "no new traces")."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    no past facts are injected in privacy mode (not just "no new traces"). A
+    request that carries privacy mode to a server in another mode
+    (``audit.request_is_privacy``) counts as privacy mode."""
+    from localm.audit import SessionMode, effective_mode, request_is_privacy
+    return not request_is_privacy() and effective_mode("chat") != SessionMode.PRIVACY
 
 
 def _recall_enabled() -> bool:
@@ -183,8 +185,37 @@ def _embed_fn():
         return emb.embed if emb is not None else None
     except Exception as e:
         from localm.debuglog import logger
-        logger.debug("memory _embed_fn resolution failed: %s", e)
+        from localm.inference.load_lease import LoadBusyError
+        if isinstance(e, LoadBusyError):
+            logger.warning("memory: the embedding model is not loaded yet (%s); "
+                           "this pass runs lexical-only", e)
+        else:
+            logger.debug("memory _embed_fn resolution failed: %s", e)
         return None
+
+
+def _deferred_embed():
+    """An embed callable for a write pass that resolves the shared embedder on
+    its first use, so a pass that stores nothing never downloads or loads it.
+    With no embedder available a write stores the record without a vector."""
+    from localm.memory import DeferredEmbed
+
+    def _resolve():
+        fn = _embed_fn()
+        if fn is None:
+            from localm.debuglog import logger
+            logger.debug("memory: no embedder resolved, this pass's records "
+                         "will have no vector")
+        return fn
+    return DeferredEmbed(_resolve)
+
+
+def _ensure_embedder(embed_fn) -> None:
+    """Resolve a deferred embedder now, before the store lock is taken. A plain
+    callable or None is left alone."""
+    from localm.memory import DeferredEmbed
+    if isinstance(embed_fn, DeferredEmbed):
+        embed_fn.ensure()
 
 
 def _embedder_download_status(request: Request | None) -> dict:
@@ -258,9 +289,13 @@ async def _off_loop(fn, *, embedder_bound: bool = True):
     timeout. Pass embedder_bound=False only for a call that never resolves the
     embedder (e.g. memory_delete), so it never queues behind an unrelated
     embedder load. See test_dedicated_embed_path_holds_one_pool_worker_at_a_time.
+
+    *fn* runs inside the caller's ``audit.request_privacy`` scope, if any.
     """
+    from localm.audit import carry_request_privacy
     from localm.rag.collection_lock import CollectionLockedError
     loop = asyncio.get_running_loop()
+    fn = carry_request_privacy(fn)
     try:
         if embedder_bound:
             from localm.inference import http_server as _hs
@@ -845,14 +880,7 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Newly added facts come from diffing record ids: store.replace reuses the same
     # record objects, so an UPDATE keeps its id and only true ADDs appear.
     before = {r.id for r in store.all()}
-    embed_fn = _embed_fn()
-    if embed_fn is None:
-        # No embedder resolvable: recall and consolidation fall back to lexical BM25,
-        # and this round's records get no vector. Logged so it is distinguishable from
-        # a per-record embed failure.
-        from localm.debuglog import logger
-        logger.debug("memory synthesize_memory: no embedder resolved, "
-                     "this round's records will have no vector")
+    embed_fn = _deferred_embed()
     res = run_consolidation(store, sessions, complete, embed_fn=embed_fn,
                             surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
@@ -868,8 +896,9 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
     # over several passes. No-op when no embedder.
-    if embed_fn is not None:
+    if store.lacks_vector():
         try:
+            embed_fn.ensure()
             filled = store.backfill_vectors(embed_fn)
             if filled:
                 res["backfilled"] = filled
@@ -1095,7 +1124,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
     pass), the failure is counted against the session in the watermark sidecar,
     and after EPISODIC_MAX_ATTEMPTS counted failures the session is skipped with
     a warning and the pass continues."""
-    ef = _embed_fn() if embed_fn is _UNSET else embed_fn
+    ef = _deferred_embed() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
         from difflib import SequenceMatcher
@@ -1217,6 +1246,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                     continue
                 # update() re-embeds on a text change, so the vector cannot go stale
                 # against the superseded text.
+                _ensure_embedder(ef)
                 store.update(keep.id, text=summ, embed_fn=ef,
                              meta={"session": f.stem, "session_mtime": mt,
                                    "judged": True})
@@ -1227,6 +1257,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
                    and SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85
                    for r in store.all()):
                 continue                           # already have this episode
+            _ensure_embedder(ef)
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt,
@@ -1263,6 +1294,12 @@ def _auto_interval() -> float:
         return MEMORY_AUTO_MIN_INTERVAL
 _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
+_stop = _threading.Event()            # set on unload: no new background pass starts
+
+
+def _request_stop() -> None:
+    """Stop scheduling background passes; a pass already running finishes."""
+    _stop.set()
 
 
 def _auto_marker() -> Path:
@@ -1297,6 +1334,8 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     from localm.debuglog import logger, debug_content_enabled
     deferred = False
     try:
+        if _stop.is_set():
+            return
         # Resolved once here, at thread start, and reused for the whole pass, so the
         # engine cannot swap out from under consolidation while it is mid-run.
         eng = _live_engine()
@@ -1384,7 +1423,7 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
     interval = _auto_interval()
     now = _time.time()
     with _auto_lock:
-        if _auto_running:
+        if _auto_running or _stop.is_set():
             return
         if now - _auto_last_run() < interval:
             return
@@ -1447,6 +1486,8 @@ def _backfill_sweep_bg() -> None:
     global _sweep_running
     from localm.debuglog import logger
     try:
+        if _stop.is_set():
+            return
         from localm.memory.backfill import backfill_all
         res = backfill_all(_memory_root(), _embed_fn())
         if res["embedded"]:
@@ -1493,7 +1534,7 @@ def _maybe_sweep_backfill() -> None:
         interval = BACKFILL_SWEEP_MIN_INTERVAL
     now = _time.time()
     with _sweep_lock:
-        if _sweep_running:
+        if _sweep_running or _stop.is_set():
             return
         if now - _sweep_last_run() < interval:
             return
@@ -1836,6 +1877,8 @@ async def _memory_inlet_hook(messages, ctx):
 
 def register(host) -> None:
     global _HOST
+    _stop.clear()
+    host.track(_request_stop)
     host.mount_router(_router)
     host.register_chat_hook("inlet", _memory_inlet_hook)
     # Outlet: after each turn, grow the memory unattended (debounced, background,
@@ -1848,4 +1891,4 @@ def register(host) -> None:
 
 
 def unregister() -> None:
-    pass
+    _request_stop()

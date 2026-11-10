@@ -30,6 +30,8 @@ import types
 import pytest
 
 import localm.config as cfg
+import localm.procid as procid
+import localm.storekit as storekit
 
 
 @pytest.fixture()
@@ -120,8 +122,8 @@ def test_cross_process_lock_reclaims_a_stale_lock_file(home, monkeypatch, capsys
     """A lock file left behind by a crashed holder must not wedge every future
     write forever - it is reclaimed once older than the staleness timeout, and
     the reclaim is surfaced, not silent."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 5.0)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     lockpath.write_text("99999999", encoding="utf-8")
     old = cfg.time.time() - 10  # far older than the 0.05s staleness threshold
@@ -139,8 +141,8 @@ def test_cross_process_lock_times_out_on_a_live_holder(home, monkeypatch):
     """A lock file that is FRESH (not stale) must be respected - a second
     acquirer waits, and gives up with a clear TimeoutError rather than
     silently proceeding unprotected past a lock it never actually got."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.2)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.2)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     cfg.ensure_dirs()
     lockpath.write_text("12345", encoding="utf-8")
@@ -152,8 +154,8 @@ def test_cross_process_lock_times_out_on_a_live_holder(home, monkeypatch):
 
 
 def test_a_lock_timeout_is_a_config_lock_timeout(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.2)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.2)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     cfg.ensure_dirs()
     lockpath.write_text("12345", encoding="utf-8")
@@ -165,8 +167,8 @@ def test_a_lock_timeout_is_a_config_lock_timeout(home, monkeypatch):
 
 
 def _foreign_registry_lock(monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 30.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 30.0)
     lockpath = cfg.REGISTRY_FILE.with_name(cfg.REGISTRY_FILE.name + ".lock")
     lockpath.write_text("12345:foreign", encoding="utf-8")
     return lockpath
@@ -234,8 +236,8 @@ def test_settings_write_blocked_by_another_process_answers_busy_not_500(
     from localm.inference.http_server import create_app
 
     monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-the-busy-settings-test")
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
     cfg.save_config({"temperature": 0.7})
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     caplog.set_level(logging.WARNING, logger="localm")
@@ -285,8 +287,8 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     access. A bare create/delete marker with no per-acquisition token fails
     this: its unconditional `finally: lockpath.unlink()` deletes whatever lock
     is on disk, not specifically the one it created."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     real_getpid = cfg.os.getpid
@@ -294,6 +296,7 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     # Two genuinely separate OS processes have different real pids; fake that
     # here so this exercises the stale-reclaim/fencing path rather than the
     # same-process reentrancy guard.
+    monkeypatch.setattr(procid, "process_start_identity", lambda pid: None)
     monkeypatch.setattr(cfg.os, "getpid", lambda: 111111)
     cm_a = cfg._cross_process_lock(cfg.CONFIG_FILE)
     cm_a.__enter__()  # simulated "process A" acquires
@@ -302,10 +305,10 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     os.utime(lockpath, (old, old))
 
     # A separate OS process has its own pid AND its own in-memory record of the
-    # locks it holds (config._held_lock_tokens), so give B an empty record as a
+    # locks it holds (storekit._held_lock_tokens), so give B an empty record as a
     # process boundary would. Ownership is keyed on the fencing token rather than
     # the pid number, because pids are reused across process lifetimes.
-    monkeypatch.setattr(cfg, "_held_lock_tokens", {})
+    monkeypatch.setattr(storekit, "_held_lock_tokens", {})
     monkeypatch.setattr(cfg.os, "getpid", lambda: 222222)
     cm_b = cfg._cross_process_lock(cfg.CONFIG_FILE)
     cm_b.__enter__()  # simulated "process B" sees A's lock as stale and reclaims it
@@ -348,7 +351,7 @@ def test_cross_process_lock_nested_same_process_call_fails_fast(home, monkeypatc
     must fail immediately with a clear error identifying itself as the holder,
     not silently stall for the whole timeout window and then raise a misleading
     'held by another localm process' TimeoutError."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.save_config({"n_ctx": 4096})
 
     def _outer(c):
@@ -375,21 +378,21 @@ def test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock(hom
     only around the read-mutate-write itself; the wait holds _rmw_lock, which
     readers never take."""
     cfg.save_config({"n_ctx": 4096})
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 1.5)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 1.5)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     lockpath.write_text("12345:foreign", encoding="utf-8")
 
     # Proves the writer is INSIDE the wait loop (not merely started) before the
     # reader is timed: the first backoff call can only happen from that loop.
     in_wait = threading.Event()
-    real_backoff = cfg._cross_lock_backoff
+    real_backoff = storekit._cross_lock_backoff
 
     def backoff(attempt):
         in_wait.set()
         real_backoff(attempt)
 
-    monkeypatch.setattr(cfg, "_cross_lock_backoff", backoff)
+    monkeypatch.setattr(storekit, "_cross_lock_backoff", backoff)
     outcome = {}
 
     def writer():
@@ -579,10 +582,10 @@ def _stale(lockpath, token=b"4242:deadbeef", age=10.0):
 
 
 def test_a_stale_lock_is_reclaimed_when_nothing_changed(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath)
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is True
     assert not lockpath.exists()
 
 
@@ -590,7 +593,7 @@ def test_a_stale_lock_is_not_reclaimed_after_a_new_holder_took_it(home, monkeypa
     """Two waiters can both reach the stale branch. The first reclaims and
     creates its own lock; the second must NOT then delete that fresh lock and
     create a second one, which would put both inside the lock at once."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath)
     # The first waiter reclaimed it and took the lock itself: new bytes, new mtime.
@@ -598,33 +601,33 @@ def test_a_stale_lock_is_not_reclaimed_after_a_new_holder_took_it(home, monkeypa
     now = cfg.time.time()
     os.utime(lockpath, (now, now))
 
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is False
     assert lockpath.read_bytes() == b"777:feedface", (
         "the stale-lock reclaim deleted a lock a new holder had already taken")
 
 
 def test_a_stale_lock_whose_bytes_changed_in_place_is_not_reclaimed(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath)
     lockpath.write_bytes(b"777:feedface")
     os.utime(lockpath, (mtime, mtime))
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is False
     assert lockpath.exists()
 
 
 def test_an_already_gone_lock_lets_the_caller_retry(home, monkeypatch):
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath)
     lockpath.unlink()
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is True
 
 
 def test_an_unreadable_stale_lock_is_still_reclaimed(home, monkeypatch):
     """A stale lock whose bytes cannot be read must not wedge every writer: the
     mtime test alone decides."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath)
     real_read = type(lockpath).read_bytes
@@ -635,7 +638,7 @@ def test_an_unreadable_stale_lock_is_still_reclaimed(home, monkeypatch):
         return real_read(self)
 
     monkeypatch.setattr(type(lockpath), "read_bytes", refuse)
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is True
     assert not lockpath.exists()
 
 
@@ -644,13 +647,13 @@ def test_a_stale_lock_touched_since_it_was_judged_is_not_reclaimed(home, monkeyp
     the file is still older than the staleness age, so neither of the other two
     checks can refuse it; only the timestamp differs from the one it was judged
     by, which means the holder wrote to it after the judgement."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, mtime = _stale(lockpath, age=10.0)
     moved = cfg.time.time() - 5.0
     os.utime(lockpath, (moved, moved))
-    assert cfg.time.time() - moved > cfg._CROSS_LOCK_STALE_AGE
-    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert cfg.time.time() - moved > storekit._CROSS_LOCK_STALE_AGE
+    assert storekit._reclaim_stale_lock(lockpath, token, mtime) is False
     assert lockpath.read_bytes() == token
 
 
@@ -658,8 +661,8 @@ def test_the_acquirer_waits_when_the_stale_reclaim_refuses(home, monkeypatch):
     """The call site must go THROUGH the reclaim and respect its answer. When the
     reclaim refuses (the lock changed under it), the acquirer waits and times out
     rather than deleting the file and taking the lock anyway."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.6)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.6)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     token, _ = _stale(lockpath)
     calls = []
@@ -668,7 +671,7 @@ def test_the_acquirer_waits_when_the_stale_reclaim_refuses(home, monkeypatch):
         calls.append(path)
         return False
 
-    monkeypatch.setattr(cfg, "_reclaim_stale_lock", refuse)
+    monkeypatch.setattr(storekit, "_reclaim_stale_lock", refuse)
     with pytest.raises(TimeoutError):
         with cfg._cross_process_lock(cfg.CONFIG_FILE):
             pass
@@ -753,27 +756,27 @@ class TestReclaimStaleLockAge:
 
     def test_a_lock_younger_than_the_stale_age_is_left_in_place(self, tmp_path):
         lockpath, token, mtime = self._lock(tmp_path, age=0)
-        assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+        assert storekit._reclaim_stale_lock(lockpath, token, mtime) is False
         assert lockpath.exists()
 
     def test_a_lock_older_than_the_stale_age_is_removed(self, tmp_path):
-        lockpath, token, mtime = self._lock(tmp_path, age=cfg._CROSS_LOCK_STALE_AGE + 60)
-        assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+        lockpath, token, mtime = self._lock(tmp_path, age=storekit._CROSS_LOCK_STALE_AGE + 60)
+        assert storekit._reclaim_stale_lock(lockpath, token, mtime) is True
         assert not lockpath.exists()
 
     def test_a_lock_exactly_as_old_as_the_stale_age_is_not_yet_stale(
             self, tmp_path, monkeypatch):
         lockpath, token, mtime = self._lock(tmp_path, age=0)
-        monkeypatch.setattr(cfg, "time", types.SimpleNamespace(
-            time=lambda: mtime + cfg._CROSS_LOCK_STALE_AGE))
-        assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+        monkeypatch.setattr(storekit, "time", types.SimpleNamespace(
+            time=lambda: mtime + storekit._CROSS_LOCK_STALE_AGE))
+        assert storekit._reclaim_stale_lock(lockpath, token, mtime) is False
         assert lockpath.exists()
 
     def test_a_lock_just_past_the_stale_age_is_removed(self, tmp_path, monkeypatch):
         lockpath, token, mtime = self._lock(tmp_path, age=0)
-        monkeypatch.setattr(cfg, "time", types.SimpleNamespace(
-            time=lambda: mtime + cfg._CROSS_LOCK_STALE_AGE + 0.001))
-        assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+        monkeypatch.setattr(storekit, "time", types.SimpleNamespace(
+            time=lambda: mtime + storekit._CROSS_LOCK_STALE_AGE + 0.001))
+        assert storekit._reclaim_stale_lock(lockpath, token, mtime) is True
         assert not lockpath.exists()
 
 
@@ -782,7 +785,7 @@ class TestReclaimStaleLockAge:
 # --------------------------------------------------------------------------- #
 
 class _OsAs:
-    """``config.os`` as seen on another platform: ``name`` replaced, the rest
+    """``storekit.os`` as seen on another platform: ``name`` replaced, the rest
     from the real module."""
 
     def __init__(self, name, **overrides):
@@ -802,7 +805,7 @@ def _denial(winerror=None):
 
 def _no_sleep(monkeypatch):
     sleeps = []
-    monkeypatch.setattr(cfg, "time", types.SimpleNamespace(
+    monkeypatch.setattr(storekit, "time", types.SimpleNamespace(
         sleep=sleeps.append, time=time.time, monotonic=time.monotonic))
     return sleeps
 
@@ -816,47 +819,47 @@ _RELEASE_READ_WARNING = (
 def test_lock_read_on_posix_gives_up_at_once_and_reports_it(tmp_path, monkeypatch, caplog):
     lockpath = tmp_path / "config.json.lock"
     lockpath.write_bytes(b"1:aa")
-    monkeypatch.setattr(cfg, "os", _OsAs("posix"))
+    monkeypatch.setattr(storekit, "os", _OsAs("posix"))
     sleeps = _no_sleep(monkeypatch)
     calls = _fail_lock_read(monkeypatch, lockpath, _denial, None)
     with caplog.at_level("WARNING", logger="localm"):
-        assert cfg._read_lock_for_release(lockpath) is None
+        assert storekit._read_lock_for_release(lockpath) is None
     assert calls["n"] == 1 and sleeps == []
     [r] = [r for r in caplog.records if "lock file" in str(r.msg)]
     assert r.msg == _RELEASE_READ_WARNING
     assert r.args[0] == "config.json.lock"
     assert isinstance(r.args[1], PermissionError)
-    assert r.args[2] == cfg._CROSS_LOCK_STALE_AGE
+    assert r.args[2] == storekit._CROSS_LOCK_STALE_AGE
 
 
 def test_lock_read_on_windows_rides_out_a_sharing_violation(tmp_path, monkeypatch):
     lockpath = tmp_path / "config.json.lock"
     lockpath.write_bytes(b"1:aa")
-    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt"))
     sleeps = _no_sleep(monkeypatch)
-    _fail_lock_read(monkeypatch, lockpath, lambda: _denial(32), cfg._REPLACE_RETRIES - 1)
-    assert cfg._read_lock_for_release(lockpath) == b"1:aa"
-    assert len(sleeps) == cfg._REPLACE_RETRIES - 1
+    _fail_lock_read(monkeypatch, lockpath, lambda: _denial(32), storekit._REPLACE_RETRIES - 1)
+    assert storekit._read_lock_for_release(lockpath) == b"1:aa"
+    assert len(sleeps) == storekit._REPLACE_RETRIES - 1
 
 
 def test_lock_read_on_windows_stops_after_its_retry_budget(tmp_path, monkeypatch):
     lockpath = tmp_path / "config.json.lock"
     lockpath.write_bytes(b"1:aa")
-    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt"))
     sleeps = _no_sleep(monkeypatch)
     calls = _fail_lock_read(monkeypatch, lockpath, lambda: _denial(32), None)
-    assert cfg._read_lock_for_release(lockpath) is None
-    assert calls["n"] == cfg._REPLACE_RETRIES
-    assert len(sleeps) == cfg._REPLACE_RETRIES - 1
+    assert storekit._read_lock_for_release(lockpath) is None
+    assert calls["n"] == storekit._REPLACE_RETRIES
+    assert len(sleeps) == storekit._REPLACE_RETRIES - 1
 
 
 def test_lock_read_on_windows_does_not_retry_a_stable_denial(tmp_path, monkeypatch):
     lockpath = tmp_path / "config.json.lock"
     lockpath.write_bytes(b"1:aa")
-    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt"))
     sleeps = _no_sleep(monkeypatch)
     calls = _fail_lock_read(monkeypatch, lockpath, lambda: _denial(1314), None)
-    assert cfg._read_lock_for_release(lockpath) is None
+    assert storekit._read_lock_for_release(lockpath) is None
     assert calls["n"] == 1 and sleeps == []
 
 
@@ -866,7 +869,7 @@ def test_replace_on_windows_does_not_retry_a_stable_denial(tmp_path, monkeypatch
     def replace(src, dst):
         calls.append((src, dst))
         raise _denial(1314)
-    monkeypatch.setattr(cfg, "os", _OsAs("nt", replace=replace))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt", replace=replace))
     sleeps = _no_sleep(monkeypatch)
     with pytest.raises(PermissionError):
         cfg._replace_atomic(tmp_path / "a", tmp_path / "b")

@@ -691,7 +691,7 @@ def spec_drafts(model):
 @click.argument("model_spec", required=False)
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
 @click.option("--sha256", default=None, metavar="HASH",
-              help="Expected SHA256 hex digest (direct-URL and HF single-GGUF pulls; "
+              help="Expected SHA256 hex digest (direct-URL, HF single-GGUF and CivitAI pulls; "
                    "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
               help="Download even when an identical model is already registered.")
@@ -713,6 +713,9 @@ def spec_drafts(model):
               help="Internal: route a single-file HF pull to this directory "
                    "instead of <data dir>/models (used by the GUI's ComfyUI "
                    "missing-model download flow).")
+@click.option("--remote-only", "remote_only", is_flag=True, hidden=True,
+              help="Internal: treat MODEL_SPEC as a remote spec even when it "
+                   "names a file or folder on this machine.")
 @click.option("--register/--no-register", default=True, hidden=True,
               help="Internal: whether to add the download to localm's own "
                    "model registry (off for a file routed to --comfy-dest-dir, "
@@ -731,7 +734,8 @@ def spec_drafts(model):
               help="Stop offering the interrupted download ID; its files are "
                    "kept and --list-interrupted still shows it.")
 def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
-         comfy_dest_dir, register, list_interrupted, resume, delete_id, dismiss_id):
+         comfy_dest_dir, register, remote_only, list_interrupted, resume, delete_id,
+         dismiss_id):
     """Download a model from HuggingFace, CivitAI, or a URL.
 
     \b
@@ -792,13 +796,13 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, type_hint, store,
         if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
             _offer_interrupted(model_spec, name)
         rc = _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-                       comfy_dest_dir, register, type_hint)
+                       comfy_dest_dir, register, type_hint, remote_only=remote_only)
     if rc:
         sys.exit(rc)
 
 
 def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
-              comfy_dest_dir, register, type_hint=False) -> int:
+              comfy_dest_dir, register, type_hint=False, remote_only=False) -> int:
     """Run one pull as ``localm pull`` does; returns its exit code (0, 1, or
     130 when Ctrl+C stopped it)."""
     from ..model_manager.pull import forget_stopped_download
@@ -807,7 +811,7 @@ def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
                         dest_dir=comfy_dest_dir, register=register,
-                        type_is_hint=type_hint)
+                        type_is_hint=type_hint, allow_local=not remote_only)
     except KeyboardInterrupt:
         click.echo("\n" + _stopped_pull_message(), err=True)
         return 130
@@ -1138,7 +1142,7 @@ def search_cmd(query, limit, list_files, source, nsfw, legacy_formats):
                 fit = fit_label(f["size_bytes"], total)
                 badge = {"fits": "[green]fits[/green]",
                          "tight": "[yellow]tight[/yellow]",
-                         "too-big": "[red]too big[/red]"}.get(fit, "")
+                         "too-big": "[red]needs partial CPU offload[/red]"}.get(fit, "")
                 parts = f" ({f['n_parts']} parts)" if f["n_parts"] > 1 else ""
                 # quant/file are parsed from a remote repo's own filenames
                 # (hf_gguf_files), so they are escaped.
@@ -1327,6 +1331,9 @@ def rm(model, yes):
     from ..selfclient import remote_hold_reason
 
     reg = load_registry()
+    if model not in reg:
+        console.print(f"[red]Not found:[/red] {escape(model)}")
+        sys.exit(1)
     if model in reg:
         reason = remote_hold_reason(model)
         if reason is not None:
@@ -1371,7 +1378,8 @@ def rm(model, yes):
                 click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
         else:
             click.confirm(f"Remove '{model}'?", abort=True)
-    remove_model(model)
+    if not remove_model(model):
+        sys.exit(1)
 
 
 
@@ -1397,7 +1405,10 @@ def rm(model, yes):
               help="Bring PATH into <data dir>/models before registering it, "
                    "instead of registering it in place at its original location. "
                    "'copy' leaves the original untouched; 'move' relocates it.")
-def add(path, name, no_hash, fast, on_duplicate, type, store):
+@click.option("--mmproj", default=None, metavar="FILE",
+              help="A projector (mmproj) GGUF on disk to attach to the model, "
+                   "e.g. the speech stages of a text-to-speech model.")
+def add(path, name, no_hash, fast, on_duplicate, type, store, mmproj):
     """Register a local model file, a HuggingFace model directory, or a folder of them.
 
     Also reads where other tools keep models: the Hugging Face hub cache, an Ollama
@@ -1430,6 +1441,39 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
     model_type = None if type == "auto" else type
     if not add_local(path, name, on_duplicate=on_duplicate,
                      no_hash=no_hash, fast=fast, model_type=model_type, store=store):
+        sys.exit(1)
+    if mmproj:
+        from rich.markup import escape
+
+        from ..model_manager import attach_mmproj_after_add
+        ok, message = attach_mmproj_after_add(path, name, mmproj)
+        console.print(f"[green]{escape(message)}[/green]" if ok
+                      else f"[red]--mmproj was not applied:[/red] {escape(message)}")
+        if not ok:
+            sys.exit(1)
+
+
+@main.command("attach-mmproj")
+@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("mmproj")
+def attach_mmproj_cmd(model, mmproj):
+    """Attach a projector (mmproj) GGUF on disk to a registered model.
+
+    Records the projector without loading the model, replacing any projector
+    recorded before. Use it to pair a text-to-speech model with the speech
+    stages file, or a vision model with its projector, when the two files are
+    already on disk and sit in a folder with several projectors.
+
+    \b
+    Example:
+      localm attach-mmproj Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+    """
+    from rich.markup import escape
+
+    from ..model_manager import attach_mmproj
+    ok, message = attach_mmproj(model, mmproj)
+    console.print(f"[green]{escape(message)}[/green]" if ok else f"[red]{escape(message)}[/red]")
+    if not ok:
         sys.exit(1)
 
 
@@ -1627,15 +1671,15 @@ def _rename_on_running_server(old_name: str, new_name: str):
     server kept its loaded engine keyed under the OLD name, so the server would
     serve a model the registry no longer lists.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -1644,7 +1688,8 @@ def _rename_on_running_server(old_name: str, new_name: str):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
     try:
         resp = requests.post(f"{url}/v1/models/rename", headers=headers,
                              params={"model": old_name, "new_name": new_name},
@@ -1736,11 +1781,17 @@ def rename(old_name, new_name):
     Example:
       localm rename gemma3-12b daily-driver
     """
-    from ..model_manager import rename_model
+    from ..model_manager import register_rename_hook, rename_model
 
     done = _rename_on_running_server(old_name, new_name)
     if done is not None:
         sys.exit(0 if done else 1)
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    for hook_name, plugin in (("saved chats", "chat"), ("scheduled jobs", "jobs")):
+        try:
+            register_rename_hook(hook_name, plugin_api(plugin, "plug").rename_notes)
+        except PluginUnavailable:
+            continue
     if not rename_model(old_name, new_name):
         sys.exit(1)
 
@@ -1779,7 +1830,7 @@ def info():
               if _is_portable_home(HOME_DIR) else "standard")
     temp_path = temp_dir_in_use(HOME_DIR)
     temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
-    console.print(f"  [bold]mode       [/bold]   {mode_s}")
+    console.print(f"  [bold]install    [/bold]   {mode_s}")
     console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
     console.print()
     for k, v in sorted(cfg.items()):
@@ -2103,8 +2154,9 @@ def config_cmd(key, value):
 def gpus_cmd():
     """List detected GPUs, the configured main GPU index, and any GPU split.
 
-    On a multi-GPU system, localm loads models onto device 0 unless you set
-    main_gpu_index. Pick one from this list, then:
+    On a multi-GPU system a GGUF chat model spreads over every GPU;
+    main_gpu_index picks the GPU for HuggingFace models and the vision
+    projector. Pick one from this list, then:
 
     \b
       localm config main_gpu_index <index>
@@ -2205,26 +2257,32 @@ def gpus_cmd():
 
 @main.command("unload")
 @click.argument("model", required=False, shell_complete=_complete_model_name)
-def unload_cmd(model):
+@click.option("--force", is_flag=True,
+              help="Stop requests still running on a busy model (the reply "
+                   "being written is cut off) and unload it.")
+def unload_cmd(model, force):
     """Unload the currently loaded model(s) from a running localm server.
 
     With no MODEL, unloads everything - frees the GPU for another task, the
     same as the GUI's "Unload all". With MODEL, unloads only that one,
     leaving any other loaded models running.
 
+    A model still busy with a request is left loaded and the command exits 1;
+    --force stops its requests and unloads it.
+
     Talks to the server already serving this directory (see `localm status`);
     set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
     requires one.
     """
-    import os
 
     import requests
     from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
+    from ..localm_url import env_root, registry_token
 
-    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    url = env_root()
     entry = None
     if not url:
         entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
@@ -2237,16 +2295,21 @@ def unload_cmd(model):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
-    # Owner key (env, else persisted auth.key) wins; else the discovered
-    # instance's own attach token (0600 per-instance registry file), which the
-    # open-mode management gate accepts in place of a key. The token is only
-    # available when the server was found via discovery; an explicit LOCALM_URL
-    # override has no registry entry to read one from.
-    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    # Owner key (env, else persisted auth.key) wins; else the instance's own
+    # attach token (0600 per-instance registry file), which the open-mode
+    # management gate accepts in place of a key: the discovered entry's, or for
+    # a LOCALM_URL override the registry entry at exactly that address.
+    headers = resolve_bearer_headers(
+        entry.get("token") if entry is not None else registry_token(url))
 
     try:
+        params = {}
+        if model:
+            params["model"] = model
+        if force:
+            params["force"] = "true"
         resp = requests.post(f"{url}/v1/models/unload", headers=headers,
-                             params={"model": model} if model else None,
+                             params=params or None,
                              timeout=180, verify=tls.requests_verify(url))
     except requests.RequestException as e:
         # show_url() already escapes its own argument; only `e` needs it here.
@@ -2278,9 +2341,23 @@ def unload_cmd(model):
     if data.get("status") == "already_unloaded":
         # A targeted unload on a registered-but-not-loaded model is an
         # idempotent no-op success, reported as such rather than as an unload.
+        if not model:
+            console.print("[dim]Nothing was loaded.[/dim]")
+            return
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    if data.get("status") == "confirm_required":
+        # The model is still busy with a request and stays loaded.
+        busy = escape(str(data.get("model") or model))
+        detail = data.get("detail")
+        console.print(f"[yellow]'{busy}' is busy with a running request and was "
+                      "not unloaded.[/yellow]")
+        if detail:
+            console.print(f"  {escape(str(detail))}")
+        console.print("Try again when it finishes, or re-run with "
+                      "[bold]--force[/bold] to stop it and unload it.")
+        sys.exit(1)
     skipped = [str(s) for s in (data.get("skipped_in_use") or [])]
     left = data.get("media_left_running")
     left = left if isinstance(left, dict) else {}
@@ -2294,11 +2371,15 @@ def unload_cmd(model):
     if data.get("status") == "in_use":
         if skipped:
             _print_left_loaded()
-            console.print("Try again when it finishes.")
+            console.print("Try again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]."
+                             if data.get("confirm_required") and not force else "."))
         else:
             console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
                           "by a running request and was not unloaded.[/yellow] Try "
-                          "again when it finishes.")
+                          "again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]." if not force
+                             else "."))
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
@@ -2359,10 +2440,10 @@ def stop_cmd(instance_id, stop_all, timeout):
     stop a specific instance, or --all to stop every running one.
 
     Requests the same clean shutdown the GUI's Settings page uses (model
-    unloaded, then the process exits). Without LOCALM_API_KEY set, a plain
-    local instance declines the unauthenticated request (by design), and if
-    the server does not confirm within --timeout for any reason, `stop` ends
-    the process directly instead.
+    unloaded, then the process exits), with the API key when one is set and
+    otherwise the instance's own local token. If the server refuses the
+    request or does not confirm within --timeout, `stop` ends the process
+    directly instead.
     """
     import time
 
@@ -2378,7 +2459,10 @@ def stop_cmd(instance_id, stop_all, timeout):
         sys.exit(1)
 
     home = home_dir()
-    instances.reap_stale(home)
+    # Removes only entries whose process is gone; the loop below reports
+    # and removes stale ones.
+    instances.reap_stale(
+        home, is_alive=lambda e: instances.entry_process_state(e)[0] != "gone")
     entries = instances.list_entries(home)
 
     if stop_all:
@@ -2402,6 +2486,16 @@ def stop_cmd(instance_id, stop_all, timeout):
             sys.exit(1)
     else:
         root = instances.resolve_root_dir()
+        for e in entries:
+            if instances._canon(e.get("root_dir", "")) != instances._canon(root):
+                continue
+            state, reason = instances.entry_process_state(e)
+            if state == "stale":
+                if e.get("_path"):
+                    instances.unregister_instance(e["_path"])
+                console.print(f"[yellow]{escape(str(e.get('instance_id', ''))[:8])}:"
+                              f"[/yellow] this entry was stale: {escape(reason)} "
+                              f"Removed the entry and stopped nothing.")
         entry = instances.find_attachable(home, root)
         if entry is None:
             console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
@@ -2436,17 +2530,28 @@ def stop_cmd(instance_id, stop_all, timeout):
                           f"{escape(replaced_by[:8])}. Removed the entry and "
                           f"stopped nothing.")
             continue
-        if is_own_address(dial):
+        state, reason = instances.entry_process_state(entry)
+        if state == "stale":
+            path = entry.get("_path")
+            if path:
+                instances.unregister_instance(path)
+            console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was stale: "
+                          f"{escape(reason)} Removed the entry and stopped nothing.")
+            continue
+        # The shutdown request is sent only to a server whose /whoami names
+        # this entry's instance id.
+        verified = is_own_address(dial) and instances.default_probe(entry, timeout=2.0)
+        if is_own_address(dial) and not verified:
+            logger.debug("stop: %s does not answer /whoami as instance %s; not "
+                         "sending a shutdown request", url, entry.get("instance_id"))
+        if verified:
             try:
                 resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
                                      timeout=5, verify=tls.requests_verify(url),
                                      allow_redirects=False)
                 if resp.status_code in (401, 403):
-                    # The open-mode management gate refuses an unauthenticated POST
-                    # from a bare local client with no shell/API-key credential,
-                    # which is the DEFAULT case for a plain `localm
-                    # run`/`gui`/`serve` with no LOCALM_API_KEY configured. Fall
-                    # back to a direct kill rather than hard-failing.
+                    # The server refused the credential. Fall back to ending
+                    # the process directly.
                     graceful_denied = True
                 elif resp.status_code == 200:
                     deadline = time.monotonic() + timeout
@@ -2457,18 +2562,40 @@ def stop_cmd(instance_id, stop_all, timeout):
                             time.sleep(0.25)
             except requests.RequestException:
                 pass  # server unreachable (hung / already gone) - fall through to a direct kill
-        else:
+        elif not is_own_address(dial):
             logger.warning(
                 "stop: registry entry's host %r is not an address this "
                 "machine holds; not dialing it", entry.get("host"))
 
         if not stopped:
-            if graceful_denied:
-                console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
-                              f"unauthenticated shutdown request (set "
-                              f"LOCALM_API_KEY for a clean model-unload "
-                              f"shutdown) - ending the process directly.")
-            stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
+            state, reason = instances.entry_process_state(entry)
+            if state == "stale":
+                path = entry.get("_path")
+                if path:
+                    instances.unregister_instance(path)
+                console.print(f"[yellow]{escape(iid)}:[/yellow] this entry was "
+                              f"stale: {escape(reason)} Removed the entry and "
+                              f"stopped nothing.")
+                continue
+            if state == "unknown":
+                console.print(f"[red]{escape(iid)}:[/red] did not end pid {pid}: "
+                              f"{escape(reason)} If that server is still running, "
+                              f"close it from its own window or terminal. If it is "
+                              f"not, delete its entry file "
+                              f"{escape(str(entry.get('_path') or ''))}.")
+                any_failed = True
+                continue
+            if graceful_denied and state == "same":
+                console.print(f"[dim]{escape(iid)}:[/dim] server refused the "
+                              f"shutdown request (set LOCALM_API_KEY to its key for "
+                              f"a clean model-unload shutdown) - ending the process "
+                              f"directly.")
+            if state == "gone":
+                stopped = True
+            else:
+                stopped = instances.kill_pid(
+                    int(pid or -1), timeout=timeout,
+                    start_identity=entry.get("start_identity"))
             if stopped:
                 # A direct kill bypasses the server's own clean-shutdown path
                 # (_do_shutdown), which normally clears the crash marker, so it

@@ -700,7 +700,7 @@ test("AUD-INSTANCEID residual 2: the unconfirmed WARNING is one per breakage, " 
   runScript(window, `
     window.chatState = chat;
     window.__warns = [];
-    console.warn = (m) => window.__warns.push(String(m));
+    console.warn = (m) => { if (!/live stats stream/.test(String(m))) window.__warns.push(String(m)); };
     window.fetch = async (url) => {
       if (String(url) === "/v1/config") return { ok: false, status: 503,
         text: async () => "", json: async () => ({}) };

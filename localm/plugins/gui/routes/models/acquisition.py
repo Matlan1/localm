@@ -15,8 +15,9 @@ from localm import scopes
 from localm.debuglog import logger
 from localm.inference._threadpool_timeout import (ThreadCallTimeout,
                                                   run_in_threadpool_bounded)
-from localm.inference.http_server import (path_formatter, principal_id,
-                                          require_fs_host, require_scope)
+from localm.inference.http_server import (effective_fs_access, path_formatter,
+                                          principal_id, require_fs_host,
+                                          require_scope)
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
@@ -52,10 +53,9 @@ def _spec_names_a_host_path(spec: str) -> bool:
     which also requires the path to exist: a non-existent absolute path is
     refused here even though pull.py would treat it as a remote spec.
 
-    RESIDUAL: a relative spec with no ".." component that names an existing FILE
-    is still registered in place without this gate firing. Its reach is bounded
-    by the server's working directory, and closing it would need a filesystem
-    answer."""
+    A relative spec with no ".." component is not a host path here; the pull of
+    a caller without host filesystem access carries ``--remote-only`` (see
+    ``_remote_only_args``), so it is never registered from this machine."""
     s = spec.strip()
     if not s:
         return False
@@ -74,6 +74,12 @@ def _spec_names_a_host_path(spec: str) -> bool:
         if any(part == ".." for part in pure.parts):
             return True
     return False
+
+
+def _remote_only_args(request: Request) -> list[str]:
+    """``["--remote-only"]`` for a caller without host filesystem access, else
+    ``[]``. Decided from the key alone, never from the spec or the disk."""
+    return [] if effective_fs_access(request) == "host" else ["--remote-only"]
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -122,7 +128,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                      f"instead of starting a second one.")
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
-        args = ["pull"]
+        args = ["pull", *_remote_only_args(request)]
         if req.name:
             args += ["--name", req.name]
         if req.mmproj:
@@ -280,7 +286,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if check["changed"]:
                 return {"status": "changed", "detail": check["detail"], "spec": spec}
             note = check["detail"]
-        job = jobs.start_cli("pull", ["pull", *pending_pulls.resume_args(rec)], extra_env={
+        job = jobs.start_cli("pull", ["pull", *_remote_only_args(request),
+                                      *pending_pulls.resume_args(rec)], extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }, host_label=f"Model pull {spec}", owner=principal_id(request))
@@ -460,51 +467,28 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             native_choice = validate_choice(req.native_models, kind)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        from localm.media import native_offer
         from localm.media.comfy_client import describe_missing_models
         from localm.media.managed_comfy import resolve_comfy_target
         from localm.model_manager.comfy_resolve import (
             cached_comfy_download, curated_comfy_download, search_refusal,
         )
+        from localm.plugins.lookup import PluginUnavailable, plugin_api
 
         def _native_check():
             """The preflight answer when the image or video plugin runs the
             native backend, or None when it runs ComfyUI. With no model set,
             ``missing`` lists every recommended file not yet downloaded."""
-            from importlib import import_module
-
             from localm.config import load_config
             from localm.media import backend_choice
-            plugin_backend = import_module(f"localm.plugins.builtin.{kind}.backend")
+            plugin_backend = plugin_api(kind, "backend")
             s = backend_choice.refine_auto(plugin_backend.settings(load_config()),
                                            kind.capitalize())
             if s.get("backend") != "native":
                 return None
-            native = import_module(f"localm.plugins.builtin.{kind}.backends.native")
+            native = plugin_api(kind, "backends.native")
             s = apply_choice(s, native_choice)
-            st = native.status(s)
-            if not st["missing"]:
-                return {"status": "verified", "missing": [], "warning": None}
-            all_parts = st.get("missing_components") or []
-            parts = [p for p in all_parts if p.get("download")]
-            if parts:
-                return {"status": "verified",
-                        "warning": st["missing"] if len(parts) < len(all_parts) else None,
-                        "missing": [{
-                    "filename": p["download"]["filename"], "native": True,
-                    "searchable": False, "slot": p["slot"],
-                    "source": {**p["download"], "name": None, "origin": "curated"},
-                } for p in parts]}
-            if (s.get("native") or {}).get("model"):
-                return {"status": "verified", "missing": [], "warning": st["missing"]}
-            rec = st["recommended"]
-            files = rec["parts"] if "parts" in rec else [dict(rec, filename=rec["file"])]
-            return {"status": "verified", "warning": None, "missing": [{
-                "filename": f["filename"], "native": True, "searchable": False,
-                "source": {"repo": f["repo"], "file": f["file"], "spec": f["spec"],
-                           "sha256": f["sha256"], "name": f.get("name"),
-                           "size_bytes": f["size_bytes"],
-                           "model_type": f["model_type"], "origin": "curated"},
-            } for f in files]}
+            return native_offer.from_status(s, native.status(s))
 
         def _native_music_check():
             """The preflight answer when the music plugin runs the native
@@ -512,25 +496,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             download), or None when it runs ComfyUI."""
             from localm.config import load_config
             from localm.media import backend_choice
-            from localm.plugins.builtin.music import backend as music_backend
-            s = backend_choice.refine_auto(music_backend.settings(load_config()), "Music")
+            s = backend_choice.refine_auto(
+                plugin_api("music", "backend").settings(load_config()), "Music")
             if s.get("backend") != "native":
                 return None
-            from localm.plugins.builtin.music.backends import native
+            native = plugin_api("music", "backends.native")
             s = apply_choice(s, native_choice)
-            st = native.status(s)
-            configured = s.get("native") or {}
-            from localm.media.koboldcpp.models import LABELS
-            unresolved = [str(LABELS.get(c, c)) for c, v in st["models"].items()
-                          if v is None and configured.get(c)]
-            warning = (f"Configured music models not found: {', '.join(unresolved)}."
-                       if unresolved else None)
-            return {"status": "verified", "warning": warning, "missing": [{
-                "filename": m["file"], "native": True, "searchable": False,
-                "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
-                           "sha256": m["sha256"], "name": m["name"], "size_bytes": m["size_bytes"],
-                           "model_type": m["model_type"], "origin": "curated"},
-            } for m in st["missing"]]}
+            return native_offer.from_music_status(s, native.status(s))
 
         def _workflow_check(wid: str):
             """The models of native workflow *wid* that are not registered,
@@ -557,6 +529,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 try:
                     native_answer = (_native_music_check() if kind == "music"
                                      else _native_check())
+                except PluginUnavailable as e:
+                    return {"status": "unavailable", "missing": [], "warning": str(e)}
                 except Exception as e:
                     logger.warning("%s backend preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],

@@ -533,10 +533,15 @@ def torch_step(tree: Path, spec: str) -> tuple:
     """The requirements and ``uv pip`` argv lists (without the uv executable)
     of the PyTorch step setup runs for the torch-args *spec* in the tree at
     *tree*: ``(requirements, commands, wheel_line)``. ``wheel_line`` is the
-    ``--torch-backend`` value (``cu126``, ``rocm6.2``, ...) or None."""
+    ``--torch-backend`` value (``cu126``, ``rocm6.2``, ...) or None. The commands
+    install the project's dependencies and these extras from ``pyproject.toml``
+    and leave the project and ``Scripts/localm.exe`` as they are, so they can run
+    while that launcher is the running program. See
+    test_the_pytorch_step_leaves_the_project_alone."""
     if spec.strip() == "-e .[gpu]":
         return (_extras(tree, ["gpu", "audio"]),
-                [["pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"]], None)
+                [["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+                  "--extra", "gpu", "--extra", "audio"]], None)
     args = shlex.split(spec, posix=True)
     line = None
     for a in args:
@@ -544,7 +549,8 @@ def torch_step(tree: Path, spec: str) -> tuple:
             line = a.split("=", 1)[1]
     return (_requirements_in(args) + _extras(tree, ["hf", "audio"]),
             [["pip", "install", "-p", ".venv", *args],
-             ["pip", "install", "-p", ".venv", "-e", ".[hf,audio]"]], line)
+             ["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+              "--extra", "hf", "--extra", "audio"]], line)
 
 
 def _local_label(version: str) -> Optional[str]:
@@ -1716,8 +1722,10 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
     component is kept (:func:`snapshot`) beside the update backup. *say*
     receives each step as one line. *runner* runs an argv and returns its exit
     code (tests); *env* is its environment; *bootstrap* replaces
-    ``uv_tool.bootstrap_uv`` (tests)."""
-    from localm import updater, updater_runtime
+    ``uv_tool.bootstrap_uv`` (tests). A package install the network policy
+    refuses (:func:`localm.pyinstall.check_command`) is not started and fails
+    its component."""
+    from localm import pyinstall, updater, updater_runtime
     pending = read_pending()
     if pending is None:
         return None
@@ -1789,6 +1797,12 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                 problem = _update_uv(p, root, say, bootstrap)
             else:
                 for cmd in _commands(p, root):
+                    if pyinstall.is_install_command(cmd):
+                        try:
+                            pyinstall.check_command(cmd, root)
+                        except pyinstall.InstallRefused as e:
+                            problem = str(e)
+                            break
                     rc = int(run(cmd))
                     if rc != 0:
                         what = (" ".join(cmd[2:4]) if cmd[1:2] == ["-m"]

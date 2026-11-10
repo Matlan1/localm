@@ -2,7 +2,8 @@ name: docker
 
 # Builds the localm server images (docker/Dockerfile) and smoke-tests each one.
 #
-#   pull_request       only when docker/** or this file changes: build + smoke
+#   pull_request       only when docker/**, this file or the project's build files
+#                      (pyproject.toml, hatch_build.py) change: build + smoke
 #                      test, nothing is pushed.
 #   release: published build + smoke test, then push the tested images to
 #                      ghcr.io/matlan1/localm. The only trigger that pushes without
@@ -10,7 +11,8 @@ name: docker
 #                      Actions tab; the release itself is never affected.
 #   workflow_dispatch  dry run by default (build + smoke test + tag computation,
 #                      no login, no push). Untick dry_run and run it on the tag
-#                      v<VERSION> to publish that release's images again.
+#                      v<VERSION>, or on a commit with that tag's source files, to
+#                      publish that release's images again.
 #
 # Backends: cpu, vulkan, cuda (CUDA 12 line) and cuda13 (CUDA 13 line, Blackwell).
 # Tags: <version> and <version>-<backend> for every release; latest, cpu, vulkan,
@@ -22,6 +24,10 @@ on:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
+      - "pyproject.toml"
+      - "hatch_build.py"
+      - "LICENSE"
+      - "THIRD-PARTY-NOTICES.md"
   release:
     types: [published]
   workflow_dispatch:
@@ -55,6 +61,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Resolve version and whether to push
         id: resolve
         env:

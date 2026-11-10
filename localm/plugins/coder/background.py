@@ -515,9 +515,10 @@ class ShellJob(BackgroundJob):
 
     def _terminate_tree_windows(self) -> None:
         # taskkill /T walks the child tree; /F is its only reliable mode.
+        from localm import sysprog as _sysprog
         try:
             done = subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(self.pid)],
+                [_sysprog.require("taskkill"), "/F", "/T", "/PID", str(self.pid)],
                 capture_output=True, timeout=10,
             )
             if done.returncode == 0:
@@ -1135,7 +1136,7 @@ def terminate_all_for_exit() -> int:
     registry nothing has used yet. Call this from the server's own exit
     paths (``os._exit``/``os.execv``): both bypass the ``atexit`` hook
     ``JobRegistry`` registers, the same reason
-    ``localm.plugins.gui.jobs.terminate_children_for_exit`` exists for the
+    ``localm.jobmanager.terminate_children_for_exit`` exists for the
     GUI's own background jobs. Never raises."""
     with _registry_lock:
         reg = _registry

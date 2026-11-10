@@ -82,7 +82,7 @@ _QUERY_SECRET_RE = re.compile(
     #    short generic names.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)"
+    r")[ \t]*=[ \t]*(?![ \t]))"
     # A value that CANNOT be a secret is left alone: a short list of literals no
     # credential is ever equal to, so ``LOCALM_REQUIRE_AUTH=1``,
     # ``require_auth=true``, ``digital_signature=True`` and ``has_token=false``
@@ -108,11 +108,45 @@ _QUERY_SECRET_RE = re.compile(
 # (a browser console error, a bundled log tail) - "X-Api-Key: <value>". Matched
 # by NAME like the query-string case above, over a small explicit set of
 # credential header names rather than a bearer-style catch-all, so an unrelated
-# header is never touched, including "Authorization" (value redacted whole,
-# leading scheme word such as Bearer/Basic included).
+# header is never touched. The value is the run of non-space characters after
+# the colon, a leading scheme word such as Bearer/Basic included.
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
+)
+
+
+# An ``Authorization`` value, whatever its scheme, as a header line
+# (``Authorization: ...``) or a quoted object key (``"Authorization": ...``).
+# A quoted value, with backslash escapes and an optional one-letter prefix
+# (``b'...'``), goes whole (to the closing quote, or to the end of the line
+# when there is none) and the text after the closing quote is kept; so does a
+# ``[...]`` array. Any other value is an optional scheme word, one credential
+# (never a ``Name:`` header label, so a second header on the same line keeps its
+# name for the next match),
+# and every further ``name=value`` parameter (spaces allowed around ``=``)
+# after a comma (Digest and
+# AWS4-HMAC-SHA256 carry several, with quoted values, plain or backslash-
+# escaped, that may hold spaces); text after that is kept. One of the scheme
+# words Bearer, Basic, Digest, Negotiate, NTLM, Token or ApiKey alone on its
+# line takes the next line's token. A
+# value that already reads ``<redacted>`` and a flag literal (``null``,
+# ``false``, ...) are left as they are.
+# ``Proxy-Authorization`` and ``X-Authorization`` end in the same name and are
+# matched by it. See
+# test_header_json_and_bearer_patterns_do_not_grow_superlinearly.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
+    r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?![A-Za-z0-9_-]+[\"']?:(?:\s|$))"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"|[^\s,]+)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 
 
@@ -128,33 +162,41 @@ _HEADER_SECRET_RE = re.compile(
 # key IS the name, so this matches the NAME, keeps it, and drops only the
 # value. The short generic names (key, auth, sig) stay prefix-only here for the
 # reason branch 3 gives above - a bare ``"key": "gpt-4"`` is ordinary data.
-# The value stops at the JSON structural characters rather than at whitespace,
-# so a redaction never eats the rest of the object.
+# A name may follow any number of ``_``/``-`` separated parts, so
+# ``"X-Auth-Token"`` and ``"AWS_SECRET_ACCESS_KEY"`` are matched. An
+# ``"Authorization"`` key is _AUTH_HEADER_RE's.
+# The value is a quoted string (backslash escapes and an optional one-letter
+# prefix included), a whole ``[...]`` array, or an unquoted run with an
+# optional leading scheme word; the unquoted run stops at the JSON structural
+# characters, so a redaction never eats the rest of the object. A value that
+# already reads ``<redacted>`` is left as it is.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
-    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
     # Same flag carve-out as _QUERY_SECRET_RE: ``"has_token": false`` survives.
     # The leading ``\s*`` is load-bearing: the ``\s*`` inside the name group can
     # give the separator space back on backtracking, so without it the guard is
     # tested one character too late and matches nothing.
+    r"(?=\S)(?!<redacted>)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)"
 )
 
 
 def _scrub_query_and_header_secrets(text: str) -> str:
     """Redact credential-ish URL query parameters, HTTP header lines and JSON
-    object keys, by NAME (see the regexes above). Idempotent: the
-    ``<redacted>`` replacement contains none of the delimiters the value
-    patterns stop on, so a second pass matches nothing new and leaves an
-    already-redacted value unchanged."""
+    object keys, by NAME (see the regexes above). Idempotent: a second pass
+    leaves an already-redacted value unchanged."""
     if not text:
         return text
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
     return text
@@ -163,8 +205,12 @@ def _scrub_query_and_header_secrets(text: str) -> str:
 # Bearer tokens ("Authorization: Bearer <token>") and API keys (OpenAI-style
 # sk-..., or a localm key) can appear in a pasted console error, a fetch log
 # line, or a mistyped config value. A bug report is share-intended, so they are
-# stripped defensively.
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
+# stripped defensively. The token is a run of eight or more characters from the
+# base64, base64url and JWT alphabets (letters, digits and ``. _ ~ + / = -``).
+# A word followed by ``:`` or by ``=`` and a value is a credential NAME
+# (``Bearer\nX-Api-Key: ...``, ``scheme=bearer api_key=...``) and is left for
+# the by-name patterns, which run after this one.
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|[ \t]*=[ \t]*[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 
 
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
@@ -380,8 +426,8 @@ def _scrub_secrets(text: str) -> str:
         return text
     text = _scrub_home(text)
     text = _scrub_url_creds(text)
-    text = _scrub_query_and_header_secrets(text)
     text = _BEARER_RE.sub(r"\1<redacted>", text)
+    text = _scrub_query_and_header_secrets(text)
     text = _APIKEY_RE.sub("<redacted>", text)
     text = _scrub_emails(text)
     text = _scrub_hosts(text)

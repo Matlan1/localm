@@ -10,6 +10,9 @@ binds.
 
 from __future__ import annotations
 
+import dataclasses
+import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -187,57 +190,105 @@ def coder_engine(engines: EngineCache, decision):
     return engine, decision.current, decision
 
 
-def build(engines: EngineCache) -> dict[str, dict]:
+_MCP_IMAGES_DIR = "mcp-images"
+_OUTPUT_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """True when the resolved *path* is *root* or below it."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def build(engines: EngineCache, coder_shell: bool = False,
+          coder_root: Path | None = None) -> dict[str, dict]:
     """``generate_image`` and ``run_coder_task``. The coder agent runs on an
-    engine from *engines*, pinned for the length of the run."""
+    engine from *engines*, pinned for the length of the run.
+
+    *coder_shell*: the operator allowed the coder to run shell commands
+    unattended; without it ``run_coder_task`` never auto-approves shell, whatever
+    ``yes`` or a project config say. *coder_root*: when set, ``cwd`` must resolve
+    inside it."""
     def generate_image(args: dict) -> dict:
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
         from localm.audit import SessionMode, effective_mode
-        from localm.config import home_dir, load_config
-        from localm.image_gen.comfy import generate_image as gen_img
+        from localm.config import home_dir
         from localm.media import paths as _media_paths
 
         home = home_dir().resolve()
 
-        try:
-            from localm.plugins.builtin.image import backend as _image_backend
-            api_url = _image_backend.settings(load_config()).get("api_url") or None
-        except Exception as exc:                     # noqa: BLE001
-            from localm.debuglog import logger
-            logger.debug("could not resolve the image plugin ComfyUI url (%s); "
-                         "using the shared default", exc)
-            api_url = None
-        if not api_url:
-            from localm.media.comfy_client import default_api_url
-            api_url = default_api_url()
+        def _confine_output(raw: str) -> Path:
+            """Resolve an MCP ``output_path`` to a NEW image file in a
+            generated-media folder of the data dir: ``mcp-images`` (where a
+            relative path is placed) or the image gallery (``gui_images``),
+            given as an absolute path.
 
-        def _confine(raw: str, label: str):
-            """Keep an MCP OUTPUT path inside the localm data dir - this tool is
-            driven by an LLM client, so an arbitrary output_path could overwrite
-            anything on disk.
-
-            WRITE targets only. ``input_image`` does NOT use this: confining a
-            READ to the data dir is far too wide, because the data dir is the
-            credential store (auth.key is the plaintext owner key, plus
-            auth.json, sessions.json, rag/, coder/).
-
-            Delegates to ``pathsafe.confined_absolute_or_under``, which carries
-            the UNC/device guard and additionally closes an NTFS Alternate Data
-            Stream / short-name-alias gap. Every rejection reason is folded into
-            the SAME message, never echoing the client-supplied string back."""
+            Raises ``ValueError`` when the path is outside those folders, is a
+            UNC/device path or carries a reserved character (via
+            ``pathsafe.confined_absolute_or_under``), does not end in an image
+            extension, or names a file (or its ``.json`` sidecar) that already
+            exists. The message never echoes the client-supplied string. The
+            path is not created here; ``_reserve`` does that."""
+            refused = ValueError(
+                "output_path must name a new image file ("
+                + ", ".join(_OUTPUT_IMAGE_SUFFIXES)
+                + f") in the data dir's {_MCP_IMAGES_DIR} or "
+                f"{_media_paths.IMAGE_DIR_NAME} folder")
             expanded = str(Path(raw).expanduser())
+            mcp_root = home / _MCP_IMAGES_DIR
+            absolute = Path(expanded).is_absolute()
+            roots = ([mcp_root, home / _media_paths.IMAGE_DIR_NAME] if absolute
+                     else [mcp_root])
+            resolved = None
+            for root in roots:
+                try:
+                    resolved = pathsafe.confined_absolute_or_under(root, expanded)
+                except ValueError:
+                    continue
+                if resolved != root.resolve():
+                    break
+                resolved = None
+            if resolved is None:
+                raise refused
+            if resolved.suffix.lower() not in _OUTPUT_IMAGE_SUFFIXES:
+                raise refused
+            sidecar = resolved.with_suffix(resolved.suffix + ".json")
+            named = Path(expanded) if absolute else mcp_root / expanded
+            if any(os.path.lexists(c) for c in (named, resolved, sidecar)):
+                raise refused
+            return resolved
+
+        def _reserve(path: Path) -> None:
+            """Create *path* as an empty file, failing if anything exists there,
+            so the backend only ever replaces a file this call created. Raises
+            ``ValueError`` when the name is taken and ``OSError`` when the file
+            cannot be created."""
+            path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                return pathsafe.confined_absolute_or_under(home, expanded)
-            except ValueError as e:
-                raise ValueError(
-                    f"{label} must stay within the localm data dir ({home})") from e
+                with open(path, "xb"):
+                    pass
+            except FileExistsError as e:
+                raise ValueError("output_path names a file that already exists") from e
+
+        def _release(path: Path) -> None:
+            """Remove the reservation of *path* when nothing was written into it."""
+            try:
+                if path.stat().st_size == 0:
+                    path.unlink()
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("could not remove the empty image placeholder (%s)", e)
 
         try:
             out_arg = args.get("output_path")
-            out = (_confine(out_arg, "output_path") if out_arg
-                   else home / "mcp-images" / f"mcp-{int(time.time())}.png")
+            out = (_confine_output(out_arg) if out_arg
+                   else home / _MCP_IMAGES_DIR
+                   / f"mcp-{int(time.time())}-{secrets.token_hex(4)}.png")
             # input_image is a READ that is then UPLOADED to ComfyUI, over an
             # api_url sanitize_comfy_url permits to be a LAN or public host on
             # plaintext http, so it is read-AND-TRANSMIT and the data dir is the
@@ -252,38 +303,45 @@ def build(engines: EngineCache) -> dict[str, dict]:
             return _text_result(str(e), is_error=True)
 
         is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
-        # comfy.generate_image builds its own rich Console / Progress on stdout;
+        # The ComfyUI generator builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
-        from localm.plugins.builtin.image import backend as image_backend
-        with _quiet_stdout():
-            native = image_backend.generate_unless_comfy(
-                prompt, out,
-                guidance=args.get("guidance"),
-                negative_prompt=args.get("negative_prompt"),
-                seed=args.get("seed"),
-                input_image=input_p,
-                denoise=args.get("denoise"),
-                write_sidecar=not is_privacy,
-                delete_outputs=is_privacy,
-                on_progress=_srv.report_progress,
-            )
-        if native is not None:
-            ok, message = native
-            return _text_result(message, is_error=not ok)
-        with _quiet_stdout():
-            ok, message = gen_img(
-                prompt, out,
-                api_url=api_url,
-                guidance=args.get("guidance"),
-                negative_prompt=args.get("negative_prompt"),
-                seed=args.get("seed"),
-                input_image=input_p,
-                denoise=args.get("denoise"),
-                write_sidecar=not is_privacy,
-                delete_outputs=is_privacy,
-                on_progress=_srv.report_progress,
-            )
+        from localm.plugins.lookup import PluginUnavailable, plugin_api
+        try:
+            image_backend = plugin_api("image", "backend")
+        except PluginUnavailable as e:
+            return _text_result(str(e), is_error=True)
+
+        def _generate():
+            with _quiet_stdout():
+                ok, message, _path = image_backend.generate_media(
+                    prompt, out,
+                    guidance=args.get("guidance"),
+                    negative_prompt=args.get("negative_prompt"),
+                    seed=args.get("seed"),
+                    input_image=input_p,
+                    denoise=args.get("denoise"),
+                    write_sidecar=not is_privacy,
+                    delete_outputs=is_privacy,
+                    privacy=is_privacy,
+                    on_progress=_srv.report_progress,
+                )
+            return ok, message
+
+        try:
+            _reserve(out)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+        except OSError as e:
+            return _text_result(
+                f"could not create the output file: {e.strerror or type(e).__name__}",
+                is_error=True)
+        ok = False
+        try:
+            ok, message = _generate()
+        finally:
+            if not ok:
+                _release(out)
         return _text_result(message, is_error=not ok)
 
     def run_coder_task(args: dict) -> dict:
@@ -304,6 +362,10 @@ def build(engines: EngineCache) -> dict[str, dict]:
         cwd_path = Path(cwd).expanduser()
         if not cwd_path.is_dir():
             return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
+        if coder_root is not None and not _inside(cwd_path.resolve(), coder_root):
+            return _text_result(
+                "'cwd' must be inside the folder this server was started with "
+                "(--coder-root).", is_error=True)
 
         # The coder Agent runs IN THIS PROCESS on an engine from this server's
         # own EngineCache: one resident model serves chat, embed and every
@@ -323,7 +385,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
         try:
             cfg = coder_runner.resolve_task_config(
                 work_dir, model=args.get("model") or None, max_turns=max_turns,
-                yes=bool(args.get("yes")), unattended=True)
+                yes=bool(args.get("yes")) and coder_shell, unattended=True)
         except ProjectConfigUnreadable as e:
             return _text_result(f"Project config could not be read: {e}", is_error=True)
         except coder_runner.InvalidSessionMode as e:
@@ -367,7 +429,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
             peer_http = HTTPBackend(
                 engine._base, model=getattr(engine, "_model", None) or model_name,
                 api_key=getattr(engine, "_token", None) or "localm",
-                localm_server=True)
+                localm_server=True, trusted_peer=True)
             peer_http.session_mode = cfg.session_mode
             backend = peer_backend = PeerCoderBackend(engines, model_name, engine,
                                                       peer_http)
@@ -376,11 +438,15 @@ def build(engines: EngineCache) -> dict[str, dict]:
                 engine, model_name, lock=engines.generation_lock(engine),
                 still_resident=lambda: engines.is_resident(model_name, engine))
 
-        # Default OFF, matching the CLI's own fail-closed default: without
-        # `yes` file writes still happen but run_shell is denied, since there
-        # is nobody to confirm it.
+        # Shell approval is the operator's launch decision (--coder-shell):
+        # without it neither `yes` nor a project's auto_approve is honoured, and
+        # file writes still happen while run_shell is denied.
+        if not coder_shell and cfg.auto_approve:
+            cfg = dataclasses.replace(cfg, auto_approve=False)
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
-            _srv._log("coder task: run_shell is denied for this run (no 'yes')")
+            _srv._log("coder task: run_shell is denied for this run "
+                      + ("(no 'yes')" if coder_shell
+                         else "(server started without --coder-shell)"))
 
         def _release():
             engines.unpin(engine)
@@ -435,6 +501,17 @@ def build(engines: EngineCache) -> dict[str, dict]:
         text = result.response + ("\n\n[denied] " + denied if denied else "") + meta
         return _text_result(text, is_error=not result.success)
 
+    if coder_shell:
+        yes_description = (
+            "Auto-approve shell commands too, not just file writes (default "
+            "false: shell calls are denied without this since there is no TTY "
+            "to confirm them)")
+    else:
+        yes_description = (
+            "Accepted for compatibility. This server was started without "
+            "--coder-shell, so shell calls are always denied and file writes "
+            "are the only thing auto-approved")
+
     return {
         "generate_image": {
             "description": ("Generate an image locally with the image plugin's backend "
@@ -444,7 +521,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                 "type": "object",
                 "properties": {
                     "prompt":          {"type": "string", "description": "Image description"},
-                    "output_path":     {"type": "string", "description": "Where to save (default: <data dir>/mcp-images/)"},
+                    "output_path":     {"type": "string", "description": "New image file to write: a relative path under <data dir>/mcp-images/, or an absolute path inside <data dir>/mcp-images/ or <data dir>/gui_images/; .png, .jpg, .jpeg or .webp; an existing file is refused (default: a new file in <data dir>/mcp-images/)"},
                     "negative_prompt": {"type": "string", "description": "Things to avoid"},
                     "seed":            {"type": "integer", "description": "Reproducibility seed"},
                     "guidance":        {"type": "number", "description": "Guidance scale (default 3.5)"},
@@ -475,11 +552,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "model": MODEL_PARAM,
                     "max_turns": {"type": "integer",
                                   "description": "Safety cap on agent iterations (default: 40)"},
-                    "yes": {"type": "boolean",
-                            "description": ("Auto-approve shell commands too, not just file "
-                                             "writes (default false: shell calls are denied "
-                                             "without this since there is no TTY to confirm "
-                                             "them)")},
+                    "yes": {"type": "boolean", "description": yes_description},
                     "timeout_seconds": {"type": "integer",
                                         "description": ("Give up after this long (default 900, "
                                                         "at most 3600). Loading the model and "

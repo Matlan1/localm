@@ -451,7 +451,7 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
     from localm.inference.http_server import create_app
 
     # The owner mints a keys:admin-only key (the attacker principal).
-    attacker = auth.create_key("ka", [S.KEYS_ADMIN], allow_privileged=True)
+    attacker = auth.create_key("ka", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {attacker['key']}"}
@@ -481,7 +481,7 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
     from localm import scopes as S
     from localm.inference.http_server import create_app
 
-    manager = auth.create_key("mgr", [S.KEYS_ADMIN], allow_privileged=True)
+    manager = auth.create_key("mgr", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {manager['key']}"}
@@ -523,7 +523,7 @@ def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
     from localm import scopes as S
     from localm.inference.http_server import create_app
 
-    manager = auth.create_key("mgr", [S.KEYS_ADMIN], allow_privileged=True)
+    manager = auth.create_key("mgr", [S.KEYS_ADMIN, S.CHAT], allow_privileged=True)
     app = create_app(None)
     with TestClient(app) as client:
         hdr = {"Authorization": f"Bearer {manager['key']}"}
@@ -930,9 +930,9 @@ def test_scrypt_derive_honours_dklen_surrogates_and_its_memory_budget(auth):
 
 
 def test_atomic_write_private_passes_retrying_through(auth, monkeypatch, tmp_path):
-    import localm.config as cfg
+    import localm.storekit as storekit
     seen = []
-    monkeypatch.setattr(cfg, "atomic_write_private",
+    monkeypatch.setattr(storekit, "atomic_write_private",
                         lambda path, text, **kw: seen.append(kw))
     auth._atomic_write_private(tmp_path / "f", "x")
     auth._atomic_write_private(tmp_path / "f", "x", retrying=True)
@@ -1352,3 +1352,15 @@ def test_verify_stamps_the_alg_marker_only_on_a_legacy_record(auth, monkeypatch)
                             "scopes": ["chat"]}])
     assert auth.verify("legacy-token") == {"chat"}
     assert marks == [("legacy1", auth._ALG_FAST)]
+
+
+def test_an_owner_kdf_file_stamped_newer_is_named_and_not_used(auth, monkeypatch, tmp_path, caplog):
+    import json
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    auth.owner_kdf_file().write_text(
+        json.dumps({"v": 2, "records": [{"x": 1}]}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert auth._load_owner_kdf() == []
+    assert str(auth.owner_kdf_file()) in caplog.text and "newer" in caplog.text
+    auth._save_owner_kdf([{"x": 1}])
+    assert auth._load_owner_kdf() == [{"x": 1}]

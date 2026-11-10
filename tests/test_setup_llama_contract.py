@@ -139,7 +139,7 @@ WIN_CPU = {"llama.dll": b"llama@cpu", "ggml.dll": b"ggml@cpu", "ggml-cpu.dll": b
 WIN_CPU_FILES = [".gitignore", ".gitkeep", ".localm-backend", "LICENSE.llama-cpp",
                  "ggml-cpu.dll", "ggml.dll", "llama.dll"]
 WIN_CUDA = {"llama.dll": b"llama@cuda", "ggml.dll": b"ggml@cuda", "ggml-cuda.dll": b"ggml-cuda",
-            "LICENSE": b"UPSTREAM LICENSE TEXT"}
+            "LICENSE-LLVM-OpenMP": b"LLVM OPENMP LICENSE TEXT"}
 WIN_CUDART = {"cudart64_12.dll": b"cudart", "cublas64_12.dll": b"cublas",
               "cublasLt64_12.dll": b"cublasLt"}
 LINUX_CPU = {"build/bin/libllama.so": b"libllama", "build/bin/libggml-base.so.0": b"base",
@@ -268,8 +268,9 @@ class World:
 
     def release(self, repo: str, tag: str, assets: list) -> dict:
         """Publish *assets* ``[(name, body, digest)]`` under a release listing.
-        *digest* is "ok" (the body's real sha256), None (no digest field), or a
-        literal digest string. Returns ``{name: download_url}``."""
+        *digest* is "ok" (the body's real sha256, which also becomes the pin of a
+        pinned asset name), None (no digest field), or a literal digest string.
+        Returns ``{name: download_url}``."""
         listing, urls = [], {}
         for name, body, digest in assets:
             url = self.serve(f"https://github.com/{repo}/releases/download/{tag}/{name}", body)
@@ -277,6 +278,9 @@ class World:
             entry = {"name": name, "browser_download_url": url, "size": len(body)}
             if digest == "ok":
                 entry["digest"] = "sha256:" + _sha(body)
+                for table in (sl._PINNED_FALLBACK_SHA256, pins._CUDA_LINUX_PINNED_SHA256):
+                    if name in table:
+                        self.mp.setitem(table, name, _sha(body))
             elif digest:
                 entry["digest"] = digest
             listing.append(entry)
@@ -705,6 +709,30 @@ def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
     assert sl.check_runtime_update()["newer"] is False
 
 
+def test_amd_rocm_cpu_overlay_keeps_the_openmp_license(world):
+    """Upstream's Windows CPU zip carries LICENSE-LLVM-OpenMP beside libomp.dll;
+    the overlay that copies libomp.dll copies that license with it."""
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, files={**ROCM_CPU, "LICENSE-LLVM-OpenMP": b"LLVM OPENMP"})
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert (world.lib / "libomp.dll").read_bytes() == b"openmp"
+    assert (world.lib / "LICENSE.llvm-openmp").read_bytes() == b"LLVM OPENMP"
+    assert world.marker() == f"amd-rocm {sl._ROCM_BUILD}\n"
+
+
+def test_amd_rocm_cpu_overlay_rollback_removes_the_openmp_license(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, files={**ROCM_CPU, "LICENSE-LLVM-OpenMP": b"LLVM OPENMP"})
+    world.probes = [(0, ""),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found")]
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert not (world.lib / "libomp.dll").exists()
+    assert not (world.lib / "LICENSE.llvm-openmp").exists()
+    assert world.marker() == f"amd-rocm {ROCM}\n"
+
+
 def test_amd_rocm_cpu_overlay_copies_the_legacy_openmp_runtime_name(world):
     _amd_rocm_release(world)
     files = {k: v for k, v in ROCM_CPU.items() if k != "libomp.dll"}
@@ -850,9 +878,13 @@ def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, l
               f"Downloading {urls[cudart]}",
               "OK - cuda runtime loads on this machine.")
     assert world.requests == [f"{API}/{UPSTREAM}/releases/tags/{PIN}", urls[build], urls[cudart]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "cublas64_12.dll",
-                             "cublasLt64_12.dll", "cudart64_12.dll", "ggml-cuda.dll", "ggml.dll",
-                             "llama.dll"]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.llvm-openmp",
+                             "LICENSE.nvidia-cuda", "cublas64_12.dll", "cublasLt64_12.dll",
+                             "cudart64_12.dll", "ggml-cuda.dll", "ggml.dll", "llama.dll"]
+    assert (world.lib / "LICENSE.llama-cpp").read_text(encoding="utf-8") == sl._LLAMA_CPP_MIT_NOTICE
+    assert (world.lib / "LICENSE.llvm-openmp").read_bytes() == b"LLVM OPENMP LICENSE TEXT"
+    assert ((world.lib / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
     assert world.marker() == f"cuda {PIN}\n"
 
 
@@ -870,7 +902,9 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
     for pkg, libs in (("nvidia-cuda-runtime-cu12", {"nvidia/cuda_runtime/lib/libcudart.so.12": b"rt"}),
                       ("nvidia-cublas-cu12", {"nvidia/cublas/lib/libcublas.so.12": b"b",
                                               "nvidia/cublas/lib/libcublasLt.so.12": b"lt"})):
-        body = _zip({**libs, "nvidia/METADATA": b"meta"}, len(pkg))
+        body = _zip({**libs, "nvidia/METADATA": b"meta",
+                     f"{pkg}.dist-info/licenses/License.txt": f"EULA {pkg}".encode()},
+                    len(pkg))
         wurl = world.serve(f"https://files.pythonhosted.org/packages/{pkg}.whl", body)
         wheels[pkg] = wurl
         pins[pkg] = ("12.9.79", _sha(body))
@@ -897,8 +931,12 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
         "https://pypi.org/pypi/nvidia-cuda-runtime-cu12/12.9.79/json", wheels["nvidia-cuda-runtime-cu12"],
         "https://pypi.org/pypi/nvidia-cublas-cu12/12.9.79/json", wheels["nvidia-cublas-cu12"]]
     assert world.files() == [".localm-backend", ".localm-cuda-runtime.json",
-                             "LICENSE.llama-cpp", "libcublas.so.12", "libcublasLt.so.12",
-                             "libcudart.so.12", "libggml-cuda.so", "libllama.so"]
+                             "LICENSE.llama-cpp", "LICENSE.nvidia-cublas-cu12",
+                             "LICENSE.nvidia-cuda-runtime-cu12", "libcublas.so.12",
+                             "libcublasLt.so.12", "libcudart.so.12", "libggml-cuda.so",
+                             "libllama.so"]
+    for pkg in wheels:
+        assert (world.lib / f"LICENSE.{pkg}").read_bytes() == f"EULA {pkg}".encode()
     assert world.marker() == f"cuda {PIN}\n"
     from localm.setup_llama import cuda as _cuda
     rec = _cuda.read_cuda_runtime(world.lib)
@@ -941,9 +979,9 @@ def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
               "OK - cuda runtime loads on this machine.")
     listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
     assert world.requests == [listing, listing, urls[build], urls[cudart]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.13",
-                             "libcublasLt.so.13", "libcudart.so.13", "libggml-cuda.so",
-                             "libggml.so", "libllama.so"]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.nvidia-cuda",
+                             "libcublas.so.13", "libcublasLt.so.13", "libcudart.so.13",
+                             "libggml-cuda.so", "libggml.so", "libllama.so"]
     assert world.marker() == f"cuda {PIN}\n"
 
 
@@ -1235,6 +1273,7 @@ def _download_failure(world, **kw):
 def test_a_digest_mismatch_is_refused(world):
     bad = "sha256:" + "0" * 64
     body = _zip(WIN_VULKAN)
+    world.mp.setitem(sl._PINNED_FALLBACK_SHA256, f"llama-{PIN}-bin-win-vulkan-x64.zip", "0" * 64)
     r, url, _ = _download_failure(world, digest=bad, body=body)
     _in_order(r.text, f"Downloading {url}",
               f"Provisioning vulkan failed: download sha256 does not match the expected pin "
@@ -1244,6 +1283,7 @@ def test_a_digest_mismatch_is_refused(world):
 
 def test_an_html_block_page_is_diagnosed_as_a_filtered_download(world):
     page = b"<!DOCTYPE html><html><body>Blocked by proxy</body></html>"
+    world.mp.setitem(sl._PINNED_FALLBACK_SHA256, f"llama-{PIN}-bin-win-vulkan-x64.zip", _sha(page))
     world.seed_target(".gitignore")
     url = world.serve(f"https://github.com/{UPSTREAM}/releases/download/{PIN}/"
                       f"llama-{PIN}-bin-win-vulkan-x64.zip", page, "text/html; charset=utf-8")
@@ -1558,15 +1598,19 @@ def test_an_explicit_backend_replaces_a_different_install(world, marker, message
     assert world.files() == WIN_VULKAN_FILES
 
 
-@pytest.mark.parametrize("marker, backend, message", [
-    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {sl._ROCM_BUILD}."),
+@pytest.mark.parametrize("marker, backend, message, prompt", [
+    ("amd-rocm b1288", "amd-rocm", f"Upgrading the amd-rocm build: b1288 -> {sl._ROCM_BUILD}.",
+     f"Update the runtime to build {sl._ROCM_BUILD} now?"),
     (f"amd-rocm {ROCM}", "amd-rocm",
-     f"Upgrading the amd-rocm build: {ROCM} -> {sl._ROCM_BUILD}."),
-    ("vulkan b10000", "vulkan", "Re-downloading the vulkan build (b10000)."),
-    ("vulkan", "vulkan", "Re-downloading the vulkan build."),
+     f"Upgrading the amd-rocm build: {ROCM} -> {sl._ROCM_BUILD}.",
+     f"Update the runtime to build {sl._ROCM_BUILD} now?"),
+    ("vulkan b10000", "vulkan", "Re-downloading the vulkan build (b10000).",
+     f"Update the runtime to build {sl._PINNED_TAG} now?"),
+    ("vulkan", "vulkan", "Re-downloading the vulkan build.",
+     "Do you want to re-download/replace them?"),
 ])
 def test_interactive_replace_names_what_is_being_replaced(world, monkeypatch, capsys,
-                                                          marker, backend, message):
+                                                          marker, backend, message, prompt):
     world.seed_target("llama.dll", marker=marker)
     world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
     world.release(LEMONADE, ROCM, [(f"llama-{ROCM}-windows-rocm-gfx103X-x64.zip",
@@ -1580,7 +1624,27 @@ def test_interactive_replace_names_what_is_being_replaced(world, monkeypatch, ca
     text = " ".join(capsys.readouterr().out.split())
     _in_order(text, "Already provisioned", "Replacing existing build...", message,
               f"Backend: {backend}", f"OK - {backend} runtime loads on this machine.")
-    assert prompts == ["Do you want to re-download/replace them?"]
+    assert prompts == [prompt]
+
+
+@pytest.mark.parametrize("marker, default, stale", [
+    ("vulkan b10000", True, True),
+    (f"vulkan {sl._PINNED_TAG}", False, False),
+])
+def test_the_replace_question_defaults_to_updating_only_a_stale_runtime(
+        world, monkeypatch, capsys, marker, default, stale):
+    world.seed_target("llama.dll", marker=marker)
+    world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
+    _upstream_win_vulkan(world)
+    asked = []
+    monkeypatch.setattr(click, "confirm",
+                        lambda text, **kw: asked.append((text, kw.get("default"))) or False)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    sl.main.callback(from_dir=None, backend="vulkan", url=None, sha256=None, force=False,
+                     tag=None, rollback=False, assume_yes=False)
+    out = " ".join(capsys.readouterr().out.split())
+    assert [d for _, d in asked] == [default]
+    assert (f"This release ships build {sl._PINNED_TAG}" in out) is stale
 
 
 def test_from_a_local_build_copies_libraries_and_marks_custom(world, tmp_path):

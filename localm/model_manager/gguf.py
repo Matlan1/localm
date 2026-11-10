@@ -876,12 +876,25 @@ def speech_route_available() -> bool:
         return False
 
 
-def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
+def gguf_chat_refusal(architecture: Optional[str],
+                      path: Optional[Path] = None) -> Optional[str]:
     """The reason a GGUF with this ``general.architecture`` cannot be chatted
     with, or None when it can (including an unknown or missing architecture,
-    which the native loader judges for itself)."""
+    which the native loader judges for itself). With *path*, a file whose own
+    header marks it as an embedding or reranker model (``gguf_embedding_signal``)
+    is refused too, which the architecture alone cannot tell for a decoder-based
+    embedding model."""
     what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
     if what is None:
+        if path is not None and gguf_embedding_signal(path):
+            if gguf_reranker_state(path):
+                return ("This model's header marks it as a reranker, which scores "
+                        "query and document pairs, not a chat model, so localm "
+                        "cannot chat with it. Use it with 'localm rerank' or "
+                        "POST /v1/rerank.")
+            return ("This model's header marks it as an embedding model, which "
+                    "turns text into vectors, not a chat model, so localm cannot "
+                    "chat with it. Use it with POST /v1/embeddings.")
         return None
     if architecture in GGUF_TTS_ARCHITECTURES:
         use = ("'localm speak' or POST /v1/audio/speech" if speech_route_available()
@@ -923,6 +936,7 @@ _GGUF_SCALAR_FORMATS = {
 _GGUF_KV_SHAPE_SUFFIXES = (
     ".block_count",
     ".decoder_block_count",
+    ".num_loops",
     ".embedding_length",
     ".attention.head_count",
     ".attention.head_count_kv",
@@ -1174,6 +1188,10 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
     ``block_count``), with a missing ``attention.head_count_kv`` read as
     ``attention.head_count``, as llama.cpp reads it.
 
+    A looped model (Nanbeige4.2) runs its stack ``<arch>.num_loops`` times
+    (default 1) and llama.cpp keeps one KV entry per loop and layer, so the
+    total is multiplied by it.
+
     Returns 0 - never raises - when the file is not a readable GGUF, or the
     shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
     the caller keeps its previous heuristic."""
@@ -1274,6 +1292,7 @@ def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
             total_kv_heads = n_layers * n_head_kv
     if total_kv_heads <= 0:
         return 0                # e.g. a fully recurrent stack: no KV cache
+    total_kv_heads *= _get(".num_loops") or 1
 
     k_len = _get(".attention.key_length")
     v_len = _get(".attention.value_length")
@@ -2068,10 +2087,19 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
     return len(recurrent_layers) * (conv + ssm) * _RECURRENT_STATE_ELEMENT_BYTES
 
 
+_LLAMA_MAX_LAYERS = 512
+
+
 def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     """``(block_count, n_vocab)`` from *path*'s GGUF metadata, or ``None`` when
     either is missing or the header does not parse. ``n_vocab`` is the length
-    of the ``tokenizer.ggml.tokens`` array. Never raises."""
+    of the ``tokenizer.ggml.tokens`` array. Never raises.
+
+    ``block_count`` is llama.cpp's LOGICAL layer count: a looped model
+    (``<arch>.num_loops`` > 1) is expanded to ``block_count * num_loops``
+    layers, each with its own KV entry, and ``llama_model_n_layer`` reports
+    that product after load. A product above llama.cpp's LLAMA_MAX_LAYERS
+    (512) is a load llama.cpp aborts, so it reads as ``None``."""
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"GGUF":
@@ -2098,7 +2126,8 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
                     for _ in range(count):
                         _gguf_read_string_stream(f)
                     continue
-                if key.endswith(".block_count") and vtype in _GGUF_SCALAR_FORMATS:
+                if (key.endswith((".block_count", ".num_loops"))
+                        and vtype in _GGUF_SCALAR_FORMATS):
                     fmt = _GGUF_SCALAR_FORMATS[vtype]
                     (scalars[key],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
                     continue
@@ -2111,6 +2140,11 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     block_count = scalars.get(f"{architecture}.block_count") if architecture else None
     if not isinstance(block_count, int) or block_count <= 0 or n_vocab <= 0:
         return None
+    loops = scalars.get(f"{architecture}.num_loops")
+    if isinstance(loops, int) and loops > 1:
+        block_count *= loops
+        if block_count > _LLAMA_MAX_LAYERS:
+            return None
     return block_count, n_vocab
 
 
@@ -2188,8 +2222,11 @@ def gguf_split_layout(path: Path) -> Optional[dict]:
     ``tensor_bytes`` maps every tensor name to its size in bytes, summed over
     every part of a split GGUF.
 
-    ``block_count`` includes any MTP / nextn layers (llama.cpp's
-    ``n_layer_all``). Sizes are offset deltas, as in
+    ``block_count`` includes any MTP / nextn layers and is multiplied by
+    ``<arch>.num_loops`` for a looped model (llama.cpp's ``n_layer_all``):
+    the loops' extra layers share the first loop's weights, so only
+    ``blk.0`` to ``blk.<physical block_count - 1>`` appear in ``tensor_bytes``.
+    Sizes are offset deltas, as in
     ``_gguf_tensor_offset_entries``. Returns ``None`` - never raises - when
     the metadata or any part's tensor section does not parse, or a part of a
     split model is missing."""
@@ -2268,12 +2305,27 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
     return data_start + max_offset
 
 
+_GGUF_DECISION_KEY_PREFIX = "pplx_decider."
+_GGUF_DECISION_KEY_INFIX = ".decision."
+
+
+def _is_decision_key(key: str) -> bool:
+    """True for a metadata key only a decision model's converter writes: the
+    ``pplx_decider.*`` block of Perplexity's decider, or an
+    ``"<architecture>.decision.*"`` key (``qwen35.decision.type`` of Bespoke
+    Nimble and JEV)."""
+    if key.startswith(_GGUF_DECISION_KEY_PREFIX):
+        return True
+    head, sep, rest = key.partition(".")
+    return bool(head) and sep == "." and ("." + rest).startswith(_GGUF_DECISION_KEY_INFIX)
+
+
 def _gguf_metadata_probe(path: Path) -> dict:
     """Best-effort read of the GGUF header metadata needed for model-role
     detection: ``general.architecture``, ``general.type``, ``adapter.type`` and
     whether any ``*.pooling_type`` key is present. The result carries the keys
     ``architecture``, ``general_type``, ``adapter_type``, ``has_pooling_type``
-    and ``non_causal``; a string key the file does not declare is None. Reads
+    ``has_decision_keys`` and ``non_causal``; a string key the file does not declare is None. Reads
     only a bounded prefix of the file (see
     ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
     tokenizer vocab arrays and tensor data), never the whole model. Returns
@@ -2294,6 +2346,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
     has_pooling_type = False
     pooling_type = None
     has_classifier_labels = False
+    has_decision_keys = False
     non_causal = False
     try:
         if buf[:4] != b"GGUF":
@@ -2312,7 +2365,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
             # pooling_type key was seen), so only the model-parameter keys that
             # precede the tokenizer arrays remain worth reading.
             if (key.startswith("tokenizer.ggml.")
-                    and (has_pooling_type
+                    and (has_pooling_type or has_decision_keys
                          or architecture in _GGUF_EMBEDDING_ARCHITECTURES
                          or architecture in GGUF_TEXT_ENCODER_ARCHITECTURES)):
                 break
@@ -2335,6 +2388,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
                             buf, off)[0]
                 elif key.endswith(".classifier.output_labels"):
                     has_classifier_labels = True
+                elif _is_decision_key(key):
+                    has_decision_keys = True
                 elif key.endswith(".attention.causal") and vtype == _GGUF_TYPE_BOOL:
                     non_causal = not struct.unpack_from("<?", buf, off)[0]
                 off = _gguf_skip_value(buf, off, vtype)
@@ -2348,6 +2403,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
     return {"architecture": architecture, "has_pooling_type": has_pooling_type,
             "pooling_type": pooling_type,
             "has_classifier_labels": has_classifier_labels,
+            "has_decision_keys": has_decision_keys,
             "non_causal": non_causal, "general_type": general_type,
             "adapter_type": adapter_type}
 
@@ -2433,6 +2489,18 @@ def gguf_unusable_reason(path: Path) -> Optional[str]:
     if gguf_general_type(path) == "imatrix":
         return GGUF_IMATRIX_REFUSAL
     return None
+
+
+def gguf_decision_signal(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when *path*'s own GGUF metadata marks it as a decision model: it
+    carries a ``pplx_decider.*`` key or an ``"<architecture>.decision.*"`` key.
+    Such a model answers typed questions with per-option probabilities and has
+    no chat head, although its ``general.architecture`` is a chat one
+    (``qwen35``). *meta*, when given, is an already-computed
+    ``_gguf_metadata_probe(path)`` result."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    return bool(meta.get("has_decision_keys"))
 
 
 def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:

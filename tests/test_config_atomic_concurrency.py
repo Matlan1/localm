@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import localm.config as cfg
+import localm.storekit as storekit
 
 
 @pytest.fixture()
@@ -32,7 +33,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", h / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
     # keep retries fast in tests
-    monkeypatch.setattr(cfg, "_REPLACE_BACKOFF", 0.001, raising=False)
+    monkeypatch.setattr(storekit, "_REPLACE_BACKOFF", 0.001, raising=False)
     return h
 
 
@@ -43,7 +44,7 @@ def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
     # os.name != nt. This test stubs the classifier rather than pinning os.name;
     # cfg.os IS the os module, so a pin would also switch os.path/tempfile to
     # Windows semantics and break the tmp path _atomic_write_json builds.
-    monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
+    monkeypatch.setattr(storekit, "_is_transient_permission_error", lambda e: True)
     real_replace = cfg.os.replace
     calls = {"n": 0}
 
@@ -83,7 +84,7 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     real_open = builtins.open
     state = {"n": 0}
     # Windows-only retry; same classifier stub as above rather than an os.name pin.
-    monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
+    monkeypatch.setattr(storekit, "_is_transient_permission_error", lambda e: True)
 
     def flaky_open(file, *a, **k):
         if str(file).endswith("registry.json") and state["n"] < 2:
@@ -101,12 +102,16 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     assert "unreadable" not in err, "a transient, recovered blip must not warn"
 
 
-def test_read_json_corrupt_falls_back_without_retry(home, capsys):
+def test_read_json_corrupt_falls_back_without_retry(home, capsys, caplog):
     """A genuinely corrupt (non-transient) file falls back immediately."""
+    import logging
+    storekit._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     cfg.CONFIG_FILE.write_text("{ not json", encoding="utf-8")
     out = cfg._read_json(cfg.CONFIG_FILE, {"fallback": True})
     assert out == {"fallback": True}
-    assert "unreadable" in capsys.readouterr().err.lower()
+    assert any("unreadable" in r.getMessage().lower() for r in caplog.records)
+    assert capsys.readouterr().err == ""
 
 
 def test_replace_atomic_rides_out_a_real_file_lock(home):

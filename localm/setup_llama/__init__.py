@@ -106,6 +106,7 @@ from localm.setup_llama.library_files import (
     blas_kernel_problems, _copy_blas_library_dirs, _LLAMA_CPP_MIT_NOTICE,
     KERNEL_PACKS_MARKER, kernel_packs_missing,
     _LICENSE_NAME_PREFIXES, _copy_license_files, _safe_is_file, _copy_binaries,
+    LLAMA_CPP_LICENSE, _license_dest_name, _place_license_file,
 )
 from localm.setup_llama.runtime_dir import (
     _platform_key, _machine_arch, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
@@ -116,7 +117,7 @@ from localm.setup_llama.runtime_dir import (
     installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
     _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
     _clear_target, _clear_target_or_refuse, _exit_runtime_in_use, _PROVISION_LOCK_OWNER,
-    _replace_target, _staging_path,
+    _replace_target, _staging_path, keep_previous_runtime, _backup_path,
     ProvisioningBusyError, _provision_lock_path, _provision_lock_holder_pid,
     _provisioning_lock, _exit_provisioning_busy,
 )
@@ -128,7 +129,7 @@ from localm.setup_llama.versions import (
 )
 from localm.setup_llama.assets import (
     _auto_backend, _resolve_backend_asset, _resolve_backend_url, _release_assets,
-    _pick_asset, _resolve_cuda_pair, _resolve_linux_cudart_asset,
+    _pick_asset, _resolve_cuda_pair, _resolve_linux_cudart_asset, _asset_sha256,
 )
 from localm.setup_llama.cuda import (
     _CUDA_LINE, _BLACKWELL_MIN_CAP, _MIN_DRIVER_CUDA, _ver_tuple, _ver_at_least,
@@ -137,6 +138,8 @@ from localm.setup_llama.cuda import (
     _pypi_wheel_url_and_sha, _fetch_pypi_runtime_lib, _fetch_cuda_runtime_libs,
     _cuda_setup_dialogue, STAGED_NOTE, IMAGE_TAG_FOR_LINE, CUDA_CHECK_FAILED,
     record_staged_cuda, staged_cuda_line, check_staged_cuda_runtime, cuda_container_check,
+    NVIDIA_CUDA_LICENSE, NVIDIA_CUDA_LICENSE_NOTICE, _copy_wheel_license,
+    write_nvidia_cuda_notice,
 )
 from localm.setup_llama.native_deps import (
     _LIBGOMP_SONAME, _LIBGOMP_DEB_URL, _LIBGOMP_DEB_SHA256, _LIBGOMP_DEB_MIN_BYTES,
@@ -180,10 +183,11 @@ __all__ = [
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
     "KERNEL_PACKS_MARKER", "kernel_packs_missing",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
-    "_replace_target", "_staging_path",
+    "_replace_target", "_staging_path", "keep_previous_runtime", "_backup_path",
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
+    "LLAMA_CPP_LICENSE", "_license_dest_name", "_place_license_file",
     "CPU_OVERLAY_FAILED_MARKER", "cpu_overlay_failed", "rocm_build_is_current",
     "_CUDA_LINE",
     "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_CUDA_RUNTIME_PIN", "_cuda_setup_dialogue",
@@ -192,6 +196,8 @@ __all__ = [
     "_EXC_HEADER_RE", "_exit_provisioning_busy", "_exit_runtime_in_use",
     "_extract_archive", "_extract_libgomp_from_deb", "_fetch_and_place",
     "_fetch_cuda_runtime_libs", "_fetch_pypi_runtime_lib", "_fetch_verified",
+    "NVIDIA_CUDA_LICENSE", "NVIDIA_CUDA_LICENSE_NOTICE", "_copy_wheel_license",
+    "write_nvidia_cuda_notice",
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
     "_interactive", "_confirm", "_choose",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
@@ -214,7 +220,7 @@ __all__ = [
     "_read_marker", "_recent_tags", "_record_provisioned_backend",
     "_record_runtime_history", "_refresh_install_record", "_release_assets",
     "_RELEASE_TAG_RE", "_repo_runtime_lib", "_resolve_backend_asset",
-    "_resolve_backend_url", "_resolve_cuda_pair", "_resolve_linux_cudart_asset", "rocm_build", "_ROCM_BUILD",
+    "_resolve_backend_url", "_resolve_cuda_pair", "_resolve_linux_cudart_asset", "_asset_sha256", "rocm_build", "_ROCM_BUILD",
     "_ROCM_CPU_ASSET", "_ROCM_CPU_TAG", "rocm_cpu_overlay_url", "_ROCM_TAG", "runtime_history",
     "_RUNTIME_HISTORY_MAX", "_runtime_pkg_dir", "RuntimeInUseError",
     "_safe_extractall_tar", "_safe_is_file", "set_pinned_tag", "_sha256_file",

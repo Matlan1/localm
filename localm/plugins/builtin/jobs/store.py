@@ -44,6 +44,10 @@ _STORE_LOCK = threading.RLock()
 #  Job definition                                                             #
 # --------------------------------------------------------------------------- #
 
+# The scope a key needs to schedule or run each task kind.
+TASK_KIND_SCOPES = {"chat": "chat", "coder": "coder", "memory": "memory",
+                    "rag": "rag"}
+
 # Task kinds and schedule kinds the store accepts. Held here rather than in the
 # scheduler, so the store can validate a job def before it is persisted.
 TASK_KINDS = ("chat", "coder", "memory", "rag")
@@ -144,6 +148,10 @@ class Job:
     # back to the runner's key-value comparison. Internal, like `owner`: never
     # sent to a client.
     owner_is_owner_key: bool = False
+    # Run claim ({"pid", "start", "token"}) written under the store lock before a
+    # run starts and cleared when its result is recorded. Internal: never sent to
+    # a client.
+    claim: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -200,6 +208,42 @@ class Job:
         # Only keep known fields so a forward-compat file with extra keys loads.
         known = {f for f in cls.__dataclass_fields__}      # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+# Tokens of the claims this process holds; a claim naming this pid is live only
+# while its token is in here.
+_HELD_CLAIMS: dict = {}
+_HELD_CLAIMS_LOCK = threading.Lock()
+
+
+def claim_is_live(claim) -> bool:
+    """True when *claim* (a ``Job.claim`` record) names a run that is still in
+    flight: the claiming process is alive and has the start identity the claim
+    recorded; for this process, the token is still held. A missing or malformed
+    claim is not live. When liveness cannot be read the claim counts as live."""
+    if not isinstance(claim, dict):
+        return False
+    pid = claim.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return False
+    if pid == os.getpid():
+        with _HELD_CLAIMS_LOCK:
+            return claim.get("token") in _HELD_CLAIMS
+    from localm import instances
+    try:
+        if not instances.pid_alive(pid):
+            return False
+        current = instances.process_start_identity(pid)
+    except Exception:
+        return True
+    return not instances.start_identity_differs(claim.get("start"), current)
+
+
+def _new_claim() -> dict:
+    from localm import instances
+    return {"pid": os.getpid(),
+            "start": instances.process_start_identity(os.getpid()),
+            "token": uuid.uuid4().hex}
 
 
 def cwd_unc_error(cwd) -> Optional[str]:
@@ -279,8 +323,15 @@ class JobStore:
                 yield
 
     def _read_all(self) -> dict:
+        return self._load()[0]
+
+    def _load(self) -> tuple:
+        """``(jobs, extras)``: the parsed jobs by id, and everything else in the
+        file (entries this build cannot parse, other top-level keys) as a dict
+        that ``_write_all`` re-emits verbatim."""
+        extras: dict = {"entries": [], "top": {}}
         if not self._defs_file.is_file():
-            return {}            # genuinely absent: an empty store is correct
+            return {}, extras    # genuinely absent: an empty store is correct
         raw = None
         try:
             raw = self._defs_file.read_text(encoding="utf-8")
@@ -297,28 +348,33 @@ class JobStore:
             # Corrupt JSON: back it up so a subsequent write cannot destroy it,
             # warn, and start empty (distinct from the absent case).
             self._quarantine_corrupt(raw, e)
-            return {}
-        jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            return {}, extras
+        if not isinstance(data, dict) or not isinstance(data.get("jobs", []), list):
+            self._quarantine_corrupt(raw, ValueError("unexpected jobs file shape"))
+            return {}, extras
+        extras["top"] = {k: v for k, v in data.items()
+                         if k not in ("jobs", "version")}
         out: dict = {}
-        skipped = 0
         index = model_index()
-        for entry in jobs:
-            if not isinstance(entry, dict):
-                skipped += 1
-                continue
+        for entry in data.get("jobs", []):
             try:
+                if not isinstance(entry, dict):
+                    raise TypeError("not an object")
                 job = Job.from_dict(entry)
             except (ValueError, TypeError):
-                skipped += 1    # skip a corrupt entry rather than fail the load
+                extras["entries"].append(entry)    # carried through every write
                 continue
             job.model = model_ids.stored_to_current(
                 job.model, entry.get(model_ids.REFS_KEY), index)
             out[job.id] = job
-        if skipped:
+        if extras["entries"]:
             from localm.debuglog import logger
-            logger.warning("jobs store: skipped %d unreadable job entr%s",
-                           skipped, "y" if skipped == 1 else "ies")
-        return out
+            n = len(extras["entries"])
+            logger.warning("jobs store: %d job entr%s cannot be read by this "
+                           "build and %s kept in the file unchanged", n,
+                           "y" if n == 1 else "ies",
+                           "is" if n == 1 else "are")
+        return out, extras
 
     def _quarantine_corrupt(self, raw, err) -> None:
         """Copy a corrupt defs file aside before anything overwrites it, and warn.
@@ -370,16 +426,20 @@ class JobStore:
             except OSError as e:
                 logger.debug("jobs store: could not prune %s (%s)", old.name, e)
 
-    def _write_all(self, jobs: dict) -> None:
-        """Atomically write the whole defs file (temp + os.replace)."""
+    def _write_all(self, jobs: dict, extras: Optional[dict] = None) -> None:
+        """Atomically write the whole defs file (temp + os.replace). *extras* is
+        the second value of ``_load``: unparsed entries and other top-level keys
+        are written back unchanged."""
         self._ensure_root()
+        extras = extras or {"entries": [], "top": {}}
         index = model_index()
         rows = []
         for j in jobs.values():
             row = j.to_dict()
             model_ids.attach_refs(row, (j.model,), index)
             rows.append(row)
-        payload = {"version": 1, "jobs": rows}
+        payload = {**extras["top"], "version": 1,
+                   "jobs": rows + list(extras["entries"])}
         # Unique temp name (pid + thread + uuid) so concurrent writers never
         # share a temp path; os.replace is atomic, so the last writer wins.
         tmp = self._defs_file.with_name(
@@ -411,40 +471,42 @@ class JobStore:
         ``model_refs``. No effect when there is no defs file."""
         with self._locked():
             if self._defs_file.is_file():
-                self._write_all(self._read_all())
+                jobs, extras = self._load()
+                self._write_all(jobs, extras)
 
     def add(self, job: Job) -> Job:
         job.validate()
         with self._locked():
-            jobs = self._read_all()
+            jobs, extras = self._load()
             jobs[job.id] = job
-            self._write_all(jobs)
+            self._write_all(jobs, extras)
         return job
 
     def update(self, job_id: str, **changes) -> Job:
         """Apply *changes* to an existing job and persist. Re-validates the
         result. Raises KeyError if the job does not exist."""
         with self._locked():
-            jobs = self._read_all()
+            jobs, extras = self._load()
             job = jobs.get(job_id)
             if job is None:
                 raise KeyError(job_id)
             for key, value in changes.items():
-                if key in Job.__dataclass_fields__ and key != "id":   # never remap id
+                if (key in Job.__dataclass_fields__
+                        and key not in ("id", "claim")):   # never remap id or claim
                     setattr(job, key, value)
             job.validate()
             jobs[job.id] = job
-            self._write_all(jobs)
+            self._write_all(jobs, extras)
         return job
 
     def remove(self, job_id: str) -> bool:
         """Delete a job def and its results dir. Returns True if it existed."""
         with self._locked():
-            jobs = self._read_all()
+            jobs, extras = self._load()
             if job_id not in jobs:
                 return False
             del jobs[job_id]
-            self._write_all(jobs)
+            self._write_all(jobs, extras)
         # Best-effort: drop the job's results too (confined to the jobs dir).
         try:
             import shutil
@@ -465,16 +527,17 @@ class JobStore:
         d.mkdir(parents=True, exist_ok=True)
         stamp = _iso_stamp(result.get("finished") or result.get("started")
                            or time.time())
-        result_id = stamp
-        path = self._confine(d / f"{result_id}.json")
-        n = 1
-        while path.exists():
-            result_id = f"{stamp}_{n}"
+        n = 0
+        while True:
+            result_id = stamp if n == 0 else f"{stamp}_{n}"
             path = self._confine(d / f"{result_id}.json")
-            n += 1
-        record = {"job_id": job_id, "result_id": result_id, **result}
-        path.write_text(json.dumps(record, indent=2, ensure_ascii=False),
-                        encoding="utf-8")
+            record = {"job_id": job_id, "result_id": result_id, **result}
+            try:
+                with open(path, "x", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, indent=2, ensure_ascii=False))
+                break
+            except FileExistsError:
+                n += 1
         # Stamp the job def (best-effort: a run for a now-deleted job is fine).
         try:
             self._stamp_result(job_id, result, result_id)
@@ -482,6 +545,9 @@ class JobStore:
             # The result file IS persisted (result_id above); only the job's
             # last_run/last_status stamp failed, so the API will under-report
             # this run until the next successful write.
+            with _HELD_CLAIMS_LOCK:
+                for tok in [t for t, j in _HELD_CLAIMS.items() if j == job_id]:
+                    del _HELD_CLAIMS[tok]
             from localm.debuglog import logger
             logger.warning(
                 "jobs: result %s for job %s is persisted but its metadata "
@@ -494,15 +560,61 @@ class JobStore:
         last_result_id). A job that no longer exists is left alone. Raises when
         the store cannot be locked, read or written."""
         with self._locked():
-            jobs = self._read_all()
+            jobs, extras = self._load()
             job = jobs.get(job_id)
             if job is None:
                 return
             job.last_run = result.get("finished") or time.time()
             job.last_status = result.get("status")
             job.last_result_id = result_id
+            self._drop_held(job.claim)
+            job.claim = None
             jobs[job.id] = job
-            self._write_all(jobs)
+            self._write_all(jobs, extras)
+
+    @staticmethod
+    def _drop_held(claim) -> None:
+        if isinstance(claim, dict) and claim.get("pid") == os.getpid():
+            with _HELD_CLAIMS_LOCK:
+                _HELD_CLAIMS.pop(claim.get("token"), None)
+
+    def claim(self, job_id: str, *, predicate=None) -> Optional[Job]:
+        """Claim *job_id* for a run: under the store lock, write this process's
+        claim into the job and return the job. Returns None when the job is
+        gone, a live claim already holds it, or *predicate* (called with the
+        freshly read job) is false. The claim is cleared by ``record_result``
+        or ``release_claim``."""
+        with self._locked():
+            jobs, extras = self._load()
+            job = jobs.get(job_id)
+            if job is None or claim_is_live(job.claim):
+                return None
+            if predicate is not None and not predicate(job):
+                return None
+            job.claim = _new_claim()
+            with _HELD_CLAIMS_LOCK:
+                _HELD_CLAIMS[job.claim["token"]] = job_id
+            try:
+                self._write_all(jobs, extras)
+            except BaseException:
+                self._drop_held(job.claim)
+                raise
+            return job
+
+    def release_claim(self, job_id: str, claim: Optional[dict]) -> None:
+        """Clear *claim* from *job_id* when the run ended without a recorded
+        result. Only a claim with the same token is cleared."""
+        try:
+            with self._locked():
+                jobs, extras = self._load()
+                job = jobs.get(job_id)
+                if (job is not None and isinstance(claim, dict)
+                        and isinstance(job.claim, dict)
+                        and job.claim.get("token") == claim.get("token")):
+                    job.claim = None
+                    self._write_all(jobs, extras)
+        finally:
+            self._drop_held(claim)
 
     def list_results(self, job_id: str, *, limit: Optional[int] = None,
                      offset: int = 0) -> list:

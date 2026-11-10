@@ -9,6 +9,7 @@ steps of a restart are not held up by this install's own PyTorch probe."""
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -18,12 +19,14 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _apply_update as au
-from localm import _version, updater, updater_components as uc, updater_runtime, uv_tool
+from localm import _version, updater, updater_components as uc, updater_finish, updater_runtime, uv_tool
 from localm.bugreport import LocalmError
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
 _REAL_RUN = subprocess.run
+_PROGRAM = Path(sys.executable).read_bytes() if os.name == "nt" else b"trampoline"
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
 
@@ -44,7 +47,7 @@ def _sd_pins(tag):
 def _files(version, deps, sd=None):
     files = {"VERSION": version, "localm/__init__.py": f"# {version}",
              "localm/setup_llama/pins.py": '_ROCM_TAG = "b1355"\n_PINNED_TAG = "b11928"\n',
-             "pyproject.toml": _pyproject(deps)}
+             "pyproject.toml": _pyproject(deps), "uv.lock": "version = 1\n"}
     if sd:
         files["localm/media/sdcpp/pins.py"] = _sd_pins(sd)
     return files
@@ -99,7 +102,7 @@ def _uninstall(site: Path, name: str) -> None:
         shutil.rmtree(info)
 
 
-def _localm_dist(site: Path, version: str, exe: bytes = b"trampoline") -> None:
+def _localm_dist(site: Path, version: str, exe: bytes = _PROGRAM) -> None:
     _dist(site, "localm", version, {"_editable_impl_localm.pth": f"# {version}".encode(),
                                     "../../Scripts/localm.exe": exe})
 
@@ -113,9 +116,7 @@ def _venv(root: Path) -> Path:
 
 
 def _fake_uv(tmp_path: Path) -> Path:
-    exe = tmp_path / "fake-uv-bin" / uv_tool.UV_NAME
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_bytes(b"")
+    exe = write_exe_stub(tmp_path / "fake-uv-bin" / uv_tool.UV_NAME)
     exe.chmod(0o755)
     return exe
 
@@ -205,6 +206,72 @@ def test_a_failed_deps_step_puts_the_venv_and_install_record_back(install):
     _assert_venv_is_031(site)
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert ei.value.summary == "the post-update step failed; rolled back"
+
+
+_RETRY_CMD = "localm.bat" if sys.platform == "win32" else "./localm.sh"
+
+
+def test_a_failed_deps_step_says_how_to_try_again(install):
+    inst, site = install
+    files = _files("0.3.2", ["click", "rich"])
+    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
+    data, sig = _release(files)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert ei.value.summary == "the post-update step failed; rolled back"
+    assert ei.value.reason.endswith(
+        f"exited 2. To try again, close localm and run {_RETRY_CMD} update in the localm "
+        "install folder")
+
+
+def _release_with_launchers():
+    files = _files("0.3.2", ["click", "rich"])
+    files.update({"localm.bat": "@echo off\r\n", "localm.sh": "#!/bin/sh\n"})
+    return _release(files)
+
+
+def test_a_deps_step_that_cannot_start_says_how_to_try_again(install):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def run(cmd):
+        raise OSError("no such program")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=run)
+    _assert_venv_is_031(site)
+    assert ei.value.summary == "the post-update step crashed; rolled back"
+    assert ei.value.reason.endswith(
+        f"no such program. To try again, close localm and run {_RETRY_CMD} update in the "
+        "localm install folder")
+
+
+def test_a_failed_rollback_after_the_deps_step_asks_for_no_retry(install, monkeypatch):
+    inst, site = install
+    data, sig = _release_with_launchers()
+
+    def broken(*a, **k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(updater, "_restore_all", broken)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    assert ei.value.summary == "the post-update step failed AND rollback failed - manual recovery needed"
+    assert "disk gone" in ei.value.reason
+    assert "To try again" not in ei.value.reason
+
+
+def test_a_failed_deps_step_without_a_launcher_script_names_only_the_failure(install):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    assert ei.value.reason.endswith("exited 2")
+    assert "To try again" not in ei.value.reason
 
 
 def test_a_failed_component_after_the_deps_step_puts_the_venv_back(install, home):
@@ -903,6 +970,21 @@ def test_a_failed_repair_puts_the_packages_back(install):
     assert _state(site) == {"localm": "0.1.5", "click": "8.0"}
 
 
+def test_a_failed_repair_says_how_to_try_again(install):
+    from localm import updater_parts
+    inst, site = install
+    (inst / "localm.bat").write_text("@echo off\r\n", encoding="utf-8")
+    (inst / "localm.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    _uninstall(site, "localm")
+    _localm_dist(site, "0.1.5")
+    with pytest.raises(LocalmError) as ei:
+        updater_parts.repair(installed=inst, runner=lambda cmd: 2)
+    assert _state(site) == {"localm": "0.1.5", "click": "8.0"}
+    assert ei.value.reason.endswith(
+        f"exited 2. To try again, close localm and run {_RETRY_CMD} update --repair in the "
+        "localm install folder")
+
+
 def test_a_repairs_runtime_failure_during_the_restart_rolls_nothing_back(install, monkeypatch):
     import localm.inference.http_server as hs
     inst, _site = install
@@ -1157,9 +1239,7 @@ def test_the_next_start_brings_uv_back_after_a_standalone_rollback(install, home
 
     (inst / script).write_text(pin("0.13.4"), encoding="utf-8")
     uv_dir = inst / uv_tool.CONTAINED_DIR
-    uv_dir.mkdir()
-    (uv_dir / uv_tool.UV_NAME).write_bytes(b"")
-    (uv_dir / uv_tool.UV_NAME).chmod(0o755)
+    write_exe_stub(uv_dir / uv_tool.UV_NAME).chmod(0o755)
     monkeypatch.setattr(uv_tool, "uv_version", lambda path: "0.13.6")
     files = _files("0.3.2", ["click", "rich"])
     files[script] = pin("0.13.6")
@@ -1850,3 +1930,404 @@ def test_doctor_lists_the_parts_that_differ(monkeypatch):
     text = out.getvalue()
     assert "install record is localm 0.1.5" in text and "localm update --repair" in text
     assert "install record: localm" not in text, "no OK line over the same record"
+
+
+# ------------------------- the build's own finishing step ---------------------
+
+_FINISH_OK = """
+import json, os, sys
+old, new, klass, result = sys.argv[1:]
+print("finishing", old, "to", new, klass)
+with open(os.path.join("site-marker.json"), "w") as f:
+    json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "isolated": sys.flags.isolated,
+               "utf8": sys.flags.utf8_mode}, f)
+with open(result, "w") as f:
+    json.dump({"took_over": %s}, f)
+"""
+
+_FINISH_CHANGES_THE_VENV_THEN = """
+import pathlib, shutil, sys
+site = pathlib.Path(%r)
+shutil.rmtree(site / "click")
+shutil.rmtree(site / "click-8.0.dist-info")
+print("removed click")
+%s
+"""
+
+
+def _finish_release(module: str, *, sd=None, version="0.3.2", deps=("click", "rich")):
+    return _release({**_files(version, list(deps), sd=sd), updater_finish.MODULE: module})
+
+
+def _forbid_deps_step(calls):
+    def run(cmd):
+        calls.append(cmd)
+        return 0
+    return run
+
+
+def _alive(pid: int) -> bool:
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        return code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def test_a_finishing_step_that_takes_over_the_dependencies_replaces_the_built_in_step(
+        install, monkeypatch):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    uv_lookups = []
+    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: uv_lookups.append(t) or "uv")
+    ran, said = [], []
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_forbid_deps_step(ran), say=said.append)
+    assert res["applied"] and res["version"] == "0.3.2"
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert ran == [], "the built-in dependency step did not run"
+    assert uv_lookups == [], "no uv is looked for when the step is taken over"
+    marker = json.loads((inst / "site-marker.json").read_text(encoding="utf-8"))
+    assert marker["argv"][:3] == ["0.3.1", "0.3.2", "deps"]
+    assert Path(marker["cwd"]).resolve() == inst.resolve()
+    assert marker["isolated"] == 1 and marker["utf8"] == 1
+    assert "finishing 0.3.1 to 0.3.2 deps" in said
+    assert not Path(marker["argv"][3]).exists(), "the result file is removed"
+    assert any("took over: dependencies" in s for s in said)
+
+
+def test_a_finishing_step_that_names_nothing_leaves_the_built_in_step(install, monkeypatch):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % "[]")
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_deps_step(site))
+    assert res["applied"]
+    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
+
+
+def test_the_built_in_step_finds_no_uv_after_a_finishing_step_and_rolls_back(install, monkeypatch):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % "[]")
+
+    def no_uv(target):
+        raise LocalmError("this update needs uv", reason="looked nowhere")
+    monkeypatch.setattr(updater, "_uv_for_deps", no_uv)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site))
+    assert ei.value.summary == "this update needs uv" and ei.value.reason == "looked nowhere"
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+
+
+@pytest.mark.parametrize("ending, reason", [
+    ("print('the disk is full'); sys.exit(3)", "the disk is full"),
+    ("raise RuntimeError('it broke')", "RuntimeError: it broke"),
+    ("sys.exit(7)", "removed click"),
+])
+def test_a_failing_finishing_step_puts_every_part_back(install, ending, reason):
+    inst, site = install
+    assert (site / "click").is_dir()
+    data, sig = _finish_release(_FINISH_CHANGES_THE_VENV_THEN % (str(site), ending))
+    ran = []
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step(ran))
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert not (inst / updater_finish.MODULE).exists()
+    assert ran == []
+    assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
+    assert ei.value.reason == reason
+
+
+def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install, monkeypatch):
+    inst, _site = install
+    shutil.rmtree(inst / ".venv")
+    warned = []
+    monkeypatch.setattr(updater, "_apply_warn", lambda msg, *args: warned.append(msg % args))
+    data, sig = _finish_release("import sys; print('no'); sys.exit(1)")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    assert updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                         runner=_forbid_deps_step([]))["applied"]
+    assert warned == []
+
+
+def test_a_failing_finishing_step_with_no_output_says_how_it_exited(install):
+    inst, _site = install
+    data, sig = _finish_release("import sys; sys.exit(9)")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert ei.value.reason == "the finishing step exited 9"
+
+
+def test_a_failing_finishing_step_puts_the_native_runtime_back(install):
+    inst, _site = install
+    lib = inst / au.RUNTIME_LIB
+    lib.mkdir(parents=True)
+    (lib / "marker.json").write_text("old", encoding="utf-8")
+    data, sig = _finish_release(
+        "import sys\n"
+        f"open(r'{lib / 'marker.json'}', 'w').write('new')\n"
+        "sys.exit(1)\n")
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert (lib / "marker.json").read_text(encoding="utf-8") == "old"
+
+
+def test_a_hanging_finishing_step_is_stopped_with_its_children(install, tmp_path, monkeypatch):
+    inst, site = install
+    monkeypatch.setattr(updater_finish, "SILENCE_LIMIT_S", 3.0)
+    pids = tmp_path / "pids.json"
+    data, sig = _finish_release(
+        "import json, os, subprocess, sys, time\n"
+        "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+        "                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"json.dump([os.getpid(), kid.pid], open(r'{pids}', 'w'))\n"
+        "print('working')\n"
+        "time.sleep(600)\n")
+    ran = []
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step(ran))
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    _assert_venv_is_031(site)
+    assert "printed nothing for 3 s" in ei.value.reason
+    assert ran == []
+    own, kid = json.loads(pids.read_text(encoding="utf-8"))
+    assert not _alive(own) and not _alive(kid)
+
+
+def test_a_finishing_step_that_keeps_printing_stops_at_the_total_limit(install, monkeypatch):
+    inst, _site = install
+    monkeypatch.setattr(updater_finish, "TOTAL_LIMIT_S", 3.0)
+    data, sig = _finish_release(
+        "import time\n"
+        "while True:\n"
+        "    print('still here')\n"
+        "    time.sleep(0.5)\n")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert "still running after 3 s" in ei.value.reason
+
+
+def test_an_interrupted_finishing_step_rolls_back(install):
+    inst, _site = install
+    data, sig = _finish_release("print('a line'); import time; time.sleep(600)")
+
+    def interrupt(line):
+        if line == "a line":
+            raise KeyboardInterrupt
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]), say=interrupt)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert ei.value.reason == "the finishing step was interrupted"
+
+
+@pytest.mark.parametrize("content", [
+    "b'{not json'", "b'\\xff\\xfe\\x00'", "b'[1, 2]'", "b'{}'",
+    "b'{\"took_over\": \"dependencies\"}'", "b'{\"took_over\": [1]}'",
+    "b'[' * 100000",
+])
+def test_an_unreadable_result_takes_nothing_over(install, content):
+    inst, site = install
+    data, sig = _finish_release(f"import sys\nopen(sys.argv[4], 'wb').write({content})\n")
+    said = []
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_deps_step(site), say=said.append)
+    assert res["applied"]
+    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
+    assert any("cannot be read" in s for s in said)
+
+
+def test_an_unreadable_result_leaves_the_failure_of_the_built_in_step(install):
+    inst, site = install
+    data, sig = _finish_release("import sys\nopen(sys.argv[4], 'w').write('{broken')\n")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=2))
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert ei.value.summary == "the post-update step failed; rolled back"
+
+
+def test_a_result_left_by_an_earlier_run_is_not_read(install, home):
+    inst, site = install
+    updates = home / "updates"
+    updates.mkdir(exist_ok=True)
+    (updates / updater_finish.RESULT_FILE).write_text('{"took_over": ["dependencies"]}',
+                                                      encoding="utf-8")
+    data, sig = _finish_release("print('wrote no result')")
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
+
+
+def test_a_step_name_it_does_not_know_takes_nothing_over(install):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % '["everything"]')
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    assert _state(site)["rich"] == "13.0", "the built-in dependency step ran"
+
+
+def _reprovision_plan(monkeypatch):
+    monkeypatch.setattr(updater_runtime, "plan", lambda staged, target: {
+        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
+        "source": "release", "pins": {}, "note": "re-provisions the runtime"})
+    monkeypatch.setattr(updater_runtime, "stop_own_holders", lambda *a, **k: [])
+
+
+def test_a_finishing_step_that_takes_over_the_runtime_replaces_its_step(install, monkeypatch):
+    inst, _site = install
+    _reprovision_plan(monkeypatch)
+    finished = []
+    monkeypatch.setattr(updater_runtime, "finish_pending", lambda **kw: finished.append(kw))
+    data, sig = _finish_release(_FINISH_OK % '["dependencies", "runtime"]')
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_forbid_deps_step([]))
+    assert res["applied"] and finished == []
+    assert updater_runtime.read_pending() is None
+
+
+def test_a_finishing_step_that_does_not_name_the_runtime_leaves_its_step(install, monkeypatch):
+    inst, _site = install
+    _reprovision_plan(monkeypatch)
+    finished = []
+    monkeypatch.setattr(updater_runtime, "finish_pending",
+                        lambda **kw: finished.append(kw) or {"state": "updated", "note": "done"})
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_forbid_deps_step([]))
+    assert res["applied"] and len(finished) == 1
+
+
+def test_a_finishing_step_that_takes_over_the_components_replaces_their_step(install, home):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % '["dependencies", "components"]',
+                                sd="master-2000-aaaaaaa")
+    ran = []
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_forbid_deps_step(ran))
+    assert res["applied"] and ran == [], "no setup-sdcpp, no dependency step"
+    assert res["components"] is None
+    assert uc.read_pending() is None
+
+
+def test_a_finishing_step_that_does_not_name_the_components_leaves_their_step(install, home):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]', sd="master-2000-aaaaaaa")
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_children(home, site))
+    assert res["components"]["state"] == "updated"
+
+
+def test_a_failed_component_after_a_finishing_step_puts_every_part_back(install, home):
+    inst, site = install
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]', sd="master-2000-aaaaaaa")
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_children(home, site, sd_rc=1))
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    _assert_venv_is_031(site)
+
+
+def test_a_build_without_a_finishing_step_runs_the_built_in_steps_only(install, monkeypatch):
+    inst, site = install
+    called = []
+    monkeypatch.setattr(updater_finish, "run", lambda *a, **k: called.append(a) or frozenset())
+    data, sig = _release_032(sd=None)
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=_deps_step(site))
+    assert res["applied"] and called == []
+    assert _state(site)["rich"] == "13.0"
+    assert sorted(res) == sorted(
+        ["applied", "version", "klass", "backup", "restart_needed", "verified", "verify_reason",
+         "downgrade", "data_backup", "runtime", "runtime_note", "components", "components_note",
+         "kept_for_updates"])
+
+
+def test_finishing_step_output_goes_to_stdout_without_a_say(install, capfd):
+    inst, _site = install
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_forbid_deps_step([]))
+    assert "finishing 0.3.1 to 0.3.2 deps" in capfd.readouterr().out
+
+
+def test_the_finishing_step_runs_by_full_path_from_the_install_with_no_window(install, monkeypatch):
+    inst, _site = install
+    seen = []
+    real = subprocess.Popen
+
+    def spy(cmd, **kw):
+        if updater_finish.MODULE.split("/")[-1] in " ".join(map(str, cmd)):
+            seen.append((cmd, kw))
+        return real(cmd, **kw)
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_forbid_deps_step([]))
+    (cmd, kw), = seen
+    assert Path(cmd[0]).is_absolute()
+    assert cmd[1:2] == ["-I"]
+    assert Path(cmd[cmd.index("-u") + 1]).resolve() == (inst / updater_finish.MODULE).resolve()
+    assert Path(kw["cwd"]).resolve() == inst.resolve()
+    assert kw["stdin"] == subprocess.DEVNULL
+    if sys.platform == "win32":
+        assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
+    else:
+        assert kw["start_new_session"] is True
+
+
+def test_a_failing_finishing_step_puts_back_the_components_this_update_changes(
+        install, home, monkeypatch):
+    inst, _site = install
+    kept, restored = [], []
+    real_snapshot, real_restore = uc.snapshot, updater._restore_all
+
+    def snapshot(names, dest, **kw):
+        kept.append(list(names))
+        return real_snapshot(names, dest, **kw)
+
+    def restore_all(*a, **kw):
+        restored.append(kw["components"])
+        return real_restore(*a, **kw)
+    monkeypatch.setattr(uc, "snapshot", snapshot)
+    monkeypatch.setattr(updater, "_restore_all", restore_all)
+    data, sig = _finish_release("import sys; sys.exit(1)", sd="master-2000-aaaaaaa")
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert [uc.DEPS, "sdcpp"] in kept
+    assert restored == [None], "every part kept is restored"
+
+
+def test_the_install_python_comes_before_the_running_one(tmp_path):
+    assert updater_finish.interpreter(tmp_path) == sys.executable
+    parts = ("Scripts", "python.exe") if sys.platform == "win32" else ("bin", "python")
+    own = tmp_path.joinpath(".venv", *parts)
+    own.parent.mkdir(parents=True)
+    own.write_bytes(b"")
+    assert updater_finish.interpreter(tmp_path) == str(own)

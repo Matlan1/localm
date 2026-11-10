@@ -27,7 +27,7 @@ def plugin() -> None:
 # (builtin/ + external dirs) and the user's installed set; enable/disable toggles
 # an installed plugin active/inactive. A PluginManager with no app is enough to
 # flip config (no routes are mounted from the CLI - a running GUI server picks
-# HTTP routes up on its next start, while stdio plugins like mcp take effect
+# HTTP routes up the next time it reads the plugin list, while stdio plugins like mcp take effect
 # immediately). Nothing is installed by default: only what the user selects.
 
 def _engine_manager():
@@ -108,20 +108,32 @@ def _resolve_with_deps(flag) -> bool:
 @click.option("--with-deps/--no-deps", "with_deps", default=None,
               help="Also install the plugin's pip extras on this machine "
                    "(default: the auto_install_plugin_deps setting).")
-def plugin_install_engine(target, force, with_deps):
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Do not ask for confirmation when installing from a directory.")
+def plugin_install_engine(target, force, with_deps, assume_yes):
     """Install a plugin and enable it.
 
     TARGET is either a first-party plugin NAME from the bundled store
     (e.g. ``localm plugin install coder``) or a path to a DIRECTORY containing a
     plugin.toml (a third-party plugin). A first-party plugin's pip extras are
     installed for you unless you pass --no-deps (or turn the setting off).
+
+    Third-party plugins run unsandboxed in-process, so install only code you
+    trust; installing from a directory asks for confirmation first.
     """
     from rich.markup import escape
+
+    from localm.plugins.contract import UNSANDBOXED_NOTICE
 
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     src = Path(target)
     if src.is_dir() and (src / "plugin.toml").is_file():
+        console.print(f"[yellow]{escape(UNSANDBOXED_NOTICE)}[/yellow]")
+        if not assume_yes and not click.confirm(
+                f"Install the plugin in {src} ?", default=False):
+            console.print("[red]Not installed.[/red]")
+            sys.exit(1)
         try:
             spec = mgr.set_installed_from_dir(src, force=force)
         except ValueError as e:
@@ -225,7 +237,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
-    (coder, image/music/video, rag, web, voice, tts, mcp). Run by the installer
+    (coder, browser, image/music/video, rag, web, memory, voice, tts, jobs, mcp). Run by the installer
     after dependencies are in place, and any time afterwards. Plugins that need a
     pip extra have it installed for you (you are asked once; --with-deps/--no-deps
     or the auto_install_plugin_deps setting decide non-interactively).
@@ -464,13 +476,13 @@ def plugin_disable(name):
 @plugin.command("refresh")
 @click.argument("name", required=False)
 def plugin_refresh(name):
-    """Re-sync installed first-party plugins with the bundled store.
+    """Remove old copied code of installed first-party plugins.
 
-    A localm upgrade ships newer plugin code, but an already-installed copy in
-    your data dir keeps shadowing it until refreshed - so you silently run stale
-    plugin code (including missing fixes). With no NAME, refreshes every
-    installed first-party plugin whose code changed; with a NAME, just that one.
-    A running GUI server picks the new code up on its next start.
+    First-party plugins run from the localm package, so an upgrade takes effect
+    without this. An install made by an older localm kept a copy of the plugin's
+    code in your data dir; this deletes that copy (files the plugin does not ship
+    are kept). With no NAME, every installed first-party plugin; with a NAME,
+    just that one. The server also does this when it starts.
     """
     from rich.markup import escape
 
@@ -487,7 +499,8 @@ def plugin_refresh(name):
         sys.exit(1)
     failed = dict(getattr(mgr, "last_refresh_failures", {}) or {})
     for n in refreshed:
-        console.print(f"[green]Refreshed[/green] plugin [bold]{escape(n)}[/bold]")
+        console.print(f"[green]Removed the old copied code[/green] of plugin "
+                      f"[bold]{escape(n)}[/bold]")
     for n, err in failed.items():
         console.print(f"[red]Could not refresh[/red] plugin [bold]{escape(n)}[/bold]: "
                       f"{escape(err)}")
@@ -562,19 +575,18 @@ def _plugin_install_state(name):
 
 def _attached_server():
     """``(url, headers, None)`` for a running localm serving this directory, or
-    ``(None, None, reason)``. LOCALM_URL targets a different instance, in which
-    case there is no registry entry to read an attach token from and only an
-    owner key (LOCALM_API_KEY / the persisted one) authenticates - the same
-    trade `localm unload` documents."""
-    import os
-
+    ``(None, None, reason)``. LOCALM_URL (a server root or a ``/v1`` base)
+    targets another instance: the owner key (LOCALM_API_KEY / the persisted
+    one) authenticates, else the attach token of this home's registry entry
+    at exactly that address, the same as `localm unload`."""
     from .. import instances
     from ..auth import resolve_bearer_headers
     from ..config import home_dir
+    from ..localm_url import env_root, registry_token
 
-    override = os.environ.get("LOCALM_URL", "").rstrip("/")
+    override = env_root()
     if override:
-        return override, resolve_bearer_headers(None), None
+        return override, resolve_bearer_headers(registry_token(override)), None
     entry = instances.find_attachable(home_dir(), instances.resolve_root_dir())
     if entry is None:
         return None, None, "no running localm server was found for this directory"

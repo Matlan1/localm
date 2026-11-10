@@ -57,7 +57,7 @@ from localm.media.native_models import (
 )
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
-from localm.plugins.gui.jobs import frame_event
+from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
@@ -177,7 +177,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
             job.push({"type": "line", "text": s["backend_note"]})
-        if s.get("backend") == "native":
+        if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
             from .backends import native
             refused = native.refusal(model_overrides=req.model_overrides,
                                      lora_name=lora_name, width=width, height=height,
@@ -191,6 +191,9 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                            s, ([{"name": lora_name}] if lora_name else [])
                            + list(native_loras or [])))
             if refused:
+                if refused == native.NO_LLM_VISION_21:
+                    from localm.media import native_offer
+                    native_offer.push_missing(job, native_offer.vision_encoder(), refused)
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
         elif native_loras:
@@ -210,13 +213,19 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                       "Batch count, sampler, scheduler and hires fix apply to the native "
                       "backend; with ComfyUI set them in the workflow."})
             return False
-        if s.get("backend") != "native" and (req.steps is not None or req.clip_skip is not None):
+        if ((req.steps is not None and not _backend.supports(s, "SUPPORTS_STEPS"))
+                or (req.clip_skip is not None
+                    and not _backend.supports(s, "SUPPORTS_CLIP_SKIP"))):
             job.push({"type": "line", "outcome": True, "text":
                       "Steps and clip skip apply to the native backend; ComfyUI uses the "
                       "values in its workflow."})
             return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
+        if not ok and _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
+            from localm.media import native_offer
+            from .backends import native
+            native_offer.push_missing(job, native_offer.job_missing("image", native, s), msg)
         job.push({"type": "line", "outcome": not ok, "text": msg})
         if not ok:
             return False
@@ -225,7 +234,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                                  note_other_vram_holders,
                                  release_other_native_media, unload_chat_for_media)
         placement = None
-        if s.get("backend") == "comfy":
+        if _backend.supports(s, "NEEDS_COMFY_SERVER"):
             from localm.media.comfy_client import resolve_media_placement
             # Per-component GPU placement (opt-in) plus the user-facing notice, in one
             # shared helper (image/music/video share this preamble). placement is
@@ -265,7 +274,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             else:
                 job.push({"type": "line", "text": media_keep_note(s)})
             note_other_vram_holders(job, s, "image")
-            if s.get("backend") == "comfy":
+            if _backend.supports(s, "NEEDS_COMFY_SERVER"):
                 job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
             is_privacy = effective_mode("server") == SessionMode.PRIVACY
             # privacy mode forces deletion of ComfyUI's own output copy: no traces
@@ -285,7 +294,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
                               "on_saved": _on_saved,
                               "on_queue_state": lambda state: job.progress(phase=state)}
-                             if s.get("backend") == "native" else {})
+                             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS") else {})
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
@@ -311,9 +320,13 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 **size_kwargs,
                 **({"loras": native_loras} if native_loras else {}),
                 **native_kwargs,
-                **({"steps": req.steps, "clip_skip": req.clip_skip,
-                    "on_preview": lambda p: job.push(frame_event(p))}
-                   if s.get("backend") == "native" else {}),
+                **({"steps": req.steps}
+                   if _backend.supports(s, "SUPPORTS_STEPS") else {}),
+                **({"clip_skip": req.clip_skip}
+                   if _backend.supports(s, "SUPPORTS_CLIP_SKIP") else {}),
+                **({"on_preview": lambda p: job.push(frame_event(p))}
+                   if _backend.supports(s, "SUPPORTS_JOB_OPTIONS") else {}),
+                privacy=is_privacy,
             )
             job.push({"type": "line", "outcome": True, "text": message})
             if ok and not saved_names:
@@ -433,7 +446,7 @@ async def imagine_backend():
         s = backend_choice.refine_auto(_backend.settings(load_config()), "Image")
         out = {"choice": s.get("backend_choice"), "active": s.get("backend"),
                "note": s.get("backend_note"), "warning": s.get("warning")}
-        if s.get("backend") == "native":
+        if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
             from .backends import native
             out["native"] = native.status(s)
         return out
@@ -813,7 +826,7 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
         for note in (s.get("warning"), s.get("backend_note")):
             if note:
                 job.push({"type": "line", "text": note})
-        if s.get("backend") != "native":
+        if not _backend.supports(s, "SUPPORTS_UPSCALE"):
             job.push({"type": "line", "outcome": True, "text":
                       "Upscaling a gallery image needs the native image backend."})
             return False

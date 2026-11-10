@@ -10,7 +10,7 @@ cookie, and each session can expire or be revoked on its own.
 Mirrors auth.py's keystore discipline: a home-dir JSON file, atomic writes,
 owner-only perms, sha256 of the secret stored and compared constant-time. Every
 read-modify-write holds the in-process ``_LOCK`` and then the cross-process
-``sessions.json.lock`` (``config._cross_process_lock``), so a writer in another
+``sessions.json.lock`` (``storekit.store_lock``), so a writer in another
 process (``localm key recover`` / ``key clear`` against a running server) cannot
 undo it. A present-but-unreadable/corrupt store fails CLOSED: it verifies no
 session.
@@ -69,8 +69,8 @@ def _hash(sid: str) -> str:
 
 def _load() -> list:
     """Load the store as a list of records, using the mtime cache. A missing store
-    is an empty list; a present-but-corrupt/unreadable one raises so callers can
-    fail CLOSED (lookup treats a load failure as 'no valid session')."""
+    is an empty list; a present-but-corrupt/unreadable one, or one that does not
+    hold a JSON list, raises so callers can fail CLOSED (lookup treats a load failure as 'no valid session')."""
     path = sessions_file()
     try:
         st = path.stat()
@@ -87,7 +87,9 @@ def _load() -> list:
         data = json.loads(path.read_text(encoding="utf-8"))  # ValueError on corrupt
     except RecursionError as e:
         raise ValueError("sessions file is nested too deeply") from e
-    records = data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        raise ValueError(f"{path} does not hold a list of sessions")
+    records = data
     _CACHE["mtime"] = key
     _CACHE["records"] = records
     return records
@@ -114,7 +116,8 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
     (None: ``_LOCK`` is waited for without a bound and the cross-process lock for
     the config default). Raises ``TimeoutError`` (an ``OSError``) when either is
     still held past it."""
-    from localm.config import _cross_process_lock, ensure_dirs
+    from localm.config import ensure_dirs
+    from localm.storekit import store_lock
     path = sessions_file()
     if create_dirs:
         ensure_dirs()
@@ -128,7 +131,7 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
         if not path.parent.is_dir():
             yield
             return
-        with _cross_process_lock(path, timeout=timeout):
+        with store_lock(path, timeout=timeout):
             yield
     finally:
         _LOCK.release()
@@ -142,7 +145,7 @@ def _save(records: list) -> None:
     # The temp file is restricted rather than the destination: it already holds
     # the full digest payload, and os.replace carries its ACL onto the
     # destination. atomic_write_private also creates the temp at 0600.
-    from localm.config import atomic_write_private
+    from localm.storekit import atomic_write_private
     atomic_write_private(path, json.dumps(records, indent=2))
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
@@ -159,9 +162,9 @@ def _restrict_perms(path: Path) -> bool:
     """Owner-only perms where the OS supports it (best-effort, never fatal).
     Returns True when the tightening is believed to have happened.
 
-    Delegates to ``config.restrict_file_perms``, which covers Windows as well
+    Delegates to ``storekit.restrict_file_perms``, which covers Windows as well
     as POSIX."""
-    from localm.config import restrict_file_perms
+    from localm.storekit import restrict_file_perms
     return restrict_file_perms(path)
 
 

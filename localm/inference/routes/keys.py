@@ -87,6 +87,14 @@ def register(app: FastAPI, ctx) -> None:
                 "Refusing to set rag_roots: only the owner key may confine a "
                 "new key's RAG-indexing reach to specific folders."
             )
+        if not is_owner:
+            beyond = [s for s in scopes.normalize(scope_list)
+                      if not _hs.caller_grants(request, s)]
+            if beyond:
+                raise HTTPException(
+                    403,
+                    f"Refusing to grant scope(s) {', '.join(beyond)}: a key may "
+                    "only mint keys with scopes it holds itself.")
         try:
             created = create_key(body.get("name", ""), scope_list,
                                  allow_privileged=is_owner, expires=expires,
@@ -103,6 +111,9 @@ def register(app: FastAPI, ctx) -> None:
         if mgr is not None:
             try:
                 warns = mgr.scope_deps_warnings(scope_list)
+                warns += scopes.unknown_scope_warnings(
+                    scope_list,
+                    {(sp.scope or n) for n, sp in mgr.discover().items()})
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.warning("could not check plugin readiness for granted scopes: %s",
@@ -130,7 +141,7 @@ def register(app: FastAPI, ctx) -> None:
                                         key_hash=auth._hash_key(owner), fs_access="host",
                                         owner_key_minted=auth._is_owner_key(owner)))
             secure = request.url.scheme == "https"
-            response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
+            response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
             # CSRF is derived from the session (client fetches it from
@@ -140,8 +151,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str, request: Request):
-        """Revoke a named key. 409 on a server that must hold a key
-        (``network_bind_needs_key``) when it is the last one."""
+        """Revoke a named key. Answers 409 when the server is reachable from the
+        network, must hold a key, and this is its last one."""
         from localm.auth import removal_leaves_no_key, revoke_key
         from localm.config import ConfigUnreadable
         if (_hs.network_bind_needs_key(request.app)

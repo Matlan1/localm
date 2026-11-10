@@ -45,7 +45,7 @@ from localm import scopes
 from localm.browser import discovery, provision
 from localm.browser import session as bsession
 from localm.inference.http_server import caller_grants, principal_id
-from localm.plugins.gui.jobs import FRAME_EVENT
+from localm.jobmanager import FRAME_EVENT
 
 _router = APIRouter()
 
@@ -116,8 +116,9 @@ def _enabled() -> bool:
 def _require_enabled() -> None:
     if not _enabled():
         raise HTTPException(
-            409, "Browser automation is switched off. Turn it on in "
-                 "Settings > Network before opening a browser.")
+            409, "Browser automation is switched off. Turn on \"Let the model "
+                 "drive a web browser\" in Settings > Server & network "
+                 "before opening a browser.")
 
 
 def _inline_live_view() -> bool:
@@ -224,8 +225,8 @@ def _viewable_agent_browsers(request: Request) -> list:
     if mgr is None:
         return []
     try:
-        from localm.plugins.builtin.coder.plug import _principal_from_request
-        is_owner, principal = _principal_from_request(request)
+        from localm.plugins.lookup import plugin_api
+        is_owner, principal = plugin_api("coder", "plug")._principal_from_request(request)
     except Exception:                      # noqa: BLE001
         return []                          # no identity: show nothing
     found = []

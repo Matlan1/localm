@@ -22,6 +22,7 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 from tests.test_sysstats import VRAM_POLL_DEADLINE
 from tests._shared_model_guard import no_shared_model_left_resident  # noqa: F401
+from tests.media_bytes import flac_bytes, mp4_bytes, png_bytes
 
 
 # ------------------------------------------------------------------ #
@@ -2171,7 +2172,7 @@ class TestModelEndpoints:
             return _FakeJob()
 
         monkeypatch.setattr(
-            "localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+            "localm.jobmanager.JobManager.start_cli", fake_start_cli)
         return captured
 
     def test_pull_passes_spec_after_double_dash(self, gui_app, monkeypatch):
@@ -2694,11 +2695,9 @@ class TestSessionExtras:
         EVERYONE - a scoped/restricted key must not trigger it, same rule as
         create_session's own optional model switch (plug.py:201-207)."""
         app, switched = coder_app
-        # The coder plugin is loaded under a synthetic sys.modules name, not
-        # localm.plugins.builtin.coder.plug (PluginManager._import_module) -
-        # patch THAT module object or the running route never sees it.
+        # The module the running route was loaded from.
         import sys
-        plug_mod = sys.modules["_localm_plugin_coder"]
+        plug_mod = sys.modules["localm.plugins.builtin.coder.plug"]
         monkeypatch.setattr(plug_mod, "_principal_from_request",
                             lambda request: (False, "scoped-principal"))
         monkeypatch.setattr("localm.inference.http_server.caller_grants",
@@ -3198,7 +3197,7 @@ class TestGuiNoModel:
 class TestJobs:
     @pytest.mark.anyio
     async def test_cli_job_streams_lines_and_ends(self):
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         mgr = JobManager()
         # Use python -m localm --help via start_cli's own python: cheap + real
         job = mgr.start_cli("pull", ["--help"])
@@ -3222,7 +3221,7 @@ class TestJobs:
     async def test_pull_flaglike_spec_fails_not_help(self):
         """End-to-end: `pull -- -h` treats -h as the spec (unknown) and exits
         non-zero, so the job is 'failed' and no Click help text is dumped."""
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         mgr = JobManager()
         # cli_args is the full argv after "-m localm" (the endpoint passes the
         # "pull" subcommand itself), so this runs: localm pull -- -h
@@ -3251,7 +3250,7 @@ class TestJobs:
         over-long integer and a non-object: the job skips them, forwards the
         frame after them, and still ends."""
         from localm.model_manager._shared import PROGRESS_SENTINEL
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         (tmp_path / "sitecustomize.py").write_text(
             "import sys\n"
             f"S = {PROGRESS_SENTINEL!r}\n"
@@ -3281,7 +3280,7 @@ class TestJobs:
 
     @pytest.mark.anyio
     async def test_fn_job_success_and_failure(self):
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         mgr = JobManager()
 
         ok_job = mgr.start_fn("imagine", lambda job: True)
@@ -4170,6 +4169,7 @@ class TestDiscoverEndpoints:
             r = client.get("/api/discover/search?source=civitai")
         assert r.status_code == 403
         assert "Network access is off" in r.json()["detail"]
+        assert "Settings > Server & network" in r.json()["detail"]
 
     def test_civitai_no_valid_type_is_422(self, gui_app, monkeypatch):
         """civitai_search itself refuses an empty resolved type list (ModelSourceError,
@@ -5044,7 +5044,7 @@ class TestImageGeneration:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"\x89PNG fake")
+            Path(out_path).write_bytes(png_bytes())
             return True, f"Image saved to {out_path}"
         monkeypatch.setattr(comfy, "generate_image", fake_gen)
 
@@ -5372,7 +5372,7 @@ class TestMusicPlugin:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
-            Path(out_path).write_bytes(b"FLACfake")
+            Path(out_path).write_bytes(flac_bytes())
             return True, f"Track saved to {out_path}"
         monkeypatch.setattr(music_gen, "generate_music", fake_gen)
 
@@ -5546,7 +5546,7 @@ class TestVideoEndpoints:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"fake mp4")
+            Path(out_path).write_bytes(mp4_bytes())
             return True, f"Clip saved to {out_path}"
         monkeypatch.setattr(video_gen, "generate_video", fake_gen)
 
@@ -5958,7 +5958,7 @@ def test_remove_route_still_allows_an_unloaded_non_active_model(gui_app, alias_e
         return _FakeJob()
 
     monkeypatch.setattr(
-        "localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        "localm.jobmanager.JobManager.start_cli", fake_start_cli)
 
     hs._engines.clear()
     hs._engines_lru.clear()
@@ -5990,7 +5990,7 @@ def test_remove_route_still_allows_a_registered_but_unloaded_engine(gui_app, ali
         id = "job-test"
 
     monkeypatch.setattr(
-        "localm.plugins.gui.jobs.JobManager.start_cli",
+        "localm.jobmanager.JobManager.start_cli",
         lambda self, kind, cli_args, **kw: _FakeJob())
 
     hs._engines.clear()

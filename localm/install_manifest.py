@@ -1015,6 +1015,57 @@ def list_processes() -> Optional[list]:
         return None
 
 
+def command_line(pid: int) -> Optional[str]:
+    """The command line of process *pid* as one string, or None when it cannot
+    be read (the process is gone, access is denied, or the platform offers no
+    way). Never raises."""
+    try:
+        if sys.platform == "win32":
+            return _win_command_line(pid)
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+        return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
+def _win_command_line(pid: int) -> Optional[str]:
+    """``NtQueryInformationProcess(ProcessCommandLineInformation)``, which needs
+    only PROCESS_QUERY_LIMITED_INFORMATION (Windows 8.1 and later). None on any
+    other platform."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT),
+                    ("Buffer", ctypes.c_void_p)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    nt = ctypes.WinDLL("ntdll")
+    nt.NtQueryInformationProcess.restype = ctypes.c_long
+    nt.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(0x10000 + ctypes.sizeof(_UnicodeString))
+        got = wintypes.ULONG(0)
+        if nt.NtQueryInformationProcess(h, 60, buf, len(buf), ctypes.byref(got)) != 0:
+            return None
+        us = _UnicodeString.from_buffer(buf)
+        if not us.Buffer or not us.Length:
+            return None
+        return ctypes.wstring_at(us.Buffer, us.Length // 2)
+    finally:
+        k32.CloseHandle(h)
+
+
 def _ancestors(procs: list, pid: int) -> set:
     parent = {p[0]: p[1] for p in procs}
     out = set()
@@ -1815,6 +1866,35 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False,
     return _finish(report, root, m, items, dry_run=False)
 
 
+EXIT_CANNOT_LIST = 4     # `running`: processes cannot be listed on this system
+
+
+def running_in_folder(root, *, stop: bool = False, log=print) -> int:
+    """List the programs running from inside *root*, one "PID <pid> <exe>" line
+    each; with *stop*, stop them as well and rescan.
+
+    Returns 0 when nothing (is left) running, EXIT_RUNNING when programs run and
+    *stop* is False, EXIT_FAILED when one could not be stopped, EXIT_CANNOT_LIST
+    when processes cannot be listed here. Nothing outside *root* is touched."""
+    root = Path(root).resolve()
+    found = running_from([root])
+    if found is None:
+        log("  [i] Could not list the running programs on this system.")
+        return EXIT_CANNOT_LIST
+    for pid, exe in found:
+        log(f"PID {pid} {exe}")
+    if not found:
+        return 0
+    if not stop:
+        return EXIT_RUNNING
+    report = {"running": found, "stopped": [], "failed": []}
+    if not _stop_all(report, [root]):
+        for label, why in report["failed"]:
+            log(f"  [!] {label}: {why}")
+        return EXIT_FAILED
+    return 0
+
+
 def _stop_all(report: dict, dirs: list, rounds: int = 3) -> bool:
     """Stop every process running from *dirs*, parents first, rescanning for
     anything a stopped process started meanwhile. False when one survives."""
@@ -2233,6 +2313,11 @@ def main(argv=None) -> int:
                    help="leave the in-clone Python runtime for the calling "
                         f"script to delete, named in {PENDING_NAME}")
 
+    rn = sub.add_parser("running", help="list LocaLM programs running from this folder "
+                                        "(exit 3 when some do); --stop stops them")
+    rn.add_argument("--root", default=".")
+    rn.add_argument("--stop", action="store_true")
+
     f = sub.add_parser("finish", help="remove what a previous uninstall deferred")
     f.add_argument("--root", default=".")
 
@@ -2303,6 +2388,8 @@ def main(argv=None) -> int:
             print(f"[install] could not write the setup journal: {e}", file=sys.stderr)
             return 1
         return 0
+    if args.cmd == "running":
+        return running_in_folder(args.root, stop=args.stop)
     if args.cmd == "finish":
         removed, left = finish_pending(args.root)
         for p in removed:

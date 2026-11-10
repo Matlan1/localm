@@ -147,8 +147,8 @@ def test_runner_downgrades_to_restricted_after_key_revoked(home, tmp_path, monke
     assert auth.revoke_key(created["id"]) is True
     captured.clear()
     result = runner.run_job(job, engine=None)
-    assert result["status"] == "ok"          # downgraded, not failed/skipped
-    assert captured["restricted"] is True
+    assert result["status"] == "error"       # skipped: the creating key is gone
+    assert "restricted" not in captured
 
 
 def test_runner_downgrades_to_restricted_for_an_expired_key(home, tmp_path, monkeypatch):
@@ -164,8 +164,8 @@ def test_runner_downgrades_to_restricted_for_an_expired_key(home, tmp_path, monk
     job = _make_job(cwd=str(work), owner=auth._hash_key(created["key"]))
 
     result = runner.run_job(job, engine=None)
-    assert result["status"] == "ok"          # downgraded, not failed/skipped
-    assert captured["restricted"] is True
+    assert result["status"] == "error"       # skipped: the creating key is gone
+    assert "restricted" not in captured
 
 
 def test_runner_owner_created_shell_job_survives_indefinitely(home, tmp_path, monkeypatch):
@@ -214,9 +214,9 @@ def test_scheduler_tick_downgrades_shell_job_after_key_revoked(home, tmp_path, m
 
     assert ran == [job.id]
     results = store.list_results(job.id)
-    assert results and results[0]["status"] == "ok"
-    # The job ran (it was not silently skipped), but WITHOUT shell access.
-    assert captured["restricted"] is True
+    assert results and results[0]["status"] == "error"
+    # The job did not run: its creating key is gone, and no agent was started.
+    assert "restricted" not in captured
 
 
 def test_scheduler_tick_runs_unrestricted_while_key_is_live(home, tmp_path, monkeypatch):

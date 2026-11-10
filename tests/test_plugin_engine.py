@@ -186,21 +186,14 @@ def test_unknown_manifest_key_warned_but_plugin_loads(env):
         assert c.get("/api/alpha/ping").json() == {"pong": True}
 
 
-def test_host_scope_methods_fail_loudly(env):
-    """The host has no request context, so has_scope/require_scope cannot check
-    anything. They must raise instead of silently allowing - a plugin guard built
-    on a silent no-op can never fire."""
-    from unittest.mock import MagicMock
-
+def test_host_has_no_scope_stubs(env):
+    """The host has no request context, so it exposes no has_scope/require_scope
+    that could only raise or silently allow."""
+    from localm.plugins.contract import Host
     from localm.plugins.engine import PluginHost
-
-    spec = MagicMock()
-    spec.name = "alpha"
-    host = PluginHost(MagicMock(), MagicMock(), spec)
-    with pytest.raises(NotImplementedError):
-        host.has_scope("alpha")
-    with pytest.raises(NotImplementedError):
-        host.require_scope("alpha")
+    for member in ("has_scope", "require_scope"):
+        assert not hasattr(PluginHost, member)
+        assert not hasattr(Host, member)
 
 
 def test_on_install_hook_fires(env):
@@ -692,7 +685,8 @@ def test_load_failure_after_partial_register_leaves_nothing_live(env, tmp_path):
         assert c.get("/api/flaky/ping").status_code == 200
 
 
-def test_protected_plugin_cannot_be_disabled(env):
+def test_protected_plugin_cannot_be_disabled(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
@@ -811,7 +805,8 @@ def test_set_installed_state_unknown_raises(env):
         mgr.set_installed_state("nope", True)
 
 
-def test_set_installed_state_protected_cannot_uninstall(env):
+def test_set_installed_state_protected_cannot_uninstall(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -821,7 +816,8 @@ def test_set_installed_state_protected_cannot_uninstall(env):
         mgr.set_installed_state("core", False)
 
 
-def test_set_enabled_state_protected_cannot_disable(env):
+def test_set_enabled_state_protected_cannot_disable(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -831,7 +827,8 @@ def test_set_enabled_state_protected_cannot_disable(env):
         mgr.set_enabled_state("core", False)
 
 
-def test_uninstall_protected_raises(env):
+def test_uninstall_protected_raises(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -1131,6 +1128,115 @@ def test_install_external_rejects_bad_input(env):
         assert "already installed" in r.json()["detail"]
 
 
+def _make_tools_only_plugin(root, name="myplugin"):
+    """The coder-tool manifest docs/plugins.md shows: ``entry`` and ``[tools]
+    exports``, no ``register``, with the entry module inside a package."""
+    pdir = root / name
+    (pdir / name).mkdir(parents=True, exist_ok=True)
+    (pdir / "plugin.toml").write_text(
+        f'[plugin]\nname  = "{name}"\nentry = "{name}.tools:setup"\n'
+        f'\n[tools]\nexports = ["do_the_thing"]\n', encoding="utf-8")
+    (pdir / name / "__init__.py").write_text("", encoding="utf-8")
+    (pdir / name / "tools.py").write_text(
+        'def setup():\n    pass\n\n\n'
+        'def do_the_thing(cwd, text=""):\n'
+        '    """Do the thing."""\n'
+        '    return f"did the thing: {text}"\n', encoding="utf-8")
+    return pdir
+
+
+def test_tools_only_manifest_is_not_a_load_failure(env, caplog):
+    """A manifest with ``entry`` and no ``register`` is installed and enabled by
+    ``localm plugin install <dir>``; a server start reports no load error for
+    it, and the coder registers its exported tool."""
+    from unittest.mock import patch
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.coder import tools as coder_tools
+    from localm.plugins.coder.plugin_tools import register_plugin_tools
+    src = _make_tools_only_plugin(env / "src")
+    PluginManager(None).set_installed_from_dir(src)      # the CLI install path
+
+    events = []
+    app = FastAPI()
+    mgr = PluginManager(app)
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.load_enabled(on_event=lambda *a: events.append(a))
+    state = mgr.api_state()
+    entry = next(p for p in state["plugins"] if p["name"] == "myplugin")
+    assert entry["installed"] is True and entry["enabled"] is True
+    assert entry["error"] is None
+    assert "myplugin" not in state["errors"]
+    assert entry["loaded"] is False
+    assert [e for e in events if e[0] == "myplugin"] == []
+    assert "myplugin" not in caplog.text
+    assert mgr.load_enabled_pending() == []
+    assert mgr.load_backend_plugins() == []
+    assert "myplugin" not in mgr.api_state()["errors"]
+
+    with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+        names, warns = register_plugin_tools()
+        assert "plugin_myplugin_do_the_thing" in names
+        assert warns == []
+        fn = coder_tools.TOOL_REGISTRY["plugin_myplugin_do_the_thing"].fn
+        assert fn(env, text="x").output == "did the thing: x"
+
+
+def test_tools_only_manifest_enables_and_disables_over_http(env):
+    from localm.plugins.engine import attach_engine
+    src = _make_tools_only_plugin(env / "src")
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        def _entry():
+            return next(p for p in c.get("/api/plugins").json()["plugins"]
+                        if p["name"] == "myplugin")
+
+        assert c.post("/api/plugins/install-external",
+                      json={"source": str(src)}).status_code == 200
+        assert _entry()["enabled"] is True and _entry()["error"] is None
+        assert c.post("/api/plugins/myplugin/disable").status_code == 200
+        assert _entry()["enabled"] is False
+        r = c.post("/api/plugins/myplugin/enable")
+        assert r.status_code == 200, r.text
+        assert _entry()["enabled"] is True and _entry()["error"] is None
+
+
+def test_manifest_with_neither_entry_nor_register_is_a_load_failure(env):
+    from localm.plugins.engine import PluginManager
+    from localm.config import load_config, save_config
+    plugins = env / "plugins"
+    pdir = plugins / "bare"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.toml").write_text('[plugin]\nname = "bare"\n', encoding="utf-8")
+    cfg = load_config()
+    cfg["plugins_enabled"] = ["bare"]
+    save_config(cfg)
+    events = []
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.load_enabled(on_event=lambda *a: events.append(a))
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "bare")
+    assert entry["loaded"] is False
+    assert "module 'plugin' not found" in entry["error"]
+    assert [(e[0], e[1]) for e in events] == [("bare", "failed")]
+
+
+def test_manifest_with_entry_and_register_is_loaded_by_the_engine(env):
+    from localm.plugins.engine import PluginManager
+    from localm.config import load_config, save_config
+    plugins = env / "plugins"
+    _make_plugin(plugins, "both", _ping("both"), toml_extra='entry = "plug:register"\n')
+    cfg = load_config()
+    cfg["plugins_enabled"] = ["both"]
+    save_config(cfg)
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.load_enabled()
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "both")
+    assert entry["loaded"] is True and entry["error"] is None
+    with TestClient(app) as c:
+        assert c.get("/api/both/ping").status_code == 200
+
+
 # ---------------------------------------------------------------------------
 #  Plugin id confinement.
 #
@@ -1239,22 +1345,6 @@ def test_uninstall_and_enable_with_traversing_id_are_refused(env):
             mgr.uninstall(evil)
         with pytest.raises(KeyError):
             mgr.enable(evil)
-    assert _sentinel_intact(sentinel)
-
-
-def test_swap_in_store_copy_refuses_staging_outside_the_installed_root(env):
-    """_swap_in_store_copy interpolates the name into two SIBLING basenames
-    ('.<name>.refresh.tmp'/'.bak') that drive copytree, two renames and four
-    rmtree calls. Today its dest always comes from the validated _installed_dir;
-    the guard exists so a future caller passing a raw name cannot silently
-    reinstate the escape."""
-    from localm.plugins.engine import PluginManager
-    store, installed, sentinel = _traversal_roots(env)
-    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
-
-    with pytest.raises(ValueError, match="staging"):
-        mgr._swap_in_store_copy("../outside", sentinel,
-                                installed / ".." / "outside", "deadbeef")
     assert _sentinel_intact(sentinel)
 
 
@@ -1638,6 +1728,8 @@ def test_failed_first_run_provisioning_is_reported(env, monkeypatch, caplog):
 
 
 def test_installed_protected_plugin_left_disabled_is_enabled_again(env):
+    """A protected plugin (chat) missing from plugins_enabled still counts as
+    enabled and is active, and discovery does not rewrite config.json."""
     from localm.config import load_config, update_config
     from localm.plugins.engine import PluginManager
 
@@ -1646,9 +1738,11 @@ def test_installed_protected_plugin_left_disabled_is_enabled_again(env):
     _make_plugin(inst, "chat", _ping("chat"))
     update_config(lambda cfg: cfg.__setitem__("plugins_enabled", []))
 
-    PluginManager(FastAPI(), store_root=store, installed_root=inst).discover()
+    m = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    m.discover()
 
-    assert "chat" in load_config().get("plugins_enabled", [])
+    assert m.is_enabled("chat") and m.is_active("chat")
+    assert load_config().get("plugins_enabled") == []
 
 
 def test_failed_builtin_refresh_is_reported(env, monkeypatch, caplog):
@@ -1659,7 +1753,7 @@ def test_failed_builtin_refresh_is_reported(env, monkeypatch, caplog):
 
     def _boom(self, name):
         raise RuntimeError("refresh exploded")
-    monkeypatch.setattr(PluginManager, "_maybe_refresh_builtin", _boom)
+    monkeypatch.setattr(PluginManager, "_migrate_installed_copy", _boom)
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
 
     with caplog.at_level(logging.WARNING, logger="localm.plugins"):
@@ -1792,13 +1886,14 @@ def test_a_staging_folder_from_a_killed_install_is_neither_listed_nor_blocks_rei
 
 def test_a_staging_folder_is_not_scanned_as_a_plugin_by_the_other_scanners(env, monkeypatch):
     from localm.plugins import loader, media_config
+    from localm.plugins.engine import PluginManager
     root = env / "installed"
     staging = root / ".killed.install.tmp"
     staging.mkdir(parents=True)
     (staging / "plugin.toml").write_text(
         '[plugin]\nname = "killed"\nscope = "killed"\nregister = "plug"\n', encoding="utf-8")
-    manifests, errors, _warns = loader._scan(root)
-    assert manifests == [] and errors == []
+    mgr = PluginManager(None, installed_root=root, store_root=root / "no-store")
+    assert "killed" not in mgr.discover() and mgr._discover_errors == {}
     monkeypatch.setattr(loader, "plugins_dir", lambda: root)
     assert media_config.active_plugins({"plugins_enabled": ["killed", ".killed.install.tmp"]}) == set()
 

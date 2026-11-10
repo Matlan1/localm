@@ -735,6 +735,75 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     return {"device_map": "auto"}
 
 
+def _refuse_missing_weights(info: dict) -> None:
+    """Raise RuntimeError when transformers' own class found weights absent from the
+    checkpoint, which it would otherwise run on random values."""
+    missing = sorted(info.get("missing_keys") or [])
+    if missing:
+        raise RuntimeError(f"transformers' own class for this model does not match its weights: {len(missing)} "
+                           f"weights are missing, such as {missing[0]}")
+
+
+@contextlib.contextmanager
+def _quiet_load_report(quiet: bool):
+    """With *quiet*, hold back transformers' load report for the block: it lists every
+    weight the on-demand experts leave to be read later as unexpected."""
+    if not quiet:
+        yield
+        return
+    from transformers.utils import logging as tr_logging
+    level = tr_logging.get_verbosity()
+    tr_logging.set_verbosity_error()
+    try:
+        yield
+    finally:
+        tr_logging.set_verbosity(level)
+
+
+def _on_demand_experts_device(torch, model_path: str, device: str, device_map_kwargs: dict):
+    """The device (a GPU index, or "cpu") for a load whose experts are read on demand, or None
+    for a load placed the usual way. Only a load on the CPU or on one GPU qualifies, for a
+    model :func:`_hf_on_demand_experts.worth_using` accepts."""
+    from localm.inference.backends import _hf_on_demand_experts
+    if device == "cpu":
+        import psutil
+        return "cpu" if _hf_on_demand_experts.worth_using(model_path, int(psutil.virtual_memory().available)) else None
+    if device != "cuda":
+        return None
+    budget = device_map_kwargs.get("max_memory")
+    gpus = sorted(i for i in budget if isinstance(i, int)) if isinstance(budget, dict) else [0]
+    if len(gpus) != 1:
+        return None
+    try:
+        free = int(torch.cuda.mem_get_info(gpus[0])[0])
+    except Exception as e:
+        logger.debug("hf load: could not read free video memory: %s", e)
+        return None
+    return gpus[0] if _hf_on_demand_experts.worth_using(model_path, free) else None
+
+
+def _safetensors_bytes(model_path: str) -> int:
+    """Total size of the ``.safetensors`` files directly in *model_path*; 0 when there are
+    none or the folder cannot be read."""
+    try:
+        return sum(f.stat().st_size for f in Path(model_path).glob("*.safetensors"))
+    except OSError:
+        return 0
+
+
+def _cpu_device_map(model_path: str) -> tuple[dict, bool]:
+    """``(device_map kwargs, keep the checkpoint's dtype)`` for a CPU load. The whole model
+    goes to system RAM unless its ``.safetensors`` files, at the float32 a CPU load uses,
+    need more than 90% of the available RAM; then placement is automatic with 80% of it as
+    the budget, the rest stays on disk in the model's own files, and the load keeps the
+    checkpoint's dtype so those files are read as they are."""
+    import psutil
+    available = int(psutil.virtual_memory().available)
+    if _safetensors_bytes(model_path) * 2 <= available * 0.9:
+        return {"device_map": "cpu"}, False
+    return {"device_map": "auto", "max_memory": {"cpu": int(available * 0.8)}}, True
+
+
 def _auto_device(torch, override: Optional[str] = None) -> str:
     """Pick the HF inference device: an explicit *override*, else the best available
     GPU, else CPU. CUDA (which also covers AMD ROCm via PyTorch) is preferred, then
@@ -1624,6 +1693,7 @@ class HFWorker:
         self.fp8_plan = None
         # One-line notes about the last load for the load output.
         self.load_notes: list[str] = []
+        self._expert_store = None
         # Why the most recent chat_stream() call ended - "stop" (EOS) or
         # "length" (max_tokens exhausted first). Mirrors GgufWorker's
         # identical attribute; recomputed for real by chat_stream() below.
@@ -1645,7 +1715,10 @@ class HFWorker:
         # PARENT, BEFORE this class is ever constructed - see hf.py's load().
         # This method only needs the boolean for the trust_remote_code= kwarg
         # below.
-        trust_remote_code = _trust_remote_code_enabled()
+        from localm.inference.backends.hf import runs_without_its_own_code, uses_transformers_classes
+        without_own_code = runs_without_its_own_code(self.model_path)
+        transformers_classes = uses_transformers_classes(self.model_path)
+        trust_remote_code = _trust_remote_code_enabled() and not transformers_classes
         _apply_gpu_order(self._gpu_order)
         torch = _require_torch()
         from localm.inference.backends import _st_plan
@@ -1655,8 +1728,21 @@ class HFWorker:
         device = _auto_device(torch, self._device)
         self.resolved_device = device
         dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
-        device_map_kwargs = (_cuda_device_map(torch) if device == "cuda"
-                              else {"device_map": "cpu"})
+        keep_checkpoint_dtype = False
+        if device == "cuda":
+            device_map_kwargs = _cuda_device_map(torch)
+        elif device == "cpu":
+            device_map_kwargs, keep_checkpoint_dtype = _cpu_device_map(self.model_path)
+        else:
+            device_map_kwargs = {"device_map": "cpu"}
+        on_demand_device = _on_demand_experts_device(torch, self.model_path, device, device_map_kwargs)
+        if on_demand_device is not None:
+            device_map_kwargs = {"device_map": {"": on_demand_device}}
+            keep_checkpoint_dtype = True
+        kernel_note = None
+        if transformers_classes:
+            from localm.inference.backends._hf_linear_attention import choose_kernels
+            kernel_note = choose_kernels(torch, device)
 
         # Runs before transformers first checks for the kernels package (the
         # check is cached): a native FP8 plan, or a Hub-kernel quantization the
@@ -1676,6 +1762,13 @@ class HFWorker:
                                        device_map_kwargs)
         self.fp8_plan = fp8
         self.load_notes = []
+        if kernel_note:
+            self.load_notes.append(kernel_note)
+        if without_own_code:
+            self.load_notes.append("this model's own code did not run ('Allow model-bundled custom code' is off); "
+                                   "using transformers' own support for it")
+        elif transformers_classes:
+            self.load_notes.append("this model's own code does not run; using transformers' own support for it")
         if fp8 is not None:
             from localm.inference.backends._hf_fp8 import describe
             self.load_notes.append(describe(fp8))
@@ -1749,9 +1842,19 @@ class HFWorker:
         load_kwargs = _build_load_kwargs(
             tr,
             device_map_kwargs=device_map_kwargs,
-            dtype=dtype,
+            dtype=("auto" if keep_checkpoint_dtype and fp8 is None
+                   and not _is_compressed_tensors(self.model_path) else dtype),
             trust_remote_code=trust_remote_code,
         )
+        from localm.inference.backends import _hf_remote_compat
+        compat = _hf_remote_compat.for_model(self.model_path, trust_remote_code)
+        if compat is not None:
+            compat_config = compat.config(tr)
+            if compat_config is not None:
+                load_kwargs["config"] = compat_config
+        if on_demand_device is not None:
+            from localm.inference.backends import _hf_on_demand_experts
+            _hf_on_demand_experts.prepare()
         if fp8 is not None and not fp8.native:
             load_kwargs["quantization_config"] = tr.FineGrainedFP8Config(dequantize=True)
         elif fp8 is None and _is_compressed_tensors(self.model_path):
@@ -1778,8 +1881,15 @@ class HFWorker:
             if cls is None:
                 continue
             try:
-                with _filter_docstring_leak(), _suppress_offload_buffer_advisory():
-                    self._model = cls.from_pretrained(self.model_path, **load_kwargs)
+                with _filter_docstring_leak(), _suppress_offload_buffer_advisory(), \
+                        _quiet_load_report(on_demand_device is not None), \
+                        (compat.loading() if compat is not None else contextlib.nullcontext()):
+                    if transformers_classes:
+                        model, info = cls.from_pretrained(self.model_path, output_loading_info=True, **load_kwargs)
+                        _refuse_missing_weights(info)
+                        self._model = model
+                    else:
+                        self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 logger.debug("hf load: class=%s", cls_name)
                 break
             except (ValueError, OSError, RuntimeError, KeyError) as e:
@@ -1796,6 +1906,19 @@ class HFWorker:
         if self._model is None:
             detail = "; tried: " + "; ".join(errors) if errors else ""
             raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
+
+        if compat is not None:
+            compat.after_load(self._model)
+
+        if on_demand_device is not None:
+            from localm.inference.backends import _hf_on_demand_experts
+            target = "cpu" if device == "cpu" else f"cuda:{on_demand_device}"
+            budget = _hf_on_demand_experts.free_bytes(device, gpu=on_demand_device if isinstance(on_demand_device, int) else 0)
+            self._expert_store = _hf_on_demand_experts.attach(self._model, self.model_path, target, budget)
+            self.load_notes.append(
+                f"larger than this machine's memory: the routed experts stay on disk and are read as needed, so "
+                f"replies are slow; up to {budget / 1024 ** 3:.1f} GB of them stay in "
+                f"{'RAM' if device == 'cpu' else 'video memory'}. A GGUF of this model may fit better.")
 
         if fp8 is None:
             from localm.inference.backends._hf_fp8 import quant_method
@@ -1880,6 +2003,9 @@ class HFWorker:
             self._vision_cache.uninstall()
         self._vision_cache = None
         self._model = None
+        if self._expert_store is not None:
+            self._expert_store.close()
+            self._expert_store = None
         self._processor = None
         self._tokenizer = None
         self._loaded = False
@@ -2260,7 +2386,11 @@ class HFWorker:
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
+        # *raw_prompt*: the whole prompt, tokenised as given with the tokenizer's
+        # own special tokens and no chat template; *messages* and *thinking* are
+        # then not read.
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
         # models). Both remaining options - drop it, or enforce it strictly - give
@@ -2280,6 +2410,7 @@ class HFWorker:
         # text alone). Checked before importing transformers so it fails
         # fast and clearly.
         from .base import (
+            EMPTY_RAW_PROMPT_MESSAGE,
             UnsupportedInputError,
             image_unsupported_message,
             messages_contain_image,
@@ -2289,6 +2420,8 @@ class HFWorker:
                 image_unsupported_message(self.processor_error))
         if _messages_contain_audio(messages) and not self._supports_audio:
             raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
+        if raw_prompt is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
 
         tokenizer = self._tokenizer
         model = self._model
@@ -2346,7 +2479,11 @@ class HFWorker:
                 vision_cache.clear()
 
         # --- Tokenize / process ---
-        if self._processor and (images or audios):
+        if raw_prompt is not None:
+            inputs = tokenizer(raw_prompt, return_tensors="pt").to(model.device)
+            if int(inputs["input_ids"].shape[-1]) == 0:
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
+        elif self._processor and (images or audios):
             # Full multimodal path
             fallback_template = _processor_fallback_template(self._processor, tokenizer)
             try:

@@ -1057,6 +1057,7 @@ def pull_model(
     dest_dir: Optional[Path] = None,
     register: bool = True,
     type_is_hint: bool = False,
+    allow_local: bool = True,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -1078,6 +1079,10 @@ def pull_model(
     result's badge), not the user's choice: the entry is registered with it, and
     the registry sync may still correct it. Without it an explicit *model_type*
     is recorded as ``type_user_set``.
+
+    *allow_local* False treats *model_spec* as a remote spec even when it names
+    an existing file or folder, so nothing on this machine is registered, copied
+    or moved.
     """
     spec = _mm.resolve_spec(model_spec)
     type_is_auto = (model_type == "auto")
@@ -1097,12 +1102,14 @@ def pull_model(
     # charset-validated anywhere upstream, so both are escaped. `actual` is a
     # hashlib hexdigest and is escaped too.
     from rich.markup import escape
+    local: Optional[Path] = None
     try:
         local = Path(model_spec).expanduser()
-        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
+        is_local_path = (allow_local and local.exists()
+                         and (local.is_absolute() or local.is_file()))
     except OSError:
         is_local_path = False
-    if is_local_path:
+    if is_local_path and local is not None:
         # A user-supplied --sha256 is verified against the real bytes here and
         # the pull is refused on a mismatch, never registered as a success. A
         # full HF repo refuses --sha256 outright instead.
@@ -1127,7 +1134,14 @@ def pull_model(
         # else let add_local detect it (GGUF -> llm, HF dir -> config.json,
         # otherwise the 'unknown' sentinel).
         local_type = None if model_type == "auto" else model_type
-        return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
+        added = _mm.add_local(str(local), name=name, model_type=local_type, store=store)
+        if added and mmproj_spec:
+            ok, message = _mm.attach_mmproj_after_add(str(local), name, mmproj_spec)
+            if not ok:
+                console.print(f"[red]--mmproj was not applied:[/red] {escape(message)}")
+                return False
+            console.print(f"[green]{escape(message)}[/green]")
+        return added
 
     logger.info("pull: downloading %s", _spec_for_log(spec))
     from . import pending_pulls
@@ -2161,6 +2175,10 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
     return dest
 
 
+_DECISION_DETECTION_NOTE = ("[yellow]Detected as a decision model (GGUF metadata). It is not a chat "
+                            "model and is kept out of chat.[/yellow]")
+
+
 def _embedding_detection_note(path) -> str:
     """The console line a pull prints for a GGUF typed as an embedding model:
     names it a reranker when its own metadata marks it as one."""
@@ -2488,6 +2506,9 @@ def _pull_gguf_file(
                 elif _mm.gguf_is_mmproj(dest):
                     console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                     reg_type = "mmproj"
+                elif _mm.gguf_decision_signal(dest):
+                    console.print(_DECISION_DETECTION_NOTE)
+                    reg_type = "decision"
                 elif _mm.gguf_embedding_signal(dest):
                     console.print(_embedding_detection_note(dest))
                     reg_type = "embedding"
@@ -2722,6 +2743,9 @@ def _pull_gguf_file(
             elif _mm.gguf_is_mmproj(base_dir / filename):
                 console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                 reg_type = "mmproj"
+            elif _mm.gguf_decision_signal(base_dir / filename):
+                console.print(_DECISION_DETECTION_NOTE)
+                reg_type = "decision"
             elif _mm.gguf_embedding_signal(base_dir / filename):
                 console.print(_embedding_detection_note(base_dir / filename))
                 reg_type = "embedding"
@@ -3171,8 +3195,9 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
         f"Python file(s) ({shown}).")
     console.print(
         "[dim]  localm will NOT run them: model-bundled custom code is disabled "
-        "by default. A model that requires it is refused with an explanation "
-        "unless you enable 'hf_trust_remote_code'.[/dim]")
+        "by default. Such a model runs on transformers' own support when there is "
+        "one; otherwise it is refused with an explanation unless you enable "
+        "'hf_trust_remote_code'.[/dim]")
 
 
 def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
@@ -3305,6 +3330,44 @@ def _pull_hf_snapshot(
         console.print(f"[red]Download already in progress:[/red] {escape(str(e))} "
                       "Wait for it to finish, or pull with -n <a-different-name>.")
         return False
+
+
+def _snapshot_unsafe_name(dest: Path, names) -> Optional[str]:
+    """The first of *names* (repo-relative file names from a HuggingFace
+    listing, ``/``-separated) that a download into *dest* must refuse, or None.
+    Each path component must pass :func:`_safe_models_filename` against the
+    folder it lands in: no reserved character (``:`` included), no reserved
+    device name, no trailing dot or space, no ``.``/``..`` or empty component,
+    and no OS short-name alias of a different existing file."""
+    for raw in names:
+        name = str(raw or "")
+        base = dest
+        for part in name.split("/"):
+            if _safe_models_filename(part, base) is None:
+                return name
+            base = base / part
+    return None
+
+
+def _snapshot_listing_names(repo_id: str, repo_siblings,
+                            commit: Optional[str]) -> tuple[Optional[list], Optional[str]]:
+    """``(names, commit)``: the file names of *repo_id* and the commit they were
+    read at. From *repo_siblings* (read at *commit*) when the listing was read;
+    else from ``list_repo_files`` at *commit*, or, without one, at the commit
+    ``repo_info`` reports for the default branch. ``(None, None)`` when no list
+    can be read, or no commit is known for it."""
+    if repo_siblings is not None:
+        return [str(getattr(s, "rfilename", "") or "") for s in repo_siblings], commit
+    try:
+        api = _hf_api()
+        if commit is None:
+            commit = _valid_commit(getattr(api.repo_info(repo_id), "sha", None))
+        if commit is None:
+            return None, None
+        return list(api.list_repo_files(repo_id, revision=commit)), commit
+    except Exception as e:
+        logger.debug("could not list the files of %s: %s", repo_id, e)
+        return None, None
 
 
 def _pull_hf_snapshot_locked(
@@ -3492,6 +3555,23 @@ def _pull_hf_snapshot_locked(
                                  max(0, total_size - _disk_bytes())):
         return False
 
+    names, listed_at = _snapshot_listing_names(repo_id, repo_siblings, commit)
+    if names is None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] its file list could not be "
+            "read from Hugging Face, so the file names it would write cannot be "
+            "checked. Retry when Hugging Face answers.")
+        return False
+    commit = listed_at
+    unsafe = _snapshot_unsafe_name(dest, names)
+    if unsafe is not None:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}:[/red] it contains a file named "
+            f"{escape(repr(unsafe))}, which is not a plain file name on this computer "
+            "(a reserved character or device name, a trailing dot or space, a path "
+            "step, or another name for a file already there).")
+        return False
+
     _mm.ensure_dirs()
     from ..storekit import atomic_write
     created = not dest.exists()
@@ -3612,7 +3692,8 @@ def _ssrf_resolve_final_url(url: str) -> str:
         netpolicy.check_url(current, allow_when_off=allow_off)
         try:
             resp = netpolicy.pinned_request(
-                "HEAD", current, allow_redirects=False, timeout=10)
+                "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         except netpolicy.NetworkPolicyError:
             raise                       # a policy refusal / rebind must NOT be swallowed into a silent GET
         except Exception:
@@ -3666,7 +3747,8 @@ def _policy_head(url: str):
                    if urllib.parse.urlparse(current).hostname == hub_host
                    else None)
         resp = netpolicy.pinned_request(
-            "HEAD", current, allow_redirects=False, timeout=10, headers=headers)
+            "HEAD", current, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10, headers=headers)
         location = (resp.headers.get("Location")
                     if resp.status_code in (301, 302, 303, 307, 308) else None)
         if not location or len(history) == 5:
@@ -4274,7 +4356,8 @@ def _pull_url_locked(
     # non-fatal; the GET still fails closed.
     head_etag = None
     try:
-        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
+        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
         total = int(head.headers.get("content-length", 0))
         head_etag = head.headers.get("etag")
     except NetworkPolicyError as e:
@@ -4320,13 +4403,15 @@ def _pull_url_locked(
         # revalidate immediately before the connect
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")
@@ -4612,13 +4697,15 @@ def _pull_civitai_file_locked(
     try:
         netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                     timeout=30, allow_redirects=False)
+                                     timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if already_have and r.status_code == 416:
             already_have = 0
             headers.pop("Range", None)
             _discard_part(part_file)
             r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
-                                         timeout=30, allow_redirects=False)
+                                         timeout=30, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off())
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from "
                           f"{escape(dl_url)}")
@@ -4818,7 +4905,7 @@ def _civitai_registry_unreadable() -> bool:
     """True when registry.json exists but neither it nor its backup can be read,
     which ``load_registry`` reports as an empty registry."""
     from .. import config
-    return not config._read_json_checked(config.REGISTRY_FILE, {})[1]
+    return config._read_json_state(config.REGISTRY_FILE, {})[1] == config.READ_UNREADABLE
 
 
 _CIVITAI_REGISTRY_STEP = "Fix or remove registry.json, then pull again."

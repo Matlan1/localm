@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import localm.config as cfg
+import localm.storekit as storekit
 from localm import sessions
 from localm.plugins.builtin.jobs.store import Job, JobStore
 
@@ -99,7 +100,7 @@ def test_a_session_write_waits_for_a_lock_held_by_another_process(home, monkeypa
     sid = sessions.create(scopes={"admin"}, key_hash="KH")
     lock = sessions.sessions_file().with_name("sessions.json.lock")
     lock.write_bytes(b"999999:" + b"f" * 32)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
 
     assert sessions.revoke_all() is None, (
         "revoke_all reported a result while another process held the store")
@@ -125,7 +126,7 @@ def test_a_held_lock_costs_the_request_path_at_most_its_short_budget(home):
 
     assert rec is not None
     assert elapsed < 2 * sessions._BEST_EFFORT_LOCK_TIMEOUT_S + 1.0, elapsed
-    assert sessions._BEST_EFFORT_LOCK_TIMEOUT_S < cfg._CROSS_LOCK_TIMEOUT
+    assert sessions._BEST_EFFORT_LOCK_TIMEOUT_S < storekit._CROSS_LOCK_TIMEOUT
 
 
 def test_a_stamp_does_not_wait_on_a_thread_holding_the_store(home):
@@ -222,10 +223,10 @@ _SLOW_JOB_STAMP = (
     "from localm.plugins.builtin.jobs.store import JobStore\n"
     "store = JobStore()\n"
     "real = store._write_all\n"
-    "def slow(jobs):\n"
+    "def slow(jobs, *extra):\n"
     "    print('READ', flush=True)\n"
     "    time.sleep(1.5)\n"
-    "    real(jobs)\n"
+    "    real(jobs, *extra)\n"
     "store._write_all = slow\n"
     "store.record_result(sys.argv[1], {'status': 'ok', 'finished': 1.0, 'output': 'x'})\n"
 )
@@ -264,7 +265,7 @@ def test_a_job_write_waits_for_a_lock_held_by_another_process(home, monkeypatch)
     _job(store)
     lock = store.root / "jobs.json.lock"
     lock.write_bytes(b"999999:" + b"f" * 32)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
 
     with pytest.raises(TimeoutError):
         store.update("j1", enabled=False)
@@ -283,7 +284,7 @@ def test_a_crash_left_lock_on_either_store_is_reclaimed(home):
     sid = sessions.create(scopes={"admin"}, key_hash="KH")
     store = JobStore()
     _job(store)
-    old = time.time() - cfg._CROSS_LOCK_STALE_AGE - 60
+    old = time.time() - storekit._CROSS_LOCK_STALE_AGE - 60
     for lock in (sessions.sessions_file().with_name("sessions.json.lock"),
                  store.root / "jobs.json.lock"):
         lock.write_bytes(b"999999:" + b"e" * 32)

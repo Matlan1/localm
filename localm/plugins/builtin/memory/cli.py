@@ -103,9 +103,17 @@ def _embed_fn():
     picked up by the next backfill.
     """
     try:
+        from localm.debuglog import native_console_paused
         from localm.inference.embedder import get_embedder
-        emb = get_embedder()
-        return emb.embed if emb is not None else None
+        with native_console_paused():
+            emb = get_embedder()
+        if emb is None:
+            return None
+
+        def _embed(texts):
+            with native_console_paused():
+                return emb.embed(texts)
+        return _embed
     except Exception:                                          # noqa: BLE001
         # Best effort. Reported rather than swallowed, so a vectorless save is
         # visible and can be correlated with a broken embedder later.
@@ -231,13 +239,8 @@ def _require_writable() -> None:
 def memory_add(text: str, kind: str, importance: float) -> None:
     """Save a fact yourself, without going through a chat turn.
 
-    Produces the SAME record `POST /api/memory/append` does - kind semantic,
-    source user, importance 0.8, and the same cap refusal.
-    `MemoryRecord.__post_init__` silently coerces an unknown kind to "semantic"
-    and an unknown source to "synth", so different values here would file the
-    user's own assertion as machine-synthesised at a lower weight and prune's
-    user-fact eviction reporting would stop seeing it. Both coercions are silent,
-    so the choices here are constrained rather than free text.
+    Stored like a fact added in the app: source user, with the kind and
+    importance given here. Refused once memory is at its record cap.
     """
     _require_writable()
     if not text.strip():

@@ -26,6 +26,14 @@ from localm.plugins.builtin.music import backend as music_backend
 from localm.plugins.builtin.music.backends import native
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 def _wav(seconds: float = 0.5, with_list: bool = True) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -348,9 +356,8 @@ def test_route_refuses_workflow_picks_for_native(tmp_path, monkeypatch, no_comfy
         r = c.post("/api/music", headers=h, json={
             "tags": "lofi", "duration_seconds": 2,
             "model_overrides": {"1": {"ckpt_name": "ace.safetensors"}}})
-        end, lines = _wait_job(c, r.json()["job_id"], h)
-        assert end and end["status"] == "failed"
-        assert any("Workflow model choices apply to ComfyUI" in ln for ln in lines)
+        assert r.status_code == 400
+        assert "Workflow model choices apply to ComfyUI" in r.json()["detail"]
         assert fake_generate == []
         assert prepared == []
 
@@ -491,9 +498,14 @@ def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fa
                                                        answer, complaint):
     from localm.media import comfy_client
     calls = []
-    monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
-                        calls.append((url, token, media)) or answer)
+
+    def _unload(url, token=None, media=True, on_failure=None, label="media"):
+        calls.append((url, token, media))
+        if answer is None:
+            on_failure(comfy_client.unload_failed_notice("HTTP 403", label))
+        return answer
+
+    monkeypatch.setattr(comfy_client, "_localm_unload", _unload)
     lines = []
     ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
                                self_url="http://127.0.0.1:9/v1", instance_token="tok",
@@ -520,13 +532,13 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     monkeypatch.setattr(server, "stop", lambda: True)
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None, media=True:
+                        lambda url, token=None, media=True, **kw:
                         calls.append(url) or {"status": "unloaded"})
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
     from localm.cli import main
     result = cli_runner.invoke(main, ["music", "lofi", "-d", "1", "-o", str(tmp_path / "s.wav")])
     assert result.exit_code == 0, result.output
-    assert calls == ["http://127.0.0.1:9"]
+    assert calls == ["http://127.0.0.1:9/v1"]
 
 
 def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path, monkeypatch,
@@ -537,9 +549,11 @@ def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path,
     save_config(cfg)
     s = music_backend.prepare_for_job(music_backend.settings(load_config()), load_config())
     assert s["backend"] == "a1111" and music_backend.is_comfy(s)
-    assert music_backend.generate_unless_comfy("lofi", tmp_path / "t.wav") is None
     import localm.cli.media as media_cli
+    import localm.image_gen.comfy as image_comfy
     import localm.music_gen as music_gen
+    monkeypatch.setattr(image_comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+    monkeypatch.setattr(image_comfy, "free_comfy_vram", lambda *a, **k: True)
     ran = []
     monkeypatch.setattr(music_gen, "generate_music",
                         lambda tags, out, **k: ran.append(tags) or (True, "saved"))
@@ -635,3 +649,38 @@ def test_route_applies_the_pages_component_choice_for_one_job(tmp_path, monkeypa
     assert seen and seen[0]["dit"] == "my-dit"
     assert bad.status_code == 400 and "not a registered model" in bad.text
     assert bad_slot.status_code == 400
+
+
+def test_a_job_with_no_models_carries_the_downloads_beside_the_text(tmp_path, monkeypatch,
+                                                                    no_comfy):
+    from fastapi.testclient import TestClient
+
+    def not_downloaded(*a, **k):
+        raise music.ModelError("the default ACE-Step models are not downloaded: run "
+                               "'localm setup-music'")
+    monkeypatch.setattr(music, "prepare", not_downloaded)
+    app = _music_app(tmp_path, monkeypatch)
+    h = _key(["music"])
+    with TestClient(app) as c:
+        r = c.post("/api/music", headers=h, json={"tags": "lofi", "duration_seconds": 2})
+        end, lines = _wait_job(c, r.json()["job_id"], h)
+        job = app.state.jobs.get(r.json()["job_id"])
+    assert end and end["status"] == "failed", lines
+    events = [e for e in job._history if e.get("type") == "missing_model"]
+    [event] = events
+    assert [m["filename"] for m in event["missing"]] == [
+        models.DEFAULT_FILES[c] for c in ("text_encoder", "dit", "vae", "lm")]
+    assert {m["filename"]: m["source"]["sha256"] for m in event["missing"]} == {
+        models.DEFAULT_FILES[c]: models.DEFAULT_SHA256[c] for c in models.COMPONENTS}
+    assert event["text"] in lines and "localm setup-music" in event["text"]
+
+
+def test_music_preflight_marks_the_offer_blocked_when_net_mode_is_off(tmp_path, monkeypatch,
+                                                                      no_comfy):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    app = _music_app(tmp_path, monkeypatch)
+    with TestClient(app) as c:
+        data = c.post("/api/media/music/preflight",
+                      headers=_key(["models:write", "music"]), json={}).json()
+    assert data["missing"] and all(m["blocked"] == "net_mode_off" for m in data["missing"])

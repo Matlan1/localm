@@ -36,11 +36,12 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from localm import model_ids
 from localm.config import model_index
+from localm.storekit import NamespaceLockRegistry, atomic_write
 
 _router = APIRouter()
 
@@ -107,10 +108,34 @@ def _conv_with_current_pin(data: dict) -> dict:
     return data
 
 
+# Serialisation scope: writers inside this process (request handlers and the
+# executor thread running relabel_pinned_model) take one lock per target file.
+# The CLI and other processes are not covered; relabel_pinned_model re-checks
+# the file's updated_at before it replaces it.
+_LOCKS = NamespaceLockRegistry()
+
+
+def _principal_dir(request: Request) -> str | None:
+    """The per-caller storage namespace: None for the owner (the shared files),
+    otherwise the caller's key hash."""
+    from localm.inference.http_server import memory_principal
+    prin = memory_principal(request)
+    if prin is None:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", prin):
+        raise HTTPException(403, "Unusable caller identity")
+    return prin
+
+
+def _chats_root(principal: str | None) -> Path:
+    base = _home() / "chats"
+    return base if principal is None else base / "_principals" / principal / "chats"
+
+
 def _persist_enabled() -> bool:
     """Chat persistence/writes are off in privacy mode (the default)."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    from localm.audit import automatic_write_allowed
+    return automatic_write_allowed("chat")
 
 
 # ------------------------------------------------------------------ #
@@ -119,10 +144,10 @@ def _persist_enabled() -> bool:
 # Server-side persistence for GUI chat conversations so they survive browser
 # reloads, profile wipes, and other devices on the LAN.
 
-def _conv_path(conv_id: str) -> Path:
+def _conv_path(conv_id: str, principal: str | None = None) -> Path:
     if not _CONV_ID.match(conv_id) or conv_id.lower() in _RESERVED_NAMES:
         raise HTTPException(400, "Invalid conversation id")
-    return _home() / "chats" / f"{conv_id}.json"
+    return _chats_root(principal) / f"{conv_id}.json"
 
 
 # Caches the projected index row per file keyed by (mtime, size), so the sidebar
@@ -172,14 +197,15 @@ def _log_unreadable(p: Path, err: Exception) -> None:
 
 
 @_router.get("/api/conversations")
-async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
+async def conversations_list(request: Request, meta: bool = False,
+                             limit: int = 0, offset: int = 0):
     """List conversations newest-first.
 
-    Pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
-    folder/n_messages) without the heavy message bodies and data-URI images - the
-    GUI sidebar uses this and lazy-loads each conversation's messages on open via
-    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. With no
-    params, returns the full payload capped at 200 items.
+    Pass ``meta=true`` for a lightweight index (id, title, updated_at, pinned,
+    folder, n_messages) without message bodies or embedded images; fetch a
+    conversation's messages with ``GET /api/conversations/{id}``. ``limit`` and
+    ``offset`` paginate. With no parameters, returns the full payload capped at
+    200 items.
 
     A chat file that cannot be read or parsed is left out of ``conversations``
     and ``total`` and its id is listed in ``unreadable``; a warning naming the
@@ -187,7 +213,7 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
     """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
-    chats_dir = _home() / "chats"
+    chats_dir = _chats_root(_principal_dir(request))
     rows = []
     unreadable: list[str] = []
     if chats_dir.is_dir():
@@ -218,12 +244,12 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
 
 
 @_router.get("/api/conversations/{conv_id}")
-async def conversation_get(conv_id: str):
-    """The full body of one conversation, lazy-loaded. Path validated by
-    _conv_path; 404 when absent so the client can fall back to its local copy."""
+async def conversation_get(conv_id: str, request: Request):
+    """The full body of one conversation. Answers 404 when it does not exist
+    and 403 when chat persistence is off (privacy mode)."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id)
+    path = _conv_path(conv_id, _principal_dir(request))
     if not path.is_file():
         raise HTTPException(404, "No such conversation")
     try:
@@ -237,12 +263,13 @@ async def conversation_get(conv_id: str):
 
 
 @_router.put("/api/conversations/{conv_id}")
-async def conversation_upsert(conv_id: str, req: ConversationUpsert):
+async def conversation_upsert(conv_id: str, req: ConversationUpsert,
+                              request: Request):
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
-    path = _conv_path(conv_id)
+    path = _conv_path(conv_id, _principal_dir(request))
     record = {"id": conv_id, "title": req.title,
               "updated_at": req.updated_at,
               "pinned": req.pinned, "folder": req.folder,
@@ -257,21 +284,86 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert):
     if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
         raise HTTPException(413, "Conversation too large to persist")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    tmp.replace(path)
+    with _LOCKS.get(str(path)):
+        atomic_write(path, payload)
     return {"status": "saved", "id": conv_id}
 
 
 @_router.delete("/api/conversations/{conv_id}")
-async def conversation_delete(conv_id: str):
+async def conversation_delete(conv_id: str, request: Request):
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id)
-    if path.is_file():
-        path.unlink()
-        return {"status": "deleted", "id": conv_id}
+    path = _conv_path(conv_id, _principal_dir(request))
+    with _LOCKS.get(str(path)):
+        if path.is_file():
+            path.unlink()
+            return {"status": "deleted", "id": conv_id}
     return {"status": "absent", "id": conv_id}
+
+
+def _all_chat_files() -> list:
+    """Every stored conversation file: the owner's and each principal's."""
+    base = _home() / "chats"
+    if not base.is_dir():
+        return []
+    files = list(base.glob("*.json"))
+    files.extend(base.glob("_principals/*/chats/*.json"))
+    return sorted(files)
+
+
+def _updated_at_of(p: Path):
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data.get("updated_at") if isinstance(data, dict) else None
+
+
+def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
+    """Rewrite ``pinned_model`` from *old_name* to *new_name* in every stored
+    conversation (the owner's and every principal's) that carries it.
+
+    A rewritten conversation gets a fresh ``updated_at`` so that a browser
+    holding an older cached copy takes this one rather than uploading its own
+    over it. Each file is rewritten under its per-file lock, and a file whose
+    ``updated_at`` changed since it was read is left as it is and listed in
+    ``failed``. A rewritten conversation's ``model_refs`` is set for *new_name*.
+    Returns ``(rewritten, failed)``: the ids rewritten, and the ids
+    of files that name *old_name* but were not rewritten. A file that does not
+    contain *old_name* is not parsed. Works in every session mode: it edits
+    files that already exist and creates none."""
+    import time
+
+    needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
+    index = model_index()
+    rewritten: list = []
+    failed: list = []
+    for p in _all_chat_files():
+        try:
+            with _LOCKS.get(str(p)):
+                text = p.read_text(encoding="utf-8")
+                if needle not in text:
+                    continue
+                data = json.loads(text)
+                if not isinstance(data, dict) or data.get("pinned_model") != old_name:
+                    continue
+                read_stamp = data.get("updated_at")
+                data["pinned_model"] = new_name
+                model_ids.attach_refs(data, (new_name,), index)
+                data["updated_at"] = int(time.time() * 1000)
+                if _updated_at_of(p) != read_stamp:
+                    failed.append(p.stem)
+                    continue
+                atomic_write(p, json.dumps(data, ensure_ascii=False))
+                rewritten.append(p.stem)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, RecursionError) as e:
+            from localm.debuglog import logger
+            logger.warning("rename: conversation %s could not be rewritten (%s)",
+                           p.stem, type(e).__name__)
+            failed.append(p.stem)
+    return rewritten, failed
 
 
 # ------------------------------------------------------------------ #
@@ -280,8 +372,10 @@ async def conversation_delete(conv_id: str):
 # Named personas: a system prompt plus sampling defaults. Explicit user assets
 # (like knowledge collections), stored in prompts.json in every session mode.
 
-def _prompts_file() -> Path:
-    return _home() / "prompts.json"
+def _prompts_file(principal: str | None = None) -> Path:
+    if principal is None:
+        return _home() / "prompts.json"
+    return _home() / "chats" / "_principals" / principal / "prompts.json"
 
 
 def _check_prompt_name(name: str) -> str:
@@ -296,7 +390,7 @@ class _PromptsUnreadable(Exception):
     """prompts.json EXISTS but could not be read or parsed."""
 
 
-def _load_prompts() -> dict:
+def _load_prompts(principal: str | None = None) -> dict:
     """The persona library, or ``{}`` when the user genuinely has none.
 
     Raises _PromptsUnreadable when the file EXISTS but cannot be read or
@@ -305,7 +399,7 @@ def _load_prompts() -> dict:
     single entry being written. Same absent-vs-unreadable split as
     conversation_get above.
     """
-    prompts_file = _prompts_file()
+    prompts_file = _prompts_file(principal)
     if not prompts_file.is_file():
         return {}                       # genuinely absent: an empty library
     try:
@@ -319,7 +413,7 @@ def _load_prompts() -> dict:
     return data
 
 
-def _prompts_or_refuse() -> dict:
+def _prompts_or_refuse(principal: str | None = None) -> dict:
     """``_load_prompts()``, turning an unreadable library into a 500 that
     REFUSES the request.
 
@@ -327,7 +421,7 @@ def _prompts_or_refuse() -> dict:
     path-free because this is a network surface; the concrete reason goes to the
     log."""
     try:
-        return _load_prompts()
+        return _load_prompts(principal)
     except _PromptsUnreadable as e:
         from localm.debuglog import logger
         logger.warning(
@@ -336,40 +430,41 @@ def _prompts_or_refuse() -> dict:
         raise HTTPException(500, "Prompt library is unreadable") from e
 
 
-def _save_prompts(data: dict) -> None:
-    prompts_file = _prompts_file()
+def _save_prompts(data: dict, principal: str | None = None) -> None:
+    prompts_file = _prompts_file(principal)
     prompts_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = prompts_file.with_name(prompts_file.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    tmp.replace(prompts_file)
+    atomic_write(prompts_file, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 @_router.get("/api/prompts")
-async def prompts_list():
-    data = _prompts_or_refuse()
+async def prompts_list(request: Request):
+    data = _prompts_or_refuse(_principal_dir(request))
     return {"prompts": [
         {"name": name, **entry} for name, entry in sorted(data.items())
     ]}
 
 
 @_router.put("/api/prompts/{name}")
-async def prompt_upsert(name: str, req: PromptUpsert):
+async def prompt_upsert(name: str, req: PromptUpsert, request: Request):
     name = _check_prompt_name(name)
-    data = _prompts_or_refuse()
-    data[name] = {"system": req.system, "params": req.params}
-    _save_prompts(data)
+    principal = _principal_dir(request)
+    with _LOCKS.get(str(_prompts_file(principal))):
+        data = _prompts_or_refuse(principal)
+        data[name] = {"system": req.system, "params": req.params}
+        _save_prompts(data, principal)
     return {"status": "saved", "name": name}
 
 
 @_router.delete("/api/prompts/{name}")
-async def prompt_delete(name: str):
+async def prompt_delete(name: str, request: Request):
     name = _check_prompt_name(name)
-    data = _prompts_or_refuse()
-    if name not in data:
-        raise HTTPException(404, f"No such persona: {name}")
-    del data[name]
-    _save_prompts(data)
+    principal = _principal_dir(request)
+    with _LOCKS.get(str(_prompts_file(principal))):
+        data = _prompts_or_refuse(principal)
+        if name not in data:
+            raise HTTPException(404, f"No such persona: {name}")
+        del data[name]
+        _save_prompts(data, principal)
     return {"status": "deleted", "name": name}
 
 
@@ -379,8 +474,8 @@ async def prompt_delete(name: str):
 
 @_router.post("/api/chat/extract")
 async def chat_extract(req: AttachmentExtractRequest):
-    """A chat or coder attachment -> plain text, entirely in memory, on the
-    plugin pool."""
+    """Extract plain text from a chat or coder attachment. The attachment is
+    processed in memory and nothing is written to disk."""
     from localm.executor import get_plugin_executor
     from localm.rag.attachment import AttachmentError, extract_attachment
     loop = asyncio.get_running_loop()
@@ -399,6 +494,24 @@ async def chat_extract(req: AttachmentExtractRequest):
 # The same "getting close to capacity" fraction routes/chat.py already uses
 # to trigger compaction.
 _NUDGE_CAPACITY_FRACTION = 0.10
+
+
+OWN_CHAT_SURFACE = "chat"
+
+
+def _own_chat_surface(ctx) -> bool:
+    """True when the request came from localm's own chat (the GUI chat or
+    ``localm run``), which send ``X-Client-Id: chat`` (``ctx.state["client_id"]``).
+    False for every other caller, an API client with no such header included."""
+    state = getattr(ctx, "state", None) or {}
+    client_id = state.get("client_id") or ""
+    return isinstance(client_id, str) and client_id.strip().lower() == OWN_CHAT_SURFACE
+
+
+def _style_note_enabled() -> bool:
+    """The ``chat_style_note`` setting (default on)."""
+    from localm.config import load_config
+    return bool(load_config().get("chat_style_note", True))
 
 
 def _nudge_fits_capacity(instruction: str, ctx) -> bool:
@@ -427,7 +540,8 @@ _THINK_INSTRUCTION = (
 def _thinking_inlet(messages, ctx):
     """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
 
-    Injects only for thinking-family models, and never twice: skips when a system
+    Injects only on localm's own chat surface (see _own_chat_surface), only for
+    thinking-family models, and never twice: skips when a system
     message already steers <think> (a coder session, whose system prompt already
     carries the instruction, or a persona that already does it), and skips when
     the model's known context capacity is too small to absorb the instruction
@@ -436,6 +550,8 @@ def _thinking_inlet(messages, ctx):
     kernel pipeline isolates any exception this raises."""
     from localm.inference.model_family import is_thinking_model
 
+    if not _own_chat_surface(ctx):
+        return None
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):
         return None
     if not _nudge_fits_capacity(_THINK_INSTRUCTION, ctx):
@@ -469,11 +585,15 @@ def _role_word_inlet(messages, ctx):
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
-    Skips when a system message already mentions third-person self-reference,
+    Applies only on localm's own chat surface (see _own_chat_surface) while the
+    ``chat_style_note`` setting is on. Skips when a system message already
+    mentions third-person self-reference,
     and when the model's known context capacity is too small to absorb the
     instruction (see _nudge_fits_capacity). Appends the instruction to the
     first system message, or inserts one when none exists. Exceptions raised
     here are isolated by the chat pipeline."""
+    if not _own_chat_surface(ctx) or not _style_note_enabled():
+        return None
     if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
         return None
     for m in messages:
@@ -488,11 +608,28 @@ def _role_word_inlet(messages, ctx):
     return messages
 
 
+def rename_notes(old_name: str, new_name: str) -> list[str]:
+    """The rename hook: re-pin saved chats from *old_name* to *new_name* and
+    return the notes to show the user."""
+    notes: list[str] = []
+    migrated, failed = relabel_pinned_model(old_name, new_name)
+    if migrated:
+        notes.append(f"Updated {len(migrated)} saved chat(s) pinned to it")
+    if failed:
+        notes.append(
+            "Could not update the saved chat(s) "
+            f"{', '.join(failed)}: they are still pinned to '{old_name}'")
+    return notes
+
+
 def register(host) -> None:
+    from localm.model_manager import register_rename_hook
     host.mount_router(_router)
     host.register_chat_hook("inlet", _thinking_inlet)
     host.register_chat_hook("inlet", _role_word_inlet)
+    register_rename_hook("saved chats", rename_notes)
 
 
 def unregister() -> None:
-    pass
+    from localm.model_manager import unregister_rename_hook
+    unregister_rename_hook("saved chats")

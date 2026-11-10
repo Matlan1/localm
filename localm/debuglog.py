@@ -71,7 +71,9 @@ def native_fault_hint() -> str:
 def debug_content_enabled() -> bool:
     """Whether the debug log may include raw CHAT CONTENT (a user prompt or a model
     reply). True only when the debug log is on AND no relevant session mode is
-    privacy - so privacy mode NEVER persists chat content to the debug log, even
+    privacy, no coder session is in privacy and no request that carries privacy
+    mode is being answered (``audit.request_privacy``) - so privacy mode NEVER
+    persists chat content to the debug log, even
     when ``--debug`` or ``keep_diagnostics`` enabled the log file for OPERATIONAL
     diagnostics. Fail-safe: no content when the mode cannot be resolved.
 
@@ -81,7 +83,11 @@ def debug_content_enabled() -> bool:
     if not debug_enabled():
         return False
     try:
-        from localm.audit import SessionMode, any_coder_session_is_privacy, effective_mode
+        from localm.audit import (SessionMode, any_coder_session_is_privacy,
+                                  effective_mode, request_is_privacy)
+        # A request that carries privacy mode to a server in another mode.
+        if request_is_privacy():
+            return False
         # Suppress content if ANY of these surfaces is privacy: the backend that
         # produces the content (llamacpp/llama.py) is surface-agnostic and serves
         # coder sessions through the same generation path as chat/server, so a
@@ -817,15 +823,15 @@ class _GrammarTraceFolder:
     arrives or at :meth:`flush`. A triggered record is passed to *record* as
     ``Grammar triggered on regex``.
 
-    An awaiting record ends at a line ending in "`)", but a piece can itself
-    contain "`)" before a newline. So after such a line the following lines are
-    held: a line of at most _MAX_TAIL characters that ends in "`)" and does not
-    start with "Grammar " is taken, together with the held lines, as the rest
-    of the piece; a line starting with "Grammar ", a longer line, :meth:`flush`,
-    or _MAX_CONTINUATION_LINES held lines release the held lines to *forward*.
-    A triggered record ends at the first of its lines that ends in "'". A
-    record whose closing delimiter has not arrived after
-    _MAX_CONTINUATION_LINES further lines is treated as ended.
+    An awaiting record ends at a line ending in "`)" and a triggered record at
+    a line ending in "'", but the generated text can itself contain that
+    delimiter before a newline. So after such a line the following lines are
+    held: a line of at most _MAX_TAIL characters that ends in the same
+    delimiter and does not start with "Grammar " is taken, together with the
+    held lines, as the rest of the record; a line starting with "Grammar ", a
+    longer line, :meth:`flush`, or _MAX_CONTINUATION_LINES held lines release
+    the held lines to *forward*. A record whose closing delimiter has not
+    arrived after _MAX_CONTINUATION_LINES further lines is treated as ended.
 
     *redacted*, when given, receives the first line of every record with its
     payload removed (``Grammar still awaiting trigger after token <id>`` or
@@ -848,7 +854,7 @@ class _GrammarTraceFolder:
         self._awaiting = 0
         self._closer: Optional[str] = None
         self._continuations = 0
-        self._settling = False
+        self._settling: Optional[str] = None
         self._held: list = []
 
     def feed(self, line: str) -> None:
@@ -864,7 +870,7 @@ class _GrammarTraceFolder:
             if (text.startswith(self._TRACE_PREFIX)
                     or len(text) > self._MAX_TAIL):
                 self._release()
-            elif text.endswith(self._AWAITING_CLOSER):
+            elif text.endswith(self._settling):
                 self._held.clear()
                 return
             else:
@@ -901,11 +907,11 @@ class _GrammarTraceFolder:
             self._close()
 
     def _close(self) -> None:
-        self._settling = self._closer == self._AWAITING_CLOSER
+        self._settling = self._closer
         self._closer = None
 
     def _release(self) -> None:
-        self._settling = False
+        self._settling = None
         held, self._held = self._held, []
         for line in held:
             self._forward(line)

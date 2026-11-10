@@ -60,7 +60,7 @@ def _files(version, *, sd=None, kobold=None, comfy=None, uv=None, pyproject=None
              "localm/setup_llama/pins.py": _LLAMA_PINS,
              "localm/setup_llama/cli.py": 'opt = "--keep-choice"\n',
              "localm/cli/comfy.py": 'opt = "--reinstall-requirements"\n',
-             "pyproject.toml": pyproject or _PYPROJECT_031}
+             "pyproject.toml": pyproject or _PYPROJECT_031, "uv.lock": "version = 1\n"}
     if sd:
         files["localm/media/sdcpp/pins.py"] = _sd_pins(sd)
     if kobold:
@@ -575,7 +575,7 @@ def _fake_uv_exe(tmp_path: Path) -> Path:
 
 def _fake_uv_pip(site: Path, transformers="5.20.2", rc=0):
     def run(cmd):
-        if Path(cmd[0]).parent.name != "fake-uv-bin" or ".[gpu,audio]" not in cmd:
+        if Path(cmd[0]).parent.name != "fake-uv-bin" or "gpu" not in cmd:
             return 0
         if rc:
             _uninstall(site, "transformers")
@@ -593,7 +593,8 @@ def test_pytorch_stack_is_re_installed_when_the_release_pins_another_one(tmp_pat
     staged = _write_tree(tmp_path / "s", _files("0.3.2", pyproject=_PYPROJECT_032))
     p = _plans(staged, inst)["pytorch"]
     assert p["update"] is True and "transformers 5.15.1 (wants ~=5.20.2)" in p["note"]
-    assert p["items"] == [["pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"]]
+    assert p["items"] == [["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+                           "--extra", "gpu", "--extra", "audio"]]
     shallow = _plans(staged, inst, deep=False)["pytorch"]
     assert shallow["check"] is True and shallow["update"] is False
 
@@ -606,7 +607,8 @@ def test_pytorch_update_and_rollback_through_apply(tmp_path, torch_install):
     res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                         runner=lambda c: calls.append(c) or fake(c))
     uv = str(_fake_uv_exe(tmp_path))
-    assert [uv, "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"] in calls
+    assert [uv, "pip", "install", "-p", ".venv", "-r", "pyproject.toml",
+            "--extra", "gpu", "--extra", "audio"] in calls
     assert res["components"]["state"] == "updated"
     assert uc.dists(site)["transformers"]["version"] == "5.20.2"
     updater.rollback_last(installed=inst)
@@ -1099,3 +1101,23 @@ def test_a_pending_update_of_another_install_is_dropped_and_this_one_checked(
     _start_components(inst, home, monkeypatch, calls=calls)
     assert [c[3] for c in calls] == ["setup-sdcpp"]
     assert uc.read_pending() is None
+
+
+def test_a_pytorch_step_the_network_policy_refuses_runs_nothing(tmp_path, torch_install,
+                                                               monkeypatch):
+    """net_mode = off: the update's own dependency step runs with the update
+    exemption, the PyTorch step's package install is refused and rolled back."""
+    inst, site = torch_install
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w",
+                                     "update_ignore_net_policy": True})
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    data, sig = _release(_files("0.3.2", pyproject=_PYPROJECT_032))
+    calls = []
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: calls.append(c) or 0)
+    assert "PyTorch stack was not updated" in ei.value.reason
+    assert "net_mode=off" in ei.value.reason
+    assert not any("gpu" in c for c in calls)
+    assert uc.dists(site)["transformers"]["version"] == "5.15.1"
+    assert _v(inst) == "0.3.1"

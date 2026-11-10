@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._exe_stub import write_exe_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 BAT = ROOT / "setup.bat"
 
@@ -741,7 +743,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         (bangdir / ".uv").mkdir()
-        (bangdir / ".uv" / "uv.exe").write_text("stub", encoding="utf-8")
+        write_exe_stub(bangdir / ".uv" / "uv.exe")
         pairs = [("UVDIR", "UVDIR")]
         probe = bangdir / "probe.bat"
         probe.write_text(

@@ -138,13 +138,15 @@ def test_cudart_for_an_unpinned_tag_with_no_listing_is_refused(machine):
         sl._resolve_linux_cudart_asset("b1", "cuda-13")
 
 
-def test_cudart_digest_comes_from_the_listing_when_it_has_one(machine):
+def test_a_cudart_listing_digest_that_disagrees_with_the_pin_is_refused(machine):
+    from localm.setup_llama.download import ArtifactError
     rows = _listing()
     for row in rows:
         if row["name"] == CUDART:
             row["digest"] = "sha256:" + "ab" * 32
     machine("arm64", rows)
-    assert sl._resolve_linux_cudart_asset(PIN, "cuda-13")[1] == "ab" * 32
+    with pytest.raises(ArtifactError):
+        sl._resolve_linux_cudart_asset(PIN, "cuda-13")
 
 
 # ------------------------------ provisioning -------------------------------- #
@@ -177,6 +179,14 @@ def test_arm64_provision_fetches_the_build_then_its_runtime_bundle(provision):
         "build": [(BUILD, sl._PINNED_FALLBACK_SHA256[BUILD])],
         "cudart": [(CUDART, sl._PINNED_FALLBACK_SHA256[CUDART])],
         "pypi": []}
+
+
+def test_arm64_provision_writes_the_nvidia_notice_beside_the_bundle(provision, tmp_path):
+    """Upstream's cudart-llama-*-bin-ubuntu-cuda-13.4-arm64.tar.gz carries the
+    three NVIDIA libraries and no license file, so the notice is written."""
+    provision()
+    assert ((tmp_path / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
 
 
 def test_arm64_provision_of_the_12_line_downloads_nothing(provision):

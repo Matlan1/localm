@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import localm
 from localm import _version, updater
 from localm.bugreport import LocalmError
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset, pub_hex
 
@@ -151,6 +152,21 @@ def test_data_backups_in_the_same_second_never_replace_each_other(env):
     second = updater._backup_data_for_downgrade("0.2.0")
     assert first != second
     assert (first / "config.json").is_file() and (second / "config.json").is_file()
+
+
+def test_downgrade_backup_covers_keys_sessions_jobs_and_rag(env):
+    home, _inst = env
+    (home / "auth.json").write_text("[]", encoding="utf-8")
+    (home / "auth.kdf.json").write_text("{}", encoding="utf-8")
+    (home / "sessions.json").write_text("[]", encoding="utf-8")
+    (home / "jobs").mkdir()
+    (home / "jobs" / "jobs.json").write_text("{}", encoding="utf-8")
+    (home / "rag" / "coll").mkdir(parents=True)
+    (home / "rag" / "coll" / "chunks.json").write_text("[]", encoding="utf-8")
+    dest = updater._backup_data_for_downgrade("0.2.0")
+    for rel in ("auth.json", "auth.kdf.json", "sessions.json",
+                "jobs/jobs.json", "rag/coll/chunks.json"):
+        assert (dest / rel).is_file(), rel
 
 
 # ------------------------- a selected install ------------------------------
@@ -386,9 +402,7 @@ def test_older_build_runs_its_dependency_step_with_the_found_uv(env, monkeypatch
     import subprocess
     import sys
     _home, inst = env
-    contained = inst / ".uv" / "uv.exe"
-    contained.parent.mkdir()
-    contained.write_bytes(b"")
+    contained = write_exe_stub(inst / ".uv" / "uv.exe")
     found = []
     monkeypatch.setattr(updater, "_uv_for_deps", lambda t: found.append(t) or str(contained))
     data = _zip("0.2.0", files={"localm/updater.py": _OLD_UPDATER,

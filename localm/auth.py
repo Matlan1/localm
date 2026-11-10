@@ -39,6 +39,7 @@ from typing import Callable
 from typing import Optional
 
 from localm.debuglog import logger
+from localm.storeformat import StoreFormatTooNew, check_stamp
 
 ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
@@ -93,7 +94,7 @@ def generate_key(nbytes: int = 32) -> str:
     return secrets.token_urlsafe(nbytes)
 
 
-# Transient read retry for the owner key file, mirroring config._read_json. On
+# Transient read retry for the owner key file, mirroring storekit.read_json. On
 # Windows a concurrent atomic replace (set_api_key), an antivirus / indexer, or a
 # backup scanner can hold auth.key open for a microsecond, making read_text raise
 # a TRANSIENT PermissionError (WinError 5); a short bounded retry rides it out
@@ -233,6 +234,12 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     return {}
 
 
+def _record_event(kind: str, **fields) -> None:
+    """Append a management event; never raises into the key operation."""
+    from localm import config, mgmt_events
+    mgmt_events.record(kind, home=config.HOME_DIR, **fields)
+
+
 def set_api_key(key: Optional[str]) -> None:
     """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
     or None *key* clears it, returning the server to open mode.
@@ -265,10 +272,13 @@ def set_api_key(key: Optional[str]) -> None:
             "letters cannot be sent reliably in an HTTP Authorization header, so "
             "most clients would fail to authenticate with such a key.")
     from localm.config import ensure_dirs
+    from localm.storekit import store_lock
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_private(path, key.strip() + "\n")
+    with store_lock(path):
+        _atomic_write_private(path, key.strip() + "\n", retrying=True)
+    _record_event("key_minted", principal="owner")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path, so the salt is on
@@ -305,6 +315,7 @@ def clear_api_key() -> list[dict[str, str]]:
     ``--debug``, so a caller reporting the outcome has to read this return value:
     a surviving key STILL GRANTS ACCESS."""
     failures: list[dict[str, str]] = []
+    had_key = key_file().exists() or keystore_file().exists()
     try:
         key_file().unlink(missing_ok=True)
     except OSError as e:
@@ -338,6 +349,8 @@ def clear_api_key() -> list[dict[str, str]]:
                          "path": str(owner_kdf_file()),
                          "error": f"{type(e).__name__}: {e}"})
     _forget_cached_digests()
+    if had_key and not failures:
+        _record_event("key_revoked", principal="all")
     return failures
 
 
@@ -394,12 +407,12 @@ def _restrict_perms(path: Path) -> bool:
     or unsupported platforms - the data dir is already user-scoped. Returns True
     when the tightening is believed to have happened.
 
-    Delegates to ``config.restrict_file_perms``, so sessions.json and jobs.json
+    Delegates to ``storekit.restrict_file_perms``, so sessions.json and jobs.json
     (which hold the key DIGEST) get the identical treatment as auth.key (which
     holds the PLAINTEXT).
 
     RETAINED although ``_atomic_write_private`` no longer calls it (that moved to
-    ``config.atomic_write_private``, which calls ``restrict_file_perms`` itself):
+    ``storekit.atomic_write_private``, which calls ``restrict_file_perms`` itself):
     this name is the unit-level equivalence point against
     ``sessions._restrict_perms``.
 
@@ -407,18 +420,18 @@ def _restrict_perms(path: Path) -> bool:
     temp+replace dance can restrict the temp file and retry on the destination
     only when the first attempt failed - the contract the shared writer relies
     on."""
-    from localm.config import restrict_file_perms
+    from localm.storekit import restrict_file_perms
     return restrict_file_perms(path)
 
 
 def _atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> None:
     """Write *text* to *path* atomically, owner-restricted from the moment the
-    bytes first exist on disk. Delegates to ``config.atomic_write_private``,
+    bytes first exist on disk. Delegates to ``storekit.atomic_write_private``,
     which is the one implementation shared by sessions.json, the instance
     registry entry, the GPU coordination entry and this module's three
     credential files.
 
-    *retrying* is passed straight through - see ``config.atomic_write_private``.
+    *retrying* is passed straight through - see ``storekit.atomic_write_private``.
     Only the keystore writer (``_save_keystore``) passes True: it is the one
     caller in this module whose writers are all serialized by a cross-process
     lock across their whole read-modify-write (see ``create_key``/
@@ -429,7 +442,7 @@ def _atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> N
     the shared writer returns is dropped: no caller in this module logs a
     subsystem-named warning of its own, and reporting the failed tightening is
     already ``restrict_file_perms``'s job."""
-    from localm.config import atomic_write_private
+    from localm.storekit import atomic_write_private
     atomic_write_private(path, text, retrying=retrying)
 
 
@@ -645,6 +658,12 @@ def _load_owner_kdf() -> list:
         return []
     if not isinstance(data, dict):
         return []
+    try:
+        check_stamp(data.get("v"), 1, path, "owner key record file")
+    except StoreFormatTooNew as e:
+        logger.warning("%s; its records are not used and a fresh derivation "
+                       "record is minted", e)
+        return []
     recs = data.get("records")
     return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
 
@@ -714,12 +733,12 @@ def _owner_digest_locked(key: str) -> str:
     it."""
     import contextlib
 
-    from localm.config import _cross_process_lock
+    from localm.storekit import store_lock
     path = owner_kdf_file()
     with contextlib.ExitStack() as stack:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            stack.enter_context(_cross_process_lock(path))
+            stack.enter_context(store_lock(path))
         except (OSError, TimeoutError) as e:
             logger.warning("could not lock the owner key derivation record %s (%s); "
                            "reading and writing it without the cross-process lock",
@@ -893,9 +912,10 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
     if not key_id:
         return
     try:
-        from localm.config import _cross_process_lock, ensure_dirs
+        from localm.config import ensure_dirs
+        from localm.storekit import store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file()):
             records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
@@ -908,26 +928,35 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
                      key_id, e)
 
 
+def _keystore_records(data: list) -> list:
+    """The entries of a parsed keystore list that are JSON objects; any other
+    entry (a string, number, null, nested list) is dropped."""
+    return [r for r in data if isinstance(r, dict)]
+
+
 def _load_keystore_checked() -> tuple:
-    """``(records, read_ok)``. ``read_ok`` is False when auth.json is PRESENT
-    and either could not be read (even after ``config._read_json_checked``'s
-    own bounded retry over a transient Windows sharing violation) or parses to
-    something other than a JSON list - the states in which an empty list is
-    indistinguishable from a genuinely empty keystore. See
+    """``(records, read_ok)``. ``records`` holds only the object entries.
+    ``read_ok`` is False when auth.json is PRESENT and either could not be read
+    (even after ``storekit.read_json_checked``'s own bounded retry over a
+    transient Windows sharing violation), parses to something other than a
+    JSON list, or holds an entry that is not a JSON object - the states in
+    which the returned list does not match what is on disk. See
     ``_load_keystore_for_write`` for the read-modify-write callers that must
     act on ``read_ok``."""
-    from localm.config import _read_json_checked
-    data, read_ok = _read_json_checked(keystore_file(), [])
+    from localm.storekit import read_json_checked
+    data, read_ok = read_json_checked(keystore_file(), [])
     if not isinstance(data, list):
         return [], False
-    return data, read_ok
+    records = _keystore_records(data)
+    return records, read_ok and len(records) == len(data)
 
 
 def keystore_readable() -> bool:
-    """False when auth.json is present but could not be read or does not hold a
-    JSON list, so an empty ``list_keys()`` there does not mean no keys exist.
-    True when the file is absent or holds a list. Reads auth.json itself, as
-    ``list_keys`` does, never a ``.bak`` beside it."""
+    """False when auth.json is present but could not be read, does not hold a
+    JSON list, or holds an entry that is not a JSON object, so ``list_keys()``
+    there does not show everything in the file. True when the file is absent or
+    holds a list of objects. Reads auth.json itself, as ``list_keys`` does,
+    never a ``.bak`` beside it."""
     path = keystore_file()
     if not path.exists():
         return True
@@ -935,16 +964,17 @@ def keystore_readable() -> bool:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return False
-    return isinstance(data, list)
+    return isinstance(data, list) and all(isinstance(r, dict) for r in data)
 
 
 def _load_keystore() -> list:
-    """The keystore records, or [] when the file is absent, corrupt, or
-    unreadable. For a plain READ - verify(), list_keys(), fs_access_for(),
-    rag_roots_for(), key_hash_live(), scopes_for_key_hash() - failing toward
+    """The keystore's object entries (any other entry is skipped), or [] when
+    the file is absent, corrupt, or unreadable. For a plain READ - verify(),
+    list_keys(), fs_access_for(), rag_roots_for(), key_hash_live(),
+    scopes_for_key_hash() - failing toward
     "no match" is the safe direction, so this never needs ``read_ok`` and
     deliberately does NOT go through ``_load_keystore_checked()``/
-    ``config._read_json_checked()``: that pre-checks ``Path.is_file()``, and
+    ``storekit.read_json_checked()``: that pre-checks ``Path.is_file()``, and
     ``verify()`` calls this on every bearer-token check. See
     test_the_gate_answer_does_not_depend_on_the_filesystem.
     A read-modify-write must use ``_load_keystore_for_write`` instead, which
@@ -953,13 +983,13 @@ def _load_keystore() -> list:
         data = json.loads(keystore_file().read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return []
-    return data if isinstance(data, list) else []
+    return _keystore_records(data) if isinstance(data, list) else []
 
 
 def _load_keystore_for_write() -> list:
     """The keystore records for a read-modify-write, RAISING ``ConfigUnreadable``
-    instead of returning [] when auth.json exists but cannot be read or does
-    not hold a JSON list - the
+    instead of returning [] when auth.json exists but cannot be read, does
+    not hold a JSON list, or holds an entry that is not a JSON object - the
     same refusal ``config.update_config``/``update_registry`` apply to
     config.json/registry.json, extended to this store. Silently returning []
     here is exactly the bug: the caller then appends/mutates and persists a
@@ -968,7 +998,7 @@ def _load_keystore_for_write() -> list:
     Callers must hold both ``_KEYSTORE_LOCK`` and a cross-process lock on
     ``keystore_file()`` for their whole read-modify-write before calling this,
     so two writers (in this process or another) can never race the read."""
-    from localm.config import ConfigUnreadable
+    from localm.storekit import ConfigUnreadable
     records, read_ok = _load_keystore_checked()
     if not read_ok:
         name = keystore_file().name
@@ -1139,12 +1169,14 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "fs_access": norm_fs_access(fs_access),
         "rag_roots": norm_rag_roots(rag_roots),
     }
-    from localm.config import _cross_process_lock, ensure_dirs
+    from localm.config import ensure_dirs
+    from localm.storekit import store_lock
     ensure_dirs()
-    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+    with _KEYSTORE_LOCK, store_lock(keystore_file()):
         records = _load_keystore_for_write()
         records.append(record)
         _save_keystore(records)
+    _record_event("key_minted", principal=record["id"])
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "expires": record["expires"],
             "fs_access": record["fs_access"], "rag_roots": record["rag_roots"],
@@ -1159,15 +1191,17 @@ def revoke_key(key_id: str) -> bool:
     until expiry. (The cookie auth path also re-validates a scoped session's key on
     every request via key_hash_live, so this is belt-and-suspenders cleanup that
     keeps the session store tidy rather than the sole enforcement.)"""
-    from localm.config import _cross_process_lock, ensure_dirs
+    from localm.config import ensure_dirs
+    from localm.storekit import store_lock
     ensure_dirs()
-    with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+    with _KEYSTORE_LOCK, store_lock(keystore_file()):
         records = _load_keystore_for_write()
         target = next((r for r in records if r.get("id") == key_id), None)
         remaining = [r for r in records if r.get("id") != key_id]
         if len(remaining) == len(records):
             return False
         _save_keystore(remaining)
+    _record_event("key_revoked", principal=key_id)
     if target and target.get("hash"):
         try:
             from localm import sessions
@@ -1262,6 +1296,23 @@ def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
             if exp is not None and now > float(exp):
                 return None
             return set(r.get("scopes", []))
+    return None
+
+
+def rag_roots_for_key_hash(key_hash: Optional[str]) -> Optional[list]:
+    """The per-key RAG folder allowlist of the LIVE keystore key with this sha256
+    *key_hash*: its normalised ``rag_roots``, ``[]`` when it has none, or None
+    when no live key matches (missing, expired, or an unreadable keystore). Same
+    liveness rules as ``scopes_for_key_hash``; does not resolve the owner key."""
+    if not key_hash:
+        return None
+    now = time.time()
+    for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            if exp is not None and now > float(exp):
+                return None
+            return norm_rag_roots(r.get("rag_roots", []))
     return None
 
 
@@ -1409,9 +1460,10 @@ def _touch_last_used(key_hash: str) -> None:
             return
         _last_used_writes[key_hash] = now
     try:
-        from localm.config import _cross_process_lock, ensure_dirs
+        from localm.config import ensure_dirs
+        from localm.storekit import store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, _cross_process_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file()):
             records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY

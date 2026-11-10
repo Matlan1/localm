@@ -53,6 +53,7 @@ _ORDER = ("reboot", "deps", "runtime", "setup")
 _SIG_FORMAT = "localm-update-sig/2"
 _SIG_MAX_CHARS = 4096
 _TRUST_FILE = "trust.json"
+_CHAIN_FILE = "trust-chain.json"
 
 _PINNED_KEYSET: dict = {
     "seq": 1,
@@ -215,14 +216,60 @@ def _trust_path() -> Path:
     return _updates_dir(create=False) / _TRUST_FILE
 
 
+def _chain_path() -> Path:
+    return _updates_dir(create=False) / _CHAIN_FILE
+
+
+def _read_chain() -> list:
+    """The signed key sets saved in the data dir's chain file (``[]`` when there
+    is none). Raises :class:`~localm.bugreport.LocalmError` naming the file when
+    it cannot be read or does not validate."""
+    from localm.bugreport import LocalmError
+    path = _chain_path()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise LocalmError("the saved update signing keys could not be read",
+                          reason=f"{path}: {e}") from None
+    try:
+        obj = _strict_json(raw.decode("utf-8"))
+        _check_fields(obj, "the key set chain", {"keysets"})
+        if not isinstance(obj["keysets"], list):
+            raise _BadSignature("the key set chain keysets is not a list")
+        return [_parse_keyset(k, signed=True) for k in obj["keysets"]]
+    except (ValueError, RecursionError) as e:
+        raise LocalmError(
+            "the saved update signing keys are corrupt",
+            reason=f"{path}: {e}. Restore that file, or reinstall localm") from None
+
+
+def _chains_to(pinned: dict, saved: dict, chain: list) -> bool:
+    """Whether *saved* is reached from *pinned* through key sets of *chain* (and
+    *saved* itself), each with a higher seq than the one before and signed by at
+    least the recovery threshold of distinct recovery keys of the one before."""
+    current = pinned
+    for ks in sorted(chain + [saved], key=lambda k: k["seq"]):
+        if ks["seq"] <= current["seq"]:
+            continue
+        recovery = current["recovery"]
+        if _count_signers(ks["signatures"], recovery["keys"],
+                          canonical_keyset_bytes(ks)) >= recovery["threshold"]:
+            current = ks
+    return canonical_keyset_bytes(current) == canonical_keyset_bytes(saved)
+
+
 def _load_trusted() -> dict:
     """The trusted key set: the one saved in the data dir when its seq is higher
-    than the pinned one's, else the pinned one. A saved file that cannot be read,
-    does not validate, or has the pinned seq with different keys raises
-    :class:`~localm.bugreport.LocalmError` naming the file; it is never replaced by
-    the pinned set."""
+    than the pinned one's, else the pinned one. A saved set with a higher seq is
+    trusted only when it chains to the pinned set (:func:`_chains_to`, through the
+    sets in the chain file). A saved file that cannot be read, does not validate,
+    has the pinned seq with different keys, or does not chain to the pinned set
+    raises :class:`~localm.bugreport.LocalmError` naming the file; it is never
+    replaced by the pinned set."""
     from localm.bugreport import LocalmError
-    pinned = _parse_keyset(_PINNED_KEYSET, signed=False)
+    pinned = _parse_keyset(_PINNED_KEYSET, signed="signatures" in _PINNED_KEYSET)
     path = _trust_path()
     try:
         raw = path.read_bytes()
@@ -243,25 +290,59 @@ def _load_trusted() -> dict:
             "the saved update signing keys conflict with the built-in ones",
             reason=f"{path}: key set {saved['seq']} differs from the built-in key set "
                    f"{pinned['seq']}. Restore that file, or reinstall localm")
-    return saved if saved["seq"] > pinned["seq"] else pinned
+    if saved["seq"] <= pinned["seq"]:
+        return pinned
+    chain = _read_chain()
+    if not _chains_to(pinned, saved, chain):
+        raise LocalmError(
+            "the saved update signing keys are not signed by the built-in recovery keys",
+            reason=f"{path}: key set {saved['seq']} does not chain to the built-in key set "
+                   f"{pinned['seq']} (through {_chain_path()}). Restore that file, or "
+                   "reinstall localm")
+    return saved
 
 
-def _save_keyset(keyset: dict) -> None:
-    """Atomically write the signed *keyset* to the data dir's trust file."""
+def _write_json_atomic(path: Path, obj) -> None:
+    """Atomically write *obj* as JSON to *path*. Raises OSError."""
     import os
-
-    from localm.bugreport import LocalmError
-    path = _updates_dir() / _TRUST_FILE
-    tmp = path.with_name(f".{_TRUST_FILE}.{uuid.uuid4().hex}.tmp")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write(_json.dumps(keyset, indent=2, sort_keys=True) + "\n")
+            f.write(_json.dumps(obj, indent=2, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-    except OSError as e:
+    except OSError:
         with contextlib.suppress(OSError):
             tmp.unlink()
+        raise
+
+
+def _save_keyset(keyset: dict) -> None:
+    """Atomically write the signed *keyset* to the data dir's trust file, after
+    adding it, and the signed set the trust file held before, to the chain file
+    (:func:`_read_chain`) that :func:`_load_trusted` verifies it through. Raises
+    :class:`~localm.bugreport.LocalmError` when a write fails or the existing
+    chain file does not validate."""
+    from localm.bugreport import LocalmError
+    path = _updates_dir() / _TRUST_FILE
+    chain = _read_chain()
+    try:
+        previous = [_parse_keyset(_strict_json(path.read_text(encoding="utf-8")),
+                                  signed=True)]
+    except (OSError, ValueError, RecursionError):
+        previous = []
+    kept: dict = {}
+    for ks in chain + previous + [keyset]:
+        if "signatures" in ks:
+            kept[canonical_keyset_bytes(ks)] = {
+                **{k: ks[k] for k in ("seq", "release", "recovery")},
+                "signatures": ks["signatures"]}
+    try:
+        _write_json_atomic(path.with_name(_CHAIN_FILE),
+                           {"keysets": sorted(kept.values(), key=lambda k: k["seq"])})
+        _write_json_atomic(path, keyset)
+    except OSError as e:
         raise LocalmError("could not save the update's new signing keys",
                           reason=f"{path}: {e}") from None
 
@@ -397,7 +478,8 @@ def _check_selected_version(new_version: str, requested: str) -> None:
 
 
 def _refuse_downgrade(new_version: str) -> None:
-    """Raise unless *new_version* is strictly newer than the running version.
+    """Raise unless *new_version* is strictly newer than the running version,
+    or when the running version cannot be read.
 
     The anti-rollback check: the signature proves authenticity, not freshness, and
     an OLD release's build.zip is still validly signed. This adds freshness."""
@@ -405,6 +487,12 @@ def _refuse_downgrade(new_version: str) -> None:
     current = _version.read_version()
     if not new_version:
         raise LocalmError("the update has no VERSION", reason="cannot confirm it is newer")
+    if not _version._leading_digit(current):
+        raise LocalmError(
+            "cannot read the installed localm version",
+            reason="without it an update cannot be confirmed as newer; choose the "
+                   "version to install (Settings > Updates, or 'localm update "
+                   "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
             f"refusing to 'update' to {new_version}: not newer than the installed {current}",
@@ -802,7 +890,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
     # hops, native cert store first, certifi as fallback. The https-only-redirect
     # guard is http_ssl.HttpsOnlyRedirect, installed by default.
-    from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
+    from localm.http_ssl import RedirectDowngradeRefused, copy_bounded, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with verified_urlopen(req, timeout=timeout) as resp:
@@ -810,11 +898,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+                copy_bounded(resp, f)
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}") from None
     except RedirectDowngradeRefused as e:
@@ -1030,7 +1114,8 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> Optional[str]:
 # Data dir entries an older build may read without the fields a newer one added,
 # and write back without them.
 _DOWNGRADE_DATA = ("config.json", "registry.json", "checkpoints", "memory", "plugins",
-                   "coder-hook-trust.json")
+                   "coder-hook-trust.json", "auth.json", "auth.kdf.json",
+                   "sessions.json", "jobs", "rag")
 
 
 def _backup_data_for_downgrade(new_version: str) -> Path:
@@ -1307,6 +1392,14 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     for a manual recovery, and the previous update's manifest is replaced only after
     the swap and the move of the backup have succeeded.
 
+    THE BUILD'S OWN FINISHING STEP. When the build ships one (:mod:`localm.updater_finish`),
+    it runs right after the swap, before any built-in step, with a copy kept of the venv,
+    the native runtime and the components this update changes. Exiting non-zero, or being
+    stopped at its time limit, rolls every part back and raises LocalmError with its last
+    line of output as the reason. The dependency, runtime and component steps it names as
+    taken over are skipped; the others run as usual, and the uv for the dependency step is
+    then looked for after it instead of before the swap.
+
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
     primitives live in :mod:`localm._apply_update`. *installed* defaults to the real
@@ -1315,6 +1408,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     the post-swap command, returns an int exit code)."""
     import subprocess
     from localm import _apply_update as au
+    from localm import updater_finish
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     if installed is None and is_site_packages_install(target):
@@ -1383,9 +1477,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             if rt_plan["reprovision"]:
                 klass = _max_class(klass, "runtime")
             deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
-            uv_exe = _uv_for_deps(target) if deps_changed else None
-            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
+            has_finish = updater_finish.present(root)
+            uv_exe = _uv_for_deps(target) if deps_changed and not has_finish else None
+            post_cmd = (au.post_swap_command("deps", uv=uv_exe)
+                        if deps_changed and not has_finish else None)
             _require_runnable(post_cmd, "deps")
+            if post_cmd:
+                _require_deps_source(root)
             if rt_plan["reprovision"] and klass != "setup":
                 _require_runnable([sys.executable], "runtime")
                 left = updater_runtime.stop_own_holders(
@@ -1480,7 +1578,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             # clean rollback over a broken install.
             try:
                 _restore_all(target, backup_dir, names, say=say,
-                             components=[updater_components.DEPS], record=False)
+                             components=None if has_finish else [updater_components.DEPS],
+                             record=False)
             except Exception as rb:
                 raise LocalmError(
                     f"{step} AND rollback failed - manual recovery needed",
@@ -1488,17 +1587,52 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             unpin()
             raise LocalmError(rolled_back, reason=reason or why)
 
-        cmd = post_cmd
-        if cmd:
+        took_over = frozenset()
+        venv_kept = False
+        if has_finish:
+            venv_kept = updater_components.site_packages(target / ".venv") is not None
             try:
                 updater_components.snapshot(
-                    [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
-                    root=target, for_backup=updater_components.backup_version(backup_dir))
+                    ([updater_components.DEPS] if venv_kept else [])
+                    + [p["name"] for p in comp_plans if p["update"]],
+                    updater_components.snapshot_dir(backup_dir), root=target,
+                    for_backup=updater_components.backup_version(backup_dir))
+                rt_lib = updater_runtime.runtime_lib(target)
+                if rt_lib.is_dir():
+                    au.snapshot_runtime(rt_lib, au.runtime_snapshot_dir(backup_dir))
             except OSError as e:
-                _roll_back(f"could not keep a copy of the venv: {e}",
-                           "keeping a copy of the dependencies failed",
-                           "the dependencies could not be kept before the update, so it was "
-                           "rolled back")
+                _roll_back(f"could not keep a copy of the parts it may change: {e}",
+                           "keeping a copy of the installed parts failed",
+                           "the installed parts could not be kept before the update's finishing "
+                           "step, so it was rolled back")
+            try:
+                took_over = updater_finish.run(
+                    target, old=previous_version, new=new_version, klass=klass,
+                    result_file=updir / updater_finish.RESULT_FILE, env=_deps_env(target),
+                    say=say)
+            except updater_finish.FinishFailed as e:
+                _roll_back(str(e), "the update's finishing step failed",
+                           "the update's finishing step failed, so the update was rolled back")
+            if deps_changed and "dependencies" not in took_over:
+                try:
+                    post_cmd = au.post_swap_command("deps", uv=_uv_for_deps(target))
+                    _require_runnable(post_cmd, "deps")
+                    _require_deps_source(target)
+                except LocalmError as e:
+                    _roll_back(f"{e.summary}: {e.reason}", "looking for uv failed",
+                               e.summary, reason=e.reason)
+        cmd = post_cmd
+        if cmd:
+            if not has_finish:
+                try:
+                    updater_components.snapshot(
+                        [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
+                        root=target, for_backup=updater_components.backup_version(backup_dir))
+                except OSError as e:
+                    _roll_back(f"could not keep a copy of the venv: {e}",
+                               "keeping a copy of the dependencies failed",
+                               "the dependencies could not be kept before the update, so it was "
+                               "rolled back")
             run = runner or (lambda c: subprocess.run(
                 c, cwd=str(target), env=_deps_env(target)).returncode)
             try:
@@ -1506,10 +1640,14 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             except Exception as e:
                 what = f"could not start {cmd[0]}: {e}" if isinstance(e, OSError) else str(e)
                 _roll_back(f"post-update step crashed: {what}", "the post-update step crashed",
-                           "the post-update step crashed; rolled back", reason=what)
+                           "the post-update step crashed; rolled back",
+                           reason=with_retry_hint(what, target, "update"))
             if rc != 0:
-                _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
-                           "the post-update step failed; rolled back")
+                why = f"{cmd[0]} exited {rc}"
+                _roll_back(why, "the post-update step failed",
+                           "the post-update step failed; rolled back",
+                           reason=with_retry_hint(why, target, "update"))
+        if cmd or venv_kept:
             try:
                 updater_components.record_changes(
                     updater_components.snapshot_dir(backup_dir), updater_components.DEPS,
@@ -1518,7 +1656,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _apply_warn("could not record which packages the update changed: %s; a "
                             "rollback puts back every package that differs", e)
         runtime_status, runtime_note = None, rt_plan["note"]
-        if not rt_plan["reprovision"]:
+        if not rt_plan["reprovision"] or "runtime" in took_over:
             try:
                 updater_runtime.clear_pending()
             except OSError as e:
@@ -1552,11 +1690,15 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     if runtime_status is not None:
                         runtime_note = runtime_status["note"]
         components_status, components_note = _apply_components(
-            comp_plans, comp_update, klass=klass, target=target, version=new_version,
+            comp_plans, comp_update and "components" not in took_over, klass=klass,
+            target=target, version=new_version,
             defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back)
         if not cmd:
             from localm import updater_parts
             updater_parts.note_kept_record(target, previous_version, new_version)
+        from localm import config as _config, mgmt_events
+        mgmt_events.record("update_applied", home=_config.HOME_DIR,
+                           version_from=previous_version, version_to=new_version)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
@@ -1565,6 +1707,24 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept}
+
+
+def retry_hint(root, args: str) -> str:
+    """The sentence that tells the user how to run ``localm <args>`` again through the
+    launcher script in the install at *root* (``localm.bat`` on Windows, ``localm.sh``
+    elsewhere), which starts localm with its Python and holds no program file of the
+    venv. Empty when the install has no such script."""
+    name = "localm.bat" if sys.platform == "win32" else "localm.sh"
+    if not (Path(root) / name).is_file():
+        return ""
+    run = name if sys.platform == "win32" else f"./{name}"
+    return f"To try again, close localm and run {run} {args} in the localm install folder"
+
+
+def with_retry_hint(reason: str, root, args: str) -> str:
+    """*reason* followed by :func:`retry_hint` when there is one."""
+    hint = retry_hint(root, args)
+    return f"{reason}. {hint}" if hint else reason
 
 
 def _require_runnable(cmd, klass: str) -> None:
@@ -1584,6 +1744,26 @@ def _require_runnable(cmd, klass: str) -> None:
         f"this update cannot run its {klass} step, so nothing was changed",
         reason=f"the program it needs ({program or 'none'}) {what}. Run {setup} in the "
                f"localm folder to repair the install, then update again")
+
+
+def _require_deps_source(tree: Path) -> None:
+    """Refuse, before anything is swapped, a dependency step the build at *tree*
+    cannot run: it has no ``uv.lock``, or the network policy refuses the package
+    index (``localm.pyinstall.check_network``; ``update_ignore_net_policy`` exempts
+    it like the update itself). Raises LocalmError."""
+    from localm import pyinstall
+    from localm.bugreport import LocalmError
+    if pyinstall.lock_file(tree) is None:
+        raise LocalmError("this update cannot install its dependencies, so nothing was changed",
+                          reason=f"the build has no {pyinstall.LOCK_NAME}")
+    from localm.netpolicy import network_mode
+    if network_mode() == "off" and _net_policy_allows_update_check():
+        return
+    try:
+        pyinstall.check_network()
+    except pyinstall.InstallRefused as e:
+        raise LocalmError("this update cannot install its dependencies, so nothing was changed",
+                          reason=str(e)) from None
 
 
 def _uv_for_deps(target: Path) -> str:
@@ -1629,6 +1809,7 @@ def _deps_env(target: Path) -> dict:
     contained and the caller has not set them."""
     import os
     env = dict(os.environ)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
     try:
         from localm import install_manifest
         m = install_manifest.load(target) or {}
@@ -1933,8 +2114,8 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
     """Record, as the last runtime and component update status, that the
     update was rolled back, so ``localm doctor`` and the GUI do not report the
     state the rolled-back update left. A ``failed`` or ``waiting`` status written
-    since this update's backup was made stays named in the new note as the
-    reason; with *keep_failures* such a status stays, under the version the install is
+    since this update's backup was made stays named in the new note as the reason,
+    followed by what to do next; with *keep_failures* such a status stays, under the version the install is
     back on and with the rollback added to its note. Best-effort: a status that cannot
     be written is logged."""
     from localm import updater_components, updater_runtime
@@ -1960,9 +2141,11 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
                         encoding="utf-8")
                 except OSError as e:
                     _apply_warn("could not record the version of the kept update result: %s", e)
-    why = [str((st or {}).get("note")) for st in (runtime_last, comp_last) if failed_now(st)]
+    why = [str((st or {}).get("why") or (st or {}).get("note"))
+           for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
-        note += " (" + "; ".join(why) + ")"
+        note += (" (" + "; ".join(why) + "). To try again, close anything else using this "
+                 "install, then choose Update now in Settings > Updates")
     write_runtime = not keep_failures or (runtime_last is not None
                                           and not failed_now(runtime_last))
     write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))

@@ -12,6 +12,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
+from localm.bugreport import LocalmError
+from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
@@ -295,6 +297,19 @@ def test_refuse_downgrade_unaffected_by_the_new_comparable_signal(monkeypatch):
     updater._refuse_downgrade("0.1.6")         # plain newer: still allowed, unchanged
 
 
+@pytest.mark.parametrize("installed", ["unknown", "", "abc"])
+def test_refuse_downgrade_refuses_when_the_installed_version_is_unreadable(
+        monkeypatch, installed):
+    """With no readable installed version nothing can be confirmed as newer,
+    so a plain update is refused whatever version the build carries."""
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(_version, "read_version", lambda: installed)
+    with pytest.raises(LocalmError, match="installed localm version"):
+        updater._refuse_downgrade("0.0.1")
+    with pytest.raises(LocalmError, match="installed localm version"):
+        updater._refuse_downgrade("9.9.9")
+
+
 # ------------------------------ classify --------------------------------
 
 def test_classify_reboot_when_deps_unchanged(tmp_path):
@@ -430,6 +445,7 @@ def _signed_build(version, deps):
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("VERSION", version)
         z.writestr("pyproject.toml", _pyproject_str(deps))
+        z.writestr("uv.lock", "version = 1\n")
         z.writestr("localm/__init__.py", f"# {version}")
     data = buf.getvalue()
     sig = envelope(data, [_TEST_PRIV])
@@ -462,10 +478,8 @@ _UV_NAME = "uv.exe" if sys.platform == "win32" else "uv"
 
 
 def _fake_uv(directory):
-    """An executable-looking uv file in *directory*; returns its path."""
-    directory.mkdir(parents=True, exist_ok=True)
-    exe = directory / _UV_NAME
-    exe.write_bytes(b"")
+    """A uv program file in *directory*; returns its path."""
+    exe = write_exe_stub(directory / _UV_NAME)
     exe.chmod(0o755)
     return exe
 
@@ -509,7 +523,67 @@ def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env, no_uv):
     res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
                         runner=lambda c: ran.append(c) or 0)
     assert res["klass"] == "deps"
-    assert ran and ran[0][:4] == [str(uv), "pip", "install", "-p"]
+    assert ran and ran[0][:3] == [str(uv), "sync", "--frozen"]
+
+
+def _signed_build_without_lock(version, deps):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", version)
+        z.writestr("pyproject.toml", _pyproject_str(deps))
+        z.writestr("localm/__init__.py", f"# {version}")
+    data = buf.getvalue()
+
+    def opener(url, headers, timeout, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    return opener, envelope(data, [_TEST_PRIV])
+
+
+def test_apply_deps_refuses_a_build_without_a_lock_before_the_swap(
+        tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    _fake_uv(inst / ".uv")
+    ran = []
+    op, sig = _signed_build_without_lock("0.2.0", ["click", "httpx"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                      runner=lambda c: ran.append(c) or 0)
+    assert "nothing was changed" in ei.value.summary and "uv.lock" in ei.value.reason
+    assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def test_apply_deps_refused_by_net_mode_off_before_the_swap(
+        tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    inst = _fake_install(tmp_path, deps=("click",))
+    _fake_uv(inst / ".uv")
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                      runner=lambda c: ran.append(c) or 0)
+    assert "net_mode=off" in ei.value.reason
+    assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def test_apply_deps_under_net_mode_off_runs_with_the_update_exemption(
+        tmp_path, monkeypatch, sig_env, no_uv):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w",
+                                     "update_ignore_net_policy": True})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    inst = _fake_install(tmp_path, deps=("click",))
+    uv = _fake_uv(inst / ".uv")
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                        runner=lambda c: ran.append(c) or 0)
+    assert res["klass"] == "deps" and ran[0][:3] == [str(uv), "sync", "--frozen"]
 
 
 def test_apply_deps_uses_the_contained_uv_that_is_not_on_path(tmp_path, monkeypatch, sig_env, no_uv):
@@ -1326,3 +1400,18 @@ def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tm
     assert exc is not None, "apply() did not refuse a site-packages install"
     assert isinstance(exc, LocalmError), f"refused with the wrong error: {exc!r}"
     assert "pip" in str(exc).lower()
+
+
+def test_apply_records_one_update_applied_event(tmp_path, monkeypatch, sig_env):
+    import json
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    monkeypatch.setattr("localm.config.HOME_DIR", home)
+    inst = _fake_install(tmp_path, deps=("click",))
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    lines = (home / "logs" / "management.jsonl").read_text(encoding="utf-8").splitlines()
+    (ev,) = [json.loads(x) for x in lines]
+    assert ev["kind"] == "update_applied"
+    assert (ev["version_from"], ev["version_to"]) == ("0.1.0", "0.2.0")

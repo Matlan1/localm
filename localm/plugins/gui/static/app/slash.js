@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
-import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, refuseWithoutModel, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
@@ -56,16 +56,22 @@ export async function runImagineInChat(promptText) {
   body.textContent = t("slash.generatingImage");
   box.scrollTop = box.scrollHeight;
   try {
+    if (!(await checkModelsBeforeGenerate("image", null, {}))) {
+      body.textContent = t("slash.modelsNotDownloaded");
+      return;
+    }
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    const missing = createMissingModelOffer(null);
     const end = await streamJob(data.job_id, (line) => {
+      if (!missing.show(line)) return;
       body.textContent = line;
       if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    });
+    }, undefined, undefined, missing.onEvent);
     if (end.status === "done" && end.result) {
       conv.messages.push({
         role: "assistant",
@@ -79,6 +85,7 @@ export async function runImagineInChat(promptText) {
       renderChat();
     } else {
       body.textContent = t("slash.imageStatus", { status: jobStatusWord(end.status) });
+      await missing.offer();
     }
   } catch (e) {
     body.textContent = t("slash.imageFailed", { message: e.message });
@@ -147,16 +154,22 @@ export async function runMusicInChat(tags) {
   body.textContent = t("slash.generatingTrack");
   box.scrollTop = box.scrollHeight;
   try {
+    if (!(await checkModelsBeforeGenerate("music", null, {}))) {
+      body.textContent = t("slash.modelsNotDownloaded");
+      return;
+    }
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ tags }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    const missing = createMissingModelOffer(null);
     const end = await streamJob(data.job_id, (line) => {
+      if (!missing.show(line)) return;
       body.textContent = line;
       if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    });
+    }, undefined, undefined, missing.onEvent);
     if (end.status === "done" && end.result) {
       conv.messages.push({
         role: "assistant",
@@ -167,6 +180,7 @@ export async function runMusicInChat(tags) {
       renderChat();
     } else {
       body.textContent = t("slash.musicStatus", { status: jobStatusWord(end.status) });
+      await missing.offer();
     }
   } catch (e) {
     body.textContent = t("slash.musicFailed", { message: e.message });
@@ -187,16 +201,22 @@ export async function runVideoInChat(promptText) {
   body.textContent = t("slash.generatingClip");
   box.scrollTop = box.scrollHeight;
   try {
+    if (!(await checkModelsBeforeGenerate("video", null, {}))) {
+      body.textContent = t("slash.modelsNotDownloaded");
+      return;
+    }
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    const missing = createMissingModelOffer(null);
     const end = await streamJob(data.job_id, (line) => {
+      if (!missing.show(line)) return;
       body.textContent = line;
       if (nearBottom(box)) box.scrollTop = box.scrollHeight;
-    });
+    }, undefined, undefined, missing.onEvent);
     if (end.status === "done" && end.result) {
       conv.messages.push({
         role: "assistant",
@@ -207,6 +227,7 @@ export async function runVideoInChat(promptText) {
       renderChat();
     } else {
       body.textContent = t("slash.videoStatus", { status: jobStatusWord(end.status) });
+      await missing.offer();
     }
   } catch (e) {
     body.textContent = t("slash.videoFailed", { message: e.message });

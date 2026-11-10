@@ -448,6 +448,10 @@ class TestOrphans:
         assert not orphan.exists()
         assert pending_pulls.list_orphans() == []
 
+    def test_an_empty_temp_file_is_not_offered(self, home, dead_pid):
+        _hf_temp(home, "paused.gguf", "e9", b"", *dead_pid)
+        assert pending_pulls.list_orphans() == []
+
     def test_a_temp_file_of_a_live_owner_is_not_offered(self, home):
         import subprocess
         from localm.instances import process_start_identity
@@ -600,7 +604,7 @@ class TestGuiRoutes:
         def fake_start_cli(self, kind, cli_args, **kw):
             started.append((kind, list(cli_args), kw.get("host_label")))
             return _FakeJob()
-        monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
         monkeypatch.setattr("localm.netpolicy.pinned_request",
                             _Server(BODY, stop_after=1500))
         assert mm.pull_model(URL, name="tiny") is False
@@ -629,6 +633,17 @@ class TestGuiRoutes:
         r = c.post(f"/api/models/pulls/interrupted/{d['id']}/delete")
         assert r.status_code == 200 and r.json()["removed_bytes"] == 1500
         assert c.get("/api/models/pulls/interrupted").json()["downloads"] == []
+
+    def test_resume_by_a_key_without_host_fs_is_remote_only(self, client, home):
+        c, started = client
+        [d] = c.get("/api/models/pulls/interrupted").json()["downloads"]
+        from localm import auth
+        from localm import scopes as S
+        key = auth.create_key("puller", [S.MODELS_WRITE], fs_access="none")["key"]
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume",
+                   json={"fresh": True}, headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        assert started[-1][1][:2] == ["pull", "--remote-only"]
 
     def test_resume_of_a_changed_source_starts_nothing(self, client, monkeypatch):
         c, started = client

@@ -34,7 +34,7 @@ def repair_app(tmp_path, monkeypatch):
     embedder available build vectors directly through the Collection
     primitive."""
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     home = tmp_path / "userhome"
     home.mkdir()
     localm = home / ".localm"

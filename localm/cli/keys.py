@@ -141,9 +141,15 @@ def key_group():
 @click.option("--reveal", is_flag=True,
               help="Print the full key instead of a masked preview.")
 def key_show(reveal):
-    """Show the active owner key (masked) or 'open mode'."""
+    """Show the active owner key (masked), or whether the server is keyed
+    without one, or 'open mode'."""
     from localm import auth
     active = auth.get_api_key()
+    if not active and auth.any_key_configured():
+        console.print("[yellow]no owner key[/yellow] - named keys, or a key file "
+                      "that cannot be read, are configured, so the server "
+                      "requires a key ('localm key list' shows named keys).")
+        return
     if not active:
         console.print("[yellow]open mode[/yellow] - no API key set; the server "
                       "accepts unauthenticated requests.")
@@ -214,12 +220,12 @@ def key_set(key):
 @click.option("-y", "--yes", is_flag=True,
               help="Skip the confirmation prompt (not for removing the last key).")
 def key_clear(yes):
-    """Remove the owner key, returning the server to open mode.
+    """Remove the owner key and every named key, returning the server to open mode.
 
     Removing the last key needs an interactive terminal and always asks, --yes
     included; piped input is refused."""
     from localm import auth, sessions
-    if auth.get_api_key() is None:
+    if not auth.any_key_configured():
         console.print("[dim]No API key set (already open mode).[/dim]")
         return
     last = auth.removal_leaves_no_key(clear_all=True)
@@ -330,11 +336,15 @@ def key_list():
     """List named, scope-limited keys (metadata only - never the secret)."""
     from localm import auth
     keys = auth.list_keys()
-    if not keys and not auth.keystore_readable():
-        raise click.ClickException(
-            f"{auth.keystore_file().name} exists but could not be read as a JSON "
-            f"list, so its keys cannot be listed. Fix or remove it (deleting it "
-            f"resets to no scoped keys).")
+    if not auth.keystore_readable():
+        name = auth.keystore_file().name
+        if not keys:
+            raise click.ClickException(
+                f"{name} exists but could not be read as a JSON list of key "
+                f"records, so its keys cannot be listed. Fix or remove it "
+                f"(deleting it resets to no scoped keys).")
+        console.print(f"[yellow]Warning: {name} holds entries that are not key "
+                      f"records; they are skipped below. Fix or remove them.[/yellow]")
     if not keys:
         console.print("[dim]No named keys. Mint one:  "
                       "localm key create <name> --scope <scope>[/dim]")
@@ -462,7 +472,10 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     # (not installed, or missing its pip extras), say so right here.
     try:
         from localm.plugins.engine import PluginManager
-        warns = PluginManager(None).scope_deps_warnings(list(scopes))
+        mgr = PluginManager(None)
+        warns = mgr.scope_deps_warnings(list(scopes))
+        warns += S.unknown_scope_warnings(
+            list(scopes), {(sp.scope or n) for n, sp in mgr.discover().items()})
     except Exception:
         warns = []
     for w in warns:

@@ -944,7 +944,8 @@ def check_upstream(rec: dict) -> dict:
         try:
             from .pull import _ssrf_resolve_final_url
             final = _ssrf_resolve_final_url(rec["url"])
-            head = netpolicy.pinned_request("HEAD", final, allow_redirects=False, timeout=10)
+            head = netpolicy.pinned_request("HEAD", final, allow_redirects=False,
+            allow_when_off=netpolicy.downloads_allowed_when_off(), timeout=10)
             now_size = int(head.headers.get("content-length", 0)) or None
             now_etag = head.headers.get("etag")
             if ((part.get("size") and now_size and part["size"] != now_size)
@@ -1070,7 +1071,7 @@ def _scan_orphans() -> list[dict]:
         except OSError:
             continue
         for f in temps:
-            if f in files or not _temp_is_unowned(f):
+            if f in files or not _size(f) or not _temp_is_unowned(f):
                 continue
             out.append({"id": _orphan_id(f), "path": f, "kind": "hf-temp",
                         "size": _size(f)})
@@ -1081,7 +1082,7 @@ def _scan_orphans() -> list[dict]:
         parts = []
     for p in parts:
         lock_dir = _part_lock_dir(p.name[:-len(".part")])
-        if (p.name.startswith(".") or p in files or not _is_url_partial(p)
+        if (p.name.startswith(".") or p in files or not _size(p) or not _is_url_partial(p)
                 or (lock_dir.exists() and not _lock_is_reclaimable(lock_dir))):
             continue
         out.append({"id": _orphan_id(p), "path": p, "kind": "part", "size": _size(p)})

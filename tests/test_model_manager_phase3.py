@@ -610,6 +610,8 @@ class TestUserNameSanitized:
 
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_snap)
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(
+            [SimpleNamespace(rfilename="config.json", size=2)]))
         ok = mm._pull_hf_snapshot("owner/repo", "../../evil")
         assert ok is True
         assert "../../evil" not in store

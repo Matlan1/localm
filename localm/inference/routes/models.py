@@ -8,15 +8,57 @@ globals, so a model swap that reassigns them is reflected here.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 import localm.inference.http_server as _hs
 from localm import scopes
 from localm.executor import get_plugin_executor
+
+
+async def _body_fields(request: Request, allowed: tuple[str, ...]) -> dict:
+    """Fields a model-lifecycle route reads from an optional JSON body.
+
+    An empty body yields {}. Returns only keys listed in *allowed*; raises 400
+    for a body that is not a JSON object or that carries any other key, naming
+    the keys the route does read.
+    """
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise HTTPException(400, "Request body must be a JSON object") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be a JSON object")
+    unknown = sorted(k for k in body if k not in allowed)
+    if unknown:
+        raise HTTPException(
+            400,
+            f"Unknown field(s) in request body: {', '.join(unknown)}. "
+            f"This route reads: {', '.join(allowed)}")
+    return body
+
+
+def _opt_str(value, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(400, f"'{name}' must be a string")
+    return value
+
+
+def _opt_bool(value, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise HTTPException(400, f"'{name}' must be true or false")
+    return value
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -187,20 +229,19 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def unload_model(model: str | None = None, force: bool = False,
-                           media: bool = True):
+    async def unload_model(request: Request, model: str | None = None,
+                           force: bool | None = None, media: bool | None = None):
         """
         Release model(s) from GPU/CPU memory.
 
-        With no `model`, releases EVERY currently-loaded model (unchanged
-        default behavior) - call this before a VRAM-intensive task (e.g.
-        ComfyUI FLUX generation) so the GPU memory is fully available. With
-        `model` set, releases only that one, leaving any other loaded models
-        untouched. Either way, the next matching /v1/chat/completions call
-        reloads lazily.
+        With no `model`, releases every currently loaded model, which frees
+        the GPU memory for a VRAM-intensive task such as ComfyUI generation.
+        With `model` set, releases only that one and leaves any other loaded
+        models untouched. An unregistered `model` answers 404. Either way, the
+        next matching /v1/chat/completions call reloads the model.
 
         A model still busy with a request is not cut off unless `force` is
-        true (a query parameter, like `model`). Without it, a busy chat model
+        true (a query parameter or JSON body field, like `model`). Without it, a busy chat model
         gets a short wait to finish, then stays loaded with its reply running:
         a named one answers `{"status": "confirm_required", "model": ...,
         "detail": ...}`, and an unload of everything lists it in
@@ -216,60 +257,66 @@ def register(app: FastAPI, ctx) -> None:
         even with `force`, and is listed in `skipped_in_use` and
         `media_left_running`. `media=false` (a query parameter) leaves them
         loaded.
+
+        `model`, `force` and `media` are read from the query string or from a
+        JSON body; the query wins when both are given. A body key other than
+        those answers 400.
         """
+        body = await _body_fields(request, ("model", "force", "media"))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
+        force = _opt_bool(force if force is not None else body.get("force"), "force", False)
+        media = _opt_bool(media if media is not None else body.get("media"), "media", True)
         if model:
             from localm.config import load_registry
-            if model not in load_registry() and model != _hs._default_model_name:
+            if (model not in load_registry() and model != _hs._default_model_name
+                    and model not in _hs._engines):
                 raise HTTPException(404, f"Model not registered: {model}")
             return await _hs.unload_one_model(model, force=force)
         return await _hs.unload_all_models(force=force, media=media)
 
     @app.post("/v1/models/rename",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def rename_model(model: str, new_name: str):
+    async def rename_model(request: Request, model: str | None = None,
+                           new_name: str | None = None):
         """
-        Rename a registered model, re-keying a loaded engine in place.
+        Rename a registered model (`model`) to `new_name`.
 
-        Unlike an alias, the old name stops working: this MOVES the
-        registration (and best-effort migrates config/job/RAG references that
-        named it). A model that is currently loaded keeps serving, under the
-        new name.
+        Unlike an alias, the old name stops working: the registration moves to
+        the new name, and config, job and RAG references to the old name are
+        updated where possible. A model that is currently loaded keeps serving
+        under the new name.
 
-        This lives on the always-present /v1 surface rather than only on the
-        GUI's /api one because the caller that needs it most is `localm
-        rename`, and a headless `localm serve` has no GUI routes. Renaming a
-        model from a separate process CANNOT re-key this server's in-memory
-        engine map, which would leave the engine orphaned under a name the
-        registry no longer has - so the CLI asks the server to do the whole
-        rename here instead, where the registry move and the re-key happen in
-        one process with no window between them.
+        `model` and `new_name` are read from the query string or a JSON body;
+        a body key other than those answers 400.
         """
+        body = await _body_fields(request, ("model", "new_name"))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
+        if new_name is None:
+            new_name = _opt_str(body.get("new_name"), "new_name")
+        if not model or not new_name:
+            raise HTTPException(400, "'model' and 'new_name' are required")
         return await _hs.rename_registered_model(model, new_name)
 
     @app.post("/v1/models/load",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def load_model(model: str | None = None):
+    async def load_model(request: Request, model: str | None = None):
         """
-        Explicitly reload a model into memory.
+        Load a model into memory ahead of the first inference request.
 
-        Use this endpoint if you want to pre-warm the model before the first
-        inference request. If no model is specified, pre-warms the model an
-        unnamed request would currently resolve to.
+        With no `model`, loads the model an unnamed request would use: the
+        model currently loaded, else the one most recently unloaded, else the
+        configured default. Answers 503 when there is none. Returns `status`
+        `loaded`, `already_loaded` or `peer_routed` (the model is routed to a
+        peer instance), with the model name.
 
-        THE UNNAMED CASE GOES THROUGH ``_resolve_unnamed_model_name`` rather
-        than re-deriving the chain here, and that is the fix rather than a
-        tidy-up. The inline version read
-        ``_active_model_name or _default_model_name`` and SKIPPED
-        ``_last_active_model_name``, which is precisely where an unload parks
-        the name of the model that was in use. So the media VRAM handover -
-        which unloads chat, generates, then POSTs here with no model name -
-        brought back the STARTUP model instead of the one the user had loaded,
-        and they returned to chat talking to something they never chose.
-
-        The shared helper already had it right and is used by ``GET /health``
-        and ``get_engine``'s own fallback; this route was the odd one out, so
-        the duplication WAS the defect.
+        `model` is read from the query string or a JSON body; a body key other
+        than `model` answers 400.
         """
+        body = await _body_fields(request, ("model",))
+        if model is None:
+            model = _opt_str(body.get("model"), "model")
         name = model or _hs._resolve_unnamed_model_name()
         if not name:
             raise HTTPException(503, "No model specified or configured to load")

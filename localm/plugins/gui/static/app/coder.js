@@ -632,6 +632,16 @@ export function todoHint(items) {
   return active ? `${label} · ${active.replace(/^\[.\]\s*/, "")}` : label;
 }
 
+/** Remove and return the pending tool card a result belongs to: the card with
+ *  the same call id when the event carries one, else the oldest pending card. */
+export function takePendingCard(s, callId) {
+  if (callId) {
+    const at = s.pendingCards.findIndex(c => c.dataset && c.dataset.callId === callId);
+    if (at >= 0) return s.pendingCards.splice(at, 1)[0];
+  }
+  return s.pendingCards.shift();
+}
+
 export function buildToolCard(ev) {
   const card = el("div", "tool-card");
   const inner = el("div", "inner");
@@ -814,6 +824,7 @@ export function handleCoderEvent(s, ev) {
       const card = buildToolCard(ev);
       feedAppend(s, card);
       s.pendingCards.push(card);
+      if (ev.call_id) card.dataset.callId = ev.call_id;
       if (!s.inlineBrowserAttempted && String(ev.tool || "").startsWith("browser_")) {
         s.inlineBrowserAttempted = true;
         maybeAttachInlineBrowser(s);
@@ -821,7 +832,7 @@ export function handleCoderEvent(s, ev) {
       break;
     }
     case "tool_result": {
-      const card = s.pendingCards.shift();
+      const card = takePendingCard(s, ev.call_id);
       if (card) {
         // A user rejection already has its own confirm card narrating
         // "Rejected <tool>" (confirm_resolved, resolveConfirmCard) - this
@@ -1707,22 +1718,28 @@ export async function downloadCoderFile(s, path) {
   }
 }
 
-/** Save the active session's feed as markdown through saveTextFile (explicit
- *  user action - works in privacy mode too, same contract as chat /export). */
-export function exportCoderSession() {
-  const s = activeSession();
-  const log = s?.eventLog || [];
-  if (!log.length) { toast(t("coder.export.nothingYet"), true); return; }
-  const lines = [t("coder.export.mdHeader", { label: sessionLabel(s.info) }), ""];
+/** Markdown for a coder event log. A tool_result carrying a call id is listed
+ *  under the tool_call with the same id, whatever order the events arrived in. */
+export function coderLogToMarkdown(log, header) {
+  const lines = [header, ""];
+  const resultsById = new Map();
+  const calledIds = new Set();
+  for (const ev of log) {
+    if (ev.type === "tool_result" && ev.call_id) resultsById.set(ev.call_id, ev);
+    if (ev.type === "tool_call" && ev.call_id) calledIds.add(ev.call_id);
+  }
+  const resultLine = ev => `  - ${ev.ok ? t("coder.export.ok") : t("coder.export.failed")}` +
+    (ev.summary ? `: ${ev.summary}` : "");
   for (const ev of log) {
     if (ev.type === "user") {
       lines.push(`**${t("coder.export.you")}${ev.queued ? t("coder.export.queuedSuffix") : ""}**: ${ev.text}`, "");
     } else if (ev.type === "tool_call") {
       lines.push(`- \`${ev.tool}\` ` +
         JSON.stringify(slimArgs(ev.args)).slice(0, 200));
+      const paired = ev.call_id && resultsById.get(ev.call_id);
+      if (paired) lines.push(resultLine(paired));
     } else if (ev.type === "tool_result") {
-      lines.push(`  - ${ev.ok ? t("coder.export.ok") : t("coder.export.failed")}` +
-        (ev.summary ? `: ${ev.summary}` : ""));
+      if (!ev.call_id || !calledIds.has(ev.call_id)) lines.push(resultLine(ev));
     } else if (ev.type === "info") {
       lines.push(`> ${ev.text}`, "");
     } else if (ev.type === "estimate") {
@@ -1732,7 +1749,17 @@ export function exportCoderSession() {
       lines.push("", `${t("coder.export.agentLabel")}${ev.text}`, "");
     }
   }
-  return saveTextFile(`coder-session-${s.info.id}.md`, lines.join("\n"), "text/markdown");
+  return lines.join("\n");
+}
+
+/** Save the active session's feed as markdown through saveTextFile (explicit
+ *  user action - works in privacy mode too, same contract as chat /export). */
+export function exportCoderSession() {
+  const s = activeSession();
+  const log = s?.eventLog || [];
+  if (!log.length) { toast(t("coder.export.nothingYet"), true); return; }
+  const text = coderLogToMarkdown(log, t("coder.export.mdHeader", { label: sessionLabel(s.info) }));
+  return saveTextFile(`coder-session-${s.info.id}.md`, text, "text/markdown");
 }
 
 /** The last finished task as JSON: the web form of the CLI's
@@ -1951,6 +1978,11 @@ export async function openHooksModal() {
         const card = el("div", "card");
         card.appendChild(el("div", "row", m.line));
         if (m.trusted_calls) card.appendChild(el("div", "sub", t("coder.hooks.mcpTrustedCalls")));
+        body.appendChild(card);
+      }
+      for (const line of data.project || []) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row", line));
         body.appendChild(card);
       }
       const mcp = servers.length > 0;

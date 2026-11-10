@@ -107,3 +107,33 @@ class TestSetupEmbeddingsRegistration:
             self, tmp_path, monkeypatch):
         entries = self._register_with_file(tmp_path, monkeypatch, b"some other bytes")
         assert len(entries) == 1 and "sha256" not in entries[0]
+
+
+class TestSetupEmbeddingsBackfillConsole:
+    def test_the_memory_backfill_runs_with_the_native_console_paused(
+            self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from localm.cli.maintenance import setup_embeddings
+        from localm.debuglog import native_console_is_paused
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(b"x")
+        monkeypatch.setattr(embedder, "_embeddings_dir", lambda: tmp_path)
+        monkeypatch.setattr(embedder, "resolve_embedding_model_path",
+                            lambda allow_download=True: str(model_file))
+        monkeypatch.setattr("localm.memory.store._memory_root", lambda ns: tmp_path)
+        monkeypatch.setattr("localm.memory.backfill.vectorless_scan",
+                            lambda root: (1, 0))
+        seen = []
+
+        def fake_backfill(root, embed_fn):
+            seen.append(native_console_is_paused())
+            return {"embedded": 1, "remaining": 0, "unreadable": 0}
+        monkeypatch.setattr("localm.memory.backfill.backfill_all", fake_backfill)
+
+        result = CliRunner().invoke(setup_embeddings, [])
+
+        assert result.exit_code == 0, result.output
+        assert seen == [True]
+        assert native_console_is_paused() is False

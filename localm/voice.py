@@ -244,20 +244,46 @@ def _verify_pinned_model(name: str, cache_root) -> Optional[str]:
             f"expected {pin[1][:16]}...); {outcome}")
 
 
+def _remove_shared_store_entry(blob: Path, cache_root: Path) -> list[str]:
+    """Delete *blob* when it is an entry of the hub's cache-wide shared blob
+    store (``<cache_root>/blobs/<2 hex>/<hash>``, the store huggingface_hub 1.x
+    links each repository's blob to), together with its reference manifest and
+    lock file. A file that is not a store entry is left alone. Returns what could
+    not be deleted."""
+    store = cache_root / "blobs"
+    try:
+        real = blob.resolve()
+        in_store = ((store / ".huggingface-shared-blobs").is_file()
+                    and real.is_file() and real.parent.parent == store.resolve())
+    except OSError:
+        return [str(blob)]
+    if not in_store:
+        return []
+    leftover = []
+    for path in (real, real.with_name(real.name + ".refs"), real.with_name(real.name + ".lock")):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            leftover.append(str(path))
+    return leftover
+
+
 def _discard_snapshot(repo_dir: Path, commit: str) -> list[str]:
     """Delete the snapshot *commit* of the hub cache folder *repo_dir*, and the
-    file it holds model.bin in. The whole folder goes when no other snapshot is
+    file it holds model.bin in, which is an entry of the cache's shared blob store
+    when the hub linked it there. The whole folder goes when no other snapshot is
     in it; otherwise the other snapshots stay and the folder's default reference
     is pointed at the newest of them when it named *commit*. Returns what could
     not be deleted."""
     snapshots = repo_dir / "snapshots"
     others = sorted((d for d in snapshots.iterdir() if d.is_dir() and d.name != commit),
                     key=lambda d: d.stat().st_mtime) if snapshots.is_dir() else []
-    if not others:
-        shutil.rmtree(repo_dir, ignore_errors=True)
-        return [str(repo_dir)] if repo_dir.exists() else []
     target = snapshots / commit
     blob = (target / "model.bin").resolve()
+    if not others:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        leftover = [str(repo_dir)] if repo_dir.exists() else []
+        return leftover + _remove_shared_store_entry(blob, repo_dir.parent)
     shutil.rmtree(target, ignore_errors=True)
     leftover = [str(target)] if target.exists() else []
     if blob.is_file() and repo_dir.resolve() in blob.parents:
@@ -265,6 +291,8 @@ def _discard_snapshot(repo_dir: Path, commit: str) -> list[str]:
             blob.unlink()
         except OSError:
             leftover.append(str(blob))
+    else:
+        leftover += _remove_shared_store_entry(blob, repo_dir.parent)
     ref = repo_dir / "refs" / "main"
     try:
         if ref.is_file() and ref.read_text(encoding="utf-8").strip() == commit:

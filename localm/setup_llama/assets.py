@@ -9,19 +9,21 @@ import json
 import re
 import sys
 import urllib.request
-from typing import Optional
+from typing import Mapping, Optional
 
 import click
 
 from localm import hwdetect
 from localm.debuglog import logger
 from localm.setup_llama._common import console
+from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LINUX_PINNED_SHA256,
                                      _CUDA_LINUX_REPO, _PINNED_FALLBACK_SHA256, _ROCM_TAG,
                                      _UPSTREAM_REPO, DEFAULT_URL, DEFAULT_URL_SHA256)
 from localm.setup_llama.versions import _tag_for
 from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 import localm.setup_llama as _sl
+from localm.http_ssl import read_bounded
 
 # --------------------------------------------------------------------------- #
 #  Backend resolution                                                          #
@@ -50,14 +52,38 @@ def _auto_backend() -> str:
     return hwdetect.recommended_install_backend(det)
 
 
+def _asset_sha256(asset: dict, pins: Mapping[str, str] = _PINNED_FALLBACK_SHA256
+                  ) -> Optional[str]:
+    """The sha256 to verify a release *asset* against.
+
+    When the asset's name is in *pins* the pinned value is returned, and a
+    ``sha256:`` digest from the release listing that differs from it raises
+    ``ArtifactError``. Otherwise the listing's digest is returned, or None when
+    it has none."""
+    name = str(asset.get("name", ""))
+    digest = asset.get("digest")
+    api_sha = (digest.split("sha256:")[-1].strip().lower()
+               if isinstance(digest, str) and "sha256:" in digest else None)
+    pinned = pins.get(name)
+    if pinned:
+        pinned = pinned.strip().lower()
+        if api_sha and api_sha != pinned:
+            raise ArtifactError(
+                f"the release listing's sha256 for {name} ({api_sha}) does not match "
+                f"the pinned sha256 ({pinned}). Refusing to install it.")
+        return pinned
+    return api_sha or None
+
+
 def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
                            tag: Optional[str] = None
                            ) -> tuple[str, Optional[str], Optional[str]]:
     """Resolve a backend name to a (url, sha256_digest, tag) triple.
 
-    If the release listing is available, resolves it dynamically and gets the
-    sha256 from the digest field. If offline, falls back to the templated guess
-    and queries the local pinned checksum dictionary.
+    If the release listing is available, resolves it dynamically; the sha256 is
+    the pinned one for a pinned asset (a disagreeing listing digest raises
+    ``ArtifactError``) and the listing's digest otherwise (see ``_asset_sha256``).
+    If offline, falls back to the templated guess and the pinned checksums.
 
     *cuda_line* selects which asset-name substrings to match for the 'cuda'
     backend on Windows AND Linux (see NvidiaInfo.cuda_line) - ignored for
@@ -108,12 +134,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
         if (any(m in name for m in matchers) and "cudart" not in name
                 and _asset_arch_ok(name, arch)
                 and a.get("browser_download_url")):
-            url = a["browser_download_url"]
-            digest = a.get("digest")
-            sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
-            if not sha:
-                sha = _PINNED_FALLBACK_SHA256.get(a.get("name", ""))
-            return url, sha, tag
+            return a["browser_download_url"], _sl._asset_sha256(a), tag
 
     # Fallback: the release listing was unavailable, so the asset name has to
     # come from somewhere else.
@@ -190,11 +211,7 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
     for a in assets:
         if f"windows-rocm-{asset_tag}" in a.get("name", ""):
             url = a.get("browser_download_url") or fallback_url
-            digest = a.get("digest")
-            sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
-            if not sha:
-                sha = fallback_sha
-            return url, sha, None
+            return url, _sl._asset_sha256(a) or fallback_sha, None
     # Surface the fallback so the user knows the build may not be current
     # (the lemonade-sdk release lookup was unreachable, or this release is
     # missing the expected asset for this GPU family); mirrors the
@@ -225,10 +242,7 @@ def _resolve_linux_cuda_asset(backend: str, cuda_line: str,
     for a in assets:
         name = str(a.get("name", "")).lower()
         if name.endswith(suffix) and a.get("browser_download_url"):
-            url = a["browser_download_url"]
-            digest = a.get("digest")
-            sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
-            return url, sha, tag
+            return a["browser_download_url"], _sl._asset_sha256(a, _CUDA_LINUX_PINNED_SHA256), tag
     pinned_name = f"llama-{tag}-bin-ubuntu{suffix}"
     pinned_sha = _CUDA_LINUX_PINNED_SHA256.get(pinned_name)
     if not assets and pinned_sha:
@@ -278,7 +292,7 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
+            data = json.loads(read_bounded(r).decode("utf-8"))
             return data.get("assets", [])
     except Exception as e:
         # Best-effort probe: every caller has a pinned fallback for exactly
@@ -404,6 +418,4 @@ def _resolve_linux_cudart_asset(tag: str, line: str = _CUDA_LINE) -> tuple[str, 
         raise click.ClickException(
             f"llama.cpp release {tag} has no Linux {line} CUDA runtime bundle for "
             f"{arch} - falling back to vulkan.")
-    digest = asset.get("digest")
-    sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
-    return asset["browser_download_url"], sha or _PINNED_FALLBACK_SHA256.get(asset["name"])
+    return asset["browser_download_url"], _sl._asset_sha256(asset)

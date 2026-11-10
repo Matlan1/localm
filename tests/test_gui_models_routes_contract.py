@@ -27,6 +27,14 @@ from localm.inference import http_server as _hs
 from localm.plugins.gui.routes import models as models_routes
 from tests.conftest import probe_double
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 _GB = 1024 ** 3
 
 # (method, path) -> the scope its Depends(require_scope(...)) must carry.
@@ -211,9 +219,9 @@ def scoped(tmp_path, monkeypatch, engines):
     attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=switch_model,
                active_model=lambda: "m-a")
     jobs = FakeJobs()
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli",
                         lambda self, *a, **kw: jobs.start_cli(*a, **kw))
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_fn",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_fn",
                         lambda self, *a, **kw: jobs.start_fn(*a, **kw))
     monkeypatch.setattr("localm.config.load_registry", lambda: dict(_REGISTRY))
     monkeypatch.setattr("localm.discover.hf_search", lambda *a, **kw: [])

@@ -5,6 +5,7 @@ per-repo file listing with VRAM fit badges."""
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import Depends, FastAPI, HTTPException
 
@@ -12,6 +13,21 @@ from localm import scopes
 from localm.inference.http_server import require_scope
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
+
+logger = logging.getLogger("localm")
+
+
+def _total_ram() -> int:
+    """Installed RAM in bytes; 0 when it cannot be read."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().total)
+    except (ImportError, OSError) as e:
+        logger.debug("could not read the installed RAM: %s", e)
+        return 0
+    except Exception as e:
+        logger.warning("could not read the installed RAM, psutil failed: %r", e)
+        return 0
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -42,8 +58,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if e.off:
                 raise HTTPException(
                     _discover_status(e),
-                    "Network access is off. Turn it on, or allow downloads "
-                    "only, in Settings → Network.") from e
+                    "Network access is off. Turn it on, or allow model "
+                    "downloads while network access is off, in Settings > "
+                    "Server & network.") from e
             raise HTTPException(_discover_status(e), str(e)) from e
 
     async def _vram_total():
@@ -97,9 +114,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown,
         # and a result with no size estimate keeps no fit.
         vram, total = await _vram_total()
+        ram = await asyncio.get_running_loop().run_in_executor(get_plugin_executor(), _total_ram)
         for r in results:
             if r.get("size_bytes"):
                 r["fit"] = fit_label(r["size_bytes"], total)
+                if total and ram and r["size_bytes"] > total + ram:
+                    r["exceeds_memory"] = True
         return {"query": q, "source": "hf", "results": results, "vram": vram,
                 "hf_backend_available": hf_backend_available()}
 

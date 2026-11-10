@@ -82,9 +82,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import has_recorded_model_type as _has_recorded_model_type
         from localm.model_manager import model_vision_capability as _mvc
         from localm.model_manager import capabilities as _caps
+        from localm.inference.backends.hf import uses_transformers_classes as _uses_transformers_classes
         from localm.model_manager import model_packages as _mpk
         registry = load_registry()
         current = active_model()
+        # Rows whose folder ships code that does not run: the load uses transformers' classes.
+        own_code_off: set = set()
         # Fetched once, off the event loop, before the row loop below: loaded_path()
         # blocks on embedder._LOCK, which get_embedder holds for the whole duration
         # of an IsolatedEmbedder load. The embedder's path cannot change mid-request,
@@ -163,6 +166,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 context_len[_n] = _caps.model_context_length(_n, reg=registry)
                 tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
                 if p.is_dir():
+                    if _uses_transformers_classes(str(p)):
+                        own_code_off.add(_n)
                     try:
                         state = _mpk.folder_state(p)
                     except (OSError, ValueError, RecursionError):
@@ -252,6 +257,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # is all the model needs.
             if name in package_needs:
                 row_out["packages"] = package_needs[name]
+            # Present only when the folder ships code that does not run.
+            if name in own_code_off:
+                row_out["own_code_off"] = True
             if context_lens.get(name) is not None:
                 row_out["context_length"] = context_lens[name]
             if tool_caps.get(name) is not None:

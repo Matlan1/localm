@@ -104,7 +104,7 @@ def _errors(caplog):
 @pytest.fixture
 def image_app(home, monkeypatch):
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     app = create_app(None)
     PluginManager(app, external_root=home / "noplugins").install("image")
     app.state.jobs = JobManager()
@@ -117,14 +117,14 @@ def image_app(home, monkeypatch):
         release.wait(10)
         return False, "stopped"
 
-    mod = sys.modules["_localm_plugin_image.backend"]
+    mod = sys.modules["localm.plugins.builtin.image.backend"]
     monkeypatch.setattr(mod, "settings", lambda cfg: {
         "reload_after": True, "warning": "", "api_url": "http://127.0.0.1:8188"})
     monkeypatch.setattr(mod, "ensure_available", lambda s, on_progress=None: (True, "up"))
     monkeypatch.setattr(mod, "generate", generate)
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
     monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
-    plug = sys.modules["_localm_plugin_image"]
+    plug = sys.modules["localm.plugins.builtin.image.plug"]
     monkeypatch.setattr(plug, "JOB_POLL_SECONDS", 0.05)
     monkeypatch.setattr(plug, "CANCEL_SETTLE_SECONDS", 0.3)
     app.state.test_started = started
@@ -157,7 +157,7 @@ def speech_app(home, monkeypatch):
     from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
     from localm.plugins.builtin.tts import speech_route
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     models = home / "models"
     models.mkdir()
     (models / "voice-1.gguf").write_bytes(b"GGUF")

@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+from localm import livefeed as _livefeed
 from localm import pathscrub
 from localm.debuglog import logger
 from localm.inference.backends.base import RerankerHeadMissingError
@@ -157,6 +158,7 @@ _KIND_WORDS = {
     "textual-inversion": "a textual-inversion embedding",
     "segmentation": "a segmentation model",
     "tts": "a text-to-speech model",
+    "decision": "a decision model",
     "unknown": "a model of unknown type",
 }
 
@@ -170,13 +172,18 @@ def registered_rerankers() -> list[str]:
                   if isinstance(entry, dict) and entry_is_reranker(name, entry))
 
 
-def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
+_HTTP_MODEL_FIELD = "the request's model field"
+
+
+def resolve_reranker(model: Optional[str], *,
+                     where: str = _HTTP_MODEL_FIELD) -> tuple[str, str]:
     """``(registry name, GGUF path)`` for the reranker a request names.
 
     An omitted or ``localm`` model resolves to the only registered reranker.
     Raises :class:`RerankerModelError` (with the HTTP status to report) when the
     model is not registered (404), names no reranker or several (400), or is
-    registered as something that cannot rerank (422)."""
+    registered as something that cannot rerank (422). *where* names the place a
+    model is chosen, for the messages."""
     from localm.config import load_registry
     from localm.model_manager.registry import entry_is_reranker
     reg = load_registry()
@@ -187,12 +194,13 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
             raise RerankerModelError(
                 "No reranker model is registered. Add a reranker GGUF (for "
                 "example bge-reranker-v2-m3 or Qwen3-Reranker) and name it in "
-                "the request's model field.", 404)
+                + where + ".", 404)
         if len(names) > 1:
             raise RerankerModelError(
                 "Several rerankers are registered (" + ", ".join(names) +
-                "); name one in the request's model field.", 400)
+                "); name one in " + where + ".", 400)
         name = names[0]
+    http = where == _HTTP_MODEL_FIELD
     entry = reg.get(name)
     if not isinstance(entry, dict):
         raise RerankerModelError(f"Model {name!r} is not registered.", 404)
@@ -202,13 +210,13 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
     if kind != "embedding":
         what = _KIND_WORDS.get(kind, f"a {kind} model")
         raise RerankerModelError(
-            f"Model {name!r} is {what}, not a reranker; /v1/rerank needs a "
-            "reranker GGUF.", 422)
+            f"Model {name!r} is {what}, not a reranker; "
+            + ("/v1/rerank" if http else "reranking") + " needs a reranker GGUF.", 422)
     if not entry_is_reranker(name, entry):
         raise RerankerModelError(
             f"Model {name!r} is an embedding model, not a reranker: it has no "
-            "classifier head to score a query against a document. Use "
-            "/v1/embeddings for it.", 422)
+            "classifier head to score a query against a document."
+            + (" Use /v1/embeddings for it." if http else ""), 422)
     path = _registered_model_path(name)
     if path is None:
         raise RerankerModelError(
@@ -290,6 +298,7 @@ class HFReranker:
     def __init__(self, path: str, device: Optional[str] = None) -> None:
         from localm.inference.backends.hf import HFBackend
         self.model_path = path
+        self.device = device
         self.active_requests = 0
         self._call_lock = threading.Lock()
         self._backend = HFBackend(path, device=device, task="rerank")
@@ -374,8 +383,11 @@ class HFReranker:
         """Load the worker again under the engine's load lock when it is not
         running. Raises :class:`RerankerUnavailableError` without loading when
         this reranker is no longer the resident one."""
+        from localm.inference import load_lease
         from localm.inference.engine import _LOAD_LOCK
-        with _LOAD_LOCK:
+        with load_lease.held(load_lease.lease_keys(device=getattr(self, "device", None)),
+                             purpose="restarting a reranker"), \
+                load_lease.bounded(_LOAD_LOCK, what="restarting a reranker"):
             if self._backend.loaded:
                 return
             with self._call_lock:
@@ -390,6 +402,7 @@ class HFReranker:
                 try:
                     self._backend.unload()
                     self._backend.load()
+                    _livefeed.kick("reranker reloaded")
                 except Exception as e:
                     reason = pathscrub.scrub_paths(str(e))
                     logger.warning("could not reload reranker %s (%s)",
@@ -463,7 +476,11 @@ def _get_resident(path: str, purpose: str):
     """The resident model for *path* loaded for *purpose* (``_RERANK`` or
     ``_EMBED``), loading it first. A different resident model with requests in
     flight is waited for, up to ``_REPLACE_WAIT_S`` and holding no lock, before
-    it is replaced. See :func:`get_reranker` and :func:`get_embedding_model`."""
+    it is replaced. See :func:`get_reranker` and :func:`get_embedding_model`.
+    From the placement check until the load has returned it holds the GPU load
+    lease; raises :class:`~localm.inference.load_lease.LoadBusyError`, latching
+    nothing, when the lease or the engine's load lock is still held elsewhere
+    after ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
     global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     from localm.config import load_config
     from localm.inference import embedder as emb
@@ -482,80 +499,88 @@ def _get_resident(path: str, purpose: str):
             _IDLE.wait(timeout=max(0.0, deadline - time.monotonic()))
         if _RERANKER is not None and _RERANKER_KEY == key:
             return _RERANKER
-    hf_device: Optional[str] = None
-    pooling: object = emb.POOLING_AUTO
-    if purpose == _EMBED:
-        cfg = load_config()
-        explicit = emb._explicit_embedder_gpu_layers(cfg)
-        emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
-        ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
-        if placement_reason is not None:
-            logger.warning("embedding model placement: %s", placement_reason)
-    elif hf_folder:
-        _check_hf_head(path)
-        ngl, placement_reason = 0, None
-        if emb._explicit_embedder_gpu_layers(load_config()) == 0:
-            hf_device = "cpu"
-    else:
-        _check_head(path)
-        cfg = load_config()
-        explicit = emb._explicit_embedder_gpu_layers(cfg)
-        emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
-        ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
-        if placement_reason is not None:
-            logger.warning("reranker placement: %s", placement_reason)
-    from localm.inference.engine import _LOAD_LOCK
-    with _LOAD_LOCK:
-        with _LOCK:
-            if _RERANKER is not None and _RERANKER_KEY == key:
-                return _RERANKER
-            failed = _latched_failure(file_key)
-            if failed is not None:
-                raise RerankerUnavailableError(failed)
-            current = _RERANKER
-            if current is not None and _busy(current):
-                raise RerankerUnavailableError(
-                    "another reranker or embedding model is still scoring or "
-                    "embedding a request; retry shortly")
-            if current is not None:
-                _RERANKER = None
-                _RERANKER_KEY = None
-                _RESIDENT_REQUESTS = 0
-                _IDLE.notify_all()
-                current.close()
-            try:
-                if hf_folder:
-                    loaded = HFReranker(path, hf_device)
-                elif purpose == _EMBED:
-                    loaded = emb.IsolatedEmbedder(
-                        path, n_gpu_layers=ngl, pooling_type=pooling,
-                        gpu_fallback_reason=placement_reason)
-                    if getattr(loaded, "effective_pooling", None) == emb._POOLING_RANK:
-                        loaded.close()
-                        raise RuntimeError(
-                            f"{Path(path).name} is a reranker (rank pooling), not "
-                            "an embedding model: it scores query and document "
-                            "pairs (POST /v1/rerank)")
+    from localm.inference import load_lease
+    lease = load_lease.acquire(
+        load_lease.lease_keys(n_gpu_layers=emb._explicit_embedder_gpu_layers(load_config())),
+        purpose="loading a reranker")
+    try:
+        hf_device: Optional[str] = None
+        pooling: object = emb.POOLING_AUTO
+        if purpose == _EMBED:
+            cfg = load_config()
+            explicit = emb._explicit_embedder_gpu_layers(cfg)
+            emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
+            ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
+            if placement_reason is not None:
+                logger.warning("embedding model placement: %s", placement_reason)
+        elif hf_folder:
+            _check_hf_head(path)
+            ngl, placement_reason = 0, None
+            if emb._explicit_embedder_gpu_layers(load_config()) == 0:
+                hf_device = "cpu"
+        else:
+            _check_head(path)
+            cfg = load_config()
+            explicit = emb._explicit_embedder_gpu_layers(cfg)
+            emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
+            ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
+            if placement_reason is not None:
+                logger.warning("reranker placement: %s", placement_reason)
+        from localm.inference.engine import _LOAD_LOCK
+        with load_lease.bounded(_LOAD_LOCK, what="loading a reranker"):
+            with _LOCK:
+                if _RERANKER is not None and _RERANKER_KEY == key:
+                    return _RERANKER
+                failed = _latched_failure(file_key)
+                if failed is not None:
+                    raise RerankerUnavailableError(failed)
+                current = _RERANKER
+                if current is not None and _busy(current):
+                    raise RerankerUnavailableError(
+                        "another reranker or embedding model is still scoring or "
+                        "embedding a request; retry shortly")
+                if current is not None:
+                    _RERANKER = None
+                    _RERANKER_KEY = None
+                    _RESIDENT_REQUESTS = 0
+                    _IDLE.notify_all()
+                    current.close()
+                try:
+                    if hf_folder:
+                        loaded = HFReranker(path, hf_device)
+                    elif purpose == _EMBED:
+                        loaded = emb.IsolatedEmbedder(
+                            path, n_gpu_layers=ngl, pooling_type=pooling,
+                            gpu_fallback_reason=placement_reason)
+                        if getattr(loaded, "effective_pooling", None) == emb._POOLING_RANK:
+                            loaded.close()
+                            raise RuntimeError(
+                                f"{Path(path).name} is a reranker (rank pooling), not "
+                                "an embedding model: it scores query and document "
+                                "pairs (POST /v1/rerank)")
+                    else:
+                        loaded = emb.IsolatedEmbedder(
+                            path, n_gpu_layers=ngl, pooling_type=emb._POOLING_RANK,
+                            gpu_fallback_reason=placement_reason)
+                except Exception as e:
+                    reason = pathscrub.scrub_paths(str(e))
+                    _LOAD_FAILED[file_key] = (reason, time.monotonic())
+                    logger.warning("could not load %s %s (%s)",
+                                   "reranker" if purpose == _RERANK else "embedding model",
+                                   Path(path).name, e)
+                    raise RerankerUnavailableError(reason) from e
+                _RERANKER = loaded
+                _RERANKER_KEY = key
+                _livefeed.kick("reranker loaded")
+                if purpose == _EMBED:
+                    logger.info("embedding model ready: %s (dim=%d)", Path(path).name,
+                                getattr(loaded, "dim", 0))
                 else:
-                    loaded = emb.IsolatedEmbedder(
-                        path, n_gpu_layers=ngl, pooling_type=emb._POOLING_RANK,
-                        gpu_fallback_reason=placement_reason)
-            except Exception as e:
-                reason = pathscrub.scrub_paths(str(e))
-                _LOAD_FAILED[file_key] = (reason, time.monotonic())
-                logger.warning("could not load %s %s (%s)",
-                               "reranker" if purpose == _RERANK else "embedding model",
-                               Path(path).name, e)
-                raise RerankerUnavailableError(reason) from e
-            _RERANKER = loaded
-            _RERANKER_KEY = key
-            if purpose == _EMBED:
-                logger.info("embedding model ready: %s (dim=%d)", Path(path).name,
-                            getattr(loaded, "dim", 0))
-            else:
-                logger.info("reranker ready: %s (labels=%s)", Path(path).name,
-                            _RERANKER.cls_labels or "none declared")
-            return _RERANKER
+                    logger.info("reranker ready: %s (labels=%s)", Path(path).name,
+                                _RERANKER.cls_labels or "none declared")
+                return _RERANKER
+    finally:
+        load_lease.release(lease)
 
 
 class RerankOutcome(NamedTuple):
@@ -687,6 +712,8 @@ def reset_reranker(*, force: bool = True) -> bool:
         _LOAD_FAILED.clear()
     if current is not None and busy:
         _stop_busy(current)
+    if current is not None:
+        _livefeed.kick("reranker unloaded")
     return current is not None
 
 

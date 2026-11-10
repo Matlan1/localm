@@ -16,14 +16,15 @@ points at the maintainer email.
 
 What it NEVER collects: environment variables (which can hold a key), config
 secrets, or chat/transcript content. Only OS / arch / Python, a few version
-markers, whether a venv exists, and the tail of the most recent log - all
+markers, whether a venv exists, and a digest of the most recent log built by
+localm/_log_digest.py (records that carry chat content are dropped) - all
 username-scrubbed before it is shown or sent.
 
 Run it directly:  python scripts/report_issue.py
 Optional flags used by the setup wiring:
   --summary TEXT    one-line title (else you are prompted)
   --detail  TEXT    prefilled "what happened" (e.g. the failing setup step)
-  --log     PATH    a specific log file to attach the tail of (else newest found)
+  --log     PATH    a specific log file to attach a digest of (else newest found)
   --yes             SEND immediately, skipping the confirm prompt (the preview
                     still prints to the console first, but does not gate the
                     send); for scripted/automated sends
@@ -119,7 +120,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 #  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
-_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|[ \t]*=[ \t]*[^=\s]))[A-Za-z0-9._~+/=\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
@@ -138,7 +139,7 @@ _QUERY_SECRET_RE = re.compile(
     #    superlinear on hostile pasted text.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)"
+    r")[ \t]*=[ \t]*(?![ \t]))"
     # Leave a value that cannot be a secret alone (true/false/none/0/1/...);
     # the literal must be the whole value, closing markup aside.
     r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
@@ -146,20 +147,38 @@ _QUERY_SECRET_RE = re.compile(
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 _HEADER_SECRET_RE = re.compile(
-    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
+)
+# An Authorization value under any scheme. Byte-identical to _AUTH_HEADER_RE
+# in localm/bugreport/scrub.py.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
+    r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?![A-Za-z0-9_-]+[\"']?:(?:\s|$))"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
+    r"|[^\s,]+)"
+    r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
 )
 # Credential-named JSON object keys ("api_key": "..."). Byte-identical to
 # _JSON_SECRET_RE in localm/bugreport/scrub.py.
 _JSON_SECRET_RE = re.compile(
     r"(?i)([\"'](?:"
-    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r"|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig)"
     r")[\"']\s*:\s*)"
+    r"(?=\S)(?!<redacted>)"
     r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[\"']?\s*(?:[,}\]]|$))"
-    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+    r"(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?"
+    r"|\[[^\]\r\n]*\]?"
+    r"|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)"
 )
 # The account segment under a well-known home root. The Windows separator is
 # one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
@@ -366,12 +385,14 @@ def scrub(text: str) -> str:
     text = re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
     # Strip user:pass@ credentials from any URL-ish value.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+    # Bearer tokens anywhere in the text.
+    text = _BEARER_RE.sub(r"\1<redacted>", text)
     # Credential-named query params, header lines and JSON keys.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _AUTH_HEADER_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
-    # Bearer tokens and API keys anywhere in the text.
-    text = _BEARER_RE.sub(r"\1<redacted>", text)
+    # API keys anywhere in the text.
     text = _APIKEY_RE.sub("<redacted>", text)
     # Email addresses, except the maintainer's.
     text = _EMAIL_RE.sub(_email_replacement, text)
@@ -398,9 +419,63 @@ def _venv_python() -> Path | None:
     return None
 
 
+#: Bytes read from the end of a log for the digest, as localm/bugreport/logs.py reads.
+_LOG_TAIL_READ_BYTES = 2_000_000
+#: Character budget of the attached log digest.
+_LOG_DIGEST_MAX_CHARS = 4000
+
+_LOG_NOTE_NO_DIGEST = ("No log was attached: localm/_log_digest.py could not be loaded, "
+                       "so chat content could not be filtered out of it.")
+_LOG_NOTE_UNREADABLE = "No log was attached: the log file could not be read."
+
+
+def _load_log_digest():
+    """The clone's ``localm/_log_digest.py`` loaded by file path (it imports only
+    the standard library), or None when it is missing or fails to load. Never
+    raises."""
+    try:
+        import importlib.util
+        path = REPO_ROOT / "localm" / "_log_digest.py"
+        if not path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_localm_report_issue_log_digest", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if not callable(getattr(mod, "build_digest", None)):
+            return None
+        return mod
+    except Exception:
+        return None
+
+
+def _digest_log(path: Path, digest_mod) -> str:
+    """Scrubbed digest of *path* built by ``digest_mod.build_digest`` (chat-content
+    records dropped), from its last _LOG_TAIL_READ_BYTES. Raises OSError when
+    the file cannot be read."""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    truncated = len(raw) > _LOG_TAIL_READ_BYTES
+    floor = None
+    if truncated:
+        floor = digest_mod.latest_header_epoch(raw[:-_LOG_TAIL_READ_BYTES])
+        raw = raw[-_LOG_TAIL_READ_BYTES:]
+    digest = digest_mod.build_digest(raw, max_chars=_LOG_DIGEST_MAX_CHARS,
+                                     start_tainted=truncated, start_floor=floor)
+    return scrub(digest.strip())[-_LOG_DIGEST_MAX_CHARS:] if digest else ""
+
+
 def _newest_log(explicit: str | None = None) -> tuple:
-    """(path, scrubbed tail) of a relevant log, or (None, ''). Looks at an explicit
-    path first, else the newest *.log under the clone's home/logs. Never raises."""
+    """``(path, scrubbed digest, note)`` for a relevant log.
+
+    Looks at an explicit path first, else the newest *.log under the clone's
+    home/logs, then home. The digest comes from localm/_log_digest.py, the same
+    filter the in-app reporter uses, so records that carry chat content are
+    dropped. *note* is a one-line reason when no log is attached although one
+    was found (the digest module did not load, or no candidate could be read);
+    otherwise "". Returns (None, "", "") when there is no log or none held
+    anything to report. Never raises."""
     candidates: list[Path] = []
     if explicit:
         p = Path(explicit)
@@ -415,15 +490,21 @@ def _newest_log(explicit: str | None = None) -> tuple:
                                          reverse=True)
             except OSError:
                 continue
+    if not candidates:
+        return None, "", ""
+    digest_mod = _load_log_digest()
+    if digest_mod is None:
+        return None, "", _LOG_NOTE_NO_DIGEST
+    unreadable = False
     for p in candidates:
         try:
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-            tail = "\n".join(lines[-120:]).strip()
-            if tail:
-                return p, scrub(tail)[-4000:]
+            digest = _digest_log(p, digest_mod)
         except OSError:
+            unreadable = True
             continue
-    return None, ""
+        if digest:
+            return p, digest, ""
+    return None, "", (_LOG_NOTE_UNREADABLE if unreadable else "")
 
 
 def collect_diagnostics() -> dict:
@@ -461,7 +542,7 @@ def collect_diagnostics() -> dict:
 # --------------------------------------------------------------------------- #
 
 def build_body(summary: str, description: str, diag: dict,
-               log_path, log_tail: str) -> str:
+               log_path, log_tail: str, log_note: str = "") -> str:
     """Render the editable markdown report (already-scrubbed inputs)."""
     lines = [
         f"# localm bug report: {summary}",
@@ -485,7 +566,9 @@ def build_body(summary: str, description: str, diag: dict,
             lines.append(f"- {name}: {val}")
     if log_tail:
         where = scrub(str(log_path)) if log_path else "log"
-        lines += ["", f"## Recent log tail ({where})", "```", log_tail, "```"]
+        lines += ["", f"## Recent log digest ({where})", "```", log_tail, "```"]
+    elif log_note:
+        lines += ["", "## Log", log_note]
     lines += ["", "---",
               f"Sent to the localm maintainer ({MAINTAINER_EMAIL}). "
               "You can edit anything above before sending."]
@@ -596,8 +679,9 @@ def main(argv=None) -> int:
     summary = summary or "localm would not start"
 
     diag = collect_diagnostics()
-    log_path, log_tail = _newest_log(args.log or None)
-    body = build_body(scrub(summary), scrub(description), diag, log_path, log_tail)
+    log_path, log_tail, log_note = _newest_log(args.log or None)
+    body = build_body(scrub(summary), scrub(description), diag, log_path, log_tail,
+                      log_note)
 
     # Resolved before the preview so the destination is shown in it.
     url, token = read_proxy()

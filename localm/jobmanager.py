@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import livefeed as _livefeed
 from localm.model_manager import PROGRESS_SENTINEL
 
 # Bound on the replay backlog and on each subscriber's queue.
@@ -795,8 +796,9 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
     except Exception:
         return
     if sys.platform == "win32":
+        from localm import sysprog as _sysprog
         try:
-            done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+            done = subprocess.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],
                                   capture_output=True, timeout=10)
             if done.returncode == 0:
                 return
@@ -930,10 +932,12 @@ class JobManager:
             self._gc()
             self._jobs[job.id] = job
             self._persist_locked()
+        _livefeed.kick("job registered")
 
     def _persist(self) -> None:
         with self._lock:
             self._persist_locked()
+        _livefeed.kick("job changed")
 
     def _persist_locked(self) -> None:
         """Mirror the registry to disk. Caller holds _lock.
@@ -1173,6 +1177,8 @@ class JobManager:
                 # Stamp BEFORE the end event goes out, so a subscriber that lists
                 # jobs on "end" never sees this one still in flight.
                 job.mark_finished()
+                if job.status != "done":
+                    job.result = None
                 if announcer:
                     if job.status == "failed":
                         announcer.announce_failure_detail()
@@ -1229,6 +1235,8 @@ class JobManager:
             finally:
                 # Stamp before "end" is emitted, as in start_cli.
                 job.mark_finished()
+                if job.status != "done":
+                    job.result = None
                 job.push({
                     "type": "end",
                     "status": job.status,

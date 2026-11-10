@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-plugin config resolution for the media plugins (image, music, video).
 
-Backend-agnostic: this only manipulates the config dict. It knows nothing about
-ComfyUI or any specific backend - each plugin's backend reads the resolved block
-and fills in its own defaults.
+Only manipulates the config dict: each plugin's backend reads the resolved block
+and fills in its own defaults. The one backend name it knows is ``comfy``, the
+default backend, which backend resolution falls back to.
 
 Each media plugin stores a self-contained block under ``config["plugins"][name]``,
 e.g.::
@@ -27,6 +27,7 @@ the source is missing/disabled. Applies only to the three media plugins.
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
@@ -152,7 +153,10 @@ def load_backend(package: str, name: Optional[str]):
     e.g. ``load_backend("localm.plugins.builtin.image", "a1111")`` imports
     ``localm.plugins.builtin.image.backends.a1111``. Raises ``ModuleNotFoundError``
     when no such module exists, so the caller falls back to its built-in ``comfy``
-    reference rather than hard-crashing on a typo or an uninstalled backend."""
+    reference rather than hard-crashing on a typo or an uninstalled backend.
+
+    The module declares what it supports as upper-case attributes
+    (``CAPABILITIES``); ``backend_capabilities`` reads them."""
     import importlib
     nm = (name or "comfy").strip().lower() or "comfy"
     return importlib.import_module(f"{package}.backends.{nm}")
@@ -188,7 +192,47 @@ def combine_warnings(*warnings: Optional[str]) -> Optional[str]:
     return "; ".join(parts) if parts else None
 
 
-def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNamespace:
+CAPABILITIES = (
+    "NEEDS_COMFY_SERVER",
+    "SUPPORTS_STEPS",
+    "SUPPORTS_CLIP_SKIP",
+    "SUPPORTS_JOB_OPTIONS",
+    "SUPPORTS_UPSCALE",
+    "EMBEDS_OUTPUT_METADATA",
+)
+"""The capability attributes a backend module may declare. A backend sets the
+ones it has to True; an undeclared attribute is False.
+
+- ``NEEDS_COMFY_SERVER``: the backend drives a ComfyUI server (``api_url``,
+  GPU placement and the ComfyUI-only settings apply).
+- ``SUPPORTS_STEPS`` / ``SUPPORTS_CLIP_SKIP``: the request's ``steps`` /
+  ``clip_skip`` reach the generator.
+- ``SUPPORTS_JOB_OPTIONS``: per-job model choices, several LoRAs, masks,
+  ControlNet, embeddings, sampler, scheduler, hires fix, batch and preview
+  frames, with the backend's own request refusals and missing-model offers.
+- ``SUPPORTS_UPSCALE``: the backend upscales gallery images.
+- ``EMBEDS_OUTPUT_METADATA``: the generated file carries the submitted workflow
+  as container metadata, so the facade strips it from the output."""
+
+
+def backend_capabilities(package: str, name: Optional[str],
+                         comfy_ref: Optional[SimpleNamespace] = None) -> dict:
+    """``{capability: bool}`` for the media backend *name* of *package*: the
+    module ``load_backend`` imports, or *comfy_ref* for ``comfy``, empty or a
+    backend that cannot be imported."""
+    nm = (name or "comfy").strip().lower() or "comfy"
+    impl = comfy_ref
+    if nm != "comfy" or comfy_ref is None:
+        try:
+            impl = load_backend(package, nm)
+        except ModuleNotFoundError:
+            if comfy_ref is None:
+                raise
+    return {cap: bool(getattr(impl, cap, False)) for cap in CAPABILITIES}
+
+
+def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
+                        output_kind: str) -> SimpleNamespace:
     """Build the ``ensure_available``/``free_vram``/``generate`` dispatch facade
     shared by every media plugin's backend.py: *comfy_ref* (the plugin's own
     inline ComfyUI reference implementation) for the default ``"comfy"`` backend,
@@ -200,7 +244,21 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNames
     A plugin's backend.py assigns the returned callables to its own module-level
     names, including ``resolve`` as ``_impl``, so both ``plug.py`` call sites
     (``_backend.ensure_available``, etc.) and tests that introspect which
-    implementation a settings dict resolves to keep working."""
+    implementation a settings dict resolves to keep working.
+
+    ``supports(s, capability)`` answers whether the backend *s* resolves to
+    declares *capability* (one of ``CAPABILITIES``; any other name raises
+    KeyError).
+
+    ``generate`` takes the extra keyword ``privacy`` (default False), which is
+    not passed to the backend. When the backend declares
+    ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a non-empty
+    file at *out_path*, ``generate`` strips
+    the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
+    ``video``) once, here. A failed strip appends the WARNING to the message;
+    with ``privacy`` it instead deletes the file and returns
+    ``(False, <message naming the reason>)``, so a file that may still carry the
+    prompt is never reported as generated."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()
@@ -211,14 +269,94 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNames
         except ModuleNotFoundError:
             return comfy_ref
 
+    def supports(s: dict, capability: str) -> bool:
+        if capability not in CAPABILITIES:
+            raise KeyError(capability)
+        return bool(getattr(resolve(s), capability, False))
+
     def ensure_available(s: dict, *args, **kwargs) -> tuple[bool, str]:
         return resolve(s).ensure_available(s, *args, **kwargs)
 
     def free_vram(s: dict, *args, **kwargs) -> bool:
         return resolve(s).free_vram(s, *args, **kwargs)
 
-    def generate(s: dict, *args, **kwargs) -> tuple[bool, str]:
-        return resolve(s).generate(s, *args, **kwargs)
+    def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
+                 **kwargs) -> tuple[bool, str]:
+        impl = resolve(s)
+        ok, message = impl.generate(s, prompt, out_path, *args, **kwargs)
+        if (not ok or not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
+                or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
+            return ok, message
+        from localm.media.output_metadata import strip_output
+        result = strip_output(output_kind, Path(out_path))
+        if not result.failed:
+            return ok, message
+        if privacy:
+            removed = ""
+            try:
+                Path(out_path).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                removed = (f" The file could not be removed ({e}); delete "
+                           f"{out_path} by hand.")
+            return False, f"Output withheld: {result.reason}{removed}"
+        return ok, f"{message}\n{result.reason}"
 
-    return SimpleNamespace(resolve=resolve, ensure_available=ensure_available,
+    return SimpleNamespace(resolve=resolve, supports=supports,
+                           ensure_available=ensure_available,
                            free_vram=free_vram, generate=generate)
+
+
+def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
+                   on_progress=None, before_generate=None,
+                   **kwargs) -> tuple[bool, str, Path]:
+    """Run one generation through a media plugin's backend facade, for any
+    caller (REPL, CLI, coder tool, MCP tool): the plugin's configuration notes,
+    the backend's request refusal, ``ensure_available``, *before_generate*
+    (e.g. unloading a chat model), ``generate`` with *kwargs* (the metadata
+    strip runs inside it), and a ``free_vram`` on every exit after
+    ``ensure_available``.
+
+    *backend* is the plugin's ``backend`` module and *s* its resolved settings
+    (``prepare_for_job``). Returns ``(ok, message, path)`` where *path* is
+    *out_path* with the backend's ``OUTPUT_SUFFIX`` when it declares one.
+    *on_progress* receives every status line and is handed to the backend as
+    given (not passed when None). A backend that cannot honour the
+    request, or is given ``steps`` / ``clip_skip`` without the matching
+    capability, returns ``(False, <reason>, path)`` before anything is loaded."""
+
+    def say(text: str) -> None:
+        if on_progress is not None:
+            on_progress(text)
+
+    kwargs.setdefault("self_url", None)
+    for note in (s.get("warning"), s.get("backend_note")):
+        if note:
+            say(note)
+    impl = backend._impl(s)
+    path = out_path.with_suffix(getattr(impl, "OUTPUT_SUFFIX", out_path.suffix))
+    unsupported = [name for name, capability in (("steps", "SUPPORTS_STEPS"),
+                                                 ("clip_skip", "SUPPORTS_CLIP_SKIP"))
+                   if kwargs.get(name) is not None
+                   and not backend.supports(s, capability)]
+    if unsupported:
+        return False, (f"The {s.get('backend')} backend does not take "
+                       f"{' or '.join(unsupported)}; it uses the values in its "
+                       f"workflow."), path
+    refusal = getattr(impl, "refusal", None)
+    refused = refusal(s=s, **kwargs) if refusal is not None else None
+    if refused:
+        return False, refused, path
+    progress = {} if on_progress is None else {"on_progress": on_progress}
+    ok, message = backend.ensure_available(s, **progress)
+    if not ok:
+        return False, message, path
+    say(message)
+    try:
+        if before_generate is not None:
+            before_generate()
+        ok, message = backend.generate(s, prompt, path, **progress, **kwargs)
+        return ok, message, path
+    finally:
+        backend.free_vram(s)

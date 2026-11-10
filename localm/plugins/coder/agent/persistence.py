@@ -377,9 +377,11 @@ class _PersistenceMixin:
         helper for episodic change detection - never raises. The code lets the
         caller tell an untracked new file (``??``) from a tracked edit so the diff
         can be built correctly."""
-        from ..tools.base import run_subprocess
+        from ..tools.git import repo_runs_programs, run_git
         try:
-            r = run_subprocess(["git", "status", "--porcelain"], self.cwd, timeout=10)
+            if repo_runs_programs(self.cwd):
+                return None
+            r = run_git(("status", "--porcelain"), self.cwd, timeout=10)
         except Exception:
             return None
         if r.not_found or r.error is not None or r.returncode != 0:
@@ -411,14 +413,14 @@ class _PersistenceMixin:
         pathspec, not the whole tree); untracked new files (``??``, which
         ``git diff`` omits entirely) get a capped content snapshot appended so the
         session's actual output still appears. Best-effort - '' on any failure."""
-        from ..tools.base import run_subprocess
+        from ..tools.git import repo_runs_programs, run_git
         parts: list[str] = []
         tracked = [p for p in paths if status.get(p, "") != "??"]
         if tracked:
-            for argv in (["git", "diff", "HEAD", "--", *tracked],
-                         ["git", "diff", "--", *tracked]):
+            for argv in (("diff", "HEAD", "--", *tracked),
+                         ("diff", "--", *tracked)):
                 try:
-                    r = run_subprocess(argv, self.cwd, timeout=15)
+                    r = None if repo_runs_programs(self.cwd) else run_git(argv, self.cwd, timeout=15)
                 except Exception:
                     r = None
                 if r is not None and r.returncode == 0 and r.error is None:
@@ -605,13 +607,17 @@ class _PersistenceMixin:
         """Remove THIS agent's own saved checkpoint - its own per-session id under
         HOME, plus the two legacy shapes (a project can only ever have ONE
         checkpoint under either legacy layout). It does NOT reach any OTHER
-        session's per-id checkpoint - see _checkpoint_path_for.
+        session's per-id checkpoint - see _checkpoint_path_for. A restricted
+        session removes only its own per-id file, never a legacy one (the
+        in-project one is under ``.localcoder``).
 
         Best-effort per path: a delete that fails is LOGGED at warning and does
         not raise, so this returning is not by itself proof the checkpoint is
         gone."""
-        for p in (self._checkpoint_path, self._legacy_checkpoint_path,
-                  self._legacy_home_checkpoint_path):
+        paths = [self._checkpoint_path]
+        if not getattr(self, "restricted", False):
+            paths += [self._legacy_checkpoint_path, self._legacy_home_checkpoint_path]
+        for p in paths:
             try:
                 p.unlink(missing_ok=True)
             except Exception as e:

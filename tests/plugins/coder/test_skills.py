@@ -9,6 +9,13 @@ from localm.plugins.coder import skills as S
 from localm.plugins.coder.tools import TOOL_REGISTRY
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 @pytest.fixture
 def clean_registry():
     """Snapshot/restore the global TOOL_REGISTRY around tests that register tools."""

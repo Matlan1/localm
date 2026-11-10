@@ -20,6 +20,20 @@ from localm.plugins.coder.backends.http import (
 from localm.plugins.coder.doctor import FAIL, INFO, OK, SKIP, WARN, Check
 
 
+@pytest.fixture
+def open_gate(monkeypatch):
+    from localm import remotegate
+    monkeypatch.setattr(remotegate, "require_off_machine_allowed",
+                        lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 def _serve(status: int, body: dict | None):
     """A real loopback HTTP server answering every GET with *status*/*body*."""
     payload = json.dumps(body or {}).encode()
@@ -112,6 +126,7 @@ def test_model_backend_without_http_is_skipped():
 
 # ---------------------------------------------------------------- tool calls
 
+@pytest.mark.usefixtures("open_gate")
 def test_tools_native_for_openai_backend():
     c = doctor.check_tools(make_openai_backend())
     assert c.status == OK and "native" in c.detail
@@ -410,3 +425,21 @@ def test_mcp_server_that_never_answers_fails_within_the_init_timeout(
     assert time.monotonic() - started < 10
     assert [c.status for c in got] == [FAIL]
     assert got[0].name == "mcp:hung"
+
+
+def test_git_check_does_not_start_the_repos_fsmonitor(tmp_path):
+    from pathlib import Path
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    marker = tmp_path / "ran.txt"
+    hook = tmp_path / "hook.py"
+    hook.write_text(
+        f"open({str(marker)!r}, 'w').write('x')\n", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "trunk")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    cmd = f'"{Path(sys.executable).as_posix()}" "{hook.as_posix()}"'
+    _git(repo, "config", "core.fsmonitor", cmd)
+    c = doctor.check_git(repo)
+    assert not marker.exists()
+    assert c.status in (OK, INFO)
+    assert "trunk" in c.detail

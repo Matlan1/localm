@@ -83,6 +83,31 @@ def _music_path(name: str) -> Path:
     return confined_file(_music_dir(), name, "track")
 
 
+async def _require_native_acceptance(req: MusicRequest) -> None:
+    """A 400 for settings the native backend refuses, before a job exists.
+    Other backends keep their own checks."""
+    from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+
+    def _check() -> str | None:
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Music")
+        refusal = getattr(_backend._impl(s), "refusal", None)
+        if refusal is None:
+            return None
+        return refusal(
+            model_overrides=req.model_overrides, sampler_name=req.sampler_name,
+            scheduler=req.scheduler, lyrics_strength=req.lyrics_strength)
+    try:
+        bad = await run_in_threadpool_bounded(_check, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the music backend settings timed out: {e}") from e
+    if bad:
+        raise HTTPException(400, bad)
+
+
 @_router.post("/api/music")
 async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
@@ -92,6 +117,9 @@ async def music(req: MusicRequest, request: Request):
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
+    if (req.sampler_name is not None or req.scheduler is not None
+            or req.lyrics_strength is not None or req.model_overrides):
+        await _require_native_acceptance(req)
     from localm.debuglog import logger
     logger.info("music: %d-char tags (duration=%gs)",
                 len(req.tags), req.duration_seconds)
@@ -136,7 +164,7 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text": s["backend_note"]})
         track_path = out_path.with_suffix(
             getattr(_backend._impl(s), "OUTPUT_SUFFIX", out_path.suffix))
-        if s.get("backend") == "native":
+        if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
             from .backends import native
             refused = native.refusal(
                 model_overrides=req.model_overrides, sampler_name=req.sampler_name,
@@ -147,6 +175,10 @@ async def music(req: MusicRequest, request: Request):
             s = _backend.apply_job_choice(s, native_choice, _cfg)
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
+        if not ok and _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
+            from localm.media import native_offer
+            from .backends import native
+            native_offer.push_missing(job, native_offer.job_missing("music", native, s), msg)
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
@@ -155,7 +187,7 @@ async def music(req: MusicRequest, request: Request):
                                  note_other_vram_holders,
                                  release_other_native_media, unload_chat_for_media)
         placement = None
-        if s.get("backend") == "comfy":
+        if _backend.supports(s, "NEEDS_COMFY_SERVER"):
             from localm.media.comfy_client import resolve_media_placement
             # Per-component GPU placement (opt-in) plus the user-facing notice, in one
             # shared helper (image/music/video share this preamble). placement is
@@ -193,7 +225,7 @@ async def music(req: MusicRequest, request: Request):
             else:
                 job.push({"type": "line", "text": media_keep_note(s)})
             note_other_vram_holders(job, s, "music")
-            if s.get("backend") == "native":
+            if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 job.push({"type": "line", "text":
                           f"Generating a {req.duration_seconds:.0f}s track with the native "
                           "ACE-Step runtime..."})
@@ -232,6 +264,7 @@ async def music(req: MusicRequest, request: Request):
                 swap=gen_swap,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
+                privacy=is_privacy,
                 **kwargs,
             )
             job.push({"type": "line", "text": message})
@@ -265,7 +298,7 @@ async def music_backend():
         s = backend_choice.refine_auto(_backend.settings(load_config()), "Music")
         out = {"choice": s.get("backend_choice"), "active": s.get("backend"),
                "note": s.get("backend_note"), "warning": s.get("warning")}
-        if s.get("backend") == "native":
+        if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
             from .backends import native
             out["native"] = native.status(s)
         return out

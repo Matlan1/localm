@@ -132,7 +132,7 @@ def captured_pull(monkeypatch):
         captured["args"] = list(cli_args)
         return _FakeJob()
 
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
     return captured
 
 
@@ -237,7 +237,19 @@ class TestRegistrationRequiresHostFsAccess:
             r = c.post("/api/models/pull", headers=_hdr(restricted_key),
                        json={"spec": "owner/repo"})
         assert r.status_code == 200, r.text
-        assert captured_pull["args"] == ["pull", "--", "owner/repo"]
+        assert captured_pull["args"] == ["pull", "--remote-only", "--", "owner/repo"]
+
+    def test_a_relative_spec_pull_without_host_fs_is_remote_only(
+            self, app, restricted_key, captured_pull):
+        """A relative spec with no '..' is not a host path textually, so the
+        route lets it through, and the pull it starts is told never to register
+        a local path."""
+        with TestClient(app) as c:
+            r = c.post("/api/models/pull", headers=_hdr(restricted_key),
+                       json={"spec": "models/real.gguf", "store": "move"})
+        assert r.status_code == 200, r.text
+        assert captured_pull["args"][:2] == ["pull", "--remote-only"]
+        assert captured_pull["args"][-2:] == ["--", "models/real.gguf"]
 
     def test_curated_comfy_pull_is_403_for_a_key_without_host_fs(
             self, app, restricted_key):
@@ -280,6 +292,58 @@ class TestRegistrationRequiresHostFsAccess:
                        json={"spec": str(victim)})
         assert r.status_code == 200, r.text
         assert captured_pull["args"] == ["pull", "--", str(victim)]
+
+
+class TestPullRemoteOnly:
+    def test_remote_only_never_registers_an_existing_relative_file(
+            self, home, tmp_path, monkeypatch):
+        import contextlib
+        from localm.model_manager import pending_pulls
+        from localm.model_manager import pull as pull_mod
+        import localm.model_manager as mm
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "real.gguf").write_bytes(b"GGUF")
+        added, remote = [], []
+        monkeypatch.setattr(mm, "add_local",
+                            lambda *a, **k: added.append(a) or True)
+        monkeypatch.setattr(pull_mod, "_pull_remote",
+                            lambda model_spec, *a, **k: remote.append(model_spec) or False)
+        monkeypatch.setattr(pending_pulls, "tracking",
+                            lambda req: contextlib.nullcontext({}))
+        assert pull_mod.pull_model("real.gguf", allow_local=False, store="move") is False
+        assert added == []
+        assert remote == ["real.gguf"]
+        assert (tmp_path / "real.gguf").exists()
+
+    def test_without_remote_only_the_same_file_is_registered_in_place(
+            self, home, tmp_path, monkeypatch):
+        from localm.model_manager import pull as pull_mod
+        import localm.model_manager as mm
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "real.gguf").write_bytes(b"GGUF")
+        added = []
+        monkeypatch.setattr(mm, "add_local",
+                            lambda *a, **k: added.append(a) or True)
+        monkeypatch.setattr(pull_mod, "_pull_remote",
+                            lambda *a, **k: pytest.fail("treated as remote"))
+        assert pull_mod.pull_model("real.gguf") is True
+        assert len(added) == 1
+
+    def test_cli_remote_only_flag_reaches_pull_model(self, home, monkeypatch):
+        from click.testing import CliRunner
+        from localm.cli import main
+        import localm.cli.models as climodels
+        seen = {}
+
+        def fake_pull_model(spec, name, **kw):
+            seen.update(kw, spec=spec)
+            return True
+        monkeypatch.setattr(climodels, "pull_model", fake_pull_model)
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+        out = CliRunner().invoke(main, ["pull", "--remote-only", "--", "real.gguf"])
+        assert out.exit_code == 0, out.output
+        assert seen["spec"] == "real.gguf"
+        assert seen["allow_local"] is False
 
 
 # NOT TESTED HERE: the per-plugin `comfy.workdir` admin gate in

@@ -209,12 +209,12 @@ def test_install_from_directory(cli_env, tmp_path):
     (ext / "plug.py").write_text(
         "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
 
-    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
     assert r.exit_code == 0 and "Installed" in r.output and "ext1" in r.output
     assert (cli_env.installed / "ext1").is_dir()                 # copied into installed
     assert "ext1" in load_config().get("plugins_enabled", [])    # enabled
 
-    r2 = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    r2 = CliRunner().invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
     assert r2.exit_code == 1 and "already installed" in r2.output.lower()
 
 
@@ -228,7 +228,7 @@ def test_install_from_directory_surfaces_resolved_scope(cli_env, tmp_path):
     (ext / "plug.py").write_text(
         "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
 
-    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
     assert r.exit_code == 0
     assert "Granted scope" in r.output and "ext2" in r.output
 
@@ -245,7 +245,7 @@ def test_install_from_directory_rejects_scope_collision(cli_env, tmp_path):
         "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
 
     CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])   # already-installed scope owner
-    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "--yes", str(ext)])
     assert r.exit_code == 1
     output = " ".join(r.output.split())            # rich console word-wraps long lines
     assert "already used by installed plugin" in output
@@ -273,3 +273,32 @@ def test_setup_plugins_blank_is_a_skip_not_an_error(cli_env):
     r = CliRunner().invoke(cli_env.main, ["plugin", "setup", "--plugins", "   "])
     assert r.exit_code == 0
     assert "no plugins selected" in r.output.lower()
+
+
+def _ext_dir(tmp_path, name):
+    ext = tmp_path / name
+    ext.mkdir()
+    (ext / "plugin.toml").write_text(
+        f'[plugin]\nname = "{name}"\nscope = "{name}"\nregister = "plug"\n', encoding="utf-8")
+    (ext / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
+    return ext
+
+
+def test_directory_install_states_the_trust_posture_and_asks_first(cli_env, tmp_path):
+    """Installing from a directory prints the unsandboxed-code sentence and
+    installs nothing when the confirmation is declined."""
+    from localm.plugins.contract import UNSANDBOXED_NOTICE
+    ext = _ext_dir(tmp_path, "asked1")
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)], input="n\n")
+    assert r.exit_code == 1
+    assert UNSANDBOXED_NOTICE in " ".join(r.output.split())
+    assert "Not installed" in r.output
+    assert not (cli_env.installed / "asked1").exists()
+
+
+def test_directory_install_proceeds_on_yes_answer(cli_env, tmp_path):
+    ext = _ext_dir(tmp_path, "asked2")
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)], input="y\n")
+    assert r.exit_code == 0
+    assert (cli_env.installed / "asked2").is_dir()

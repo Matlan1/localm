@@ -139,7 +139,7 @@
       <div id="chat-messages"></div>
       <div class="composer-wrap">
         <div id="params">
-          <div class="full sub" style="margin:2px 0 8px" data-i18n-rich="chat.params.intro">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Chat</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
+          <div class="full sub" style="margin:2px 0 8px" data-i18n-rich="chat.params.intro">Fine-tune <b>this chat</b>. Blank fields use your defaults from <b>Settings &rsaquo; Model</b> (system prompt, sampling); set one here to override it for this conversation only.</div>
           <div class="full"><label data-i18n="chat.persona.label">Persona - a saved system prompt + sampling defaults</label>
             <div class="row">
               <select id="p-persona"><option value="" data-i18n="chat.none">(none)</option></select>
@@ -150,7 +150,7 @@
                       title="Delete the selected persona" data-i18n-title="chat.persona.deleteTitle">delete</button>
             </div>
           </div>
-          <div class="full"><label data-i18n="chat.systemPrompt">System prompt <span class="sub" data-i18n="chat.systemPrompt.hint">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings" data-i18n-placeholder="chat.systemPrompt.placeholder"></textarea></div>
+          <div class="full"><label data-i18n="chat.systemPrompt">System prompt <span class="sub" data-i18n="chat.systemPrompt.hint">(blank = your Settings &rsaquo; Model default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings" data-i18n-placeholder="chat.systemPrompt.placeholder"></textarea></div>
           <div><label data-i18n="chat.temperature">Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default" data-i18n-placeholder="chat.default"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy; under net_mode=ask every request the model makes must be approved first). Off = fully offline chat." data-i18n-title="chat.web.title" data-i18n="chat.web"><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
           <div class="full check-row"><label title="Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings)." data-i18n-title="chat.pinModel.title" data-i18n="chat.pinModel"><input type="checkbox" id="p-pin-model"> <span class="lbl-ic" data-icon="pin"></span> Pin this chat to <b id="p-pin-model-name"></b></label></div>
@@ -426,7 +426,7 @@
             <div class="card-head-text"><h3 data-i18n="models.pull.title">Add a model</h3></div></div>
           <div class="sub" data-i18n="models.pull.intro">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
           <div class="row">
-            <select id="pull-shortcut" style="max-width:200px" data-i18n-title="models.pull.shortcutTitle" title="Curated small models that work even with network access set to Off - picks a known-good quant and fills in the fields below">
+            <select id="pull-shortcut" style="max-width:200px" data-i18n-title="models.pull.shortcutTitle" title="Curated small models - picks a known-good quant and fills in the fields below. The list shows even with network access set to Off; the download itself needs network access or the model-downloads allowance.">
               <option value="" data-i18n="models.pull.shortcutPlaceholder">Curated shortcuts…</option>
             </select>
             <input type="text" id="pull-spec" data-i18n-placeholder="models.pull.specPlaceholder" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
@@ -816,9 +816,9 @@
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
             <div class="card-head-text"><h3 data-i18n="plugins.external">External plugins</h3></div></div>
-          <div class="sub" data-i18n-rich="plugins.externalIntro">A third-party plugin is a folder with a <code>plugin.toml</code> manifest
-          under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the
-          coder agent. Installation is a local directory copy.</div>
+          <div class="sub" data-i18n-rich="plugins.externalIntro">A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it
+          into the plugins folder of this installation. It can add a CLI command and export tools to the
+          coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.</div>
           <div class="row">
             <input type="text" id="plugin-source" placeholder="path to a plugin folder" spellcheck="false"
                    data-i18n-placeholder="plugins.sourcePlaceholder">
@@ -926,9 +926,9 @@
               <label for="perf-max-resident" data-i18n="settings.perf.maxResidentLabel">Max resident models</label>
               <input type="number" id="perf-max-resident" min="1" step="1" placeholder="no cap"
                      data-i18n-placeholder="settings.perf.maxResidentPlaceholder">
-              <div class="sub" data-i18n="settings.perf.maxResidentHelp">How many models may stay loaded at once. Blank lets free-VRAM
-              arithmetic decide (a model loads alongside the others only when it provably
-              fits); 1 forces strict single-resident. Saves immediately.</div>
+              <div class="sub" data-i18n="settings.perf.maxResidentHelp">Most models kept loaded at once. Blank lets free VRAM decide
+              (a model loads alongside the others only when it provably fits). 1 keeps one
+              model only when Unload other models to make room is always. Saves immediately.</div>
               <label for="perf-pinned-models" data-i18n="settings.perf.pinnedLabel">Pinned models</label>
               <input type="text" id="perf-pinned-models" spellcheck="false" autocomplete="off"
                      placeholder="comma-separated model names (blank pins nothing)"

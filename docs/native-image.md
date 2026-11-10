@@ -11,7 +11,7 @@ Settings > Images > **Generation backend** (config `plugins.image.backend`):
 
 | Value | Behaviour |
 |---|---|
-| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
+| `auto` (default) | ComfyUI when it is set up (localm's managed ComfyUI is installed, `comfy_target` is `user`, `FLUX_API_URL` is set, a ComfyUI address, launcher or folder is configured, or a ComfyUI answers at the configured address), otherwise native. The job log says which one ran and why. |
 | `native` | Always the native backend. |
 | `comfy` | Always ComfyUI. |
 
@@ -38,7 +38,10 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    `auto` picks Metal on Apple Silicon, CUDA for NVIDIA on Windows, ROCm for AMD when
    hipBLAS is available (the ROCm PyTorch wheels in localm's venv, or a system ROCm),
    CPU when no GPU is found, and Vulkan otherwise. A build that does not load on this
-   machine falls back to Vulkan, then CPU, and says so.
+   machine falls back to Vulkan, then CPU, and says so. With only the CPU build
+   installed (for example after `--backend cpu`), a generation on `auto` installs the
+   recommended GPU build; when that download fails or is refused, it keeps the CPU build
+   and says so.
 
    **Linux with an NVIDIA GPU runs on Vulkan.** The pinned upstream release
    publishes a CUDA build for Windows only; its Linux archives are
@@ -212,7 +215,7 @@ picked here stay in the page and go to the server with the next generation; they
 saved anywhere else.
 
 - **Mask (inpaint / outpaint).** *Paint mask* opens the input image (a gallery image set
-  with *Use as img2img input*, or a file loaded with *Load image file*) in an editor: paint
+  with *use as input*, or a file loaded with *Load image file*) in an editor: paint
   the area to repaint in white with the brush, take paint off with the eraser, *Invert* or
   *Clear* the mask, and *Extend canvas* by a number of pixels on any side to outpaint (the
   new border is filled from the image's edge and repainted; Denoise is set to 1 when it is

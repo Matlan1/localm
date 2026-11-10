@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// localm proxy - a tiny Cloudflare Worker giving 1-2 private-repo testers three
+// localm proxy - a tiny Cloudflare Worker giving localm installs three
 // account-less surfaces, each backed by a SERVER-SIDE GitHub token:
 //
 //   POST /                       file a bug report      [GitHub App or GITHUB_TOKEN, Issues:write]
@@ -13,7 +13,7 @@
 //
 // No token ships in the app. The issue token cannot read code; the SEPARATE update
 // token can read releases/contents but cannot write. The shared secret gates the
-// routes and is MANDATORY for the update routes (they serve private builds).
+// routes and is MANDATORY for the update routes (they serve release builds).
 //
 // Deploy + secrets: see README.md.
 
@@ -337,8 +337,12 @@ async function latestRelease(request, env, url) {
   // A request without "client" comes from localm 0.3.1 or earlier; it is offered
   // nothing newer than LEGACY_CLIENT_CEILING.
   const legacy = !url.searchParams.get("client");
-  const rel = await latestAppRelease(env, wantsPrerelease, legacy ? LEGACY_CLIENT_CEILING : null);
-  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING } : {};
+  // A client older than OLD_CLIENT_CEILING is offered nothing newer than it.
+  const old = !legacy && clientOlderThan(url.searchParams.get("client"), OLD_CLIENT_CEILING);
+  const maxTag = legacy ? LEGACY_CLIENT_CEILING : (old ? OLD_CLIENT_CEILING : null);
+  const rel = await latestAppRelease(env, wantsPrerelease, maxTag);
+  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING }
+    : (old ? { client_ceiling: OLD_CLIENT_CEILING } : {});
   if (rel === null) return json({ ok: true, version: null, note: "no releases yet", ...ceiling });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). From
@@ -450,6 +454,12 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 // the release tooling reads this constant and refuses such a build.
 const LEGACY_CLIENT_CEILING = "v0.3.2";
 
+// The newest release offered to a client that names a version older than this one.
+// Those clients reinstall the project over their running launcher in an update that
+// changes Python dependencies, so this release carries the build hook that makes that
+// work; later releases need not. The release tooling checks the deployed value.
+const OLD_CLIENT_CEILING = "v0.3.3";
+
 // A prerelease suffix: rc, a, b, alpha or beta, then a number with no separator
 // (rc1, b2, alpha3); a dotted number (rc.1) is not one.
 const PRERELEASE_SUFFIX_RE = /^(rc|a|b|alpha|beta)\d+$/i;
@@ -474,6 +484,13 @@ function tagAtMost(a, b) {
     if (ka[i] !== kb[i]) return ka[i] < kb[i];
   }
   return ka[4] <= kb[4];
+}
+
+// True when *client*, a version with or without the leading "v", orders below app tag
+// *tag*. A value that is not a version is not older.
+function clientOlderThan(client, tag) {
+  const c = "v" + String(client).replace(/^v/, "");
+  return tagAtMost(c, tag) && !tagAtMost(tag, c);
 }
 
 // The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
@@ -551,6 +568,29 @@ async function appReleases(env, includePrerelease, pages = 1, maxTag = null) {
 // download). Returns null on any failure or an implausibly large body - a missing
 // signature must degrade to "unsigned", never to an arbitrary fetch.
 async function fetchAssetText(env, id) {
+  const key = `${env.TARGET_REPO}#${id}`;
+  const now = Date.now();
+  const hit = ASSET_TEXT_CACHE.get(key);
+  if (hit && hit.expires > now) return hit.text;
+  ASSET_TEXT_CACHE.delete(key);
+  const text = await fetchAssetTextUncached(env, id);
+  if (text != null) {
+    if (ASSET_TEXT_CACHE.size >= ASSET_TEXT_CACHE_MAX) {
+      ASSET_TEXT_CACHE.delete(ASSET_TEXT_CACHE.keys().next().value);
+    }
+    ASSET_TEXT_CACHE.set(key, { text, expires: now + ASSET_TEXT_TTL_MS });
+  }
+  return text;
+}
+
+// Signature text per "<repo>#<asset id>" for ASSET_TEXT_TTL_MS, held in this isolate.
+// Only a successful read is stored, so a failure is retried by the next check and never
+// served from here; an asset id names one immutable file.
+const ASSET_TEXT_TTL_MS = 10 * 60 * 1000;
+const ASSET_TEXT_CACHE_MAX = 64;
+const ASSET_TEXT_CACHE = new Map();
+
+async function fetchAssetTextUncached(env, id) {
   const api = `https://api.github.com/repos/${env.TARGET_REPO}/releases/assets/${id}`;
   const r1 = await fetch(api, {
     headers: ghHeaders(env.UPDATE_GITHUB_TOKEN, "application/octet-stream"),

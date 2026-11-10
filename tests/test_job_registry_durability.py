@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from localm.plugins.gui import jobs as J
+from localm import jobmanager as J
 
 
 # --------------------------------------------------------------------------- #
@@ -65,7 +65,7 @@ def _rows(path: Path) -> list:
 
     A file written microseconds ago can still be held by the ACL tool or a
     scanner; that is the documented transient case
-    (config._is_transient_permission_error), not a defect in what is under
+    (storekit._is_transient_permission_error), not a defect in what is under
     test."""
     for _ in range(50):
         try:

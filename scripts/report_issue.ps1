@@ -58,16 +58,18 @@ function Scrub([string]$t) {
   $t = [regex]::Replace($t, '([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
   # user:pass@ credentials in any URL-ish value (a comfy/searx/remote-server URL).
   $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
+  # Bearer tokens.
+  $t = [regex]::Replace($t, '(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|[ \t]*=[ \t]*[^=\s]))[A-Za-z0-9._~+/=\-]{8,}', '${1}<redacted>')
   # Credential-named assignments (a URL query parameter, a .env line, a shell line)
-  # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _HEADER_SECRET_RE
-  # in localm/bugreport/scrub.py; the three-branch reasoning is documented there. Applied
+  # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _AUTH_HEADER_RE /
+  # _HEADER_SECRET_RE in localm/bugreport/scrub.py; the reasoning is documented there. Applied
   # in the same order as scripts/report_issue.py, so all three reporters agree.
-  $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`\"''\)\]\}]{0,4}(?:[\s&#]|$))(?:\"[^\"\r\n]*\"?|''[^''\r\n]*''?|[^&\s#\"''\)\]\}]*)', '${1}<redacted>')
-  $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))[ \t]*=[ \t]*(?![ \t]))(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`\"''\)\]\}]{0,4}(?:[\s&#]|$))(?:\"[^\"\r\n]*\"?|''[^''\r\n]*''?|[^&\s#\"''\)\]\}]*)', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)(authorization[\"'']?\s*:\s*)(?=\S)(?!<redacted>)(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[\"'']?\s*(?:[,}\]]|$))(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?''(?:[^''\\\r\n]|\\.)*''?|\[[^\]\r\n]*\]?|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?(?![A-Za-z0-9_-]+[\"'']?:(?:\s|$))(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)|[^\s,]+)(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+', '${1}<redacted>')
   # Credential-named JSON object keys ("api_key": "..."), .NET port of _JSON_SECRET_RE.
-  $t = [regex]::Replace($t, '(?i)(["''](?:(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig))["'']\s*:\s*)(?!\s*["'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["'']?\s*(?:[,}\]]|$))(?:"[^"\r\n]*"?|''[^''\r\n]*''?|[^,}\]\s]*)', '${1}<redacted>')
-  # Bearer tokens and OpenAI-style / localm API keys.
-  $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)([\"''](?:(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig))[\"'']\s*:\s*)(?=\S)(?!<redacted>)(?!\s*[\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[\"'']?\s*(?:[,}\]]|$))(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?''(?:[^''\\\r\n]|\\.)*''?|\[[^\]\r\n]*\]?|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,}\]\s]*)', '${1}<redacted>')
+  # OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
   # Tokens that contain an email address, except the maintainer's ($email: ASCII, case-insensitive,
   # %40 read as @, edge single quotes and trailing periods set aside). Same pattern as _EMAIL_RE in localm/bugreport/scrub.py.
@@ -128,11 +130,33 @@ $body = "# localm bug report: $summary`n`n" +
         "## What happened`n$detail`n`n" +
         "## How it was filed`n- Filed via the standalone PowerShell reporter (no Python on this machine).`n`n" +
         "## Environment`n- OS: $os`n- PowerShell: $($PSVersionTable.PSVersion)"
+# Headers of the debug-log records that carry chat content: the same markers as
+# _CONTENT_MARKER_RES in localm/_log_digest.py. See
+# test_powershell_content_marker_matches_every_log_digest_content_sample.
+$contentMarker = '(?m)(?:raw model output:\s*$|\bmemory embed_one failed for |\bjobs web tool: \S+ \{|assembled chat prompt \(\d+ message\(s\)\):\s*$|chat completion reply \(finish_reason=\S+\):\s*$|\bmemory (?:auto-)?consolidate (?:prompt|response):\s*$|\bmemory consolidation: (?:evaluating candidate \[\d+/\d+\]: |decision for )|\brag index: |\brag extract identity: )'
+
+# The last $maxBytes of a file as text.
+function Read-LogEnd([string]$path, [int]$maxBytes) {
+  $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+  try {
+    if ($fs.Length -gt $maxBytes) { [void]$fs.Seek(-$maxBytes, 'End') }
+    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+    try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+  } finally { $fs.Dispose() }
+}
+
 if ($logPath -and (Test-Path -LiteralPath $logPath)) {
   try {
-    $tail = (Get-Content -LiteralPath $logPath -Tail 120 -ErrorAction Stop) -join "`n"
-    if ($tail) { $body += "`n`n## Recent log tail`n$fence`n" + (Scrub $tail) + "`n$fence" }
-  } catch { }
+    $logEnd = Read-LogEnd (Resolve-Path -LiteralPath $logPath).ProviderPath 2000000
+    if ($logEnd -match $contentMarker) {
+      $body += "`n`n## Log`nNo log was attached: it holds chat content, which a bug report never includes."
+    } else {
+      $tail = (($logEnd -split "\r?\n") | Select-Object -Last 120) -join "`n"
+      if ($tail.Trim()) { $body += "`n`n## Recent log tail`n$fence`n" + (Scrub $tail) + "`n$fence" }
+    }
+  } catch {
+    $body += "`n`n## Log`nNo log was attached: the log file could not be read."
+  }
 }
 $body = Scrub $body
 

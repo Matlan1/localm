@@ -26,6 +26,7 @@ import os
 import pytest
 
 import localm.config as cfg
+import localm.storekit as storekit
 
 
 @pytest.fixture()
@@ -58,7 +59,7 @@ def test_stale_lock_with_colliding_self_pid_is_reclaimed(home, capsys):
     not evidence that WE hold it."""
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
-    _leak_stale_lock(lockpath, os.getpid(), cfg._CROSS_LOCK_STALE_AGE + 10)
+    _leak_stale_lock(lockpath, os.getpid(), storekit._CROSS_LOCK_STALE_AGE + 10)
 
     cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
 
@@ -71,7 +72,7 @@ def test_stale_lock_with_colliding_self_pid_does_not_wedge_the_registry(home, ca
     """The same leak on REGISTRY.lock must not wedge model pull / rm / alias."""
     cfg.ensure_dirs()
     lockpath = cfg.REGISTRY_FILE.with_name(cfg.REGISTRY_FILE.name + ".lock")
-    _leak_stale_lock(lockpath, os.getpid(), cfg._CROSS_LOCK_STALE_AGE + 10)
+    _leak_stale_lock(lockpath, os.getpid(), storekit._CROSS_LOCK_STALE_AGE + 10)
 
     cfg.update_registry(lambda r: r.__setitem__("m", {"path": "x.gguf"}))
 
@@ -85,7 +86,7 @@ def test_fresh_foreign_lock_with_colliding_self_pid_waits_and_times_out(home, mo
     wait-then-TimeoutError ('held by another localm process'), never an
     immediate RuntimeError. This lock is FRESH, so reordering staleness ahead of
     the pid check does not satisfy it either."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     _leak_stale_lock(lockpath, os.getpid(), 0)   # fresh: someone else holds it NOW
@@ -99,7 +100,7 @@ def test_genuine_nested_call_still_fails_fast(home, monkeypatch):
     update_config() on the same file is unsupported and fails immediately with
     the clear error, rather than stalling for the timeout or reclaiming its own
     live lock."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.save_config({"n_ctx": 4096})
 
     def _outer(c):
@@ -117,8 +118,8 @@ def test_nested_guard_survives_an_outer_hold_longer_than_the_stale_age(home, mon
     critical section has outlived _CROSS_LOCK_STALE_AGE (a slow write under
     antivirus). A staleness-only check would let the inner call reclaim its own
     outer lock and proceed."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
 
@@ -138,7 +139,7 @@ def test_released_lock_is_forgotten_so_a_later_leak_is_not_read_as_ours(home, ca
 
     with cfg._cross_process_lock(cfg.CONFIG_FILE):
         pass
-    _leak_stale_lock(lockpath, os.getpid(), cfg._CROSS_LOCK_STALE_AGE + 10)
+    _leak_stale_lock(lockpath, os.getpid(), storekit._CROSS_LOCK_STALE_AGE + 10)
 
     cfg.update_config(lambda c: c.__setitem__("n_ctx", 2048))
     assert cfg.load_config()["n_ctx"] == 2048
@@ -175,11 +176,15 @@ def _deny_reads(monkeypatch, target, err):
     return attempts
 
 
-def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sleep, capsys):
+def test_posix_permission_denied_falls_back_immediately(
+        home, monkeypatch, no_sleep, caplog):
     """THE REGRESSION. On POSIX, EACCES from open() is a stable state - the file
     is mode 000 or root-owned. Retrying it 16 times burns ~1s of time.sleep while
     holding _io_lock (serializing config access process-wide, including the
     per-request auth path) and cannot ever succeed. Fall back at once instead."""
+    import logging
+    storekit._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     monkeypatch.setattr(cfg.os, "name", "posix")
     target = home / "config.json"
     target.write_text("{}", encoding="utf-8")
@@ -188,7 +193,8 @@ def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sl
     assert cfg._read_json(target, {"fell_back": True}) == {"fell_back": True}
     assert len(attempts) == 1, f"retried a stable EACCES {len(attempts)} times"
     assert no_sleep == [], f"stalled {sum(no_sleep):.2f}s under _io_lock for nothing"
-    assert "unreadable" in capsys.readouterr().err, "the failure must still be surfaced"
+    assert any("unreadable" in r.getMessage() for r in caplog.records), (
+        "the failure must still be surfaced")
 
 
 def test_windows_transient_sharing_violation_is_still_ridden_out(home, monkeypatch, no_sleep):
@@ -204,7 +210,7 @@ def test_windows_transient_sharing_violation_is_still_ridden_out(home, monkeypat
     attempts = _deny_reads(monkeypatch, target, err)
 
     cfg._read_json(target, {})
-    assert len(attempts) == cfg._REPLACE_RETRIES, "the transient retry was lost"
+    assert len(attempts) == storekit._REPLACE_RETRIES, "the transient retry was lost"
     assert no_sleep, "the transient retry must back off between attempts"
 
 
@@ -263,7 +269,7 @@ def test_windows_replace_sharing_violation_is_still_retried(home, monkeypatch, n
     monkeypatch.setattr(cfg.os, "replace", denied)
     with pytest.raises(PermissionError):
         cfg._replace_atomic(home / "a", home / "b")
-    assert len(attempts) == cfg._REPLACE_RETRIES, "the transient retry was lost"
+    assert len(attempts) == storekit._REPLACE_RETRIES, "the transient retry was lost"
     assert no_sleep
 
 
@@ -311,7 +317,7 @@ async def test_patch_config_does_not_freeze_the_event_loop(home, monkeypatch):
     user running `localm config ...` while the GUI is up) must not park the
     server event loop inside _cross_lock_backoff's time.sleep for up to
     _CROSS_LOCK_TIMEOUT. A blocked loop ticks 0 times for the whole wait."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.4)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.4)
     cfg.save_config({"n_ctx": 4096})
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     _leak_stale_lock(lockpath, 999999, 0)      # another process holds it, right now
@@ -328,7 +334,7 @@ async def test_patch_config_does_not_freeze_the_event_loop(home, monkeypatch):
 @pytest.mark.anyio
 async def test_set_media_config_does_not_freeze_the_event_loop(home, monkeypatch):
     """The same defect 68 lines below patch_config, on the same blocking call."""
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.4)
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.4)
     cfg.save_config({"n_ctx": 4096})
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     _leak_stale_lock(lockpath, 999999, 0)

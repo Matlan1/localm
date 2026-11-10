@@ -1,6 +1,9 @@
 *
 !pyproject.toml
+!hatch_build.py
 !VERSION
+!LICENSE
+!THIRD-PARTY-NOTICES.md
 !docs/pypi-readme.md
 !localm
 !runtime

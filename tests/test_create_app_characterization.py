@@ -433,13 +433,14 @@ _MIDDLEWARE_STACK = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
     ("BaseHTTPMiddleware", "_keyless_network_gate"),
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
-_INNERMOST = (("ClientLeftMiddleware", None),)
+_INNERMOST = (("ClientLeftMiddleware", None), ("RequestPrivacyMiddleware", None))
 
 
 def _middleware_stack(app) -> tuple:
@@ -553,8 +554,10 @@ def _shell_auth(app) -> dict:
 
 def test_exception_handler_registry():
     handlers = create_app(None).exception_handlers
+    from localm.inference.load_lease import LoadBusyError
     assert set(handlers) == {Exception, ConfigLockTimeout, StarletteHTTPException,
-                             RequestValidationError, WebSocketRequestValidationError}
+                             RequestValidationError, WebSocketRequestValidationError,
+                             LoadBusyError}
     assert handlers[WebSocketRequestValidationError] is (
         websocket_request_validation_exception_handler)
     for exc_type in (Exception, StarletteHTTPException, RequestValidationError):
@@ -659,7 +662,7 @@ def test_validation_error_prunes_input_nested_past_the_recursion_limit():
 def test_assembly_sets_exactly_these_state_fields():
     from localm.inference.chat_pipeline import ChatPipeline
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
 
     app = create_app(None)
     assert set(app.state._state) == {

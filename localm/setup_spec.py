@@ -68,6 +68,7 @@ class Question:
 QUESTIONS: tuple = (
     Question("existing-install", "1",
              (("1", "repair"), ("2", "uninstall"), ("3", "cancel"))),
+    Question("running-localm", "y"),
     Question("uninstall-data", "n"),
     Question("uninstall-confirm", "n"),
     Question("uninstall-no-python", "n", variants=(CONSOLE,)),

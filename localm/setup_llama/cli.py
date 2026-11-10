@@ -128,6 +128,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         _require_backend_here(backend.lower())
     if not from_dir and (tag is not None or rollback or force):
         _refuse_when_net_off()
+    pin_before = _stored_pin()
     _apply_version_request(tag, rollback, backend, from_dir, url)
     # A version request is inherently a re-provision: the guard below compares
     # BACKENDS, and the whole point here is to change the BUILD while the
@@ -137,8 +138,14 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # the config and the disk would then disagree with no sign of it.
     if tag is not None or rollback:
         force = True
+        installed = _sl._provisioned_backend(target)
+        # With no backend named, the build change applies to the installed
+        # backend when it is one a release provides; otherwise the backend is
+        # detected.
+        if backend.lower() == "auto" and installed in BACKENDS:
+            backend = installed
         # A build change of the installed backend is not a backend choice.
-        if backend.lower() in ("auto", _sl._provisioned_backend(target) or ""):
+        if backend.lower() in ("auto", installed or ""):
             keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +159,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # target must not interleave. Above this point only the "already provisioned"
     # short-circuit runs, which at most removes the choice record.
     try:
-        with _sl._provisioning_lock(target):
+        with _sl._provisioning_lock(target), _sl.keep_previous_runtime(
+                target, on_failure=lambda: _restore_pin(pin_before)):
             if cuda_line:
                 _provision_staged_cuda(cuda_line, target, lib_name, sha256)
                 _refresh_install_record(target)
@@ -168,7 +176,36 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             _refresh_install_record(target)
             _sl._verify()
     except ProvisioningBusyError as e:
+        _restore_pin(pin_before)
         _exit_provisioning_busy(e)
+
+
+def _stored_pin() -> Optional[str]:
+    """The raw ``llama_runtime_pin`` config value, or None when it cannot be read."""
+    from localm import config
+    try:
+        return config.load_config().get("llama_runtime_pin")
+    except Exception as e:
+        logger.debug("could not read llama_runtime_pin: %s", e)
+        return None
+
+
+def _restore_pin(before: Optional[str]) -> None:
+    """Put ``llama_runtime_pin`` back to *before* when a failed provision moved it."""
+    if _stored_pin() == before:
+        return
+    from localm import config
+
+    def _put(cfg: dict) -> None:
+        if before is None:
+            cfg.pop("llama_runtime_pin", None)
+        else:
+            cfg["llama_runtime_pin"] = before
+    try:
+        config.update_config(_put)
+        console.print("[yellow]The llama.cpp pin is back to what it was before.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Could not put the llama.cpp pin back:[/red] {e}")
 
 
 def _refuse_when_net_off() -> None:
@@ -265,8 +302,15 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
+            newer = _release_build_when_stale(target, have, build)
+            if newer:
+                console.print(f"[yellow]This release ships build {newer}; the installed "
+                              f"build is {build}.[/yellow]")
             if (not assume_yes and _sl._interactive() and _net_allowed()
-                    and _sl._confirm("Do you want to re-download/replace them?", default=False)):
+                    and _sl._confirm(
+                        f"Update the runtime to build {newer} now?" if newer
+                        else "Do you want to re-download/replace them?",
+                        default=bool(newer))):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
@@ -330,6 +374,27 @@ def _accept_installed_backend(target: Path, installed: str) -> None:
         _record_backend_choice(target, None)
         console.print(f"[green]Keeping {installed}.[/green] Your earlier choice "
                       f"'{rec['requested']}' is no longer recorded.")
+
+
+def _release_build_when_stale(target: Path, have: Optional[str],
+                              build: Optional[str]) -> Optional[str]:
+    """The build tag this release pins for *have* when the build recorded in
+    *target* differs from it; None when they match, the build is not recorded,
+    the release does not pin one, or the pin cannot be read."""
+    if not have or not build:
+        return None
+    try:
+        from localm.setup_llama.versions import runtime_target, tracks_latest
+        want, source = runtime_target(have, pin=_sl.pinned_tag(),
+                                      tracking=tracks_latest())
+        if have == "amd-rocm":
+            if _sl.rocm_build_is_current(target, build):
+                return None
+        elif want == build:
+            return None
+    except Exception:
+        return None
+    return want if source == "release" and want else None
 
 
 def _print_pending_choice(target: Path) -> None:

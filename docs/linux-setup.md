@@ -4,7 +4,7 @@ localm runs natively on Linux. The app code is platform-agnostic; only the
 native llama.cpp library and a few setup scripts differ from Windows.
 
 > **macOS is experimental.** On Apple Silicon `setup.sh` defaults to the Metal
-> llama.cpp build (the interactive picker also lists it, as choice 8, on Apple
+> llama.cpp build (choice 1 in the interactive picker, on Apple
 > Silicon only); Intel Macs default to the `cpu` backend and get the macOS x64
 > build, since no Metal build targets them. On macOS the picker lists only the
 > backends with a macOS build: `cpu`, `metal` on Apple Silicon, and your own
@@ -34,8 +34,8 @@ and no global `localm` command. It auto-detects your GPU and provisions the
 matching llama.cpp backend (CUDA for NVIDIA, HIP for AMD when a system ROCm/HIP
 toolkit is present, Metal on Apple Silicon, Vulkan as the universal fallback
 otherwise, CPU with no GPU - see [gpu-setup.md](gpu-setup.md) for the full
-policy). `--yes` skips the plugin picker (its default is to install none); run
-`localm plugin setup` afterwards to choose features. `localm` is not on your PATH afterwards:
+policy). `--yes` installs the recommended plugins (coder, rag, web, tts) without showing
+the picker; run `localm plugin setup` afterwards to change the selection. `localm` is not on your PATH afterwards:
 run `~/localm/localm.sh <args>`, or run `bash setup.sh` yourself and answer `y`
 to the global-command question.
 
@@ -57,17 +57,17 @@ bash setup.sh
 `setup.sh` is interactive. In order, it asks whether uv, its Python and its
 download cache stay inside the clone (Portable, the default) or use uv's normal
 per-user locations (Shared); installs `uv` if it is missing (into `./.uv` for
-Portable); asks whether to use a detected GPU; creates `.venv` (Python 3.12);
+Portable); creates `.venv` (Python 3.12);
 asks where data should live (`./home`, or a custom path recorded in
 `localm-home.cfg`); asks whether the GUI opens in a browser tab or an app window
 (the app window adds the `desktop` extra); installs localm (extras `coder`,
-`voice`, `monitor`); lets you pick a llama.cpp backend (or copy in your own
+`voice`, `monitor`); asks whether to use a detected GPU and lets you pick a llama.cpp backend (or copy in your own
 build); installs PyTorch to match; on Linux builds the launcher and offers an
 application-menu entry (macOS gets neither: start LocaLM with
 `./localm-launcher.sh` or `./localm.sh gui`); offers an optional global `localm`
 command (a symlink in `~/.local/bin`); and runs `localm plugin setup`. Pass
 `--yes` to take the default at each question without prompting, including the
-plugin picker, whose default is to install none. `bash setup.sh --uninstall`
+plugin picker, whose default is the recommended set (coder, rag, web, tts). `bash setup.sh --uninstall`
 removes what setup installed.
 
 The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
@@ -163,7 +163,7 @@ cd llama.cpp
 cmake -B build && cmake --build build --config Release -j
 
 # AMD ROCm (set your gfx target, e.g. gfx1030 for RDNA2):
-cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DGGML_HIP=ON -DGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 # NVIDIA CUDA:
@@ -202,6 +202,9 @@ uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 Not sure which CUDA line your card needs? `.venv/bin/python -m localm.hwdetect
 torch-args cuda` prints the exact one for the GPU actually in this machine (see
 [gpu-setup.md](gpu-setup.md#huggingface-transformers-pytorch) for the full table).
+On Linux that line also installs `fla-core`, the Triton kernels of Kimi-Linear
+models; the CUDA PyTorch brings Triton itself. The load output of such a model
+names the kernels in use.
 
 A HuggingFace AWQ (4-bit) checkpoint needs nothing beyond this PyTorch stack:
 localm dequantizes AWQ layers natively (no `gptqmodel`/`autoawq`/`torchao`
@@ -210,8 +213,9 @@ or CPU as it does elsewhere.
 
 ### `pip install "localm[gpu]"` is Windows-only
 
-The `[gpu]` pip extra pins AMD ROCm torch wheels and can only resolve them on
-Windows. A pip extra cannot carry a custom package index, so on Linux
+The `[gpu]` pip extra pins AMD ROCm torch wheels for Windows; they come from
+AMD's package index, which a source checkout's uv configuration names and a
+plain `pip install` does not. A pip extra cannot carry a custom package index, so on Linux
 `pip install "localm[gpu]"` will NOT install a GPU torch build. On Linux use
 `setup.sh` (it picks the right `--torch-backend`) or the manual
 `uv pip install ... --torch-backend` command shown above.

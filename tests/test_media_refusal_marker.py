@@ -112,14 +112,15 @@ def test_a_refusal_with_another_cause_is_not_marked_as_media(exc, status):
     assert MEDIA_REFUSAL_HEADER not in r.headers
 
 
-def test_an_image_no_decoder_recognises_is_an_image_limit_error():
+def test_an_image_no_decoder_recognises_is_a_vision_input_error_not_a_limit():
     from localm.inference.backends.llamacpp.llama import LlamaCpp
 
     garbage = "data:image/svg+xml;base64," + base64.b64encode(b"<svg/>").decode("ascii")
     messages = [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": garbage}}]}]
-    with pytest.raises(ImageLimitError, match="could not be read") as ei:
+    with pytest.raises(VisionInputError, match="could not be read") as ei:
         LlamaCpp._messages_with_markers(messages, "<__media__>", 0)
+    assert not isinstance(ei.value, ImageLimitError)
     assert type(ei.value.__cause__).__name__ == "UnidentifiedImageError"
 
 

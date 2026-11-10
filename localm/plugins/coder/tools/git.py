@@ -18,15 +18,70 @@ from typing import Optional
 
 from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
+_NULL_DEVICE = "NUL" if os.name == "nt" else "/dev/null"
+
+_HARDENING_CONFIG = (
+    "core.fsmonitor=",
+    f"core.hooksPath={_NULL_DEVICE}",
+    "protocol.ext.allow=never",
+    "safe.bareRepository=explicit",
+    "diff.external=",
+)
+
+_NO_DRIVER_COMMANDS = frozenset({"diff", "log", "show"})
+
+_DROPPED_ENV = ("GIT_EXTERNAL_DIFF", "GIT_PAGER", "PAGER")
+
+
+def git_argv(*args: str) -> list[str]:
+    """Full argv for a git command that cannot run a program named by the
+    repository: fsmonitor, hooks, ext:: transports and a discovered bare
+    repository are switched off, and diff, log and show skip external diff
+    and textconv drivers."""
+    argv = ["git"]
+    for item in _HARDENING_CONFIG:
+        argv += ["-c", item]
+    if args and args[0] in _NO_DRIVER_COMMANDS:
+        return [*argv, args[0], "--no-ext-diff", "--no-textconv", *args[1:]]
+    return [*argv, *args]
+
+
+def git_env(env: Optional[dict] = None) -> dict:
+    """Environment for a hardened git: *env* (default ``os.environ``) copied,
+    with program-naming variables removed. The system and global config stay in
+    effect (line endings, credential helper, symlinks); the ``-c`` settings in
+    :func:`git_argv` override them for every hardened key. See
+    test_system_line_ending_config_still_applies."""
+    out = dict(os.environ if env is None else env)
+    for name in _DROPPED_ENV:
+        out.pop(name, None)
+    return out
+
+
+def repo_runs_programs(cwd: Path) -> bool:
+    """True when the repository at *cwd* has local configuration or hooks that
+    can make a read command run a program, or that cannot be inspected."""
+    from .. import shell_guard
+    try:
+        return shell_guard._git_runs_programs(str(cwd), str(cwd))
+    except Exception:
+        return True
+
+
+def run_git(argv_args: tuple, cwd: Path, *, timeout: float,
+            env: Optional[dict] = None):
+    """Run a hardened git and return the raw SubprocessResult."""
+    return run_subprocess(git_argv(*argv_args), cwd, timeout=timeout, env=git_env(env))
+
+
 def _git(cwd: Path, *args: str, timeout: int = 10,
          env: Optional[dict] = None) -> tuple[str, bool]:
-    """Run a git command and return (output, ok).
+    """Run a hardened git command and return (output, ok).
 
-    *env* REPLACES the child's whole environment (that is subprocess semantics),
-    so a caller that only wants to add a variable must merge it onto os.environ -
-    a git invoked without PATH does not run at all.
+    *env* is the base environment (default ``os.environ``); the hardening
+    variables are applied on top of it.
     """
-    result = run_subprocess(["git", *args], cwd, timeout=timeout, env=env)
+    result = run_git(args, cwd, timeout=timeout, env=env)
     if result.not_found:
         return "git not found in PATH", False
     if result.timed_out:
@@ -37,8 +92,21 @@ def _git(cwd: Path, *args: str, timeout: int = 10,
     return out, result.ok
 
 
+_RISKY_REFUSAL = ("refused: this repository's configuration or hooks can run "
+                  "programs, so git is not run on it")
+
+
+def _refuse_risky(cwd: Path, name: str) -> Optional[ToolResult]:
+    if repo_runs_programs(cwd):
+        return ToolResult.error(f"{name} {_RISKY_REFUSAL}")
+    return None
+
+
 def tool_git_status(cwd: Path) -> ToolResult:
     """Return the output of `git status --short` in the working directory."""
+    refused = _refuse_risky(cwd, "git status")
+    if refused is not None:
+        return refused
     out, ok = _git(cwd, "status", "--short", "--branch")
     return ToolResult(ok=ok, output=out, summary=f"git status ({len(out.splitlines())} lines)")
 
@@ -52,6 +120,9 @@ def tool_git_diff(cwd: Path, path: str = "", staged: bool = False) -> ToolResult
     path   : limit diff to this file or directory (optional)
     staged : if True, show staged changes (`git diff --cached`)
     """
+    refused = _refuse_risky(cwd, "git diff")
+    if refused is not None:
+        return refused
     args = ["diff", "--stat", "-p"]
     if staged:
         args.append("--cached")
@@ -64,6 +135,9 @@ def tool_git_diff(cwd: Path, path: str = "", staged: bool = False) -> ToolResult
 
 def tool_git_log(cwd: Path, n: int = 10, path: str = "") -> ToolResult:
     """Return the last n commits as a compact log."""
+    refused = _refuse_risky(cwd, "git log")
+    if refused is not None:
+        return refused
     args = ["log", f"--max-count={n}", "--oneline", "--decorate"]
     if path:
         args += ["--", path]
@@ -116,8 +190,21 @@ def tool_git_push(
     remote: str = "origin",
     branch: str = "",
 ) -> ToolResult:
-    """Push the current branch to a remote."""
-    args = ["push", remote]
+    """Push the current branch to a remote.
+
+    A *remote* that is empty after stripping, or a *remote* or *branch* that
+    begins with ``-``, is refused; the two are passed after ``--`` so git never
+    reads either as an option."""
+    remote = (remote or "origin").strip()
+    branch = (branch or "").strip()
+    for label, value in (("remote", remote), ("branch", branch)):
+        if value.startswith("-"):
+            return ToolResult.error(
+                f"git push refused: the {label} {value!r} begins with '-', which "
+                "git would read as an option.")
+    if not remote:
+        return ToolResult.error("git push refused: the remote is empty.")
+    args = ["push", "--", remote]
     if branch:
         args.append(branch)
     out, ok = _git(cwd, *args, timeout=60)

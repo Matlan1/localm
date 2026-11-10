@@ -21,6 +21,7 @@ from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive, ArtifactError
 import localm.setup_llama as _sl
+from localm.http_ssl import read_bounded
 
 # --------------------------------------------------------------------------- #
 #  NVIDIA / CUDA preflight + self-assembly                                     #
@@ -286,12 +287,12 @@ _CUDA_RUNTIME_PYPI_PACKAGES = {
 _CUDA_RUNTIME_PIN = {
     "nvidia-cuda-runtime-cu12": ("12.9.79",
         "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3"),
-    "nvidia-cublas-cu12": ("12.9.2.10",
-        "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
-    "nvidia-cuda-runtime": ("13.4.92",
-        "9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5"),
-    "nvidia-cublas": ("13.8.2.12",
-        "21721774d8e7044debec3034ecc1a8cd22e173eb6dae5d7f5f8a014852382894"),
+    "nvidia-cublas-cu12": ("12.9.3.13",
+        "d7d51055f161b317c7105ddaae90e71eda059026074ffef93cf7cde2886bfe72"),
+    "nvidia-cuda-runtime": ("13.5.37",
+        "df2b79a8852f10d1fef8c848489c49eebb5754051bf870202a862831412b179d"),
+    "nvidia-cublas": ("13.10.0.20",
+        "dcc6d63884c53d07e267ce7e6feac17b2538cebaafec5db865736c3e28e4dc84"),
 }
 
 
@@ -312,7 +313,7 @@ def _pypi_wheel_url_and_sha(package: str) -> tuple:
         req = urllib.request.Request(api, headers={"Accept": "application/json",
                                                     "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
+            data = json.loads(read_bounded(r).decode("utf-8"))
         for f in data["urls"]:
             name = str(f.get("filename", ""))
             if name.endswith(".whl") and "x86_64" in name and "linux" in name.lower():
@@ -327,7 +328,8 @@ def _pypi_wheel_url_and_sha(package: str) -> tuple:
 def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
     """Download *package*'s Linux wheel from PyPI, verify it, and copy every
     ``.so*`` file it contains into *target* (flat - matches how the llama.cpp
-    runtime dir is already laid out). Returns the number of files copied.
+    runtime dir is already laid out), with the wheel's license file beside them
+    (:func:`_copy_wheel_license`). Returns the number of library files copied.
     Raises :class:`ArtifactError` on a download or validation failure, same
     contract as :func:`_fetch_and_place`, so callers decide fatal-vs-fallback
     identically for either artifact source.
@@ -350,7 +352,69 @@ def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
             if f.is_file() and not f.is_symlink():
                 shutil.copy2(f, target / f.name)
                 n += 1
+        _copy_wheel_license(ex, package, target)
         return n
+
+
+# The notice written beside NVIDIA's CUDA runtime libraries when the archive
+# they came from carries no license file of its own.
+NVIDIA_CUDA_LICENSE_NOTICE = """\
+The NVIDIA CUDA runtime libraries in this folder (cudart, cuBLAS, cuBLASLt)
+are proprietary NVIDIA software, not open source. They are covered by the
+NVIDIA CUDA Toolkit End User License Agreement:
+https://docs.nvidia.com/cuda/eula/index.html
+"""
+
+# The file name of that notice in a runtime folder.
+NVIDIA_CUDA_LICENSE = "LICENSE.nvidia-cuda"
+
+
+def _wheel_license_files(extracted: Path) -> list:
+    """The license files in the ``*.dist-info`` folder of an extracted wheel,
+    sorted by path."""
+    return sorted(f for f in extracted.glob("*.dist-info/**/*")
+                  if f.is_file() and not f.is_symlink()
+                  and f.name.lower().startswith(("license", "licence")))
+
+
+def _copy_wheel_license(extracted: Path, package: str, target: Path) -> list:
+    """Copy the license files of the wheel extracted at *extracted* into
+    *target* as ``LICENSE.<package>`` (then ``.1``, ``.2`` for more than
+    one). A wheel with no license file gets :data:`NVIDIA_CUDA_LICENSE_NOTICE`
+    under that name and a warning. Returns the paths written. Raises
+    ``OSError``."""
+    found = _wheel_license_files(extracted)
+    base = f"LICENSE.{package}"
+    if not found:
+        logger.warning("the %s wheel carries no license file; writing a notice "
+                       "naming NVIDIA's CUDA license instead", package)
+        console.print(f"[yellow]Note:[/yellow] {package} carries no license file; "
+                      f"{base} names NVIDIA's CUDA license instead.")
+        dest = target / base
+        dest.write_text(NVIDIA_CUDA_LICENSE_NOTICE, encoding="utf-8")
+        return [dest]
+    written = []
+    for i, f in enumerate(found):
+        dest = target / (base if i == 0 else f"{base}.{i}")
+        shutil.copy2(f, dest)
+        written.append(dest)
+    return written
+
+
+def write_nvidia_cuda_notice(target: Path) -> bool:
+    """Write :data:`NVIDIA_CUDA_LICENSE_NOTICE` into *target* as
+    :data:`NVIDIA_CUDA_LICENSE`, for an upstream cudart bundle, which carries
+    no license file. Returns False, with a warning, when it cannot be
+    written."""
+    try:
+        (target / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
+                                                  encoding="utf-8")
+    except OSError as e:
+        logger.warning("could not write %s into %s: %s", NVIDIA_CUDA_LICENSE, target, e)
+        console.print(f"[yellow]Warning:[/yellow] could not write {NVIDIA_CUDA_LICENSE} "
+                      f"beside the CUDA runtime libraries: {e}")
+        return False
+    return True
 
 
 # The record, in a runtime dir, of the PyPI CUDA libraries fetched into it.

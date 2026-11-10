@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import contextlib
 import copy
 import json
 import os
@@ -11,6 +10,25 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
+
+from localm import mgmt_events
+from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
+    READ_ABSENT,
+    READ_CURRENT,
+    READ_FROM_BACKUP,
+    READ_UNREADABLE,
+    ConfigLockLost,
+    ConfigLockTimeout,
+    ConfigUnreadable,
+    assert_store_lock_held,
+    atomic_write_private,
+    restrict_file_perms,
+)
+from localm.storekit import read_json as _read_json
+from localm.storekit import read_json_checked as _read_json_checked
+from localm.storekit import read_json_state as _read_json_state
+from localm.storekit import replace_atomic as _replace_atomic
+from localm.storekit import store_lock as _cross_process_lock
 
 
 _warned_unconfigured_home = False
@@ -466,6 +484,15 @@ def _absolute_folder(text: str) -> Optional[Path]:
     return candidate if candidate.is_absolute() else None
 
 
+def _is_unc_or_device(text: str) -> bool:
+    """True for a UNC or device-namespace path: a leading two backslashes on any
+    host, or ``//`` and ``\\??\\`` on Windows. Lexical only, no filesystem
+    call."""
+    if text.startswith("\\\\"):
+        return True
+    return os.name == "nt" and (text.startswith("//") or text.startswith("\\??\\"))
+
+
 def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     """Where localm's temporary files go, or None to leave the system temp folder.
 
@@ -491,12 +518,12 @@ def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     if choice.lower() == "system":
         return None
     if choice and choice.lower() != "auto":
-        folder = _absolute_folder(choice)
+        folder = None if _is_unc_or_device(choice) else _absolute_folder(choice)
         if folder is not None:
             return folder
         if warn:
             print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
-                  "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
+                  "'auto', 'data', 'system' or a local absolute folder; using 'auto'.",
                   file=sys.stderr)
     return home / "tmp" if _is_portable_home(home) else None
 
@@ -794,6 +821,7 @@ DEFAULT_CONFIG: dict = {
     "tls_cert": "",
     "tls_key": "",
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    "allowed_hosts": None,    # None = own names only; list of host names; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
     # False (default) = open in local/dev mode on loopback.
@@ -1038,6 +1066,9 @@ DEFAULT_CONFIG: dict = {
     # before it stops looking things up and answers from what it found. 0 = no
     # ceiling. Repeated and no-progress lookups end the loop sooner either way.
     "chat_web_max_lookups": 20,
+    # The GUI chat and `localm run` add a short style note to the system prompt
+    # (answer directly, speak of yourself as "I"). API callers never get it.
+    "chat_style_note": True,
     # Chat avatars: an emoji or a small data:image URI, never a URL. See
     # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
     "user_avatar": "",
@@ -1319,161 +1350,9 @@ def ensure_dirs() -> None:
     _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
-def _perm_warn(path: Path, why: str) -> None:
-    """Record a failed permission tightening at debug level.
-
-    Debug level rather than a warning: the data dir is already user-scoped, so a
-    failure here degrades defence in depth without exposing a plaintext
-    secret."""
-    try:
-        from localm.debuglog import logger
-        logger.debug("could not restrict permissions on %s (%s); the data "
-                     "directory's own scoping still applies", path.name, why)
-    except Exception:
-        pass
-
-
-def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
-    """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
-    Windows icacls - which grants sole full control regardless of *mode*, since
-    ACLs do not encode POSIX bits). Returns True when the tightening is believed
-    to have happened, False when it did not. No-op on failure - the data dir is
-    already user-scoped, so this per-file tightening is defence in depth.
-
-    *mode* defaults to 0o600 for a FILE. A caller locking down a DIRECTORY must
-    pass 0o700 (or another mode with the execute/search bit set) - 0o600 on a
-    directory removes POSIX traversal (x), so every file inside becomes
-    unreachable by path even though it still lists in a directory scan.
-
-    On Windows ``os.replace`` carries the source's ACL onto the destination,
-    overwriting the destination's inherited one, and POSIX rename likewise
-    carries the source's mode. So a caller doing the atomic temp+replace dance
-    can restrict the TEMP file (which already holds the whole payload) and skip
-    a second call on the destination in the happy path; when this returns False,
-    retry on the destination.
-
-    Shared by the project's credential-bearing files and directories -
-    ``auth.key``, ``sessions.json``, ``jobs.json``, the local CA material via
-    ``tls`` (which passes ``mode=0o700``), and everything written through
-    ``atomic_write_private`` - so each gets the same treatment on both platforms.
-    """
-    try:
-        if os.name == "posix":
-            os.chmod(path, mode)
-        else:
-            import subprocess
-            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-            if not user:
-                _perm_warn(path, "no USERNAME/USER in the environment")
-                return False
-            # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
-            # /grant:r replaces any existing grant for this user, so the result
-            # is an explicit, sole full-control ACE.
-            from localm import sysprog
-            icacls = sysprog.find("icacls")
-            if not icacls:
-                _perm_warn(path, "icacls was not found in the Windows system folder")
-                return False
-            r = subprocess.run(
-                [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True, check=False)
-            if r.returncode != 0:
-                # icacls FAILS without raising (access denied, an unresolvable
-                # principal, a non-NTFS volume), so a non-zero exit is reported
-                # and returned as False rather than read as a lock-down that
-                # happened.
-                _perm_warn(path, (r.stderr or r.stdout or b"").decode(
-                    "utf-8", "replace").strip() or f"icacls exit {r.returncode}")
-                return False
-        return True
-    except Exception as e:
-        # Best-effort (see docstring): a failure (icacls missing, a filesystem
-        # without per-file perms) leaves the home-dir scoping in effect and never
-        # raises. It is reported at debug level and returned as False rather than
-        # swallowed, so a caller can retry.
-        _perm_warn(path, repr(e))
-        return False
-
-
-def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bool:
-    """Write *text* to *path* atomically, owner-restricted from the moment the
-    bytes first exist on disk. Returns whether the PRE-RENAME restriction
-    succeeded (see below).
-
-    *retrying* selects the final replace: False (default) is a bare
-    ``os.replace`` (preserves the original behaviour for every caller that
-    predates this parameter - auth.key, the owner-KDF file, sessions.json, the
-    instance and GPU registry entries - some of which run on the asyncio event
-    loop and must not block on a multi-attempt retry); True uses
-    ``_replace_atomic``'s bounded backoff over a transient Windows sharing
-    violation instead. Pass True only when the caller already serializes every
-    writer of *path* across processes (a cross-process lock held for the whole
-    read-modify-write), so the retry is bounded, rare, and never faces another
-    writer racing the same temp file - only a concurrent READER's open handle,
-    which is exactly what the retry rides out.
-
-    TWO steps are needed and NEITHER covers both platforms alone:
-
-    * the temp file is created via ``os.open`` with an explicit 0600, so on
-      POSIX it is never briefly at the umask default. On Windows the mode
-      argument writes no ACL at all.
-    * :func:`restrict_file_perms` on the TEMP file before the rename covers
-      Windows - ``os.replace`` carries the source's ACL (and POSIX mode) onto
-      the destination, so the single call covers both names. The destination is
-      retried only when the first attempt failed.
-
-    The pre-rename restrict also covers the one case ``os.open`` cannot: a stale
-    ``.tmp`` left by an earlier crash is opened, not created, so its existing
-    mode survives O_CREAT.
-
-    Call sites: ``auth.key``, ``auth.json`` and the owner-KDF file in auth.py;
-    ``model_source_credentials.json``; ``sessions.json``; the instance
-    registry entry from both ``register_instance`` and ``set_mode``.
-
-    The RETURN VALUE is the pre-rename ``ok``, so a caller that logs its own
-    subsystem-named warning on failure keeps that signal.
-
-    Best-effort by contract: a tightening that fails is reported by
-    ``restrict_file_perms`` (which warns) and retried, never raised.
-
-    Uses a BARE ``os.replace``, not :func:`_replace_atomic`. That helper's
-    transient-sharing-violation retry sleeps up to ~1 s, and two of these
-    callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run ON THE ASYNCIO EVENT LOOP.
-
-    ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
-    TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
-    file matches what ``Path.write_text`` produces on each platform. Adding
-    O_BINARY would switch every Windows install's credential and registry files
-    to LF on the next write.
-
-    The write LOOPS because ``os.write`` is a single syscall that may consume
-    less than the whole buffer (ENOSPC after a partial write returns the short
-    count rather than raising); without the loop a silently truncated keystore
-    or session store could replace a good one. Raising leaves the temp file
-    behind and the destination untouched."""
-    tmp = path.with_name(path.name + ".tmp")
-    data = text.encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        written = 0
-        while written < len(data):
-            n = os.write(fd, data[written:])
-            if not n:
-                raise OSError(
-                    f"short write persisting {path.name}: {written} of "
-                    f"{len(data)} bytes accepted; the previous file is intact")
-            written += n
-    finally:
-        os.close(fd)
-    ok = restrict_file_perms(tmp)
-    if retrying:
-        _replace_atomic(tmp, path)
-    else:
-        os.replace(tmp, path)      # atomic on Windows + POSIX (same dir)
-    if not ok:
-        restrict_file_perms(path)
-    return ok
+def _logger():
+    from localm.debuglog import logger
+    return logger
 
 
 # Registry and config are mutated from several places at once - the GUI server
@@ -1492,75 +1371,6 @@ _io_lock = threading.RLock()
 # _cross_process_lock's token check. LOCK ORDER: _rmw_lock (outer) ->
 # <name>.lock file -> _io_lock (inner).
 _rmw_lock = threading.RLock()
-
-# A concurrent open handle makes a Windows os.replace / open raise a TRANSIENT
-# PermissionError (WinError 5); a bounded retry rides it out. The lock is usually
-# microseconds, but a loaded box (antivirus scanning the file, an indexer, a slow
-# second process) can hold it tens of ms, so the backoff escalates and the total
-# budget is ~1 s before a PERSISTENT failure is re-raised / falls back. See
-# _replace_atomic / _read_json.
-_REPLACE_RETRIES = 16
-_REPLACE_BACKOFF = 0.01      # seconds; escalates up to the cap
-_REPLACE_BACKOFF_CAP = 0.1   # seconds
-
-
-def _transient_backoff(attempt: int) -> None:
-    """Sleep before the next retry, escalating linearly to a cap so a lock that
-    lingers on a busy machine is ridden out without a hot spin."""
-    time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
-
-
-def _is_transient_permission_error(e: OSError) -> bool:
-    """True when a PermissionError plausibly reflects a TRANSIENT file lock worth
-    riding out, rather than a stable denial no retry can change.
-
-    Windows is the only platform with the race this retry exists for: another
-    handle (a concurrent atomic replace, antivirus, the indexer, Windows Search)
-    holds the file open for microseconds and open()/os.replace raises
-    PermissionError - ERROR_SHARING_VIOLATION (32), or ERROR_ACCESS_DENIED (5)
-    when a replace collides with an AV lock. A genuine Windows ACL denial also
-    surfaces as winerror 5 and is indistinguishable from the AV case at this
-    layer, so Windows keeps retrying it: ~1s to be sure is the documented,
-    accepted trade there.
-
-    POSIX has no such race. open() raises EACCES/EPERM only when the mode or ACL
-    genuinely denies us (a mode-000 or root-owned file left by an earlier sudo
-    run), which is a stable state - the retry can never succeed and just burns
-    ~1s of time.sleep while holding _io_lock, which serializes config access
-    process-wide, including the per-request auth path (auth.require_auth ->
-    load_config). So on POSIX we fall back at once (the failure is still
-    surfaced by the caller, never hidden - it just is not retried)."""
-    if os.name != "nt":
-        return False
-    # winerror is absent only if this was not raised by the Windows layer at all
-    # (e.g. a test double); treat that as transient to preserve the established
-    # Windows behaviour rather than silently narrowing it.
-    return getattr(e, "winerror", None) in (5, 32, None)
-
-
-def _replace_atomic(src: Path, dst: Path) -> None:
-    """``os.replace(src, dst)`` with a bounded retry on a transient Windows
-    sharing violation.
-
-    os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
-    when another handle has *dst* open at that instant: a second localm process
-    reading the file, an antivirus / indexer / backup scanner, Windows Search.
-    That window is short, so retrying briefly rides it out instead of crashing
-    the save. A genuine, persistent permission problem is re-raised after the
-    last attempt. On POSIX os.replace does not hit this, so the loop succeeds
-    first try; a raise there is a STABLE denial (see
-    _is_transient_permission_error) and is re-raised at once rather than
-    stalling under _io_lock AND the cross-process lock for a retry that cannot
-    succeed."""
-    for attempt in range(_REPLACE_RETRIES):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError as e:
-            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
-                raise
-            _transient_backoff(attempt)
-
 
 def _holds_unparseable_json(path: Path) -> bool:
     """True when *path* can be opened but its content is not valid JSON (corrupt,
@@ -1635,81 +1445,6 @@ def _atomic_write_json(path: Path, data) -> None:
         raise
 
 
-class ConfigUnreadable(RuntimeError):
-    """A JSON store file EXISTS but could not be read, so a read-modify-write
-    must not proceed (it would persist defaults over the caller's real data).
-    Raised by update_config / update_registry, and by auth.py's keystore
-    (create_key/revoke_key) and model_source_credentials.set_credentials,
-    which share this same refuse-on-unreadable contract."""
-
-
-class ConfigLockTimeout(TimeoutError):
-    """Another localm process held a store file's cross-process lock for the
-    whole wait budget, so the write was not made. Nothing was written; trying
-    again later is safe. Raised by ``_cross_process_lock``."""
-
-
-def _read_json(path: Path, default):
-    """Read JSON from *path*, falling back to its .bak then *default* on any
-    corruption - a damaged file must never take the whole app down."""
-    return _read_json_checked(path, default)[0]
-
-
-def _read_json_checked(path: Path, default):
-    """``(value, read_ok)``. ``read_ok`` is False ONLY when a file was PRESENT
-    and no candidate (neither *path* nor its ``.bak``) could be read - the one
-    state in which the returned *default* is indistinguishable from a genuinely
-    absent file.
-
-    Read-only consumers whose default is the safe answer take that fallback
-    and keep calling _read_json (the key verify path, netname and updater). A
-    consumer whose default is looser than a setting the user may have stored
-    (netpolicy, require_auth_enabled) calls load_config_checked and fails
-    safe on ``read_ok`` False. A read-modify-write must not take the
-    fallback: writing the default back replaces every setting the user had,
-    so update_config / update_registry refuse on ``read_ok`` False.
-
-    Note the asymmetry: a file that PARSES but holds the wrong shape (a JSON
-    string, a list) is read_ok True and keeps its documented fall-back-to-
-    defaults behaviour. Only an unreadable file can be hiding settings that
-    still exist."""
-    saw_file = False
-    for candidate in (path, path.with_name(path.name + ".bak")):
-        if not candidate.is_file():
-            continue
-        saw_file = True
-        for attempt in range(_REPLACE_RETRIES):
-            try:
-                with open(candidate, encoding="utf-8") as f:
-                    return json.load(f), True
-            except PermissionError as e:
-                # TRANSIENT on Windows: a concurrent atomic replace (another
-                # process, or antivirus/indexer) has the file locked for a
-                # microsecond. Retry the SAME file before falling back to
-                # .bak/defaults. A persistent EACCES surfaces after the retries
-                # via the same warning + fall-through. A STABLE denial (any
-                # POSIX EACCES - see _is_transient_permission_error) skips the
-                # retry entirely: it can never succeed, and this loop runs under
-                # _io_lock, so the backoff would stall every config read
-                # process-wide, including the per-request auth path.
-                if attempt < _REPLACE_RETRIES - 1 and _is_transient_permission_error(e):
-                    _transient_backoff(attempt)
-                    continue
-                print(f"[localm] {candidate.name} is unreadable ({e}); "
-                      "falling back.", file=sys.stderr)
-            except (ValueError, OSError, RecursionError) as e:
-                # NOT transient (corrupt/non-UTF-8 JSON -> ValueError incl.
-                # JSONDecodeError/UnicodeDecodeError, a huge integer -> ValueError,
-                # deep nesting -> RecursionError, or a hard OS error): fall back
-                # immediately without wasting the retry budget, honouring the
-                # documented "fall back to .bak then default, never take the app
-                # down" guarantee.
-                print(f"[localm] {candidate.name} is unreadable ({e}); "
-                      "falling back.", file=sys.stderr)
-            break
-    return (default() if callable(default) else default), not saw_file
-
-
 def instance_id() -> str:
     """Stable, unguessable identifier for THIS install's data directory. Minted
     once (uuid4 hex) on first call and reused for the life of the install by
@@ -1763,6 +1498,140 @@ def _drop_stray_credentials(stored: dict) -> None:
                   "Settings instead.", file=sys.stderr)
 
 
+CONFIG_VERSION_KEY = "config_version"
+
+# Stored keys that are legitimate although DEFAULT_CONFIG does not list them.
+_EXTRA_KNOWN_CONFIG_KEYS = frozenset({CONFIG_VERSION_KEY, "plugins_first_use_done"})
+
+_warned_unknown_stored_keys: set = set()
+_warned_newer_config_version: set = set()
+
+
+def _config_rename(old: tuple, new: tuple, value_map: Optional[Callable] = None) -> dict:
+    return {"kind": "rename", "old": old, "new": new, "value_map": value_map}
+
+
+def _config_remove(old: tuple) -> dict:
+    return {"kind": "remove", "old": old}
+
+
+def _map_remote_image_value(value):
+    mapped = coerce_remote_image_mode(value)
+    return value if mapped is None else mapped
+
+
+# Ordered migration steps; step N (1-based) takes a stored config from version
+# N-1 to N. Append only; never reorder or edit a released step. A step is a
+# rename (key path -> key path, optional value map) or a removal. A key path is
+# a tuple of keys, so a nested key is addressed as ("plugins", "x", "key").
+_CONFIG_STEPS: tuple = (
+    _config_rename(("gui_proxy_remote_images",), ("gui_proxy_remote_images",),
+                   _map_remote_image_value),
+)
+CURRENT_CONFIG_VERSION = len(_CONFIG_STEPS)
+
+
+def _stored_config_version(stored: dict) -> int:
+    """The ``config_version`` in *stored*; 0 when absent or not a plain
+    non-negative integer."""
+    raw = stored.get(CONFIG_VERSION_KEY, 0)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return 0
+    return raw
+
+
+def _config_path_parent(root: dict, path: tuple):
+    node = root
+    for part in path[:-1]:
+        node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return None
+    return node
+
+
+def _apply_config_step(stored: dict, step: dict) -> None:
+    old = step["old"]
+    src = _config_path_parent(stored, old)
+    if src is None or old[-1] not in src:
+        return
+    value = src.pop(old[-1])
+    if step["kind"] == "remove":
+        return
+    new = step["new"]
+    value_map = step["value_map"]
+    if value_map is not None:
+        value = value_map(value)
+    node = stored
+    for part in new[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = node[part] = {}
+        node = child
+    node.setdefault(new[-1], value)
+
+
+def _apply_config_migrations(stored: dict) -> None:
+    """Bring *stored* (the persisted delta) in place up to
+    ``CURRENT_CONFIG_VERSION`` by applying the steps above its
+    ``config_version``, then stamp the version. A stored version newer than this
+    build is left untouched and warned about once per process. An empty *stored*
+    is left empty."""
+    if not stored:
+        return
+    version = _stored_config_version(stored)
+    if version > CURRENT_CONFIG_VERSION:
+        if version not in _warned_newer_config_version:
+            _warned_newer_config_version.add(version)
+            _logger().warning(
+                "%s has config_version %d, newer than this build understands (%d); "
+                "it is read as is and not rewritten.",
+                CONFIG_FILE.name, version, CURRENT_CONFIG_VERSION)
+        return
+    for step in _CONFIG_STEPS[version:]:
+        _apply_config_step(stored, step)
+    stored[CONFIG_VERSION_KEY] = CURRENT_CONFIG_VERSION
+
+
+def _config_needs_migration(stored) -> bool:
+    """True when a migration step would change *stored*'s settings. A file that
+    only lacks the version stamp is not rewritten on load; the stamp is written
+    with the next save."""
+    if not (isinstance(stored, dict) and stored
+            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION):
+        return False
+    migrated = copy.deepcopy(stored)
+    _apply_config_migrations(migrated)
+    migrated.pop(CONFIG_VERSION_KEY, None)
+    original = {k: v for k, v in stored.items() if k != CONFIG_VERSION_KEY}
+    return migrated != original
+
+
+def _warn_unknown_stored_keys(stored: dict) -> None:
+    """One WARNING per process per stored top-level key that DEFAULT_CONFIG does
+    not define. Names the key, never the value; the key stays in the file."""
+    for key in sorted(k for k in stored if isinstance(k, str)):
+        if key in DEFAULT_CONFIG or key in _EXTRA_KNOWN_CONFIG_KEYS:
+            continue
+        if key in _warned_unknown_stored_keys:
+            continue
+        _warned_unknown_stored_keys.add(key)
+        _logger().warning(
+            "%s holds the key %.80r, which this build does not use; its value is "
+            "ignored and the key is kept in the file.", CONFIG_FILE.name, key)
+
+
+def _persist_migrated_config() -> None:
+    """Rewrite config.json in the migrated form under the store lock. A failure
+    is logged and leaves the file as it was; the in-memory config is already
+    migrated."""
+    try:
+        update_config(lambda _cfg: None)
+    except Exception as e:
+        _logger().warning("%s could not be rewritten after its settings were "
+                          "migrated (%s); it is migrated again on the next load.",
+                          CONFIG_FILE.name, e)
+
+
 def _merge_stored_config(cfg: dict, stored) -> None:
     """Overlay the persisted config delta *stored* onto *cfg* (the defaults),
     without any model-source credential key (see _drop_stray_credentials).
@@ -1775,6 +1644,8 @@ def _merge_stored_config(cfg: dict, stored) -> None:
     ``{}``. stderr, not the logger (see _detect_home)."""
     if isinstance(stored, dict):
         _drop_stray_credentials(stored)
+        _apply_config_migrations(stored)
+        _warn_unknown_stored_keys(stored)
         cfg.update(stored)
         return
     key = str(CONFIG_FILE)
@@ -1802,8 +1673,11 @@ def load_config_checked() -> tuple:
     with _io_lock:
         stored, read_ok = _read_json_checked(CONFIG_FILE, {})
     refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
+    needs_migration = read_ok and _config_needs_migration(stored)
     _merge_stored_config(cfg, stored)
     model_ids.config_to_current(cfg, refs, model_index())
+    if needs_migration:
+        _persist_migrated_config()
     # gui_proxy_remote_images is off/ask/on but config.json may hold a boolean.
     # There is no migration step: this normalises on every read, so a stored
     # `true` reads as "on" for the route, the schema, the CLI and the bug report
@@ -1890,7 +1764,25 @@ def save_config(cfg: dict) -> None:
     exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
-        _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
+        delta = _config_for_disk(cfg)
+        previous = _read_json(CONFIG_FILE, {})
+        _atomic_write_json(CONFIG_FILE, delta)
+    _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
+
+
+def _changed_config_keys(before: dict, after: dict) -> list:
+    """Names of the top-level keys whose value differs between *before* and *after*."""
+    return sorted(k for k in set(before) | set(after) if before.get(k, _MISSING) != after.get(k, _MISSING))
+
+
+_MISSING = object()
+
+
+def _record_config_saved(before: dict, after: dict) -> None:
+    """Record a config save in the management log (key NAMES only); nothing when no key changed."""
+    changed = _changed_config_keys(before, after)
+    if changed:
+        mgmt_events.record("config_saved", home=HOME_DIR, keys=changed)
 
 
 # update_config()/update_registry() are read-modify-write: read the file, let a
@@ -1902,262 +1794,6 @@ def save_config(cfg: dict) -> None:
 # read-before-written-back last. A lock FILE closes that gap across processes:
 # os.open(..., O_CREAT | O_EXCL) is an atomic create-only-if-absent op on both
 # Windows and POSIX, so exactly one process at a time can hold the lock.
-_CROSS_LOCK_TIMEOUT = 10.0      # seconds to wait for a lock held by another process
-_CROSS_LOCK_STALE_AGE = 30.0    # a lock file older than this is presumed abandoned
-                                 # by a crashed holder and is reclaimed
-_CROSS_LOCK_POLL = 0.02         # seconds between acquire attempts; escalates up to
-_CROSS_LOCK_POLL_CAP = 0.25     # this cap under sustained contention
-
-
-def _cross_lock_backoff(attempt: int) -> None:
-    time.sleep(min(_CROSS_LOCK_POLL * (attempt + 1), _CROSS_LOCK_POLL_CAP))
-
-
-def _lock_owner_pid(raw: bytes):
-    """Extract the PID from a lock file's ``<pid>:<nonce>`` token, or from a
-    bare ``<pid>``. None if unparseable - including an orphaned/empty file left
-    by a write that failed partway through (see _cross_process_lock's
-    acquire-failure cleanup)."""
-    try:
-        return int(raw.split(b":", 1)[0])
-    except (ValueError, IndexError):
-        return None
-
-
-# The fencing tokens of locks THIS process currently holds, keyed by lock path.
-# This - not the pid recorded in the file - is what identifies a lock as ours.
-# A pid NUMBER is not an identity: the OS reuses pids freely across process
-# lifetimes, so a lock LEAKED by a crashed holder can carry the very pid the OS
-# later hands to a new localm process. The uuid4 nonce in each token makes the
-# match exact - a leaked file can never equal a token we are holding right now,
-# whatever pid it records.
-_held_lock_tokens: dict = {}
-_held_lock_tokens_guard = threading.Lock()
-
-
-def _lock_is_held_by_us(lockpath: Path, held: bytes) -> bool:
-    """True only when *held* is a fencing token THIS process wrote and still
-    holds - i.e. a genuine nested acquisition, not a pid collision."""
-    if not held:
-        return False
-    with _held_lock_tokens_guard:
-        return _held_lock_tokens.get(str(lockpath)) == held
-
-
-def _unlink_lock_file(lockpath: Path) -> None:
-    """Remove our own released lock file, retrying a transient sharing violation
-    (another process reading the file) with _replace_atomic's bounded backoff.
-    A file that still cannot be removed is reported at WARNING, naming the file.
-    See test_release_retries_unlink_while_a_reader_pins_the_lock_file."""
-    last: Optional[OSError] = None
-    for attempt in range(_REPLACE_RETRIES):
-        try:
-            lockpath.unlink()
-            return
-        except FileNotFoundError:
-            return
-        except OSError as e:
-            last = e
-            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
-                break
-            _transient_backoff(attempt)
-    from localm.debuglog import logger
-    logger.warning("could not remove released lock file %s (%s); config/registry "
-                   "writes in every localm process fail on it until it is %.0fs "
-                   "old and reclaimed", lockpath.name, last, _CROSS_LOCK_STALE_AGE)
-
-
-def _read_lock_for_release(lockpath: Path) -> Optional[bytes]:
-    """The lock file's bytes, or None when the file is gone or could not be read.
-    A transient sharing violation is retried with _replace_atomic's bounded
-    backoff; a file that still cannot be read is reported at WARNING, naming the
-    file, because the release then leaves it in place for stale-age reclaim."""
-    last: Optional[OSError] = None
-    for attempt in range(_REPLACE_RETRIES):
-        try:
-            return lockpath.read_bytes()
-        except FileNotFoundError:
-            return None
-        except OSError as e:
-            last = e
-            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
-                break
-            _transient_backoff(attempt)
-    from localm.debuglog import logger
-    logger.warning("could not read lock file %s on release (%s); leaving it in "
-                   "place, so config/registry writes in every localm process "
-                   "fail on it until it is %.0fs old and reclaimed",
-                   lockpath.name, last, _CROSS_LOCK_STALE_AGE)
-    return None
-
-
-def _reclaim_stale_lock(lockpath: Path, judged: bytes, judged_mtime: float) -> bool:
-    """Remove a lock file judged stale, and report whether it was removed.
-
-    Re-stats and re-reads the file immediately before the unlink and leaves it
-    alone when its mtime or its bytes are no longer the ones it was judged by, or
-    when the staleness test no longer holds: between the judgement and here, the
-    holder may have released it and a new holder may have created its own. Two
-    waiters that both reach the stale branch therefore cannot both unlink and both
-    create. True when the file is already gone, so the caller retries its create.
-    A file that cannot be read falls back to the mtime test alone, so an
-    unreadable stale lock is still reclaimed rather than wedging every writer.
-    The residual window (a lock created between this re-read and the unlink)
-    cannot be closed with plain files; the fencing token stops it from cascading,
-    since the wrongly-removed holder's release will not then delete a third
-    party's lock. Mirrors ``rag.collection_lock._reclaim``.
-    See test_a_stale_lock_is_not_reclaimed_after_a_new_holder_took_it."""
-    try:
-        current_mtime = lockpath.stat().st_mtime
-    except OSError:
-        return True
-    if current_mtime != judged_mtime:
-        return False
-    if time.time() - current_mtime <= _CROSS_LOCK_STALE_AGE:
-        return False
-    try:
-        current = lockpath.read_bytes()
-    except OSError:
-        current = judged
-    if current != judged:
-        return False
-    try:
-        lockpath.unlink()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-@contextlib.contextmanager
-def _cross_process_lock(target: Path, *, timeout: Optional[float] = None):
-    """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
-    marker file) for the duration of the ``with`` block.
-
-    *timeout* is the wait budget in seconds; None means _CROSS_LOCK_TIMEOUT.
-
-    Bounded retry with an escalating backoff, matching _replace_atomic's
-    established pattern, but on a wall-clock budget (_CROSS_LOCK_TIMEOUT) rather
-    than a fixed attempt count, since a full read-modify-write held by another
-    process can legitimately take longer than a single os.replace. Timing out
-    raises TimeoutError rather than proceeding unprotected.
-
-    FENCING TOKEN: each acquisition writes a unique ``<pid>:<nonce>`` token into
-    the lock file, not just a bare marker. A holder whose critical section
-    legitimately outlasts _CROSS_LOCK_STALE_AGE (not crashed, just slow - heavy
-    antivirus scanning, a paused debugger) has its lock reclaimed by a waiter
-    that reads staleness as "crashed". With the token, release only removes the
-    file if it still holds the token THIS call wrote; if it doesn't (this call's
-    lock was reclaimed as stale while still legitimately held), the file is left
-    alone - whoever's token is on disk owns cleanup, so a stale-reclaim can never
-    cascade into deleting a live holder's lock.
-
-    The same token also turns a same-thread NESTED call (a mutator passed to
-    update_config()/update_registry() that calls back into either for the same
-    file - not supported, this lock is not reentrant like _io_lock) from a
-    confusing _CROSS_LOCK_TIMEOUT-long stall into an immediate, clear error: the
-    token on disk matches one in _held_lock_tokens, which is only possible via
-    the calling process's own nested acquisition (a sibling thread in this
-    process would already be blocked on the outer _rmw_lock before ever reaching
-    here). Ownership is decided by that exact token, NOT by the pid recorded in
-    the file: pids are reused across process lifetimes, so a leaked lock carrying
-    our own pid must still be treated as foreign, and stays eligible for the
-    staleness reclaim below.
-
-    A lock file older than _CROSS_LOCK_STALE_AGE that we do not hold is assumed
-    to belong to a crashed holder (a killed CLI, a hard-killed server) and is
-    reclaimed instead of wedging every future config/registry write; the reclaim
-    is logged."""
-    lockpath = target.with_name(target.name + ".lock")
-    token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
-    budget = _CROSS_LOCK_TIMEOUT if timeout is None else timeout
-    deadline = time.time() + budget
-    attempt = 0
-    while True:
-        try:
-            fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            try:
-                held = lockpath.read_bytes()
-            except OSError:
-                held = b""
-            if _lock_is_held_by_us(lockpath, held):
-                raise RuntimeError(
-                    f"{lockpath.name} is already held by this same process "
-                    f"(pid {os.getpid()}) - a mutator passed to update_config()/"
-                    "update_registry() called back into update_config()/"
-                    "update_registry() on the same file. That is not supported "
-                    "(the cross-process lock is not reentrant); make both changes "
-                    "in one mutator instead of nesting the calls.") from None
-            try:
-                mtime = lockpath.stat().st_mtime
-            except OSError:
-                # The lock vanished between our failed create and this stat (the
-                # holder just released it) - retry the create immediately rather
-                # than waiting out a backoff for a lock that is already gone.
-                continue
-            age = time.time() - mtime
-            if age > _CROSS_LOCK_STALE_AGE and _reclaim_stale_lock(lockpath, held, mtime):
-                print(f"[localm] note: reclaiming stale lock {lockpath.name} "
-                      f"({age:.0f}s old) - the process that held it appears to "
-                      "have crashed without releasing it.", file=sys.stderr)
-                continue
-            if time.time() >= deadline:
-                raise ConfigLockTimeout(
-                    f"timed out after {budget:g}s waiting for "
-                    f"{lockpath.name}, held by another localm process") from None
-            _cross_lock_backoff(attempt)
-            attempt += 1
-            continue
-        # We created the lock file (os.open succeeded). Everything from here
-        # must clean up OUR OWN just-created file on failure, or a transient
-        # write error (ENOSPC, a momentary AV lock on the file we just made)
-        # would leak an orphaned, unowned lock file that blocks every other
-        # config/registry writer install-wide until the next staleness reclaim.
-        try:
-            try:
-                os.write(fd, token)
-            finally:
-                os.close(fd)
-        except BaseException:
-            try:
-                lockpath.unlink()
-            except OSError:
-                pass
-            raise
-        # Record the token only once it is actually ON DISK: a failed write above
-        # unlinks the file, so registering earlier would leave us believing we
-        # hold a lock that does not exist.
-        with _held_lock_tokens_guard:
-            _held_lock_tokens[str(lockpath)] = token
-        break
-    try:
-        yield
-    finally:
-        # Forget our claim FIRST, and unconditionally: once we leave this block we
-        # no longer hold the lock, whatever happens to the file below. A stale
-        # entry here would make a LATER acquisition of the same path read a
-        # foreign lock as our own nested call.
-        with _held_lock_tokens_guard:
-            if _held_lock_tokens.get(str(lockpath)) == token:
-                del _held_lock_tokens[str(lockpath)]
-        # Fencing-token release (see docstring): only remove the lock file if it
-        # still holds the token WE wrote. If it doesn't, another process reclaimed
-        # it as stale while we were still legitimately inside our critical section
-        # (a write that outlasted _CROSS_LOCK_STALE_AGE) - deleting THEIR live
-        # lock here would let a third writer in while they still believe they
-        # hold exclusive access, so we leave it alone instead.
-        current = _read_lock_for_release(lockpath)
-        if current == token:
-            _unlink_lock_file(lockpath)
-        elif current is not None:
-            print(f"[localm] note: {lockpath.name} was reclaimed by another "
-                  "localm process while this process still held it (this "
-                  f"write took longer than _CROSS_LOCK_STALE_AGE={_CROSS_LOCK_STALE_AGE:.0f}s) "
-                  "- not deleting the new holder's lock.", file=sys.stderr)
-
-
 def update_config(mutator: Callable[[dict], None]) -> dict:
     """Atomically read-modify-write the config.
 
@@ -2175,7 +1811,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     ensure_dirs()
     # LOCK ORDER: _rmw_lock -> config.json.lock -> _io_lock. See
     # test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock.
-    with _rmw_lock, _cross_process_lock(CONFIG_FILE), _io_lock:
+    with _rmw_lock, _cross_process_lock(CONFIG_FILE) as lock, _io_lock:
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored, read_ok = _read_json_checked(CONFIG_FILE, {})
         if not read_ok:
@@ -2193,16 +1829,20 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
             # in an HTTP error body (inference/routes/config.py).
             raise ConfigUnreadable(
                 f"{CONFIG_FILE.name} exists but could not be read, so saving "
-                f"would replace every setting in it with defaults; refused. "
-                f"Fix or remove {CONFIG_FILE.name} (a .bak may hold a good copy).")
+                f"would replace its settings with an older copy or with "
+                f"defaults; refused. Fix or remove {CONFIG_FILE.name} (the "
+                f"{CONFIG_FILE.name}.bak next to it may hold a good copy).")
         refs = stored.pop(model_ids.REFS_KEY, None) if isinstance(stored, dict) else None
         _merge_stored_config(cfg, stored)
         model_ids.config_to_current(cfg, refs, model_index())
+        before = copy.deepcopy(cfg)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
+        lock.assert_held()
         _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
-        return cfg
+    _record_config_saved(before, cfg)
+    return cfg
 
 
 _model_index_cache: Optional[tuple] = None
@@ -2309,9 +1949,9 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     ensure_dirs()
     # LOCK ORDER: _rmw_lock -> registry.json.lock -> _io_lock. See
     # test_reader_is_not_blocked_by_a_writer_waiting_on_the_cross_process_lock.
-    with _rmw_lock, _cross_process_lock(REGISTRY_FILE), _io_lock:
-        reg, read_ok = _read_json_checked(REGISTRY_FILE, {})
-        if not read_ok:
+    with _rmw_lock, _cross_process_lock(REGISTRY_FILE) as lock, _io_lock:
+        reg, state = _read_json_state(REGISTRY_FILE, {})
+        if state == READ_UNREADABLE:
             # Same refusal as update_config, and the loss here is worse: this
             # writes the WHOLE dict rather than a delta, so an unreadable
             # registry plus one registration leaves a registry.json holding that
@@ -2330,6 +1970,7 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
         mutator(reg)
         model_ids.ensure_ids(reg, previous)
         model_ids.follow_bases(reg, model_ids.build_index(reg))
+        lock.assert_held()
         _atomic_write_json(REGISTRY_FILE, reg)
         return reg
 

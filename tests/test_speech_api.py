@@ -106,7 +106,7 @@ def _tts_app(home, kernel=False):
         app = FastAPI()
     PluginManager(app, external_root=home / "noplugins").install("tts")
     if getattr(app.state, "jobs", None) is None:
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         app.state.jobs = JobManager()
     return app
 
@@ -347,7 +347,7 @@ class TestJobAndPrivacy:
 
     def test_a_client_that_goes_away_cancels_the_synthesis(self, home, monkeypatch):
         from localm.plugins.builtin.tts import speech_route
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         started, seen_cancel = threading.Event(), threading.Event()
 
         def slow(model, text, *, on_progress=None, should_cancel=None, **kw):
@@ -381,7 +381,7 @@ class TestJobAndPrivacy:
     def test_a_client_that_goes_away_mid_stream_of_progress_cancels_the_job(
             self, home, monkeypatch):
         from localm.plugins.builtin.tts import speech_route
-        from localm.plugins.gui.jobs import JobManager
+        from localm.jobmanager import JobManager
         started, seen_cancel = threading.Event(), threading.Event()
 
         def chatty(model, text, *, on_progress=None, should_cancel=None, **kw):

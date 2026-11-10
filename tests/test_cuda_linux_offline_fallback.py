@@ -40,12 +40,21 @@ def test_a_readable_listing_without_the_asset_does_not_fall_back(monkeypatch):
         _resolve_linux_cuda_asset("cuda", "cuda-12", _PINNED_TAG)
 
 
-def test_a_readable_listing_wins_over_the_pinned_table(monkeypatch):
+def test_a_readable_listing_gives_the_url_and_the_pin_gives_the_sha(monkeypatch):
+    name = f"llama-{_PINNED_TAG}-bin-ubuntu-cuda-x64.tar.gz"
+    _listing(monkeypatch, [{"name": name, "browser_download_url": "https://example.invalid/live",
+                            "digest": "sha256:" + _CUDA_LINUX_PINNED_SHA256[name]}])
+    url, sha, _tag = _resolve_linux_cuda_asset("cuda", "cuda-12", _PINNED_TAG)
+    assert url == "https://example.invalid/live" and sha == _CUDA_LINUX_PINNED_SHA256[name]
+
+
+def test_a_listing_digest_that_disagrees_with_the_pin_is_refused(monkeypatch):
+    from localm.setup_llama.download import ArtifactError
     name = f"llama-{_PINNED_TAG}-bin-ubuntu-cuda-x64.tar.gz"
     _listing(monkeypatch, [{"name": name, "browser_download_url": "https://example.invalid/live",
                             "digest": "sha256:" + "ab" * 32}])
-    url, sha, _tag = _resolve_linux_cuda_asset("cuda", "cuda-12", _PINNED_TAG)
-    assert url == "https://example.invalid/live" and sha == "ab" * 32
+    with pytest.raises(ArtifactError):
+        _resolve_linux_cuda_asset("cuda", "cuda-12", _PINNED_TAG)
 
 
 def test_the_pinned_table_names_the_pinned_tag_and_both_lines():

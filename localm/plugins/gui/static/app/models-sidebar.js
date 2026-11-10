@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
-import { $, GIB, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { $, GIB, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
 import { applyI18n, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
@@ -139,22 +139,147 @@ export function renderHwStats(data) {
 
 export async function pollHwStats() {
   if (typeof document !== "undefined" && document.hidden) return;
+  if (isLiveOpen()) return;   // the open stream keeps the readout current
   try {
     const r = await fetch("/api/stats", { headers: authHeaders() });
     if (!r.ok) return;
-    renderHwStats(await r.json());
+    const data = await r.json();
+    if (isLiveOpen()) return;   // the stream opened while this was in flight; its reading is newer
+    renderHwStats(data);
   } catch { /* transient - keep the last reading */ }
 }
 
+// --------------------------------------------------------------------------- //
+//  Live channel: GET /api/live pushes the hardware stats and the activity     //
+//  list as they change, so the meter follows a model load or unload within    //
+//  the second instead of waiting out a 2.5 s poll. Polling (below) is the     //
+//  fallback whenever the stream is not open.                                  //
+// --------------------------------------------------------------------------- //
+
+export let LIVE_BACKOFF_MIN_MS = 1000;
+export let LIVE_BACKOFF_MAX_MS = 30000;
+// No frame at all, keepalive comments included, for this long means the
+// connection is dead without having closed (the server sends one at least every
+// 15 s).
+export let LIVE_STALL_MS = 40000;
+
+let _liveAbort = null;         // AbortController of the open or opening stream
+let _liveRetryTimer = null;
+let _liveBackoffMs = LIVE_BACKOFF_MIN_MS;
+let _liveFellBackLogged = false;
+let _liveWanted = false;        // startHwStats() has run and the tab is visible
+let _liveIntervalMs = 2500;
+
 export let _hwStatsTimer = null;
+
+function _startPolling() {
+  if (_hwStatsTimer) return;
+  _hwStatsTimer = setInterval(() => { pollHwStats(); pollActivity(); }, _liveIntervalMs);
+}
+
+function _stopPolling() {
+  if (_hwStatsTimer) { clearInterval(_hwStatsTimer); _hwStatsTimer = null; }
+}
+
+export function isLiveOpen() {
+  return _liveAbort !== null && _liveAbort.opened === true;
+}
+
+function _applyLiveFrame(ev) {
+  if (ev.type === "stats") renderHwStats(ev.data);
+  else if (ev.type === "activity") _applyActivity(ev);
+}
+
+function _noteLiveFallback(why) {
+  if (_liveFellBackLogged) return;
+  _liveFellBackLogged = true;
+  console.warn(`localm: the live stats stream is unavailable (${why}); polling /api/stats instead and retrying the stream`);
+}
+
+function _scheduleLiveRetry() {
+  if (_liveRetryTimer || !_liveWanted) return;
+  _liveRetryTimer = setTimeout(() => { _liveRetryTimer = null; _openLive(); }, _liveBackoffMs);
+  _liveBackoffMs = Math.min(_liveBackoffMs * 2, LIVE_BACKOFF_MAX_MS);
+}
+
+// Open the stream and read it until it ends. Never throws. When it cannot be
+// opened, or ends without this page having asked it to, polling takes over and
+// a retry is scheduled with a growing delay; a stream that delivered frames
+// resets that delay.
+async function _openLive() {
+  if (_liveAbort || !_liveWanted) return;
+  if (typeof document !== "undefined" && document.hidden) return;
+  const ac = new AbortController();
+  ac.opened = false;
+  _liveAbort = ac;
+  let watchdog = null;
+  const arm = () => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => ac.abort(), LIVE_STALL_MS);
+  };
+  let why = "the stream ended";
+  try {
+    const r = await fetch("/api/live", { headers: authHeaders(), signal: ac.signal });
+    if (!r.ok || !r.body) throw new Error(r.ok ? "no response body" : `HTTP ${r.status}`);
+    arm();
+    await readSSE(r, (payload) => {
+      let ev;
+      try { ev = JSON.parse(payload); } catch { return; }
+      if (!ac.opened && ev.type === "stats") {
+        ac.opened = true;
+        _liveBackoffMs = LIVE_BACKOFF_MIN_MS;
+        _stopPolling();
+      }
+      try {
+        _applyLiveFrame(ev);
+      } catch (e) {
+        console.error("localm: could not render a live frame:", e);
+      }
+    }, arm);
+  } catch (e) {
+    why = ac.intentional ? "" : String((e && e.message) || e);
+    if (!ac.intentional && ac.signal.aborted) why = `no data for ${LIVE_STALL_MS / 1000}s`;
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    if (_liveAbort === ac) _liveAbort = null;
+  }
+  if (ac.intentional || !_liveWanted) return;
+  _noteLiveFallback(why);
+  _startPolling();
+  _scheduleLiveRetry();
+}
+
+function _closeLive() {
+  _liveWanted = false;
+  if (_liveRetryTimer) { clearTimeout(_liveRetryTimer); _liveRetryTimer = null; }
+  if (_liveAbort) { _liveAbort.intentional = true; _liveAbort.abort(); }
+}
+
+let _hwStarted = false;
+
 export function startHwStats(intervalMs = 2500) {
+  if (_hwStarted) return;
+  _hwStarted = true;
+  _liveIntervalMs = intervalMs;
   pollHwStats();
   pollActivity();   // ADR-0008 U4: folded into this existing poll, not a new timer
   loadInterrupted();
-  if (_hwStatsTimer) clearInterval(_hwStatsTimer);
-  _hwStatsTimer = setInterval(() => { pollHwStats(); pollActivity(); }, intervalMs);
+  _liveWanted = typeof document === "undefined" || !document.hidden;
+  _liveBackoffMs = LIVE_BACKOFF_MIN_MS;
+  _startPolling();
+  _openLive();
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) { pollHwStats(); pollActivity(); }   // refresh promptly on tab focus
+    if (document.hidden) {
+      _closeLive();
+      return;
+    }
+    pollHwStats(); pollActivity();   // refresh promptly on tab focus
+    if (!_liveWanted) {
+      _liveWanted = true;
+      _liveBackoffMs = LIVE_BACKOFF_MIN_MS;
+      _startPolling();
+      _openLive();
+    }
   });
 }
 
@@ -441,18 +566,25 @@ async function _readActivity() {
     const r = await fetch("/api/activity", { headers: authHeaders() });
     if (!r.ok) return _activityReadFailed();
     const data = await r.json();
-    const ops = Array.isArray(data.operations) ? data.operations : [];
-    _activityOps = ops;
-    _activityServerNow = typeof data.now === "number" ? data.now : null;
-    _activityKnown = true;
-    _activityStaleReads = 0;
-    _noteStalls(Array.isArray(data.stalls) ? data.stalls : [], _activityServerNow);
-    renderActivityPill(ops);
-    _refreshActivityModalIfOpen();
-    return ops;
+    if (_activityKnown && isLiveOpen()) return _activityOps;   // the stream's list is the newer one
+    return _applyActivity(data);
   } catch {
     return _activityReadFailed();
   }
+}
+
+// One /api/activity body, from a poll or a pushed frame: record it, redraw the
+// pill and the open details modal, and return the operations list.
+function _applyActivity(data) {
+  const ops = Array.isArray(data.operations) ? data.operations : [];
+  _activityOps = ops;
+  _activityServerNow = typeof data.now === "number" ? data.now : null;
+  _activityKnown = true;
+  _activityStaleReads = 0;
+  _noteStalls(Array.isArray(data.stalls) ? data.stalls : [], _activityServerNow);
+  renderActivityPill(ops);
+  _refreshActivityModalIfOpen();
+  return ops;
 }
 
 // A failed read never overwrites _activityOps/_activityKnown (R1 - the last
@@ -1051,6 +1183,7 @@ export async function refreshModels() {
     }
     _modelsEverRefreshed = true;
     _publishActiveChange(previousActive);
+    window.dispatchEvent(new CustomEvent("localm:models-refreshed"));
   } catch {
     setStatus("err", t("sidebar.status.serverUnreachable"));
   }
@@ -1255,7 +1388,9 @@ export function confirmLoadText(data) {
   const where = names.length
     ? t("models.switch.freeAfterUnload", { free: data.free_mb, names: names.join(", ") })
     : t("models.switch.freeNow", { free: data.free_mb });
-  return t(data.moe ? "models.switch.degradedMoe" : "models.switch.degradedDense", {
+  const worded = data.experts_on_disk ? "models.switch.degradedDisk"
+    : (data.moe ? "models.switch.degradedMoe" : "models.switch.degradedDense");
+  return t(worded, {
     model: data.model, plan: data.plan_mb, full: data.full_mb, where });
 }
 

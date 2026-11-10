@@ -24,6 +24,12 @@ from localm.plugins.builtin.video.backends import native
 
 
 @pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+@pytest.fixture(autouse=True)
 def _reference_box(monkeypatch):
     from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
     pin_rx6900xt(monkeypatch)
@@ -369,7 +375,7 @@ def video_app(fake_video, tmp_path, monkeypatch):
 
     from localm.config import update_config
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     runner, s = fake_video
     update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
         "video", {}).update({"native": dict(s["native"])}))
@@ -455,7 +461,7 @@ def test_a_native_video_job_streams_its_previews_as_frames_kept_only_in_memory(v
     assert all(e.get("type") != "frame" for e in job._history)
 
 
-def test_a_native_refusal_fails_the_job_before_any_vram_handover(video_app, monkeypatch):
+def test_a_native_refusal_is_a_400_before_any_job_or_vram_handover(video_app, monkeypatch):
     from fastapi.testclient import TestClient
     app, runner = video_app
     unloads, provisions = [], []
@@ -465,9 +471,8 @@ def test_a_native_refusal_fails_the_job_before_any_vram_handover(video_app, monk
     monkeypatch.setattr(sd_runtime, "provision", lambda *a, **k: provisions.append(a))
     with TestClient(app) as c:
         r = c.post("/api/video", json={"prompt": "p", "width": 100, "height": 96})
-        job = _wait_job(app, r.json()["job_id"])
-    assert job.status == "failed"
-    assert any("multiple of 16" in ln for ln in _lines(job))
+    assert r.status_code == 400
+    assert "multiple of 16" in r.json()["detail"]
     assert unloads == [] and provisions == [] and runner.loads == []
 
 
@@ -496,7 +501,7 @@ def test_explicit_comfy_without_comfyui_fails_and_never_runs_native(video_app, m
     from localm.config import update_config
     app, runner = video_app
     update_config(lambda cfg: cfg["plugins"]["video"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_video.backend"]
+    mod = sys.modules["localm.plugins.builtin.video.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (False, "ComfyUI is not running"))
     with TestClient(app) as c:
@@ -904,7 +909,7 @@ def test_a_flow_shift_is_refused_for_comfyui(video_app, monkeypatch):
     from localm.config import update_config
     app, runner = video_app
     update_config(lambda cfg: cfg["plugins"]["video"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_video.backend"]
+    mod = sys.modules["localm.plugins.builtin.video.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (True, "ready"))
     with TestClient(app) as c:
@@ -913,3 +918,94 @@ def test_a_flow_shift_is_refused_for_comfyui(video_app, monkeypatch):
     assert job.status == "failed"
     assert any("Flow shift applies to the native backend" in ln for ln in _lines(job))
     assert runner.generates == []
+
+
+# --------------------------------------------------------------------------- #
+#  the download offer beside the command text                                 #
+# --------------------------------------------------------------------------- #
+
+def _offer_events(job):
+    return [e for e in job._history if e.get("type") == "missing_model"]
+
+
+def test_a_job_with_no_model_carries_the_download_beside_the_command(video_app):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, runner = video_app
+    update_config(lambda cfg: cfg["plugins"]["video"].update({"native": {}}))
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    [event] = _offer_events(job)
+    rec = native.RECOMMENDED_VIDEO_MODELS[0]
+    assert [m["source"]["spec"] for m in event["missing"]] == [p.spec for p in rec.parts]
+    assert [m["source"]["sha256"] for m in event["missing"]] == [p.sha256 for p in rec.parts]
+    assert [m["source"]["model_type"] for m in event["missing"]] == [
+        p.model_type for p in rec.parts]
+    assert all(m["native"] is True and "blocked" not in m for m in event["missing"])
+    text_line = [e for e in job._history
+                 if e.get("type") == "line" and e.get("text") == event["text"]]
+    assert text_line and f"localm pull {rec.parts[0].spec}" in event["text"]
+    assert job._history.index(event) < job._history.index(text_line[0])
+    assert runner.loads == []
+
+
+def test_a_job_over_an_explicit_model_that_is_gone_offers_no_download(video_app, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, _runner = video_app
+    update_config(lambda cfg: cfg["plugins"]["video"].update(
+        {"native": {"model": str(tmp_path / "gone.gguf")}}))
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    assert _offer_events(job) == []
+
+
+def test_preflight_marks_the_offer_blocked_when_net_mode_is_off(gui_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/video/preflight", json={}).json()
+    assert data["missing"] and all(m["blocked"] == "net_mode_off" for m in data["missing"])
+    assert all(m["source"]["sha256"] for m in data["missing"])
+
+
+def test_preflight_does_not_mark_the_offer_blocked_when_downloads_are_allowed_when_off(
+        gui_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    update_config(lambda cfg: cfg.__setitem__("net_allow_model_downloads", True))
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/video/preflight", json={}).json()
+    assert data["missing"] and not any("blocked" in m for m in data["missing"])
+
+
+def test_the_native_offer_for_a_models_companion_files_keeps_every_checksum():
+    from localm.media import native_offer
+    from localm.media.sdcpp import pairing
+    dl = pairing._DOWNLOADS[("vae", "flux")]
+    entries = native_offer.from_pairing([
+        {"slot": "vae", "label": "VAE", "download": dl.as_dict()},
+        {"slot": "clip_l", "label": "CLIP-L", "download": None}])
+    [entry] = entries
+    assert entry["slot"] == "vae" and entry["native"] is True
+    assert entry["filename"] == dl.filename
+    assert entry["source"]["sha256"] == dl.sha256
+    assert entry["source"]["spec"] == dl.spec
+    assert entry["source"]["model_type"] == dl.model_type
+
+
+def test_the_vision_encoder_offer_is_the_qwen3_vl_projector():
+    from localm.media import native_offer
+    from localm.media.sdcpp import pairing
+    [entry] = native_offer.vision_encoder()
+    dl = pairing.QWEN3_VL_8B_MMPROJ
+    assert entry["filename"] == dl.filename and entry["source"]["sha256"] == dl.sha256
+    assert entry["source"]["model_type"] == "mmproj"

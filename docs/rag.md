@@ -93,9 +93,10 @@ network drives as filesystem locations** is off.
 
 ### Per-key folder scoping
 
-A named API key's RAG reach can be confined further, to a specific set of
-folders - narrower than the global policy above, not wider than it. Mint one
-with:
+A named API key's RAG reach can be set to a specific set of folders of its
+own. Those folders replace the global policy above for that key (its allowed
+and denied lists do not apply to it); the always-refused credential folders
+and files still are. Mint one with:
 
 ```bash
 localm key create dashboard --scope rag --rag-root D:\docs\manuals --rag-root D:\docs\public
@@ -109,6 +110,10 @@ collection route:
 
 - **Indexing** (`POST /api/rag/collections/{name}/add`) refuses a path
   outside the granted roots.
+- **Adding and uploading** (`.../add`, `.../upload`) are refused (403) for a
+  collection that already holds any document indexed from outside the
+  granted roots, so such a key cannot add to it or replace an uploaded
+  document in it.
 - **Listing** (`GET /api/rag/collections`) leaves out a collection that
   holds any document from outside the granted roots entirely, rather than
   showing a name the key cannot then use.
@@ -117,11 +122,20 @@ collection route:
   `.../repair`, `.../reembed`) are all refused (403) for a collection that
   holds any document indexed from outside the granted roots, even one added
   by a different, less-restricted key.
+- **Scheduled re-syncs** (`POST /api/jobs` and `PUT /api/jobs/{id}` with
+  `task_kind: rag`) are refused (403) for such a collection; a scheduled run
+  re-syncs only within the creating key's granted roots and is not run once
+  they no longer cover the collection.
 
 A document added through `.../upload` (bytes from the caller's own device,
-never a host filesystem read) is not subject to this check - it never named a
-host path to confine. Only the owner key may set `rag_roots` on another key
-(via `key create` or `POST /v1/keys`); the owner's own reach, and open mode
+never a host filesystem read) is not itself path-confined - it never named a
+host path to confine. For any key but the owner's, `.../repair` re-checks every
+recorded source against that key's indexing policy (the folder policy above, or
+the key's own `rag_roots`) and skips a source that policy refuses, naming it in
+the job log; the owner's repair, like `localm rag repair`, applies only the hard
+floor. Only the owner key (or a key holding `admin`) may set `rag_roots` on another key
+over the API (`POST /v1/keys`), and `localm key create --rag-root` from this
+machine's terminal; the owner's own reach, and open mode
 (no key configured), are never confined by it. See
 [cli.md](cli.md#api-keys).
 
@@ -152,8 +166,8 @@ structural sniff of the content. Only when both are inconclusive (an odd extensi
 whose shape is unclear) does localm consult the loaded chat model as a one-off
 tie-break, cached per extension so it fires at most once per indexing run, and
 never at all when no chat model is loaded. So an embedding-only index never stalls
-on a chat call. Turn the tie-break off entirely with `rag_classify_unknown_files
-false` (it is on by default); unclassifiable chunks then fall back to the `text`
+on a chat call. Turn the tie-break off entirely with `localm config
+rag_classify_unknown_files false` (it is on by default); unclassifiable chunks then fall back to the `text`
 label.
 
 ## How retrieval works (and why it's lexical-first)
@@ -229,7 +243,7 @@ embedder too rather than quietly returning those vectors.
   chunk.
 - **Reranking.** The first search ranks every chunk with a cheap score, so the
   best excerpt is often present but not first. When a reranker model is
-  installed, the best 20 hits (Settings > Knowledge > Reranker candidates, 5 to
+  installed, the best 20 hits (Settings > Plugins > Knowledge (RAG) > Reranker candidates, 5 to
   100) are re-scored by it against the question and the top few are kept, each
   carrying a `rerank_score` next to its `score`. It runs on this machine and
   adds a fraction of a second to a second per question; more candidates find
@@ -247,7 +261,7 @@ embedder too rather than quietly returning those vectors.
   candidates before the reranker sees them, as does a question that points back
   at the conversation (with no `context`) and a reranker that fails.
   To gate on the reranker score for another reranker, or with another cut-off,
-  set Settings > Knowledge > Reranker minimum score (`rag_rerank_min_score`) to
+  set Settings > Plugins > Knowledge (RAG) > Reranker minimum score (`rag_rerank_min_score`) to
   the lowest score an excerpt may have, in that reranker's own scale (the
   Qwen3-Reranker score is a probability from 0 to 1; bge-reranker gives a
   logit); blank keeps the measured value, or the floor.
@@ -321,7 +335,11 @@ policy as an interactive add. Full details in
   trusted that way, since it may be hung or already gone, so it waits a bounded 30
   seconds, says so while it waits, and then REFUSES with a message naming the
   process that holds the collection rather than interleaving with it. A refused
-  command has changed nothing, and the API answers 409. There is no wall-clock
+  command has changed nothing. Over the API, create, delete and remove-doc answer
+  409; add, upload, repair and re-embed have already returned their job id, and
+  the job ends `failed` with the same message as an `error:` line. Deleting a
+  collection also waits a bounded 30 seconds for a writer in its own process
+  and then refuses. There is no wall-clock
   limit on how long a collection may be HELD, so an hours-long index of a big
   folder is safe: the holder keeps reporting in, and only a holder that stops
   reporting (a crash, a killed process) has its lock reclaimed. Collections are

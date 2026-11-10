@@ -17,7 +17,8 @@ from tests.conftest import probe_double
 from tests.test_projector_not_a_model import FakeEngine
 
 COMPONENT_TYPES = ["diffusion-unet", "lora", "text-encoder", "tts", "upscaler", "vae",
-                   "vocoder", "planner", "controlnet", "textual-inversion", "segmentation"]
+                   "vocoder", "planner", "controlnet", "textual-inversion", "segmentation",
+                   "decision"]
 WORDS = {
     "diffusion-unet": "an image or video checkpoint",
     "text-encoder": "a text encoder",
@@ -30,6 +31,7 @@ WORDS = {
     "controlnet": "a ControlNet",
     "textual-inversion": "a textual-inversion embedding",
     "segmentation": "a segmentation model",
+    "decision": "a decision model",
 }
 
 

@@ -670,6 +670,34 @@ def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     return [first, *steps] if first else steps
 
 
+def window_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
+    """Every step the window runs: the running-programs check, then all_steps."""
+    return [running_programs_step(), *all_steps(plan, resume)]
+
+
+def running_programs_step() -> Step:
+    """The first step: LocaLM programs running from this folder are listed, and
+    stopped when the user agrees; if not, the run ends with nothing changed."""
+    def check(emit):
+        im = install_manifest()
+        found = im.running_from([ROOT])
+        if not found:
+            return
+        emit("LocaLM is running from this folder:")
+        for pid, exe in found:
+            emit(f"  - {exe} (PID {pid})")
+        # SETUP-Q: running-localm
+        if ASK is None or not ask_yes("running-localm", "Stop them and go on?"):
+            raise StepFailed("LocaLM is running from this folder, so nothing was "
+                             "changed. Close it, then run setup again.")
+        if im.running_in_folder(ROOT, stop=True, log=emit) != 0:
+            raise StepFailed("a LocaLM program running from this folder could not be "
+                             "stopped, so nothing was changed. Close it by hand, then "
+                             "run setup again.")
+        emit("Stopped them.")
+    return Step("Checking for running LocaLM programs", check, key="")
+
+
 def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     """The install, as setup.bat performs it, in setup.bat's order. *resume* is the
     journal state of an interrupted earlier run (see begin_journal)."""
@@ -717,8 +745,15 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     steps.append(Step("Recording where data lives", data_dir, key="data-folder"))
 
     def install_localm(emit):
-        _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
-             emit, plan)
+        try:
+            _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
+                 emit, plan)
+        except StepFailed as e:
+            raise StepFailed(f"{str(e).rstrip('.')}. If a LocaLM program is still running from this "
+                             "folder, close it and run setup again and pick install "
+                             "again / repair; until then this folder is partly "
+                             "updated. Your chats, settings and models are untouched."
+                             ) from None
     steps.append(Step("Installing LocaLM", install_localm, key="install-localm"))
 
     def install_runtime_pkg(emit):
@@ -1642,7 +1677,7 @@ class Wizard:
         global ASK
         ASK = self._ask_from_worker
         resume = begin_journal(self._emit)
-        steps = all_steps(plan, resume)
+        steps = window_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
         self.root.after(80, self._pump)
 

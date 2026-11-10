@@ -30,7 +30,7 @@ settings render under **Settings > Privacy & data**, not on the Plugins page.
 Memory only *grows* in `log` or `full` session mode. The default mode is
 `privacy`, which writes nothing and, by default, recalls nothing (see
 [Privacy](#privacy-what-runs-in-each-mode) below). To actually accumulate a
-memory, set the mode to `log` or `full` (Settings > Privacy in the app, `--mode
+memory, set the mode to `log` or `full` (Settings > Privacy & data in the app, `--mode
 log` on `localm gui` / `serve`, or the `LOCALM_MODE` environment variable). See
 [privacy.md](privacy.md) for the full mode reference.
 
@@ -234,8 +234,8 @@ is treated as context.
 
 When memory injects facts, the server reports it so you are never guessing:
 
-- The GUI shows a **"used N memories"** chip on the reply; click it to open the
-  memory manager.
+- The GUI shows a memory chip with the number of facts used on the reply (hover
+  it for the facts); click it to open the memory manager.
 - `POST /v1/chat/completions` carries an `X-Localm-Memory` response header with
   the count, the injected items, and a **degrade reason** when the semantic
   signal could not be used: `no_embedder` (no embedding model resolved -
@@ -271,6 +271,10 @@ You can opt into recalling your existing memories during privacy-mode chats
 without ever writing new ones: turn on **Allow memory recall in privacy mode**
 (`memory_recall_in_privacy`, with the per-surface `..._chat` switch). Even then,
 it only READS: no reinforcement, no consolidation, no migration.
+
+The mode is taken per chat: a privacy-mode session that talks to a server
+running in `log` or `full` mode (`localm run MODEL --mode privacy`) is treated
+as privacy mode, whatever the server's own mode.
 
 Because the default is privacy, memory does nothing out of the box until you
 switch to `log` or `full`. This is deliberate (offline-first, no traces by

@@ -18,7 +18,7 @@ from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threa
 # Budgets for run_in_threadpool_bounded() below. Each bounds only the
 # client-visible wait; the wrapped call keeps running.
 #   _CONFIG_RMW_TIMEOUT_S: sits just above update_config()'s own cross-process
-#     lock timeout (localm.config._CROSS_LOCK_TIMEOUT, 10s), so that more
+#     lock timeout (localm.storekit._CROSS_LOCK_TIMEOUT, 10s), so that more
 #     specific TimeoutError surfaces first.
 #   _COMFY_STATUS_TIMEOUT_S: _comfy_alive()'s own urlopen timeout is 1.0s.
 #   _COMFY_STOP_TIMEOUT_S: stop_comfy()'s worst case is interrupt_comfy (two
@@ -120,14 +120,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/config/schema",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_config_schema(request: Request):
-        """The typed settings schema (widget/label/help/group/owner/options/
-        min/max) with each non-secret field's CURRENT value injected as its
-        `default`, so the GUI can render the right control pre-filled. Secret
-        fields never carry a value (schema_json omits secret defaults).
-
-        Owner-only fields (admin_only) are omitted for a non-owner caller so the
-        GUI never renders a control they cannot use; the write is refused
-        server-side regardless (see patch_config)."""
+        """The typed settings schema (widget, label, help, group, owner, options,
+        min, max) with each non-secret field's current value as its `default`.
+        Secret fields never carry a value. Owner-only fields are omitted for a
+        non-owner caller; writing them through ``PATCH /v1/config`` is refused
+        with 403 regardless."""
         from localm.config import load_config
         from localm.settings_schema import schema_json
         is_owner = _hs.caller_is_operator(request)
@@ -135,18 +132,19 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def patch_config(body: dict, request: Request):
-        """Update known config keys and persist. Unknown keys are rejected.
+        """Update known config keys and persist them. Unknown keys are rejected
+        with 400, and owner-only keys from a non-owner caller with 403.
 
-        The read-only extras the GET handler injects (effective_mode etc.) are
-        dropped first, so a client that round-trips the whole config object is
-        not rejected for echoing back values it never edited.
+        The read-only fields that ``GET /v1/config`` adds (``effective_mode``,
+        ``instance_id`` and the like) are ignored when echoed back, so a client
+        can send back the whole config object it read.
 
-        Model-source credential keys are written to their own store only after
-        every other check and the config write have succeeded, so any error
-        response leaves stored credentials unchanged. If that final credential
-        write fails, the error detail says so and says whether the other
-        settings in the request were saved. A config or credential file that
-        exists but cannot be read is a 409 naming that file."""
+        Model-source credential keys are stored separately, only after every
+        other check and the config write have succeeded, so an error response
+        leaves stored credentials unchanged. If that final credential write
+        fails, the error detail says so and says whether the other settings in
+        the request were saved. A config or credential file that exists but
+        cannot be read answers 409 naming that file."""
         from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
@@ -300,15 +298,13 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/media/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_media_config(request: Request):
-        """Per-plugin media (ComfyUI) config for image/music/video, each with its
-        editable fields and RESOLVED values (the per-plugin block value, else the
-        shared global comfy_* fallback). The GUI 'Media' section renders one
-        subsection per plugin so the three are configured independently.
+        """Per-plugin media (ComfyUI) config for image, music and video, each
+        with its editable fields and resolved values (the plugin's own value, else
+        the shared global ComfyUI setting). The three plugins are configured
+        independently.
 
-        launch_cmd/api_url are admin_only (a shell command / a render target), so
-        their resolved value is OMITTED for a non-owner config:read caller -
-        mirroring the write-side owner gate below and the admin_only_keys()
-        treatment GET /v1/config gives the core schema."""
+        The launch command and API URL are owner-only, so their values are
+        omitted for a non-owner caller, as for ``GET /v1/config/schema``."""
         from localm.config import load_config
         from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
         cfg = load_config()
@@ -326,9 +322,12 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/media/config/{name}",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_media_config(name: str, body: dict, request: Request):
-        """Save ONE media plugin's own config block, deep-merged so the other
-        fields and the other plugins are untouched. A blank field clears that
-        plugin's override (it falls back to the shared global default)."""
+        """Save one media plugin's own config block, merged into the stored
+        block so other fields and other plugins are untouched. A blank field
+        clears that plugin's override, which falls back to the shared global
+        default. Answers 404 for an unknown media plugin, 400 for an invalid
+        value, and 403 when a non-owner caller sets an owner-only field (launch
+        command, API URL, working folder or a native model file)."""
         from localm.config import ConfigUnreadable, load_config, update_config
         from localm.settings_schema import (MEDIA_PLUGINS, media_admin_only_fields,
                                              media_schema_json, validate_media_block)
@@ -414,20 +413,19 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/tts/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_tts_config(request: Request):
-        """The tts plugin's editable settings with their RESOLVED values (the
-        user's override, else the shipped template default).
-
-        This is the SETTINGS surface. The plugin's own /api/tts/config is the
-        resolved runtime config the browser loads; this one carries the field
-        metadata (widget/label/help/options) the GUI renders and edits."""
+        """The tts plugin's editable settings with their resolved values (the
+        user's override, else the shipped default), plus the field metadata
+        (widget, label, help, options) needed to edit them and whether the plugin
+        is active."""
         return _tts_payload(request)
 
     @app.post("/v1/tts/config",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_tts_config(body: dict, request: Request):
         """Save the tts plugin's own config block, merged key by key so
-        unlisted keys are untouched. A blank field clears that override (back to
-        the shipped template default)."""
+        unlisted keys are untouched. A blank field clears that override back to
+        the shipped default. Setting the library or WASM path fields needs an
+        owner key (403 otherwise); an invalid value answers 400."""
         from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (TTS_PLUGIN, tts_admin_only_fields,
                                             validate_tts_block)
@@ -475,16 +473,10 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/plugins/settings",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_plugin_settings(request: Request):
-        """Settings sections any ACTIVE plugin contributed via host.add_settings(),
-        each with its RESOLVED values (the plugin's own config["plugins"][name]
-        block, else the field's own declared default) - the generic counterpart
-        to the tts/media sections above, for a plugin the core has no bespoke
-        schema for (docs/plugin-interop.md's Open WebUI Valves interop seam).
-
-        Unlike GET /v1/tts/config, there is no per-plugin "not active" flag to
-        check here: an inactive plugin simply has no entry (its fields are not
-        known anywhere while it is unloaded), so the list is naturally just the
-        currently active sections."""
+        """Settings sections contributed by active plugins, each with its
+        resolved values (the plugin's own stored value, else the field's declared
+        default). Inactive plugins have no entry, and fields that are owner-only
+        are omitted for a non-owner caller."""
         from localm.config import load_config
         from localm.settings_schema import plugin_settings_schema_json
         manager = getattr(request.app.state, "plugin_manager", None)
@@ -505,16 +497,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/plugins/{name}/settings",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_plugin_settings(name: str, body: dict, request: Request):
-        """Save one plugin's add_settings() block, merged key by key so other
-        fields (and other plugins) are untouched. A blank field clears that
-        override back to the field's own declared default, same convention as
-        POST /v1/tts/config.
-
-        404s for a plugin with no active add_settings() fields: unlike the tts
-        block (a fixed schema known ahead of time, so it can be pre-configured
-        before the plugin is enabled), a dynamically-registered field list only
-        exists while the plugin is actually loaded - there is nothing to
-        validate against otherwise."""
+        """Save one plugin's settings block, merged key by key so other fields
+        and other plugins are untouched. A blank field clears that override back
+        to the field's declared default. Answers 404 for a plugin that is not
+        active or contributes no settings, since its fields are known only while
+        it is loaded."""
         from localm.config import ConfigUnreadable, load_config, update_config
         from localm.settings_schema import (plugin_settings_admin_only_fields,
                                             plugin_settings_schema_json,
@@ -564,12 +551,11 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
-        """Alive status of ComfyUI, and whether localm launched THIS one (so the
-        GUI can show Stop/Restart only for a ComfyUI it can actually control).
-        This is the "direct status request" trigger - always a real, uncached
-        ping - and it primes the readiness cache with the fresh result, so a
-        task submitted right after does not need to re-check (see
-        comfy_client's module docstring on the readiness cache)."""
+        """Whether ComfyUI is reachable (``alive``) and whether localm launched
+        it (``launched_by_localm``), so a client can offer Stop and Restart only
+        for a ComfyUI localm controls. Each call pings ComfyUI afresh. When it is
+        not reachable and not launched by localm, ``port_held`` names the process
+        occupying its port. Answers 504 if the check times out."""
         # default_api_url is the current base-URL helper.
         from localm.image_gen.comfy import _comfy_alive, default_api_url
         from localm.media.comfy_client import (
@@ -599,9 +585,10 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():
-        """Stop ComfyUI: abort the in-flight render + clear the
-        queue + free VRAM, and terminate the process localm launched (a ComfyUI the
-        user started themselves is only aborted, never killed)."""
+        """Stop ComfyUI: abort the in-flight render, clear the queue, free VRAM,
+        and terminate the process localm launched (a ComfyUI the user started
+        themselves is aborted but not terminated). Returns ``{ok, message}``;
+        504 if stopping times out."""
         from localm.media.comfy_client import stop_comfy
         try:
             ok, message = await run_in_threadpool_bounded(
@@ -612,8 +599,9 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_restart():
-        """Restart the ComfyUI localm launched: stop it, then
-        re-launch via the configured comfy_launch_cmd/comfy_workdir."""
+        """Restart the ComfyUI localm launched: stop it, then launch it again
+        with the configured launch command and working folder. Returns
+        ``{ok, message}``; 504 if the restart times out."""
         from localm.config import load_config
         from localm.media.comfy_client import comfy_launch_wait_seconds, restart_comfy
         # restart_comfy() is stop_comfy() (bounded by _COMFY_STOP_TIMEOUT_S) then

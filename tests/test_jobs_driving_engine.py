@@ -67,6 +67,8 @@ def test_run_memory_pins_the_engine_busy_for_the_whole_synthesis_pass(monkeypatc
     monkeypatch.setattr(
         "localm.plugins.builtin.memory.plug.synthesize_memory",
         fake_synthesize_memory)
+    monkeypatch.setattr("localm.plugins.lookup.is_available",
+                        lambda name: name == "memory")
 
     result = runner._run_memory(_make_job(task_kind="memory"), engine=eng)
 

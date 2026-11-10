@@ -245,6 +245,23 @@ def config_names(cfg: dict) -> list:
     return [n for n in names if isinstance(n, str) and n]
 
 
+def config_keys_naming(cfg: dict, name: str) -> list:
+    """The keys of *cfg* that name *name*, from the keys listed above. A native
+    slot is given as ``plugins.<plugin>.native.<key>``."""
+    keys = [k for k in CONFIG_NAME_KEYS if cfg.get(k) == name]
+    for key in CONFIG_LIST_KEYS + CONFIG_MAP_KEYS:
+        value = cfg.get(key)
+        if isinstance(value, (list, dict)) and name in value:
+            keys.append(key)
+    plugins = cfg.get("plugins")
+    for plugin, block in (plugins.items() if isinstance(plugins, dict) else ()):
+        native = block.get("native") if isinstance(block, dict) else None
+        if isinstance(native, dict):
+            keys.extend(f"plugins.{plugin}.native.{k}" for k in NATIVE_NAME_KEYS
+                        if native.get(k) == name)
+    return keys
+
+
 def config_to_current(cfg: dict, refs: Any, index: ModelIndex) -> None:
     """Replace every stored model name in *cfg* with its current name, in place."""
     if not index.by_name:

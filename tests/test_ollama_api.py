@@ -541,6 +541,46 @@ def test_chat_unload_idiom_unloads(client, engine):
     assert engine.loaded is False
 
 
+def test_chat_with_messages_and_keep_alive_zero_unloads_after_the_reply(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _chat(client, stream=False, keep_alive=0)
+    assert r.status_code == 200
+    assert r.json()["message"]["content"] == "Hello world"
+    assert engine.loaded is False
+
+
+def test_streamed_chat_with_keep_alive_zero_unloads_after_the_last_chunk(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _chat(client, stream=True, keep_alive="0s")
+    assert _lines(r)[-1]["done"] is True
+    assert engine.loaded is False
+
+
+def test_generate_with_prompt_and_keep_alive_zero_unloads_after_the_reply(client, engine):
+    with patch("localm.discover.vram_info", return_value={}):
+        r = _generate(client, stream=False, keep_alive=0)
+    assert r.status_code == 200
+    assert engine.loaded is False
+
+
+def test_chat_with_keep_alive_zero_from_a_chat_only_key_answers_and_stays_loaded(
+        protected, engine):
+    app, keys = protected
+    body = {"model": MODEL, "stream": False, "keep_alive": 0,
+            "messages": [{"role": "user", "content": "hi"}]}
+    with TestClient(app) as c:
+        r = _call(c, "POST", "/api/chat", body, key=keys["chat"])
+    assert r.status_code == 200
+    assert "models:write" in r.headers["x-localm-keep-alive"]
+    assert engine.loaded is True
+
+
+def test_chat_with_keep_alive_unset_leaves_the_model_loaded(client, engine):
+    r = _chat(client, stream=False)
+    assert r.status_code == 200
+    assert engine.loaded is True
+
+
 def test_unknown_request_keys_are_ignored_not_fatal(client):
     r = _chat(client, stream=False, mystery_field=1, options={"mirostat": 2})
     assert r.status_code == 200
@@ -581,8 +621,8 @@ def test_generate_sends_system_then_prompt(client, engine):
 
 
 @pytest.mark.parametrize("extra", [
-    {"raw": True}, {"suffix": "tail"}, {"template": "{{ .Prompt }}"},
-    {"context": [1, 2]}])
+    {"suffix": "tail"}, {"template": "{{ .Prompt }}"}, {"context": [1, 2]},
+    {"raw": True, "suffix": "tail"}, {"raw": True, "context": [1, 2]}])
 def test_generate_refuses_what_it_cannot_honour(client, extra):
     r = _generate(client, stream=False, **extra)
     assert r.status_code == 400 and _has_key(r, "error")
@@ -1050,3 +1090,33 @@ def test_localm_response_headers_are_forwarded_in_both_modes(
     r = client.post(route, json={"model": MODEL, "stream": stream, **body})
     assert r.status_code == 200
     assert r.headers.get("x-localm-test") == "1"
+
+
+def _ghost_engine(client):
+    import localm.inference.http_server as hs
+    ghost = _mock_engine()
+    ghost.display_name = "ghost"
+    hs._engines["ghost"] = ghost
+    return ghost
+
+
+def test_ps_lists_a_resident_engine_whose_name_left_the_registry(client, home):
+    _write_registry(home, {})
+    _ghost_engine(client)
+    names = sorted(m["name"] for m in client.get("/api/ps").json()["models"])
+    assert names == sorted([MODEL, "ghost"])
+
+
+def test_unload_by_name_frees_a_resident_engine_that_left_the_registry(client, home):
+    _write_registry(home, {})
+    ghost = _ghost_engine(client)
+    assert ghost.loaded
+    resp = client.post("/v1/models/unload", params={"model": "ghost"})
+    assert resp.status_code == 200, resp.text
+    assert not ghost.loaded
+
+
+def test_unload_of_a_name_that_is_neither_registered_nor_resident_is_404(client, home):
+    _write_registry(home, {})
+    resp = client.post("/v1/models/unload", params={"model": "nobody"})
+    assert resp.status_code == 404

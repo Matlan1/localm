@@ -15,7 +15,9 @@ from rich.markup import escape
 from localm.config import load_config
 from localm.console import console
 from localm.debuglog import logger
-from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
+from localm import livefeed as _livefeed
+from localm.inference.backends.base import (
+    LOADING_MODEL_STATUS, RAW_PROMPT_UNSUPPORTED_MESSAGE, BaseBackend)
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
 from localm.kv_cache import resolve_kv_cache_type
 from localm.inference.parallel_setting import resolve_parallel_slots
@@ -36,6 +38,11 @@ from localm.textnorm import scrub_stream
 # create_backend, run under this lock by a reload, may load backend plugins and
 # take localm.plugins.engine._backend_manager_lock (inner), then
 # backend_registry._LOCK (innermost); neither is ever held while taking this one.
+#
+# The GPU load lease (localm.inference.load_lease) is OUTER to this lock:
+# lease -> _LOAD_LOCK -> embedder._LOCK. Every acquire of this lock waits at
+# most load_lease.LOAD_WAIT_TIMEOUT_S (load_lease.bounded / load_guard) and
+# raises LoadBusyError past it. See test_lock_order_lease_outer_load_lock_inner.
 class _LoadLock:
     """A re-entrant lock that counts its outermost acquires and releases.
 
@@ -504,10 +511,31 @@ class Engine:
         self._load_cancel = event
         self._backend.set_load_cancel(event)
 
-    def load(self) -> None:
+    def _lease_keys(self) -> tuple:
+        """The GPU load lease keys of this engine's load
+        (:func:`localm.inference.load_lease.lease_keys`)."""
+        from localm.inference import load_lease
+        args = getattr(self, "_backend_args", None) or {}
+        return load_lease.lease_keys(device=args.get("device"),
+                                     n_gpu_layers=args.get("n_gpu_layers"))
+
+    def _load_guard(self):
+        """The GPU load lease, then the load lock, each waited for at most
+        ``load_lease.LOAD_WAIT_TIMEOUT_S``; raises ``LoadBusyError`` past it."""
+        from localm.inference import load_lease
         if not hasattr(self, "_load_lock"):
             self._load_lock = _LOAD_LOCK
-        with self._load_lock:
+        return load_lease.load_guard(self._load_lock, self._lease_keys(),
+                                     purpose=f"loading {getattr(self, 'display_name', 'a model')}")
+
+    def load(self) -> None:
+        """Load the model unless it is loaded. Holds the GPU load lease and the
+        load lock for the load; raises
+        :class:`~localm.inference.load_lease.LoadBusyError` when either is
+        still held elsewhere after ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
+        if self._backend.loaded:
+            return
+        with self._load_guard():
             if self._backend.loaded:
                 return
             self.loading = True
@@ -515,6 +543,7 @@ class Engine:
                 self._load_locked()
             finally:
                 self.loading = False
+                _livefeed.kick("model loaded")
 
     def _load_locked(self) -> None:
         """The body of load(), for a backend that is not loaded yet. Caller
@@ -572,7 +601,10 @@ class Engine:
                 for a in applied if isinstance(a, dict)]
 
     def unload(self) -> None:
-        self._backend.unload()
+        try:
+            self._backend.unload()
+        finally:
+            _livefeed.kick("model unloaded")
 
     @property
     def effective_ctx_max(self):
@@ -945,6 +977,12 @@ class Engine:
             "set net_mode=allow) to enable semantic search; memory and RAG use "
             "lexical BM25 until then.")
 
+    def embeds_via_dedicated(self) -> bool:
+        """True when :meth:`embed` serves vectors from the dedicated on-device
+        embedder rather than this engine's own model. For an HF checkpoint the
+        answer is only final once the weights are loaded."""
+        return getattr(self._backend, "can_embed", True) is False
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return embedding vectors for a list of texts.
 
@@ -971,9 +1009,10 @@ class Engine:
         if getattr(self._backend, "can_embed", True) is False:
             return self._embed_via_dedicated(texts)
         if not self._backend.loaded:
-            with _LOAD_LOCK:
+            with self._load_guard():
                 if not self._backend.loaded:
                     self._backend.load()
+                    _livefeed.kick("model loaded")
         if getattr(self._backend, "can_embed", True) is False:
             # Only knowable now (HF): the loaded checkpoint is a chat decoder,
             # so the dedicated embedder is substituted, and the substitution is
@@ -989,6 +1028,12 @@ class Engine:
         """True when the active backend can actually constrain generation to a
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
+
+    @property
+    def supports_raw_prompt(self) -> bool:
+        """True when the active backend takes a raw prompt (see
+        ``BaseBackend.supports_raw_prompt``)."""
+        return bool(getattr(self._backend, "supports_raw_prompt", False))
 
     @property
     def supports_logprobs(self) -> bool:
@@ -1040,8 +1085,13 @@ class Engine:
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
         cache_prompt: Optional[bool] = None,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
-        """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
+        """Stream the reply to *messages*, or with *raw_prompt* the continuation
+        of that text, tokenised as given with no chat template (*messages* are
+        then not sent to the model). A raw prompt to a backend whose
+        :attr:`supports_raw_prompt` is False raises :class:`UnsupportedInputError`
+        before anything loads. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
         model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
         passed to the backend only when set; check :meth:`unsupported_sampling`
@@ -1049,12 +1099,13 @@ class Engine:
         set; check :attr:`supports_logprobs` first. ``cache_prompt=False`` is
         passed on (see the backend's ``chat_stream``); ``None`` and ``True`` keep
         the prompt cache. The other parameters default to the config values."""
-        # Auto-reload if the model was unloaded. Holds the process-global load
-        # lock so a reload cannot race another load onto the GPU, and
-        # double-checks inside the lock so a model another thread just brought
-        # back is not reloaded.
+        if raw_prompt is not None and not self.supports_raw_prompt:
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(RAW_PROMPT_UNSUPPORTED_MESSAGE)
+        # Auto-reload if the model was unloaded, under the GPU load lease and
+        # the load lock, re-checking inside them.
         if not self._backend.loaded:
-            with _LOAD_LOCK:
+            with self._load_guard():
                 if not self._backend.loaded:
                     if on_status is not None:
                         on_status(LOADING_MODEL_STATUS)
@@ -1063,6 +1114,7 @@ class Engine:
                     )
                     self._attach_registered_adapters()
                     self._backend.load()
+                    _livefeed.kick("model loaded")
 
         cfg = load_config()
         extra: dict = {"thinking": thinking} if thinking is not None else {}
@@ -1075,6 +1127,8 @@ class Engine:
             extra["on_logprobs"] = on_logprobs
         if cache_prompt is False:
             extra["cache_prompt"] = False
+        if raw_prompt is not None:
+            extra["raw_prompt"] = raw_prompt
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF

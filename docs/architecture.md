@@ -6,12 +6,25 @@ localm core is a model loader plus a plugin engine. The CLI is a thin shell
 over a pluggable inference backend, and everything above bare chat is a
 plugin. The core design rule: the CLI knows nothing about inference;
 inference knows nothing about CLI. They communicate through `Engine`, with
-a couple of narrow, deliberate exceptions (`localm/cli/doctor.py` imports
+a few narrow, deliberate exceptions (`localm/cli/doctor.py` imports
 the llama.cpp loader directly for GPU-probe diagnostics; `localm/cli/chat.py`
-catches specific backend exception types). CHAT
+and `localm/cli/_core.py` import the backend exception types from
+`inference/backends/base.py`; `localm/cli/chat.py` also reads capability
+routing and compaction constants from `inference/`; `localm/cli/models.py`
+imports `describe_gpu_placement` and `resolve_spec_draft_model` from
+`inference/engine.py` and the private llama.cpp modules `_drafting` and
+`_draftmodel`; `localm/cli/speak.py` imports `inference/speech.py`, the backend
+exception types and `inference/backends/llamacpp/mtmd_gen.py`;
+`localm/cli/rerank.py` imports `inference/reranker.py` and the backend
+exception types; `localm/cli/maintenance.py` imports the private names
+`_nonlocal_spec_reason`, `_EMBEDDING_PINS` and `_embeddings_dir` from
+`inference/embedder.py`;
+`localm/cli/rag.py` imports the default embedding model name from
+`inference/embedder.py`). CHAT
 is the protected, preinstalled plugin (#0); coder, browser, image, music,
 video, rag, web, memory, voice (Whisper STT), tts (Kokoro in-browser TTS),
-jobs (scheduled tasks), and mcp are all plugins layered on top.
+jobs (scheduled tasks), mcp, and the opt-in exllama inference backend
+(NVIDIA, Linux) are all plugins layered on top.
 
 ```
 CLI (localm/cli/)                  Plugin engine (localm/plugins/)
@@ -35,7 +48,8 @@ time are covered: a function-local import (how a genuine import cycle is
 broken), an `importlib` call, and a plugin loaded under its own module name
 are outside it, and so are tests and scripts.
 
-`scripts/check_hygiene.py` enforces the map on every commit and in CI. It
+`scripts/check_hygiene.py` enforces the map in CI, and on every commit once
+the pre-commit hook is installed (`python scripts/check_hygiene.py --install-hook`). It
 also fails on a unit the map does not place, on a placed unit that no longer
 exists, and on a unit placed twice, so the map cannot rot silently. There is
 no allow-list: a tier carries exactly `name`, `role` and `units`, and any
@@ -54,8 +68,8 @@ Two tools cover that gap.
 `scripts/check_hygiene.py` (check 10) reads every route whose handler
 builds its JSON response from dict literals, and every test that reads a
 top-level key from that route's response, and fails when the key is one the
-handler cannot produce. It runs on every commit through the pre-commit hook
-and in CI's hygiene gate, before any test runs. It does not see a handler
+handler cannot produce. It runs in CI's hygiene gate, before any test runs, and on every commit once
+the pre-commit hook is installed. It does not see a handler
 whose response comes from another module, a model class, a file or stream,
 or a non-literal merge (that shape is open and not judged); a nested key; a
 key read through a helper or a fixture rather than a `.json()` call in the
@@ -107,8 +121,9 @@ needed job that was skipped or failed cannot read as a pass. It passes when
 it ran; skipped is neutral then) and, on a PR without the `full-ci` label,
 `python-pr-gate` succeeded and the change is not a release (`VERSION`
 unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
-succeeded. `gui-tests`, like the matrix, runs on a pull request only when
-it carries the label. The two-platform matrix runs at release, not on
+succeeded. `gui-tests` runs on both hosts on a pull request that
+carries the label; without it, on the Linux host only, and only when the
+change touches the GUI or its tests. The two-platform matrix runs at release, not on
 an ordinary pull request: a release PR without the label fails
 `merge-policy` with the label named, and every other PR merges on the three
 cheap jobs. Adding the label to an open PR leaves the earlier unlabelled
@@ -123,12 +138,12 @@ boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
 workflows and gates. None of those blocks a merge; the list lives in
 `scripts/merge_policy.py`.
 
-`master` is protected by a repository ruleset (`.github/rulesets/master.json`, applied with `gh api repos/<owner>/<repo>/rulesets`): no force-push, no deletion, and every change arrives through a pull request whose `merge-policy` and CodeQL `analyze (<language>)` checks have passed. No approving review is required. Only a `pull_request` run reports a check named `merge-policy`, so the skipped run the narrow `push` trigger creates on the same commit cannot stand in for it.
+`master` is protected by a repository ruleset (`.github/rulesets/master.json`, applied with `gh api repos/<owner>/<repo>/rulesets`): no force-push, no deletion, and every change arrives through a pull request whose `merge-policy` check has passed (CodeQL is not a required check). No approving review is required. Only a `pull_request` run reports a check named `merge-policy`, so the skipped run the narrow `push` trigger creates on the same commit cannot stand in for it.
 
 Scheduled runs on master. The nightly cron (03:23 UTC) runs `test`,
-`gui-tests`, `optional-stacks` and `lint`. The weekly cron (Monday 06:37 UTC)
+`gui-tests`, `optional-stacks`, `lint`, `voice-stack` and `proxy-tests`. The weekly cron (Monday 06:37 UTC)
 runs those and, only on that cron, every mutation shard and the gate, `abi-check`,
-`web-search-canary`, `voice-stack` and the two pin-currency checks. A
+`web-search-canary` and the two pin-currency checks. A
 weekly-only job's `if:` tests `github.event.schedule == '37 6 * * 1'`;
 `tests/test_ci_schedule_split.py` evaluates every job's `if:` under each
 trigger.
@@ -138,8 +153,9 @@ with `setup.sh --yes`, then checks `localm doctor`, that the backend
 auto-pick is Metal, that `localm serve --no-model` answers `/v1/models`, that a
 tiny GGUF model loads and generates on the CPU, and a small test selection. It
 runs nightly, on a dispatch, and on pull requests that touch `localm/hwdetect*`,
-`localm/setup_llama/`, `localm/inference/backends/`, `setup.sh` or the workflow
-file. It is not a required check: it is not in `merge-policy`'s `needs`.
+`localm/instances.py`, `localm/sysprog.py`, `localm/updater.py`,
+`localm/uv_tool.py`, `localm/setup_llama/`, `localm/inference/backends/`,
+`setup.sh` or the workflow file. It is not a required check: it is not in `merge-policy`'s `needs`.
 
 `mutation-test` is the mutation-testing gate for the trust boundary: the
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`).
@@ -151,10 +167,11 @@ module, a changed test file that exercises one per
 or every module when the gate itself, the `[tool.mutmut]` table, a
 `mutation-*` job or `tests/conftest.py` and what it imports changed). A pull
 request without the label runs no shard; its notice names the modules it
-touches. One `mutation-run` shard per selected module
-runs mutmut (`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
-`PYTHONHASHSEED` it prints first) and uploads its result
-file; `mutation-test` merges them and runs
+touches. Each selected module runs as one `mutation-run` shard, or as several
+parts for a module listed in `scripts/mutation_parts.py` (`auth` and `config`,
+five each). A shard runs mutmut (`scripts/mutmut_run.py run "<pattern>"`,
+`localm.<module>.*` for a whole module, under a random `PYTHONHASHSEED` it
+prints first) and uploads its result file; `mutation-test` merges them and runs
 `scripts/check_mutation_floors.py --modules` on the selected modules against the committed baseline
 `scripts/mutation_baseline.json`. The baseline records every mutant's
 disposition - `killed`, `survived` (a known gap, counted against the score),
@@ -165,7 +182,10 @@ score floor and the `controls`: concrete mutants, at least one per
 security-decision class (a weakened scope check, an authorization fallback
 flipped to allow, a skipped SSRF redirect re-validation, a widened
 net_mode=off exemption, a path-confinement bypass, a loopback classifier
-that accepts an unparseable host), that must stay killed. The gate fails on
+that accepts an unparseable host, an empty, unknown or expired key accepted, a
+cache-containment variable dropped for a child process, certificate
+verification switched off or inverted, a server given a certificate serving
+plain HTTP), that must stay killed. The gate fails on
 a score below its floor, a mutant recorded as killed that now survives (a
 weakened test or a nondeterministic outcome; the message names the re-run
 that tells them apart), a mutant with no disposition
@@ -232,7 +252,7 @@ macOS; no llama-cpp-python). Key behaviour:
 - **Dynamic context window**: contexts start at `n_ctx` and are rebuilt
   larger in `n_ctx_grow` steps, capped at `n_ctx_max`; `ctx_auto` sizes the
   cap at load from the free memory the KV cache lands in (VRAM for the
-  layers on the GPU, system RAM for the layers on the CPU). Prefill is always chunked to `n_batch`.
+  layers on the GPU, system RAM for the layers on the CPU). Prefill is always chunked (at most 2048 tokens per decode).
 - **KV prefix reuse**: between calls the common token prefix with the
   previous request stays in the KV cache (llama_memory_* API, probed at
   runtime); only the new suffix is prefilled.
@@ -294,6 +314,19 @@ hybrid-attention layers that AWQ checkpoints leave unquantized (vision
 towers, projectors, some hybrid-attention sublayers) are skipped and kept in
 their original precision.
 
+## Plugin-supplied inference backends
+
+A plugin can offer a backend for model files or folders the built-in GGUF and
+Hugging Face backends refuse. It calls `Host.register_inference_backend` with
+an `InferenceBackendDescriptor` (`claims`, `create`, optional `refusal`) and
+declares `capabilities = ["inference-backend"]` in its manifest.
+`inference/backend_registry.py` holds the registered descriptors;
+`engine.create_backend` asks the built-ins first, then the descriptors in
+registration order, and the first whose `claims` returns True builds the
+backend. The descriptor is dropped when the plugin is disabled or uninstalled.
+The `exllama` store plugin (EXL2 and EXL3 models, NVIDIA GPU, Linux) is the one
+first-party user.
+
 ## HTTP server
 
 `inference/http_server.py` builds the FastAPI app (`create_app(engine)`) and
@@ -337,9 +370,10 @@ reports to `gpu_registry`'s live peer detection, after verifying the forward tar
 
 `inference/compact.py` summarises older chat turns through the model when a
 conversation reaches 70% of the context ceiling, keeping the system prompt
-and at least the last four messages verbatim. The kept tail starts at a
+and the last four messages or more verbatim. The kept tail starts at a
 message the user wrote where one is available (not a tool event or tool
-result), the latest request is carried verbatim into the summary when it falls
+result); when the only such message is among the last three, the tail starts
+there and is shorter than four; the latest request is carried verbatim into the summary when it falls
 outside the tail, and roles keep alternating.
 Each summary request, prompt and reply budget together, is sized to fit the
 context window when the window is known and leaves room for one; removed
@@ -356,8 +390,10 @@ the context; a client disconnect stops the server's summary generation.
 The server compacts instead of reloading the model with a larger window when
 the system prompt, the recent messages it keeps, a summary and the reply buffer fit
 the window and the request declares no window of its own (`min_context`,
-`context_reserve`); otherwise it reloads first, with at least twice the window,
-and compacts only if the reloaded window is still too small.
+`context_reserve`); otherwise it reloads first, asking for at least twice the window when the
+prompt does not fit, or for the declared window (rounded up to a multiple of
+4096) when the request declares one, never more than the model's limit, and compacts only if the window is still too small
+afterwards.
 The server compacts down to half the window, keeping as many recent messages
 as fit, and keeps each summary in memory per engine, keyed by a hash of the
 messages it covers: a later request that resends the same conversation gets
@@ -379,7 +415,11 @@ and `unregister()`.
 **Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
 read-only first-party plugins listed above). *Installed* plugins live under
 `<data dir>/plugins/`. Installing copies a plugin from the store into the
-installed location.
+installed location. Three first-party packages sit outside the store:
+`localm/plugins/coder/` (the coder agent that the `coder` store plugin
+imports), `localm/plugins/mcpserver/` (the MCP server behind the `mcp` store
+plugin) and `localm/plugins/gui/` (the web GUI, attached to the server by
+`attach_gui` and not a plugin).
 
 **States.** A plugin is *active* only when it is both installed (present under
 `<data dir>/plugins/`) and enabled (listed in `config["plugins_enabled"]`); the
@@ -391,13 +431,13 @@ disabled or uninstalled.
 
 **Contract.** `localm/plugins/contract.py` defines the contract a plugin
 sees: the dataclasses `Surface` and `PluginSpec` (manifest shape),
-`ModelRoleDescriptor` and `PluginSettingField`, and the `Host` protocol (the
+`ModelRoleDescriptor`, `InferenceBackendDescriptor` and `PluginSettingField`, and the `Host` protocol (the
 API the engine hands to `register`). The host exposes `mount_router`,
 `mount_static`, `add_settings`, `register_tab`, `plugin_config`,
-`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `register_model_role`
-and `register_chat_hook`; `has_scope` and `require_scope` are declared but raise
-`NotImplementedError`, and the concrete `PluginHost` adds `driving_engine` and
-`on_startup`. `catalog.py` holds the static first-party catalog.
+`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `track`, `register_model_role`,
+`register_inference_backend`, `register_chat_hook` and the caller checks
+`caller_is_owner`, `caller_principal` and `caller_owns`; the concrete `PluginHost` adds
+`driving_engine` and `on_startup`. `catalog.py` holds the static first-party catalog.
 
 **Lifecycle.** `PluginManager` discovers installed plugins, then
 `load_enabled` mounts each active plugin at runtime through `PluginHost`
@@ -410,9 +450,11 @@ happen at runtime without restarting the server.
 targets; the engine refuses to load a plugin whose `api_version` it does not
 support, surfacing an error rather than crashing.
 
-**Capability scopes.** Every plugin declares a capability scope, and its
-HTTP routes are gated to that scope, so a plugin cannot reach beyond the
-permissions it asked for.
+**Capability scopes.** Every plugin declares a capability scope, and the HTTP
+routes it mounts are gated to that scope and must sit under `/api/` or `/v1/`.
+The scope gates those routes only. Third-party plugins run unsandboxed
+in-process, so install only code you trust. Chat hooks are transforms, not
+controls (see [plugins.md](plugins.md)).
 
 See [plugins.md](plugins.md) for the full authoring guide. A broken plugin
 warns and is skipped, never crashing the host.

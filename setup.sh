@@ -57,8 +57,8 @@ uv_manual_hint() {  # the manual uv-install command; used from two call sites be
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
-UV_INSTALLER_VERSION="0.13.6"
-UV_INSTALLER_SHA256="f7a56e7afaec49a3bcbc3ac3cdbe917e7c6ce30e0d815308a12e531aa5ef23b7"
+UV_INSTALLER_VERSION="0.13.7"
+UV_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -324,6 +324,36 @@ if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]
   esac
 fi
 
+# ---- LocaLM programs running from this folder hold files setup must replace ----
+# Needs the installed Python; a folder with no .venv has nothing running from it.
+if [ -x .venv/bin/python ]; then
+  run_rc=0
+  run_list="$(.venv/bin/python -m localm.install_manifest running --root . 2>/dev/null)" || run_rc=$?
+  if [ "$run_rc" = 3 ] && [ "$YES" = 1 ]; then
+    say "  [i] LocaLM is running from this folder and keeps running. Restart it after setup to use the new version."
+  elif [ "$run_rc" = 3 ]; then
+    say ""
+    say "  These programs are running from this folder and would block the update:"
+    say ""
+    printf '%s\n' "$run_list" | sed 's/^PID \([0-9]*\) \(.*\)$/    - \2 (PID \1)/'
+    say ""
+    # SETUP-Q: running-localm
+    stoprun="$(ask "  Stop them and go on? [Y/n]: " Y)"
+    case "$stoprun" in
+      [Nn]*) say "  Nothing changed. Close them, then run setup again."; exit 0 ;;
+    esac
+    run_rc=0
+    .venv/bin/python -m localm.install_manifest running --root . --stop || run_rc=$?
+    if [ "$run_rc" != 0 ]; then
+      say ""
+      say "  [!] Those programs could not be stopped. Nothing changed. Close them by hand, then run setup again."
+      exit 1
+    fi
+  elif [ "$run_rc" != 0 ] && [ "$run_rc" != 4 ]; then
+    say "  [i] Could not check for running LocaLM programs."
+  fi
+fi
+
 # ---- setup journal: remember how far this run gets ---------------------------
 # One tab-separated line per event, appended to .localm-setup-journal in this
 # folder (the format localm.install_manifest reads): "begin<TAB>step",
@@ -525,13 +555,14 @@ if [ "$uv_present" != 1 ]; then
   fi
   rm -rf "$UVTMP"
   rmdir ./.localm-setup-tmp 2>/dev/null || true
-  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
-  # was set above; the installer edits a shell profile, not this running shell, so
-  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
-  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
-  # treat that as the current directory).
+  # uv lands in UV_INSTALL_DIR when that was set above, else in ~/.local/bin
+  # (older builds used ~/.cargo/bin); the installer edits a shell profile, not
+  # this running shell, so add where it landed to PATH for the rest of setup.
+  # With UV_INSTALL_DIR set, ~/.local/bin is not added: the global-command step
+  # reads PATH to tell whether that directory still has to go into a shell
+  # profile. See test_portable_uv_install_leaves_local_bin_off_path.
   if [ -n "${UV_INSTALL_DIR:-}" ]; then
-    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    export PATH="$UV_INSTALL_DIR:$PATH"
   else
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   fi
@@ -826,6 +857,9 @@ say "  Installing localm into .venv ..."
 # the create_venv retry loop above. Do not copy it back here.
 uv pip install -p .venv -e ".[${EXTRAS}]" || {
   say "  [!] Installing localm failed - see the error above."
+  say "      If a LocaLM program is still running from this folder, close it, run setup.sh again"
+  say "      and pick [1] Install again / repair. Until then this folder is partly updated."
+  say "      Your chats, settings and models are untouched."
   offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
   exit 1
 }

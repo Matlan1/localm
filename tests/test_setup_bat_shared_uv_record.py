@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._exe_stub import write_exe_stub
+
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="runs a setup.bat block")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +31,7 @@ def _subroutine() -> str:
 def test_the_shared_uv_is_recorded_with_its_bang(tmp_path, contained, recorded):
     uvdir = tmp_path / "tools!x"
     uvdir.mkdir()
-    (uvdir / "uv.exe").write_bytes(b"")
+    write_exe_stub(uvdir / "uv.exe")
     scripts = tmp_path / ".venv" / "Scripts"
     scripts.mkdir(parents=True)
     out = tmp_path / "args.txt"

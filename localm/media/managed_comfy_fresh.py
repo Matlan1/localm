@@ -82,8 +82,8 @@ COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 # every audio-dependent ComfyUI node. Pinning the matching ROCm build here makes
 # the later bare torchaudio requirement already-satisfied.
 _AMD_GFX103X_ROCM_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_TORCH = ("torch==2.9.1+rocm7.13.0", "torchvision==0.24.0+rocm7.13.0",
-                      "torchaudio==2.9.0+rocm7.13.0")
+_AMD_GFX103X_TORCH = ("torch==2.11.0+rocm7.13.0", "torchvision==0.26.0+rocm7.13.0",
+                      "torchaudio==2.11.0+rocm7.13.0")
 _AMD_GFX103X_ROCM_SDK = ("rocm", "rocm-sdk-core", "rocm-sdk-libraries-gfx103x-all")
 
 

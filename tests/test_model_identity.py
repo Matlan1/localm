@@ -277,10 +277,15 @@ class TestStoredReferences:
         assert nw.get_workflow("image", wid)["models"]["vae"]["name"] == "renamed"
 
     def test_first_rename_records_references_a_later_name_reuse_cannot_capture(
-            self, home, tmp_path):
+            self, home, tmp_path, monkeypatch):
         from localm.media import native_workflows as nw
+        from localm.model_manager import registry
+        from localm.plugins.builtin.chat.plug import rename_notes as chat_notes
+        from localm.plugins.builtin.jobs.plug import rename_notes as jobs_notes
         from localm.plugins.builtin.jobs.store import Job, JobStore
         from localm.rag.store import Collection
+        monkeypatch.setitem(registry._RENAME_HOOKS, "saved chats", chat_notes)
+        monkeypatch.setitem(registry._RENAME_HOOKS, "scheduled jobs", jobs_notes)
         _add(tmp_path, "orig")
         # Written the way a build without IDs wrote them.
         store = JobStore()
@@ -378,7 +383,8 @@ class TestProjectConfigName:
         monkeypatch.setattr(coder_cli, "make_localm_backend",
                             lambda *a, **k: started.append(a) or pytest.fail("a server was started"))
         result = CliRunner().invoke(
-            _main.main, ["--cwd", str(self._project(tmp_path, "orig")), "-y", "say ok"])
+            _main.main, ["--cwd", str(self._project(tmp_path, "orig")), "--trust-hooks",
+                         "-y", "say ok"])
         assert result.exit_code == 1, result.output
         text = " ".join(result.output.split())
         assert "'orig' is not registered" in text
