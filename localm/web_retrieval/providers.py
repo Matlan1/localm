@@ -617,7 +617,7 @@ class DefaultSearchProvider:
         if any(isinstance(e, BotCheckError) for _, e in failures):
             message += (" These services limit automated searches from one "
                         "network; a self-hosted SearXNG search backend can be "
-                        "set under Settings > Network.")
+                        "set under Settings > Server & network.")
         raise SearchProviderError(message)
 
 
@@ -657,7 +657,7 @@ class SearXNGProvider:
 
     def _label(self) -> str:
         host = urllib.parse.urlparse(self.base_url).hostname or self.base_url
-        return f"The search backend set in Settings > Network ({host})"
+        return f"The search backend set in Settings > Server & network ({host})"
 
     def search(self, query: str, max_results: int,
                finish_by: Optional[float] = None) -> list[SearchResult]:
