@@ -233,7 +233,7 @@ export async function refreshEmbeddingPanel() {
     const md = await (await fetch("/api/models", { headers: authHeaders() })).json();
     for (const m of (md.models || [])) {
       if ((st.internal || []).includes(m.name)) continue;   // already listed
-      if (m.model_type === "text-encoder") continue;   // a text encoder is not an embedder
+      if (m.model_type !== "embedding") continue;   // only embedding models can embed
       opts.push([m.name, t("knowledge.embed.optionFromModels", { name: m.name })]);
     }
   } catch { /* model list is optional for the picker */ }

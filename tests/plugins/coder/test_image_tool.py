@@ -9,6 +9,19 @@ import urllib.error
 # Import the tool function and class
 from localm.plugins.coder.tools import tool_generate_image
 
+def _no_comfy_lifecycle(fn):
+    """Run *fn* with ComfyUI's start-up check and VRAM release stubbed, so a test
+    that fakes only the generator does not reach a ComfyUI server."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up")), \
+             patch("localm.image_gen.comfy.free_comfy_vram"):
+            return fn(*a, **k)
+    return wrapper
+
+
 class TestFluxImageTool(unittest.TestCase):
     def setUp(self):
         # The image plugin's ``auto`` backend resolves to ComfyUI in these tests.
@@ -32,11 +45,17 @@ class TestFluxImageTool(unittest.TestCase):
     # preflight_models calls comfy_object_info as a bare global in comfy_client,
     # so the stub targets comfy_client.
     @patch("localm.media.comfy_client.comfy_object_info", return_value=None)
+    # The reachability probe and the VRAM release are stubbed: the generator and
+    # the facade each start ComfyUI, so a positional urlopen sequence cannot
+    # count the probes.
+    @patch("localm.image_gen.comfy.free_comfy_vram")
+    @patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up"))
     # comfy_client routes ComfyUI calls through its own _comfy_urlopen, never
     # the top-level urllib.request.urlopen; that is the seam to patch.
     @patch("localm.media.comfy_client._comfy_urlopen")
     @patch("urllib.request.Request")
-    def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
+    def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_ensure,
+                                    mock_free, mock_obj_info):
         # 1. Setup the mock responses
         # First call: /prompt endpoint -> return prompt_id
         mock_prompt_response = MagicMock()
@@ -71,7 +90,6 @@ class TestFluxImageTool(unittest.TestCase):
 
         # Make urlopen return the mocks sequentially
         mock_urlopen.side_effect = [
-            mock_alive_response,   # for GET /system_stats (fail-fast probe)
             mock_prompt_response,  # for POST /prompt
             mock_history_response, # for GET /history/mock_prompt_abc_123
             mock_view_response     # for GET /view?filename=...
@@ -91,6 +109,7 @@ class TestFluxImageTool(unittest.TestCase):
         self.assertTrue(sidecar.exists())
         sidecar.unlink()
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_privacy_mode_suppresses_sidecar(self, mock_gen):
         """In privacy mode the prompt sidecar must not be written."""
@@ -99,6 +118,7 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertIs(kwargs.get("write_sidecar"), False)
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_privacy_mode_deletes_comfy_output_copy(self, mock_gen):
         """Privacy mode also deletes ComfyUI's own on-disk output copy, which
@@ -109,6 +129,7 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertIs(kwargs.get("delete_outputs"), True)
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_uses_default_api_url_not_a_hardcoded_default(self, mock_gen):
         """The tool resolves its target through default_api_url(), which carries
@@ -122,6 +143,7 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertEqual(kwargs.get("api_url"), "http://127.0.0.1:8189")
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_uses_the_image_plugins_own_comfy_url(self, mock_gen):
         """A ComfyUI URL set on the image plugin itself (plugins.image.comfy.api_url)
@@ -141,6 +163,7 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertEqual(kwargs.get("api_url"), "http://127.0.0.1:8190")
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_default_mode_keeps_sidecar(self, mock_gen):
         mock_gen.return_value = (True, "Image saved to x")
@@ -148,6 +171,7 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertIs(kwargs.get("write_sidecar"), True)
 
+    @_no_comfy_lifecycle
     @patch("localm.image_gen.comfy.generate_image")
     def test_default_mode_keeps_output_copy(self, mock_gen):
         mock_gen.return_value = (True, "Image saved to x")
@@ -303,8 +327,9 @@ def test_the_tool_passes_its_cancel_check_to_comfyui(tmp_path):
     def stop():
         return True
 
-    with patch("localm.plugins.builtin.image.backend.generate_unless_comfy",
-               return_value=None), \
+    with patch("localm.media.backend_choice.comfy_is_set_up", return_value=True), \
+         patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up")), \
+         patch("localm.image_gen.comfy.free_comfy_vram"), \
          patch("localm.image_gen.comfy.generate_image",
                return_value=(True, "Image saved to x")) as gen:
         tool_generate_image(tmp_path, "p", "out.png", _cancel=stop)

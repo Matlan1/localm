@@ -448,6 +448,10 @@ class TestOrphans:
         assert not orphan.exists()
         assert pending_pulls.list_orphans() == []
 
+    def test_an_empty_temp_file_is_not_offered(self, home, dead_pid):
+        _hf_temp(home, "paused.gguf", "e9", b"", *dead_pid)
+        assert pending_pulls.list_orphans() == []
+
     def test_a_temp_file_of_a_live_owner_is_not_offered(self, home):
         import subprocess
         from localm.instances import process_start_identity

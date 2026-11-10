@@ -41,7 +41,6 @@ def _build_tolerant(mod):
 
     Conservative by construction: any mismatch (missing name, wrong signature,
     already tolerant, source unavailable) returns None so the caller no-ops."""
-    import asyncio
     import inspect
 
     fn = getattr(mod, "make_locked_method_func", None)
@@ -78,7 +77,7 @@ def _build_tolerant(mod):
         locked_class = lock_class(class_clone)
         attr = getattr(type_obj, func)
         method = attr.__func__ if hasattr(attr, "__func__") else attr
-        if asyncio.iscoroutinefunction(method):
+        if inspect.iscoroutinefunction(method):
             async def wrapped_async_func(**inputs):
                 return await method(locked_class, **inputs)
             return wrapped_async_func

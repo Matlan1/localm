@@ -621,7 +621,19 @@ def hf_gguf_files(repo: str, token: Optional[str] = None) -> list[dict]:
     repo = repo.strip().strip("/")
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         raise DiscoverError(f"Not a HuggingFace repo id: {repo}")
-    tree = _get(f"{HF_API}/api/models/{repo}/tree/main", token=token)
+    try:
+        tree = _get(f"{HF_API}/api/models/{repo}/tree/main",
+                    {"recursive": "true"}, token=token)
+    except DiscoverError as e:
+        status = getattr(getattr(e.__cause__, "response", None), "status_code", None)
+        if status in (401, 403, 404):
+            raise DiscoverError(
+                f"Repository {repo} was not found, or it is private or gated "
+                "(HuggingFace answers the same way for all three). Check the "
+                "name; for a private or gated repo set a token with "
+                "`localm config hf_token hf_xxx` and accept the repo's terms "
+                "on huggingface.co.") from e
+        raise
     if not isinstance(tree, list):
         raise DiscoverError(f"Unexpected tree response for {repo}")
 
