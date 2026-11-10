@@ -71,7 +71,20 @@ Two more native runtimes are downloaded from their upstream releases at the
 user's request and are not redistributed by this repository:
 stable-diffusion.cpp (MIT; `localm setup-sdcpp`, loaded into a localm worker
 process) and KoboldCpp (AGPL-3.0; `localm setup-music`, run as a separate
-program, see the arm's-length section below).
+program, see the arm's-length section below). localm unpacks each as upstream
+ships it and adds or removes no license file: the stable-diffusion.cpp archive
+carries `stable-diffusion.cpp.txt` and `ggml.txt` (both MIT texts), and the
+KoboldCpp runtime carries `LICENSE.md` (AGPL-3.0) and a `vendor_licenses/`
+folder; both stay in the runtime folder beside the binaries.
+
+The NVIDIA CUDA runtime libraries (cudart and cuBLAS) are proprietary, not open
+source. They are downloaded only when the user picks a CUDA build
+(`localm setup-llama --backend cuda`, `localm setup-sdcpp --backend cuda`): from
+NVIDIA's own PyPI packages (`nvidia-cuda-runtime`, `nvidia-cublas` and their
+`-cu12` variants, which declare `LicenseRef-NVIDIA-Proprietary`) on Linux, and
+from the `cudart` bundle of the upstream llama.cpp or stable-diffusion.cpp
+release on Windows. They are not part of this repository, and localm copies the
+library files without a license file; NVIDIA's CUDA license terms apply to them.
 
 ## Python dependencies (installed from PyPI, not redistributed here)
 
