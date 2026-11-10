@@ -1001,8 +1001,11 @@ class PluginManager:
         return out
 
     def _enabled_set(self) -> set:
+        """Names enabled in config["plugins_enabled"], plus every protected
+        plugin (chat), which is always enabled and never stored there."""
         from localm.config import load_config
-        return set(load_config().get("plugins_enabled", []))
+        from localm.plugins import catalog as _cat
+        return set(load_config().get("plugins_enabled", [])) | set(_cat.protected())
 
     def _set_enabled(self, name: str, on: bool) -> None:
         """Add/remove *name* in config["plugins_enabled"] atomically (read-modify-
