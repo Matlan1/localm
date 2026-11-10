@@ -127,7 +127,7 @@ def _neutralise_flac(f: BinaryIO, size: int) -> int:
 def _neutralise_mp3(f: BinaryIO, size: int) -> int:
     """Zero the body of a leading ID3v2 tag (keeping its header, so the tag
     becomes pure padding) and the fields of a trailing ID3v1 tag. Returns the
-    number of tags cleared. Raises ValueError when the ID3v2 header declares a
+    number of tags that held data. Raises ValueError when the ID3v2 header declares a
     tag longer than the file."""
     count = 0
     f.seek(0)
@@ -140,13 +140,17 @@ def _neutralise_mp3(f: BinaryIO, size: int) -> int:
         f.seek(5)
         f.write(bytes([header[5] & _ID3V2_FOOTER_FLAG]))
         f.seek(10)
+        had_content = any(f.read(tag_size))
+        f.seek(10)
         _zero(f, tag_size)
-        count += 1
+        count += 1 if had_content else 0
     if size >= _ID3V1_TAG_SIZE:
         f.seek(size - _ID3V1_TAG_SIZE)
         if f.read(3) == b"TAG":
+            had_content = any(f.read(_ID3V1_TAG_SIZE - 3))
+            f.seek(size - _ID3V1_TAG_SIZE + 3)
             _zero(f, _ID3V1_TAG_SIZE - 3)
-            count += 1
+            count += 1 if had_content else 0
     return count
 
 

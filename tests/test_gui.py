@@ -22,6 +22,7 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 from tests.test_sysstats import VRAM_POLL_DEADLINE
 from tests._shared_model_guard import no_shared_model_left_resident  # noqa: F401
+from tests.media_bytes import flac_bytes, mp4_bytes, png_bytes
 
 
 # ------------------------------------------------------------------ #
@@ -5044,7 +5045,7 @@ class TestImageGeneration:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"\x89PNG fake")
+            Path(out_path).write_bytes(png_bytes())
             return True, f"Image saved to {out_path}"
         monkeypatch.setattr(comfy, "generate_image", fake_gen)
 
@@ -5372,7 +5373,7 @@ class TestMusicPlugin:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
-            Path(out_path).write_bytes(b"FLACfake")
+            Path(out_path).write_bytes(flac_bytes())
             return True, f"Track saved to {out_path}"
         monkeypatch.setattr(music_gen, "generate_music", fake_gen)
 
@@ -5546,7 +5547,7 @@ class TestVideoEndpoints:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"fake mp4")
+            Path(out_path).write_bytes(mp4_bytes())
             return True, f"Clip saved to {out_path}"
         monkeypatch.setattr(video_gen, "generate_video", fake_gen)
 

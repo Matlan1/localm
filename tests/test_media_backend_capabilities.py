@@ -278,7 +278,7 @@ def test_a_caller_that_gives_no_self_url_reaches_the_comfyui_generator(
     backend = import_module(f"{PACKAGES[plugin]}.backend")
     seen = {}
 
-    def generate(s, prompt, out_path, **kwargs):
+    def generate(prompt, out_path, **kwargs):
         seen.update(kwargs)
         return True, "done"
 
@@ -339,6 +339,17 @@ def _is_literal(node: ast.AST) -> bool:
     return False
 
 
+_MEDIA_BACKEND_NAMES = {"native", "comfy", "auto"}
+
+
+def _names_a_media_backend(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return node.value in _MEDIA_BACKEND_NAMES
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return any(_names_a_media_backend(e) for e in node.elts)
+    return False
+
+
 def _name_comparisons(source: str) -> int:
     count = 0
     for node in ast.walk(ast.parse(source)):
@@ -346,7 +357,8 @@ def _name_comparisons(source: str) -> int:
             continue
         operands = [node.left, *node.comparators]
         if any(_is_backend_value(o) for o in operands) \
-                and any(_is_literal(o) for o in operands):
+                and any(_is_literal(o) and _names_a_media_backend(o)
+                        for o in operands):
             count += 1
     return count
 

@@ -44,11 +44,17 @@ class TestFluxImageTool(unittest.TestCase):
     # preflight_models calls comfy_object_info as a bare global in comfy_client,
     # so the stub targets comfy_client.
     @patch("localm.media.comfy_client.comfy_object_info", return_value=None)
+    # The reachability probe and the VRAM release are stubbed: the generator and
+    # the facade each start ComfyUI, so a positional urlopen sequence cannot
+    # count the probes.
+    @patch("localm.image_gen.comfy.free_comfy_vram")
+    @patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up"))
     # comfy_client routes ComfyUI calls through its own _comfy_urlopen, never
     # the top-level urllib.request.urlopen; that is the seam to patch.
     @patch("localm.media.comfy_client._comfy_urlopen")
     @patch("urllib.request.Request")
-    def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
+    def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_ensure,
+                                    mock_free, mock_obj_info):
         # 1. Setup the mock responses
         # First call: /prompt endpoint -> return prompt_id
         mock_prompt_response = MagicMock()
@@ -83,7 +89,6 @@ class TestFluxImageTool(unittest.TestCase):
 
         # Make urlopen return the mocks sequentially
         mock_urlopen.side_effect = [
-            mock_alive_response,   # for GET /system_stats (fail-fast probe)
             mock_prompt_response,  # for POST /prompt
             mock_history_response, # for GET /history/mock_prompt_abc_123
             mock_view_response     # for GET /view?filename=...
