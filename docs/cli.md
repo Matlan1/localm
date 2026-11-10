@@ -607,7 +607,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -972,7 +972,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `dispatch_parallel` | Run up to 2 sub-tasks at once, each in its own git worktree | yes | no |
 | `fetch_url` | Fetch a URL and return its text, HTML stripped | see below | no |
 | `web_search` | Search the web, returning titles, URLs and snippets | see below | no |
-| `generate_image` | Generate or refine an image with the local pipeline | no | no |
+| `generate_image` | Generate or refine an image with the local pipeline (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
 | `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
 | `browser_navigate` | Open a URL in the automated browser (browser plugin) | see below | no |
@@ -1010,7 +1010,7 @@ Six things the table cannot express, and each of them matters:
   the project controls (a test suite runs the project's own test files). A one-shot
   `localm coder "TASK"` without `--yes` denies them, `--interactive-confirm` asks
   before each, and an untrusted MCP server's tools ask before every call even under
-  `--yes`. `generate_image` still has real side effects and does not ask.
+  `--yes`. `generate_image` writes a file and asks exactly like `write_file`.
 - **Untrusted content re-arms confirmation.** Once the session has read a web page,
   a search result, an MCP tool's output or a skill, every destructive, network or
   code-running tool asks again until your next message, even with writes

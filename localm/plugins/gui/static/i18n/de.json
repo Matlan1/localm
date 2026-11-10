@@ -1970,6 +1970,8 @@
   "settings.field.confirmRemove.label": "Vor dem Löschen von Modellen bestätigen",
   "settings.field.corsOrigins.help": "Browser-Origins, die die API aufrufen dürfen. Leer = nur localhost; kommagetrennte Liste; oder \"*\" für beliebige.",
   "settings.field.corsOrigins.label": "CORS-Origins",
+  "settings.field.allowedHosts.help": "Weitere Namen, unter denen dieser Server antwortet, etwa hinter einem Reverse-Proxy oder für einen eigenen DNS-Namen. Leer = nur die eigenen Namen und Adressen dieses Rechners; kommagetrennte Liste; \"*.example.com\" deckt eine Ebene ab; oder \"*\" für jeden Namen, was die Prüfung gegen DNS-Rebinding abschaltet.",
+  "settings.field.allowedHosts.label": "Erlaubte Hostnamen",
   "settings.field.ctxAuto.help": "Bestimmt die Kontext-Obergrenze beim Laden anhand des freien GPU-Speichers statt des festen Kontextfenster (max).",
   "settings.field.ctxAuto.label": "Kontext automatisch aus VRAM bemessen",
   "settings.field.defaultPlaceholder": "Standard ({value})",

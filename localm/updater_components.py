@@ -1799,7 +1799,7 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                 for cmd in _commands(p, root):
                     if pyinstall.is_install_command(cmd):
                         try:
-                            pyinstall.check_command(cmd)
+                            pyinstall.check_command(cmd, root)
                         except pyinstall.InstallRefused as e:
                             problem = str(e)
                             break

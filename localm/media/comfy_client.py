@@ -1860,12 +1860,13 @@ def _kill_process_tree(proc) -> None:
     import signal as _signal
     import subprocess as _sp
     import sys as _sys
+    from localm import sysprog as _sysprog
     pid = getattr(proc, "pid", None)
     if not pid:
         return
     if _sys.platform == "win32":
         try:
-            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+            _sp.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],
                     capture_output=True, timeout=15)
         except Exception:
             try:

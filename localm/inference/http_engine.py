@@ -100,7 +100,8 @@ class HttpEngine:
         try:
             import requests
             resp = requests.get(f"{self._base}/config",
-                                headers=self._headers(), timeout=15)
+                                headers=self._headers(), timeout=15,
+                                allow_redirects=False)
             if resp.status_code == 200:
                 v = resp.json().get("effective_ctx_max")
                 if isinstance(v, int) and v > 0:
@@ -150,7 +151,8 @@ class HttpEngine:
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
-        and ``RuntimeError`` for an unreachable server, other error responses, or a
+        and ``RuntimeError`` for an unreachable server, a redirect (never followed),
+        other error responses, or a
         stream that ends with ``finish_reason: "error"`` (its message is the last
         content piece, the server's error text). A refusal the server sends
         in-stream (``localm_error``, on a stream it opened before it finished
@@ -182,10 +184,16 @@ class HttpEngine:
         try:
             resp = requests.post(f"{self._base}/chat/completions",
                                  json=body, headers=self._headers(),
-                                 stream=True, timeout=300)
+                                 stream=True, timeout=300, allow_redirects=False)
         except requests.RequestException as e:
             raise RuntimeError(
                 f"Could not reach the localm server at {self._base}: {e}") from e
+
+        if 300 <= resp.status_code < 400:
+            resp.close()
+            raise RuntimeError(
+                f"The localm server at {self._base} answered with a redirect "
+                f"(HTTP {resp.status_code}); localm does not follow it.")
 
         if resp.status_code >= 400:
             detail = _error_detail(resp)
@@ -256,8 +264,8 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
 
       - ``("loaded", "<id>")``  the server reports a model (its id).
       - ``("empty",  None)``    the server ANSWERED (200) but reports no model.
-      - ``("unknown", None)``   we could not tell: unreachable, an auth/scope error,
-        or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
+      - ``("unknown", None)``   we could not tell: unreachable, a redirect (never
+        followed), an auth/scope error, or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
         needs the ``models`` scope, so an attach token scoped only for chat gets a 403
         here while chatting still works. Callers must not claim "no model loaded" on
         ``unknown``.
@@ -267,8 +275,8 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         r = requests.get(f"{base_url.rstrip('/')}/models",
-                         headers=headers, timeout=timeout)
-        if r.status_code >= 400:
+                         headers=headers, timeout=timeout, allow_redirects=False)
+        if r.status_code >= 300:
             return "unknown", None
         data = (r.json() or {}).get("data") or []
         # /v1/models lists EVERY registered model (sorted), each with a `loaded`

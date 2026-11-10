@@ -2129,6 +2129,8 @@
   "settings.field.confirmRemove.label": "Confirmar antes de eliminar modelos",
   "settings.field.corsOrigins.help": "Orígenes de navegador que pueden llamar a la API. En blanco = solo localhost; lista separada por comas; o \"*\" para cualquiera.",
   "settings.field.corsOrigins.label": "Orígenes CORS",
+  "settings.field.allowedHosts.help": "Nombres adicionales a los que responde este servidor, para un proxy inverso o un nombre DNS propio. En blanco = solo los nombres y direcciones de esta máquina; lista separada por comas; \"*.example.com\" cubre un nivel; o \"*\" para cualquier nombre, lo que desactiva la comprobación contra el DNS rebinding.",
+  "settings.field.allowedHosts.label": "Nombres de host permitidos",
   "settings.field.ctxAuto.help": "Elige el límite de contexto según la memoria de GPU libre al cargar, en lugar del valor fijo de Ventana de contexto (máx.).",
   "settings.field.ctxAuto.label": "Ajustar el contexto a la VRAM",
   "settings.field.ctxReserve.help": "Cada carga mantiene utilizable una ventana de al menos estos tokens. Los modelos MoE mantienen más expertos en la RAM del sistema para conservarla en la GPU; el agente de código pide 32768.",

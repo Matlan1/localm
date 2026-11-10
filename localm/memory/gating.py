@@ -26,5 +26,5 @@ def writes_allowed(surface: str) -> bool:
     """True when durable memory writes are permitted for *surface* ("chat" |
     "coder" | "server"). False in privacy mode (the default). Resolved fresh each
     call so a mid-run config/env change is honoured."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode(surface) != SessionMode.PRIVACY
+    from localm.audit import automatic_write_allowed
+    return automatic_write_allowed(surface)

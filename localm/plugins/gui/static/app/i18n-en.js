@@ -1970,6 +1970,8 @@ export const I18N_EN = {
   "settings.field.tlsKey.help": "Private key for the custom TLS certificate.",
   "settings.field.corsOrigins.label": "CORS origins",
   "settings.field.corsOrigins.help": "Browser origins allowed to call the API. Blank = localhost only; comma-separated list; or \"*\" for any.",
+  "settings.field.allowedHosts.label": "Allowed host names",
+  "settings.field.allowedHosts.help": "Extra names this server answers to, for a reverse proxy or your own DNS name. Blank = only this machine's own names and addresses; comma-separated list; \"*.example.com\" covers one level; or \"*\" for any name, which turns the DNS-rebinding check off.",
   "settings.field.mdnsName.label": "Network name (mDNS)",
   "settings.field.mdnsName.help": "The name other devices use to reach this server on your LAN: <name>.local, so there is no IP to type. Letters, digits and hyphens only.",
   "settings.field.mdnsEnabled.label": "Advertise on the network (mDNS)",

@@ -357,6 +357,12 @@ def _peer_url(route: PeerRoute, path: str) -> str:
     return f"{route.scheme}://{host}:{int(route.port)}{path}"
 
 
+def api_key_is_sendable(api_key: Optional[str]) -> bool:
+    """Whether *api_key* (empty or None for none) holds only printable ASCII
+    without spaces (0x21-0x7e), the characters a Bearer credential is sent with."""
+    return all("\x21" <= c <= "\x7e" for c in (api_key or ""))
+
+
 def _auth_headers(api_key: Optional[str]) -> dict:
     """The Authorization header for *api_key*, or none for an empty key (a peer
     in open mode needs no credential)."""
@@ -391,11 +397,15 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
     chat endpoint. A peer that does not answer ``/api/session`` is checked
     with an authenticated ``GET /v1/models`` instead.
 
-    Raises :class:`PeerCredentialError` when the key is refused, and
+    Raises :class:`PeerCredentialError` when the key is refused or holds a
+    character outside :func:`api_key_is_sendable` (nothing is sent), and
     ``requests.RequestException`` when the peer cannot be reached. Refuses,
     without sending anything, a peer whose endpoint fails
     :func:`is_routable_peer_endpoint` or whose port is not held by this OS user
     (:func:`peer_listener_is_ours`)."""
+    if not api_key_is_sendable(api_key):
+        raise PeerCredentialError(
+            "the API key contains a character an API key cannot hold")
     scheme = peer.get("scheme") or "http"
     if not is_routable_peer_endpoint(peer.get("host"), scheme):
         raise PeerCredentialError(
@@ -464,10 +474,13 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
     more than *mode*: ``GET /api/session`` with *api_key* and the session-mode
     header, field ``session_mode``. None when the peer answers without a valid
     mode (an older localm). Raises :class:`PeerUnreachable` on a network error,
-    an HTTP 401/403, or an answer that the peer requires a key *api_key* is not.
+    an HTTP 401/403, an answer that the peer requires a key *api_key* is not, or
+    an *api_key* outside :func:`api_key_is_sendable` (nothing is sent).
     Sends nothing to an endpoint that fails :func:`is_routable_peer_endpoint`,
     or whose host or port is malformed (None)."""
     from localm.audit import SESSION_MODE_HEADER, SessionMode
+    if not api_key_is_sendable(api_key):
+        raise PeerUnreachable("its API key contains a character an API key cannot hold")
     scheme = peer.get("scheme") or "http"
     host, port = peer.get("host"), peer.get("port")
     if not isinstance(host, str) or not is_routable_peer_endpoint(host, scheme):
@@ -493,7 +506,7 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
         resp = local_request("GET", url, headers=headers, timeout=timeout,
                              verify=verify)
     except requests.RequestException as e:
-        raise PeerUnreachable(f"it could not be reached ({e})") from e
+        raise PeerUnreachable(f"it could not be reached ({type(e).__name__})") from e
     if resp.status_code in (401, 403):
         raise PeerUnreachable(f"it refused the API key (HTTP {resp.status_code})")
     try:
