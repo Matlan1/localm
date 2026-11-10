@@ -78,7 +78,10 @@ class TestGuiStopRefusesAForgedHost:
         kill_calls = []
         monkeypatch.setattr(
             instances, "kill_pid",
-            lambda pid, timeout=None: kill_calls.append(pid) or True)
+            lambda pid, timeout=None, start_identity=None:
+                kill_calls.append(pid) or True)
+        monkeypatch.setattr(instances, "entry_process_state",
+                            lambda e: ("same", ""))
         request_spy = Mock()
         with patch("requests.request", request_spy), \
              caplog.at_level("WARNING", logger="localm"):
@@ -127,7 +130,10 @@ class TestCliStopRefusesAForgedHost:
         kill_calls = []
         monkeypatch.setattr(
             instances, "kill_pid",
-            lambda pid, timeout=None: kill_calls.append(pid) or True)
+            lambda pid, timeout=None, start_identity=None:
+                kill_calls.append(pid) or True)
+        monkeypatch.setattr(instances, "entry_process_state",
+                            lambda e: ("same", ""))
         post_spy = Mock()
         with patch("requests.post", post_spy), \
              caplog.at_level("WARNING", logger="localm"):
