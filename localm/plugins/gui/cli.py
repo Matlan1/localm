@@ -777,13 +777,20 @@ def _resolve_startup_model_file(console, model, registry, *, model_less: bool):
     *model* may be a registered name or a path on disk
     (registry.get_operator_model_info); display_name is the name when it is
     registered, else the resolver's display hint. Exits 1 when *model*
-    resolves to nothing."""
+    resolves to nothing or is a model chat cannot load (an embedding model, a
+    reranker, a text-to-speech model, a vision projector)."""
     if model_less:
         return None, None, ""
     from localm.model_manager.registry import get_operator_model_info
     info = get_operator_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
+        sys.exit(1)
+    from localm.model_manager.registry import chat_load_refusal
+    refusal = chat_load_refusal(model, registry)
+    if refusal is not None:
+        from rich.markup import escape
+        console.print(f"[red]{escape(refusal)}[/red]")
         sys.exit(1)
     model_path, display_hint = info
     return info, model_path, (model if model in registry else display_hint)

@@ -242,3 +242,21 @@ def test_run_with_an_unregistered_embedding_path_exits_1(env, monkeypatch):
     r = CliRunner().invoke(main, ["run", str(emb), "--no-server", "-p", "hi"])
     assert r.exit_code == 1, r.output
     assert "embedding" in r.output.lower()
+
+
+def test_gui_and_serve_startup_refuse_an_embedding_model_by_name_or_path(env):
+    from rich.console import Console
+
+    from localm.plugins.gui.cli import _resolve_startup_model_file
+    emb = _gguf(env / "enc.gguf", "bert", {"bert.pooling_type": "mean"})
+    chat = _gguf(env / "chat.gguf", "llama")
+    reg = {"enc": {"path": str(emb), "source": "local", "model_type": "embedding"},
+           "chat": {"path": str(chat), "source": "local"}}
+    (env / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+    console = Console(record=True, width=200)
+    for model in ("enc", str(emb)):
+        with pytest.raises(SystemExit) as ei:
+            _resolve_startup_model_file(console, model, reg, model_less=False)
+        assert ei.value.code == 1
+    info, path, name = _resolve_startup_model_file(console, "chat", reg, model_less=False)
+    assert name == "chat" and str(path).endswith("chat.gguf")
