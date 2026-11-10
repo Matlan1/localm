@@ -1525,7 +1525,7 @@
   "plugins.external": "Externe Plugins",
   "plugins.external.empty.hint": "Installieren Sie eines aus dem Katalog oben, um Funktionen hinzuzufügen.",
   "plugins.external.empty.text": "Keine externen Plugins installiert",
-  "plugins.externalIntro": "Ein Plugin von Drittanbietern ist ein Ordner mit einem <code>plugin.toml</code>-Manifest unter <code>~/.localm/plugins/</code>; es kann einen CLI-Befehl hinzufügen und Tools für den Coder-Agenten bereitstellen. Die Installation ist eine lokale Verzeichniskopie.",
+  "plugins.externalIntro": "Ein Plugin von Drittanbietern ist ein Ordner mit einem <code>plugin.toml</code>-Manifest; die Installation kopiert ihn in den Plugin-Ordner dieser Installation. Es kann einen CLI-Befehl hinzufügen und Tools für den Coder-Agenten bereitstellen. Plugins von Drittanbietern laufen ohne Sandbox im selben Prozess, installieren Sie daher nur Code, dem Sie vertrauen.",
   "plugins.firstParty": "Offizielle Plugins",
   "plugins.install": "Installieren",
   "plugins.installDependencies": "Abhängigkeiten installieren",

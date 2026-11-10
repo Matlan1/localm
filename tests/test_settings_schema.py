@@ -312,7 +312,7 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     assert ss.admin_only_keys() == (
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
-        | HOST_PATH_OWNER_KEYS
+        | HOST_PATH_OWNER_KEYS | _NEWLY_OWNER_ONLY
         | {"hf_trust_remote_code"}
         | {"net_allow_private", "cors_origins"}
         # update_allow_prerelease decides which builds the updater suggests
@@ -363,7 +363,7 @@ def test_net_allow_private_is_admin_only():
     assert by_key["net_allow_private"].admin_only is True, \
         "the SSRF-guard-disable toggle must be owner-only"
     # A sibling network field the scoped key legitimately manages stays non-admin.
-    assert by_key["net_allow"].admin_only is False
+    assert by_key["user_name"].admin_only is False
 
 
 def test_cors_origins_is_admin_only():
@@ -769,3 +769,53 @@ def test_a_list_setting_given_as_json_text_is_the_list():
 def test_a_deeply_nested_bracket_string_is_one_entry_not_a_crash():
     text = "[" * 100000 + "]" * 100000
     assert ss.validate_update({"pinned_models": text})["pinned_models"] == [text]
+
+
+# ---- settings tier ----
+
+_NEWLY_OWNER_ONLY = {"temp_location", "net_mode", "net_allow",
+                     "memory_recall_in_privacy", "memory_recall_in_privacy_chat",
+                     "memory_recall_in_privacy_coder"}
+
+
+def test_a_setting_field_without_a_tier_cannot_be_built():
+    with pytest.raises(TypeError):
+        ss.SettingField("x", ss.Widget.TEXT, "X")
+
+
+def test_a_setting_field_with_an_unknown_tier_is_refused():
+    with pytest.raises(ValueError):
+        ss.SettingField("x", ss.Widget.TEXT, "X", tier="admin-ish")
+
+
+def test_temp_location_net_mode_and_recall_fields_are_owner_only():
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    for key in _NEWLY_OWNER_ONLY:
+        assert by_key[key].tier == ss.Tier.OWNER, key
+        assert key in ss.admin_only_keys()
+
+
+def test_every_path_url_and_host_list_field_is_owner_tier():
+    def sensitive(f):
+        return (f.widget in (ss.Widget.FOLDER, ss.Widget.PATH, ss.Widget.PATHLIST)
+                or f.key in ss.HOST_PATH_KEYS
+                or f.key.endswith(("_url", "_cmd", "_dir", "_roots", "_origins"))
+                or f.key.startswith("net_") and f.widget == ss.Widget.LIST)
+    loose = [f.key for f in ss.CORE_FIELDS
+             if sensitive(f) and f.tier != ss.Tier.OWNER]
+    assert loose == []
+
+
+@pytest.mark.parametrize("value", [
+    "\\\\attacker.example\\share\\tmp",
+    "\\\\?\\C:\\tmp",
+    "\\\\.\\PhysicalDrive0",
+])
+def test_temp_location_refuses_a_unc_or_device_path(value):
+    with pytest.raises(ValueError, match="temp_location"):
+        ss.validate_update({"temp_location": value})
+
+
+@pytest.mark.parametrize("value", ["auto", "data", "system", "D:\\scratch\\tmp"])
+def test_temp_location_still_accepts_keywords_and_local_paths(value):
+    assert ss.validate_update({"temp_location": value}) == {"temp_location": value}

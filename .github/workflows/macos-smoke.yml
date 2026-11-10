@@ -36,7 +36,7 @@ permissions:
 jobs:
   macos-smoke:
     name: macOS smoke (Apple Silicon, install + doctor + Metal pick + serve)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       SMOKE_PORT: "8651"
