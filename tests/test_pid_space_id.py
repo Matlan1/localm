@@ -12,7 +12,7 @@ from localm.rag import collection_lock
 def _fresh(monkeypatch, **patches) -> str:
     monkeypatch.setattr(procid, "_PID_SPACE", None)
     for name, value in patches.items():
-        monkeypatch.setattr(instances, name, value)
+        monkeypatch.setattr(procid, name, value)
     return instances.pid_space_id()
 
 

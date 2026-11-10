@@ -359,7 +359,7 @@ def test_host_id_does_not_depend_on_the_host_name(monkeypatch):
 
 def test_host_id_is_none_without_a_machine_identifier(monkeypatch):
     for name in ("machine_guid", "linux_machine_id", "darwin_host_uuid"):
-        monkeypatch.setattr(instances, name, lambda: "")
+        monkeypatch.setattr(procid, name, lambda: "")
     monkeypatch.setattr(procid, "_HOST_ID", None)
     monkeypatch.setattr(procid, "_HOST_ID_READ", False)
     assert instances.host_id() is None
