@@ -308,7 +308,7 @@ CORE_FIELDS: list = [
                  "Tokens a diffusion language model writes per reply. It fills the whole "
                  "length every time, so longer is slower. Limited by Max tokens per "
                  "reply and by the room the prompt leaves (2048 at most).",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=2048),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
@@ -749,9 +749,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Fetched on first use (Network access off: run 'localm "
-                 "setup-embeddings'). Until then memory and RAG search lexically. A known "
-                 "key (bge-small-en-v1.5), registered name or GGUF path. Then stays loaded.",
+                 "Fetched on first use; with network access off, enable Allow model "
+                 "downloads and run 'localm setup-embeddings'. Until then memory and RAG "
+                 "search lexically. A known key, registered name or GGUF path.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF

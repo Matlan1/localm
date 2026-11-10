@@ -2043,7 +2043,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
-  "settings.field.embeddingModel.help": "Fetched on first use (Network access off: run 'localm setup-embeddings'). Until then memory and RAG search lexically. A known key (bge-small-en-v1.5), registered name or GGUF path. Then stays loaded.",
+  "settings.field.embeddingModel.help": "Fetched on first use; with network access off, enable Allow model downloads and run 'localm setup-embeddings'. Until then memory and RAG search lexically. A known key, registered name or GGUF path.",
   "settings.field.embeddingPooling.label": "Embedding pooling",
   "settings.field.embeddingPooling.help": "Changing this invalidates document collections and memory vectors: re-index after. A loaded embedder keeps the old value until unloaded. mean suits bge/nomic; a decoder-based one needs last or auto.",
   "settings.field.embeddingGpuLayers.label": "Embedder GPU layers",
@@ -2568,7 +2568,7 @@ export const I18N_EN = {
   "settings.perf.splitDisabledToast": "Split disabled - applies on the next model load",
   "settings.perf.maxResidentLabel": "Max resident models",
   "settings.perf.maxResidentHelp":
-    "How many models may stay loaded at once. Blank lets free-VRAM arithmetic decide (a model loads alongside the others only when it provably fits); 1 forces strict single-resident. Saves immediately.",
+    "Most models kept loaded at once. Blank lets free VRAM decide (a model loads alongside the others only when it provably fits). 1 keeps one model only when Unload other models to make room is always. Saves immediately.",
   "settings.perf.maxResidentRangeToast": "Max resident models must be blank or a whole number of 1 or more",
   "settings.perf.maxResidentPlaceholder": "no cap",
   "settings.perf.capClearedToast": "Cap cleared",

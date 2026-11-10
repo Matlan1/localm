@@ -491,7 +491,8 @@ def _refuse_downgrade(new_version: str) -> None:
         raise LocalmError(
             "cannot read the installed localm version",
             reason="without it an update cannot be confirmed as newer; choose the "
-                   "version with 'localm update --to <version>'")
+                   "version to install (Settings > Updates, or 'localm update "
+                   "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
             f"refusing to 'update' to {new_version}: not newer than the installed {current}",

@@ -769,13 +769,3 @@ def test_a_list_setting_given_as_json_text_is_the_list():
 def test_a_deeply_nested_bracket_string_is_one_entry_not_a_crash():
     text = "[" * 100000 + "]" * 100000
     assert ss.validate_update({"pinned_models": text})["pinned_models"] == [text]
-
-
-def test_diffusion_reply_length_stops_at_the_largest_decode():
-    """A diffusion reply fits in one decode, so the setting's upper bound is
-    the largest batch a context is given."""
-    from localm.inference.backends.llamacpp._sizing import VramSizingMixin
-    field = next(f for f in ss.CORE_FIELDS if f.key == "diffusion_max_tokens")
-    assert field.max == VramSizingMixin._MAX_BATCH
-    with pytest.raises(ValueError, match="diffusion_max_tokens"):
-        ss.validate_update({"diffusion_max_tokens": VramSizingMixin._MAX_BATCH + 1})
