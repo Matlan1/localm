@@ -89,7 +89,8 @@ This keeps users account-less, which a baked-in token cannot do safely.
 - Only a body with the structure a localm reporter writes is filed:
   - the in-app reporter: the `# localm bug report:` title line, then `## What I was
     doing`, `## What happened`, `## App state` followed by its `- Model:` line, and
-    `## Environment` followed by its `- localm:` line;
+    `## Environment` followed by its `- localm:` line (or by
+    `(could not collect environment)`);
   - `scripts/report_issue.py` and `scripts/report_issue.ps1`: the title line, then
     `## What happened`, `## How it was filed` followed by its `- Filed via the
     standalone` line, and `## Environment` followed by a `- ` line;
@@ -135,7 +136,7 @@ set; mandatory for `/update*`). Failures return a 4xx/5xx `{ "error": "..." }` t
 the app surfaces honestly (a failed action is never reported as success).
 
 ```
-POST /                      { "title", "body" }   -> 201 { ok, url, number }
+POST /  (alias: POST /report) { "title", "body" } -> 201 { ok, url, number }
                                422 { error, filed: false } when the body is not a
                                report built by localm (not filed, not echoed)
                                429 { error, retry_after } when the client IP is

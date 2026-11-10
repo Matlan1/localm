@@ -24,11 +24,11 @@ on:
   #                  mutation shard (and so the mutation-test gate); never on
   #                  push.
   #   schedule       two crons. The nightly one ("23 3 * * *") runs test,
-  #                  gui-tests, optional-stacks and lint on master. The weekly
-  #                  one ("37 6 * * 1") runs those plus every job that is
-  #                  weekly only: the mutation shards and gate, abi-check,
-  #                  web-search-canary, voice-stack and the two pin checks. A
-  #                  weekly-only job tests
+  #                  gui-tests, optional-stacks, lint, voice-stack and
+  #                  proxy-tests on master. The weekly one ("37 6 * * 1") runs
+  #                  those plus every job that is weekly only: the mutation
+  #                  shards and gate, abi-check, web-search-canary and the two
+  #                  pin checks. A weekly-only job tests
   #                  github.event.schedule == '37 6 * * 1'.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`

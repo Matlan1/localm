@@ -41,7 +41,8 @@ time are covered: a function-local import (how a genuine import cycle is
 broken), an `importlib` call, and a plugin loaded under its own module name
 are outside it, and so are tests and scripts.
 
-`scripts/check_hygiene.py` enforces the map on every commit and in CI. It
+`scripts/check_hygiene.py` enforces the map in CI, and on every commit once
+the pre-commit hook is installed (`python scripts/check_hygiene.py --install-hook`). It
 also fails on a unit the map does not place, on a placed unit that no longer
 exists, and on a unit placed twice, so the map cannot rot silently. There is
 no allow-list: a tier carries exactly `name`, `role` and `units`, and any
@@ -60,8 +61,8 @@ Two tools cover that gap.
 `scripts/check_hygiene.py` (check 10) reads every route whose handler
 builds its JSON response from dict literals, and every test that reads a
 top-level key from that route's response, and fails when the key is one the
-handler cannot produce. It runs on every commit through the pre-commit hook
-and in CI's hygiene gate, before any test runs. It does not see a handler
+handler cannot produce. It runs in CI's hygiene gate, before any test runs, and on every commit once
+the pre-commit hook is installed. It does not see a handler
 whose response comes from another module, a model class, a file or stream,
 or a non-literal merge (that shape is open and not judged); a nested key; a
 key read through a helper or a fixture rather than a `.json()` call in the

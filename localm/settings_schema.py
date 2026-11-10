@@ -358,9 +358,9 @@ CORE_FIELDS: list = [
     # _validate_one - a Widget.NUMBER field whose default is None derives
     # want_int=False and would store a cap of 2 as 2.0.
     SettingField("max_resident_models", Widget.HIDDEN, "Max resident models",
-                 "How many models may stay loaded at once. Blank lets free-VRAM "
-                 "arithmetic decide (a model loads alongside the others only "
-                 "when it provably fits); 1 forces strict single-resident.",
+                 "Most models kept loaded at once. Blank lets free VRAM decide (a model "
+                 "loads alongside the others only when it provably fits). 1 keeps one "
+                 "model only when Unload other models to make room is always.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1),
     # HIDDEN: rendered by a "Pinned models" text input beside the one above
     # (same Live Tuning card, same setupResidencyControls), not the generic
@@ -572,8 +572,8 @@ CORE_FIELDS: list = [
                  group="Server", applies=Applies.RESTART),
     SettingField("metrics_enabled", Widget.TOGGLE, "Prometheus metrics",
                  "Serve request, token and GPU-memory counters at /metrics for "
-                 "Prometheus. Needs an admin API key; carries no prompts, "
-                 "replies or model names.",
+                 "Prometheus. Once any API key exists it needs an admin key; "
+                 "carries no prompts, replies or model names.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback so "
@@ -750,9 +750,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Until fetched, memory and RAG use lexical search; run 'localm "
-                 "setup-embeddings'. A known key (bge-small-en-v1.5), registered name or "
-                 "GGUF path. A loaded embedder stays until it is unloaded.",
+                 "Fetched on first use (Network access off: run 'localm "
+                 "setup-embeddings'). Until then memory and RAG search lexically. A known "
+                 "key (bge-small-en-v1.5), registered name or GGUF path. Then stays loaded.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -1976,7 +1976,7 @@ MEDIA_PLUGIN_FIELDS: list = [
                "Optional VAE (registered name or file path).", plugins=_NATIVE,
                admin_only=True),
     MediaField("native_clip_l", ("native", "clip_l"), "", Widget.TEXT,
-               "Native CLIP-L text encoder", "Optional (SD1, SD2, SDXL, FLUX, SD3).", plugins=_IMAGE_ONLY,
+               "Native CLIP-L text encoder", "Optional (SD1, SDXL, FLUX, SD3; for SD2, its OpenCLIP-H encoder).", plugins=_IMAGE_ONLY,
                admin_only=True),
     MediaField("native_clip_g", ("native", "clip_g"), "", Widget.TEXT,
                "Native CLIP-G text encoder", "Optional (SDXL, SD3).", plugins=_IMAGE_ONLY,

@@ -68,7 +68,7 @@ localm run D:\hf-models\gemma-3-4b-it
 ### GUI
 
 ```bash
-localm gui                       # picks the first registered model, opens browser
+localm gui                       # picks the first registered model, opens browser (or the app window with the desktop extra, see native-app.md)
 localm gui mymodel               # or name one
 localm gui --no-model            # open model-less, straight to the Models page
 localm gui --no-browser          # start the server, open the URL yourself

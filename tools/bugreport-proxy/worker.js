@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// localm proxy - a tiny Cloudflare Worker giving 1-2 private-repo testers three
+// localm proxy - a tiny Cloudflare Worker giving localm users three
 // account-less surfaces, each backed by a SERVER-SIDE GitHub token:
 //
 //   POST /                       file a bug report      [GitHub App or GITHUB_TOKEN, Issues:write]
