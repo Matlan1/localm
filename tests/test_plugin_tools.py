@@ -61,7 +61,7 @@ def _isolate(tmp_path, monkeypatch, enabled=("issues", "evilp", "plain", "dotted
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
-    monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: root or tmp_path)
     cfg.update_config(lambda c: c.__setitem__("plugins_enabled", list(enabled)))
 
 
@@ -82,7 +82,7 @@ def _make_dotted_plugin(root, entry):
 class TestDottedEntryModule:
     def test_a_dotted_entry_module_is_imported_from_its_package(self, tmp_path, monkeypatch):
         _make_dotted_plugin(tmp_path, "pkg.tools:setup")
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: tmp_path)
+        _isolate(tmp_path, monkeypatch)
         with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
             names, warns = register_plugin_tools()
             assert names == ["plugin_dotted_tool_hi"]
@@ -91,7 +91,7 @@ class TestDottedEntryModule:
 
     def test_a_dotted_entry_module_that_does_not_exist_is_a_warning(self, tmp_path, monkeypatch):
         _make_dotted_plugin(tmp_path, "pkg.absent:setup")
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: tmp_path)
+        _isolate(tmp_path, monkeypatch)
         with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
             names, warns = register_plugin_tools()
             assert names == []
@@ -103,7 +103,7 @@ class TestDottedEntryModule:
         (outside / "tools.py").write_text("def tool_hi(cwd):\n    return 'out'\n", encoding="utf-8")
         plugins = tmp_path / "plugins"
         _make_dotted_plugin(plugins, "...outside.tools:setup")
-        monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: plugins)
+        _isolate(tmp_path, monkeypatch, root=plugins)
         with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
             names, warns = register_plugin_tools()
             assert names == []

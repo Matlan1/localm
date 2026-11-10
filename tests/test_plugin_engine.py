@@ -685,7 +685,8 @@ def test_load_failure_after_partial_register_leaves_nothing_live(env, tmp_path):
         assert c.get("/api/flaky/ping").status_code == 200
 
 
-def test_protected_plugin_cannot_be_disabled(env):
+def test_protected_plugin_cannot_be_disabled(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
@@ -804,7 +805,8 @@ def test_set_installed_state_unknown_raises(env):
         mgr.set_installed_state("nope", True)
 
 
-def test_set_installed_state_protected_cannot_uninstall(env):
+def test_set_installed_state_protected_cannot_uninstall(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -814,7 +816,8 @@ def test_set_installed_state_protected_cannot_uninstall(env):
         mgr.set_installed_state("core", False)
 
 
-def test_set_enabled_state_protected_cannot_disable(env):
+def test_set_enabled_state_protected_cannot_disable(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
@@ -824,7 +827,8 @@ def test_set_enabled_state_protected_cannot_disable(env):
         mgr.set_enabled_state("core", False)
 
 
-def test_uninstall_protected_raises(env):
+def test_uninstall_protected_raises(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     store = env / "store"
     _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")

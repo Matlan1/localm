@@ -2029,11 +2029,13 @@ def load_inference_backend_plugins() -> list:
 def attach_engine(app, inference_engine=None) -> PluginManager:
     """Instantiate a PluginManager bound to *app*, load enabled plugins, and add
     the management endpoints. Returns the manager."""
-    from fastapi import Depends, HTTPException, Request
+    from fastapi import Depends, HTTPException
+    from fastapi import Request as _Request
     from localm import scopes
     from localm.inference.http_server import require_scope
 
-    global _server_manager_attached
+    global _server_manager_attached, Request
+    Request = _Request
     with _backend_manager_lock:
         _server_manager_attached = True
     manager = PluginManager(app, inference_engine=inference_engine)
@@ -2069,11 +2071,14 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": name}
 
-    async def install_external_plugin_engine(body: dict, request):
+    @app.post("/api/plugins/install-external",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def install_external_plugin_engine(body: dict, request: Request):
         """Install a third-party plugin from a local directory given as
         `source`, which must contain a `plugin.toml` (400 otherwise). Equivalent
         to `localm plugin install <dir>`. The plugin is copied and verified; it
-        becomes available the next time the plugin list is read."""
+        becomes available the next time the plugin list is read. Third-party
+        plugins run unsandboxed in-process, so install only code you trust."""
         from pathlib import Path as _P
 
         from localm.inference.http_server import effective_fs_access
@@ -2100,12 +2105,6 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except Exception as e:
             raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": spec.name, "version": spec.version}
-
-    # Bind the `request` annotation to the Request class imported above.
-    install_external_plugin_engine.__annotations__["request"] = Request
-    app.post("/api/plugins/install-external",
-             dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))]
-             )(install_external_plugin_engine)
 
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
