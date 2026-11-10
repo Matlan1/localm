@@ -23,7 +23,7 @@ from __future__ import annotations
 import base64
 import time
 
-from localm.plugins.gui.jobs import Job
+from localm.jobmanager import Job
 from localm.rag.store import Collection
 
 

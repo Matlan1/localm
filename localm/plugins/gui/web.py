@@ -740,7 +740,7 @@ def attach_gui(
     jobs = getattr(app.state, "jobs", None)
     _job_routes_unregistered = jobs is None
     if jobs is None:
-        from .jobs import JobManager
+        from localm.jobmanager import JobManager
         jobs = JobManager()
 
     # Shared services that converted plugins (rag/image/music/video) reach via

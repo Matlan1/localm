@@ -6,7 +6,7 @@ independent, unrelated exceptions hit that exact line in practice: a
 ModuleNotFoundError from rich's cell-width lookup, and a UnicodeEncodeError from
 a legacy Windows console write path.
 
-The GUI runs `localm pull` as a subprocess (localm/plugins/gui/jobs.py) and
+The GUI runs `localm pull` as a subprocess (localm/jobmanager.py) and
 reduces the whole operation to `status = "done" if returncode == 0 else
 "failed"`. So the return value of pull_model()/_pull_url()/_pull_hf_snapshot()
 alone is one link short: what decides the user-visible outcome is the CLI
@@ -155,7 +155,7 @@ class TestPullUrlSurvivesACrashingSuccessPrint:
 # ------------------------------------- the actual CLI process's exit code
 
 class TestCliPullExitCode:
-    """The GUI job runner (localm/plugins/gui/jobs.py) decides success/failure
+    """The GUI job runner (localm/jobmanager.py) decides success/failure
     from the SUBPROCESS EXIT CODE alone, not from any Python-level return
     value it never sees. Driving the real `pull` click command is what
     actually proves the user-visible bug is fixed - a passing return-value

@@ -15,8 +15,8 @@ import json
 import logging
 import time
 
-from localm.plugins.gui import jobs as gj
-from localm.plugins.gui.jobs import _HostAnnouncer
+from localm import jobmanager as gj
+from localm.jobmanager import _HostAnnouncer
 
 
 def test_progress_throttled_to_ten_percent_steps():
@@ -72,7 +72,7 @@ def test_start_cli_mirrors_a_pull_to_the_host(capsys, monkeypatch):
     job = mgr.start_cli("pull", ["pull", "foo"], host_label="Model pull foo")
     # Wait for the ANNOUNCEMENT, not for job.status, and accumulate rather than
     # draining once. The worker sets job.status = "done" BEFORE it emits the
-    # closing announce (localm/plugins/gui/jobs.py: the status assignment, then
+    # closing announce (localm/jobmanager.py: the status assignment, then
     # the announcer's end emit several lines later), so a loop that breaks on the
     # status flip can read capsys inside that window and miss the final line.
     # readouterr() drains the buffer, so each poll appends to what was already
@@ -136,7 +136,7 @@ def test_start_cli_logs_failure_detail_from_real_output(caplog):
         def wait(self):
             return 1
 
-    import localm.plugins.gui.jobs as gj_mod
+    import localm.jobmanager as gj_mod
     monkeypatch_target = gj_mod.subprocess
     original_popen = monkeypatch_target.Popen
     monkeypatch_target.Popen = lambda *a, **k: _FakeFailingProc()

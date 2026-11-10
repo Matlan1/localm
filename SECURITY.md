@@ -187,16 +187,21 @@ localm process's own permissions rather than a sandbox:
   restricted session starts none of the project's MCP servers, plugin tools or
   skills, and cannot create or change anything inside a `.localcoder` directory,
   which configures later coder sessions.
-- **`browser`** lets the coding agent drive a real, automated browser session -
-  navigate, read, click, fill forms, screenshot, and read the page's console and
-  network activity - separate from `coder`/`coder:full`'s shell and file access,
+- **`browser`** lets its holder open and drive a real, automated browser on
+  this machine - directly through the Browser page and its `/api/browser/*`
+  routes, and, for a key that also holds `coder:full`, through the coding
+  agent's browser tools (a plain `coder` session never browses) - navigate,
+  read, click, fill forms, screenshot, and read the page's console and network
+  activity. It is separate from `coder`/`coder:full`'s shell and file access,
   so a key can be granted one without the other. Every request the driven page
   makes, including images and scripts it pulls in on its own and every hop of a
   redirect, is checked against the same outbound network policy as
   `fetch_url`/`web_search`, and a WebSocket connection is refused rather than
   relayed. See [docs/network.md](docs/network.md).
-- **`rag`** indexing over the HTTP API is confined to your home folder, the
-  working directory, and any folders you explicitly allow, and always refuses
+- **`rag`** indexing over the HTTP API is confined, by default, to your home
+  folder, the working directory, and any folders you explicitly allow (with the
+  indexing mode switched to `blacklist` it is allowed everywhere except the
+  folders you deny), and in both modes always refuses
   credential folders (`~/.ssh`, ...) wherever they appear, so an API client
   cannot index-and-read arbitrary system files. The localm data directory is
   NOT specially excluded from that confinement - if it falls within an allowed
@@ -206,11 +211,15 @@ localm process's own permissions rather than a sandbox:
   The `localm rag` CLI is not bound by that folder policy (a local user can already read
   their own files) but it refuses the same credential folders, UNC and device paths,
   and mapped network drives when that setting is off.
-  A `rag`-scoped key can still read documents under the allowed roots back through a
-  query, so issue one only to clients you trust. A key can also be confined to a
+  A `rag`-scoped key can read back, through a query, every document in every
+  collection on this server (ones indexed from the terminal and ones other
+  clients uploaded included) unless the key is confined with `rag_roots`, so
+  issue one only to clients you trust. A key can also be confined to a
   specific folder allowlist at mint time (`rag_roots`) instead of that default
   reach - which REPLACES it rather than narrowing it, so it can point at a folder
-  outside the default reach too, and only the owner key may grant it.
+  outside the default reach too, and over the API only the owner key (or a key
+  holding `admin`) may grant it; `localm key create --rag-root` does the same
+  from this machine's terminal.
 - **`image` / `video` / `music`** read a source image for img2img only from the
   uploads folder and the generated-media galleries - never the rest of the data
   directory (which holds your owner key and sessions) and never the localm
@@ -231,17 +240,19 @@ localm process's own permissions rather than a sandbox:
   curated ComfyUI model, re-pointing a registered model at a moved file by
   naming its new server-side path, and moving a generated media file out of
   the data directory (see above). Without it, a key holding those scopes is
-  confined to
-  HuggingFace-by-name pulls and the folders localm already manages. It is a
+  confined to remote pulls (a HuggingFace repo, a CivitAI version id or an
+  http(s) URL, each subject to the network policy) and the folders localm
+  already manages. It is a
   per-route gate on those routes, not a blanket property of every scope.
-- **Installing a plugin** (a store name, or a third-party directory via
-  `localm plugin install <path>` / `POST /api/plugins/install-external`)
+- **Installing a third-party plugin** from a directory
+  (`localm plugin install <path>` / `POST /api/plugins/install-external`)
   refuses a source tree containing any symlink or Windows junction, so a
   malicious plugin source cannot smuggle a file's contents out through a link
-  or drive a large copy through a self-referencing cycle.
+  or drive a large copy through a self-referencing cycle. (A plugin installed
+  by its store name is copied from localm's own shipped files.)
 - **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
-  are privileged and are never granted implicitly: an owner-authenticated
-  `POST /v1/keys` call, or `localm key create --allow-privileged` from this
+  are privileged and are never granted implicitly: a `POST /v1/keys` call made
+  with the owner key (or a key holding `admin`), or `localm key create --allow-privileged` from this
   machine's terminal, must ask for one deliberately.
 
 These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
@@ -253,8 +264,10 @@ clients you trust.
 - **A model name from the API, an MCP client, or a scheduled job must be one
   you have already registered** - it is never treated as a filesystem path, so
   a request cannot point the server at an arbitrary folder (which, for a
-  HuggingFace-format model, would otherwise run that folder's own bundled
-  Python unconditionally). Naming a model straight from a path on the command
+  HuggingFace-format model with "Allow model-bundled custom code" turned on,
+  would run that folder's own bundled Python). Two owner-only settings also
+  take a path: the draft model for speculative drafting and the coder's local
+  reviewer model. Naming a model straight from a path on the command
   line (`localm run D:\models\foo.gguf`, `localm gui <path>`, `localm mcp
   --model <path>`) is unchanged and still allowed - you typed it yourself.
 - **A model's own bundled code does not run just because you loaded it.**
@@ -262,7 +275,8 @@ clients you trust.
   ships it runs on the classes transformers has for it, without its code,
   and is refused with an explanation when there are none. The owner-only "Allow
   model-bundled custom code" setting (Settings > Model) turns it back on
-  for a model you trust.
+  for a model you trust. A few model types whose bundled code targets an older
+  transformers always run on transformers' own classes, whatever the setting.
 - **A downloaded model or vision-projector filename** cannot resolve to
   something other than the plain file it appears to be: a repo-supplied name
   is rejected if it contains a colon (which can open a hidden Windows
@@ -304,11 +318,17 @@ this section states the security properties and, more importantly, their edges.
   normal, unchecked ComfyUI deployments - treat the policy as governing the
   paths named above, not as a blanket statement about every socket localm
   opens. The embedding-model and Whisper downloads described below are
-  another: they respect `net_mode` (including `off`) but fetch from a
-  **fixed, hardcoded repository** named by localm's own code rather than a
-  caller-supplied URL, so they never call `check_url` and are not subject to
-  the domain lists, the SSRF guard, or the DNS-rebinding pin - none of which
-  a fixed destination needs.
+  another: they respect `net_mode` (including `off`) and check the Hugging Face
+  endpoint against the policy (`check_url`: the domain lists and the address
+  check) before fetching. The repository is a **fixed, hardcoded** one named
+  by localm's own code rather than a caller-supplied URL, and the transfer
+  runs inside `huggingface_hub`, without the per-hop check or the
+  DNS-rebinding pin. The same holds for the compute kernel transformers
+  fetches from the Hub when a checkpoint's quantization needs one (FP8 on a
+  GPU that runs it natively, mxfp4, eetq, fbgemm_fp8, metal): the Hub endpoint
+  is checked against the policy first (`off` and the domain lists refuse it,
+  `ask` and `allow` let it through without a prompt); every other model load
+  keeps Hub kernels blocked.
 - **No redirect off HTTPS, on any of them.** Separate from the policy above and
   narrower: every outbound client that uses localm's shared verified opener
   (setup-llama's runtime download and its GitHub and PyPI lookups, the update
@@ -339,7 +359,10 @@ this section states the security properties and, more importantly, their edges.
   downloads you trigger yourself proceed under `off`: model pulls and
   HuggingFace search, the vision-projector, voice, embedding-model, browser-build
   and TTS model fetches, and the native runtime downloads (`localm setup-llama`,
-  `localm setup-sdcpp`, `localm setup-music`). It never applies to model-initiated access (the
+  `localm setup-sdcpp`, `localm setup-music`), and the Python package installs localm
+  starts (a plugin's dependencies, the managed ComfyUI's packages, the PyTorch step of an
+  update; an update's own dependency step also runs under `update_ignore_net_policy`).
+  It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
   by `net_mode` alone. Some paths never consult `net_mode` at all: the
   bug-report upload (sent only when you press Send), and requests to your
@@ -426,7 +449,11 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   build. An update can carry a new set of keys (for example a new release key); it
   is accepted only when it is numbered higher than the set in use and signed by two
   of the three current recovery keys, and is then kept in the data directory
-  (`updates/trust.json`) and used from then on. A lower-numbered set is refused, so
+  (`updates/trust.json`, with the sets accepted before it in `updates/trust-chain.json`)
+  and used from then on. Each time it is read, the saved set is checked again from the
+  built-in keys forward: every step must be signed by two recovery keys of the set
+  before it, and a saved set that does not chain to the built-in keys stops updates
+  with an error naming the file. A lower-numbered set is refused, so
   a replaced key cannot be brought back by replaying an old one. A refused update
   leaves the keys in use unchanged (an older version installed by choice saves a
   correctly signed new set during its signature check, before its other checks),
@@ -451,6 +478,25 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   uses the `uv` this install found instead.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.
+- **Python dependencies come from the release's lock.** When an update changes
+  localm's dependencies, its dependency step installs them with `uv sync --frozen`
+  from the `uv.lock` the signed build carries: exact versions, and each downloaded file
+  is checked against the SHA-256 the lock records. A plugin's dependencies are
+  installed the same way (`--require-hashes`, at the locked versions) when the install
+  has a `uv.lock` and uv. Installs no lock covers use the package index over HTTPS
+  without hash checking: a plugin dependency install with no `uv.lock` or no uv (it
+  says so as it runs), the managed ComfyUI's packages (ComfyUI's own requirements and
+  PyTorch from the PyTorch index), the PyTorch step setup runs and an update repeats,
+  and the first install by `setup.bat` / `setup.sh`, which resolves from the
+  `pyproject.toml` minimum versions.
+- **Native runtime downloads.** The llama.cpp runtime archives of the release localm
+  pins are checked against SHA-256 values compiled into localm; when the release
+  listing reports a different digest for one of them, the download is refused. For a
+  release localm does not pin (`localm setup-llama --tag ...`) the digest comes from
+  the same release listing as the file, and when the listing has none the download is
+  installed with a warning that it is unverified (pass `--sha256` to pin one). The
+  stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
+  against pinned SHA-256 values.
 - **Your data is never in the swap.** The updater never touches the venv, `.git`,
   your data directory (models, config, sessions), or `.localcoder`; provisioned
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
