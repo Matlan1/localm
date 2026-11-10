@@ -106,6 +106,7 @@ from localm.setup_llama.library_files import (
     blas_kernel_problems, _copy_blas_library_dirs, _LLAMA_CPP_MIT_NOTICE,
     KERNEL_PACKS_MARKER, kernel_packs_missing,
     _LICENSE_NAME_PREFIXES, _copy_license_files, _safe_is_file, _copy_binaries,
+    LLAMA_CPP_LICENSE, _license_dest_name, _place_license_file,
 )
 from localm.setup_llama.runtime_dir import (
     _platform_key, _machine_arch, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
@@ -186,6 +187,7 @@ __all__ = [
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
+    "LLAMA_CPP_LICENSE", "_license_dest_name", "_place_license_file",
     "CPU_OVERLAY_FAILED_MARKER", "cpu_overlay_failed", "rocm_build_is_current",
     "_CUDA_LINE",
     "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_CUDA_RUNTIME_PIN", "_cuda_setup_dialogue",

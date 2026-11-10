@@ -139,7 +139,7 @@ WIN_CPU = {"llama.dll": b"llama@cpu", "ggml.dll": b"ggml@cpu", "ggml-cpu.dll": b
 WIN_CPU_FILES = [".gitignore", ".gitkeep", ".localm-backend", "LICENSE.llama-cpp",
                  "ggml-cpu.dll", "ggml.dll", "llama.dll"]
 WIN_CUDA = {"llama.dll": b"llama@cuda", "ggml.dll": b"ggml@cuda", "ggml-cuda.dll": b"ggml-cuda",
-            "LICENSE": b"UPSTREAM LICENSE TEXT"}
+            "LICENSE-LLVM-OpenMP": b"LLVM OPENMP LICENSE TEXT"}
 WIN_CUDART = {"cudart64_12.dll": b"cudart", "cublas64_12.dll": b"cublas",
               "cublasLt64_12.dll": b"cublasLt"}
 LINUX_CPU = {"build/bin/libllama.so": b"libllama", "build/bin/libggml-base.so.0": b"base",
@@ -709,6 +709,30 @@ def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
     assert sl.check_runtime_update()["newer"] is False
 
 
+def test_amd_rocm_cpu_overlay_keeps_the_openmp_license(world):
+    """Upstream's Windows CPU zip carries LICENSE-LLVM-OpenMP beside libomp.dll;
+    the overlay that copies libomp.dll copies that license with it."""
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, files={**ROCM_CPU, "LICENSE-LLVM-OpenMP": b"LLVM OPENMP"})
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert (world.lib / "libomp.dll").read_bytes() == b"openmp"
+    assert (world.lib / "LICENSE.llvm-openmp").read_bytes() == b"LLVM OPENMP"
+    assert world.marker() == f"amd-rocm {sl._ROCM_BUILD}\n"
+
+
+def test_amd_rocm_cpu_overlay_rollback_removes_the_openmp_license(world):
+    _amd_rocm_release(world)
+    _rocm_cpu_overlay(world, files={**ROCM_CPU, "LICENSE-LLVM-OpenMP": b"LLVM OPENMP"})
+    world.probes = [(0, ""),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found")]
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert not (world.lib / "libomp.dll").exists()
+    assert not (world.lib / "LICENSE.llvm-openmp").exists()
+    assert world.marker() == f"amd-rocm {ROCM}\n"
+
+
 def test_amd_rocm_cpu_overlay_copies_the_legacy_openmp_runtime_name(world):
     _amd_rocm_release(world)
     files = {k: v for k, v in ROCM_CPU.items() if k != "libomp.dll"}
@@ -854,9 +878,11 @@ def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, l
               f"Downloading {urls[cudart]}",
               "OK - cuda runtime loads on this machine.")
     assert world.requests == [f"{API}/{UPSTREAM}/releases/tags/{PIN}", urls[build], urls[cudart]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.nvidia-cuda",
-                             "cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll",
-                             "ggml-cuda.dll", "ggml.dll", "llama.dll"]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.llvm-openmp",
+                             "LICENSE.nvidia-cuda", "cublas64_12.dll", "cublasLt64_12.dll",
+                             "cudart64_12.dll", "ggml-cuda.dll", "ggml.dll", "llama.dll"]
+    assert (world.lib / "LICENSE.llama-cpp").read_text(encoding="utf-8") == sl._LLAMA_CPP_MIT_NOTICE
+    assert (world.lib / "LICENSE.llvm-openmp").read_bytes() == b"LLVM OPENMP LICENSE TEXT"
     assert ((world.lib / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
             == sl.NVIDIA_CUDA_LICENSE_NOTICE)
     assert world.marker() == f"cuda {PIN}\n"
