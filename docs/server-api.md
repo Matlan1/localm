@@ -38,6 +38,17 @@ Ollama.
 The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
 on the same port; see [ollama-api.md](ollama-api.md).
 
+The server answers only to its own names: `localhost`, loopback addresses and,
+on a network bind, its IP addresses, host name, mDNS and Tailscale names and
+certificate names. A request with any other `Host` gets `400` with
+`{"detail": ..., "error": ...}` (both carry the same message, which names the
+refused host and the fix) before any route runs. A client that reaches localm
+under another name, such as a container calling `http://host.docker.internal:8642`
+or a reverse proxy that forwards its own host name, needs that name in the
+`allowed_hosts` setting or the `LOCALM_ALLOWED_HOSTS` environment variable,
+then a restart; see [docker.md](docker.md#a-client-in-a-container-hostdockerinternal)
+and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
+
 Open mode does not open the management routes. With no key configured, every
 state-changing request and every `GET` under `/api/` or `/v1/` outside the
 inference routes and the routes above that carry their own credential still
@@ -947,7 +958,7 @@ Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. These settings widen a trust boundary and are hidden from, and refused for, a
 non-owner `config:write` key - only an `admin`-scoped key or the open-mode
-owner may read or change them: `allow_network_drives`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
+owner may read or change them: `allow_network_drives`, `allowed_hosts`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_output_dir`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `memory_recall_in_privacy`, `memory_recall_in_privacy_chat`, `memory_recall_in_privacy_coder`, `metrics_enabled`, `mode`, `net_allow`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_mode`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `temp_location`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write

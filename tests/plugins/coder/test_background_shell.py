@@ -1151,6 +1151,7 @@ def test_a_failed_taskkill_is_reported_and_falls_through(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 128, b"", b'ERROR: The process "1234" not found.'))
     swept = []
@@ -1177,6 +1178,7 @@ def test_a_taskkill_that_SUCCEEDED_is_silent(tmp_path, make_registry, monkeypatc
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run",
                         lambda argv, **kw: _sp.CompletedProcess(argv, 0, b"", b""))
     swept = []
@@ -1205,6 +1207,7 @@ def test_the_benign_taskkill_descendant_race_is_not_flagged_unexplained(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 255, b"",
         b'ERROR: The process with PID 35352 (child process of PID 14540) could '
@@ -1235,6 +1238,7 @@ def test_a_genuinely_different_taskkill_failure_is_still_flagged_unexplained(
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")
 
+    monkeypatch.setattr("localm.sysprog.find", lambda name: name)
     monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
         argv, 1, b"", b"ERROR: Access is denied."))
 
@@ -1467,6 +1471,7 @@ def test_a_failed_taskkill_after_a_clock_step_is_not_an_identity_mismatch(
     try:
         with job._lock, monkeypatch.context() as m:
             step_the_clock(m, a_forward_step_past_boot())
+            m.setattr("localm.sysprog.find", lambda name: name)
             m.setattr(bg.subprocess, "run", _taskkill_exits_255)
             m.setattr(job, "_kill_via_handle", lambda **kw: handle_calls.append(kw))
             job._terminate(force=False)

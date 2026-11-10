@@ -499,8 +499,13 @@ def _rag_embed_fn():
         emb = get_embedder()
         return emb.embed if emb is not None else None
     except Exception as e:
-        logger.debug("jobs: rag embedder resolution failed (%s); "
-                     "re-syncing lexical-only", e)
+        from localm.inference.load_lease import LoadBusyError
+        if isinstance(e, LoadBusyError):
+            logger.warning("jobs: the embedding model is not loaded yet (%s); "
+                           "re-syncing lexical-only", e)
+        else:
+            logger.debug("jobs: rag embedder resolution failed (%s); "
+                         "re-syncing lexical-only", e)
         return None
 
 
