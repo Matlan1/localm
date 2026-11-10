@@ -70,6 +70,7 @@ audit log). They are not the whole of what localm writes to disk. A few
 kinds of data are explicit, deliberate assets - like a file you save
 yourself - and are written in every session mode, privacy included:
 
+- **The management log.** `<data dir>/logs/management.jsonl` records that a key was created or revoked, a login was refused, an update was applied or a setting was saved, without any key, setting value or conversation content (see [The management log](#the-management-log-written-in-every-mode)). It is written in every session mode.
 - **Scheduled job results.** Every run of a chat or coder job writes its
   prompt, the full reply, status, and timing to
   `<data dir>/jobs/results/<job_id>/<timestamp>.json`, on its own schedule,
