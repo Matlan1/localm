@@ -194,8 +194,6 @@ def test_files_without_a_final_newline_still_give_an_applicable_multifile_patch(
     _run(agent, "edit_file", path="other.txt", old="two", new="three")
     diff = agent.flush_patch()
     assert "\\ No newline at end of file" in diff
-    assert "---" not in "".join(
-        line for line in diff.splitlines() if line.startswith(("-", "+")) and "a/" not in line and "b/" not in line and line[1:2] == "-")
     check = _git_apply_check(project, diff)
     assert check.returncode == 0, check.stderr
 
@@ -233,4 +231,5 @@ def test_grep_and_search_replace_see_a_file_created_in_the_session(project):
                 glob="**/*.py").ok
     diff = agent.flush_patch()
     assert "+def multiply(a, b):" in diff
-    assert "--- /dev/null" in diff or "--- a/newmod.py" in diff
+    assert "--- /dev/null" in diff
+    assert _git_apply_check(project, diff).returncode == 0

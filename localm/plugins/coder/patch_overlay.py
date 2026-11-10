@@ -27,6 +27,7 @@ class PatchOverlay:
         self._original: dict[str, str] = {}
         self._current: dict[str, str] = {}
         self._labels: dict[str, str] = {}
+        self._existed: dict[str, bool] = {}
         self._lock = threading.RLock()
 
     def _key(self, path: Path | str) -> str:
@@ -67,6 +68,7 @@ class PatchOverlay:
             if key not in self._original:
                 self._original[key] = read_old_content(self.cwd, str(path))
                 self._labels[key] = self._label(path)
+                self._existed[key] = Path(key).is_file()
             self._current[key] = new_text
 
     def diff(self) -> str:
@@ -76,14 +78,15 @@ class PatchOverlay:
         by git's "\\ No newline at end of file" marker, so the diffs of several
         files concatenate into one patch ``git apply`` accepts."""
         with self._lock:
-            items = [(self._labels[k], o, self._current[k])
+            items = [(self._labels[k], o, self._current[k], self._existed[k])
                      for k, o in self._original.items()]
         chunks = []
-        for label, original, current in items:
+        for label, original, current, existed in items:
             for line in difflib.unified_diff(
                     original.splitlines(keepends=True),
                     current.splitlines(keepends=True),
-                    fromfile=f"a/{label}", tofile=f"b/{label}"):
+                    fromfile=f"a/{label}" if existed else "/dev/null",
+                    tofile=f"b/{label}"):
                 chunks.append(line if line.endswith("\n")
                               else line + "\n\\ No newline at end of file\n")
         return "".join(chunks)
@@ -117,6 +120,7 @@ class PatchOverlay:
             self._original.clear()
             self._current.clear()
             self._labels.clear()
+            self._existed.clear()
 
 
 def _glob_regex(glob: str) -> re.Pattern[str]:
