@@ -2647,7 +2647,7 @@ export const I18N_EN = {
   "settings.server.shutdownButton": "Shut down server",
   "settings.server.restartTitle": "Restart the server?",
   "settings.server.restartBody":
-    "This restarts the LocaLM server (the model is unloaded first, then reloaded). It will be briefly unavailable, then reconnect automatically.",
+    "This restarts the LocaLM server with the command it was started with (the loaded model is unloaded, and is loaded again only if the server was started with it). It will be briefly unavailable, then reconnect automatically.",
   "settings.server.restartConfirm": "Restart",
   "settings.server.restartingToast": "Server restarting…",
   "settings.server.restartFailed": "Could not restart: {message}",
