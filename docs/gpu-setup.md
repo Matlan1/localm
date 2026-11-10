@@ -83,7 +83,11 @@ By default you get the newest upstream release localm has confirmed works
 (`default`); an upstream release that turns out broken on your hardware is exactly
 what `--rollback` is for. Both `--tag` and `--rollback` stick, including across
 `localm update`. `localm doctor` shows which build is installed and whether it is
-pinned.
+pinned. With no `--backend`, `--tag` and `--rollback` act on the backend that is
+installed. The `amd-rocm` backend takes neither: its build is fixed by the localm
+release, so a pin leaves it as it is and `--rollback` is refused. Naming the
+backend that is already installed, with no `--tag`, asks before it downloads the
+same build again; add `--force` to skip the question.
 
 The same actions are in the GUI under **Settings -> Updates -> Inference
 runtime**: a **Check for runtime update** button (compares what is installed

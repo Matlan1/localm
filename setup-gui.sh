@@ -44,6 +44,14 @@ echo
 echo "  LocaLM graphical setup"
 echo
 
+# A headless box (no DISPLAY) has no window to show: say so and point at the
+# console installer, before any question is asked or uv is installed.
+if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
+    echo "      Use the console installer instead:  ./setup.sh"
+    exit 1
+fi
+
 # ---- portable vs shared: where localm's Python tooling lives ----------------
 # The question setup.sh asks, asked once, here. The window reads the answer from
 # LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV, and
@@ -147,14 +155,6 @@ fi
 # ---- open the installer window ----------------------------------------------
 # --no-project so uv never resolves this repo as its own project, and an explicit
 # --python so the interpreter is the managed 3.12 the install targets.
-#
-# A headless box (no DISPLAY) has no window to show: say so and point at the
-# console installer rather than failing with a tkinter traceback.
-if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "  [!] No graphical display was found (DISPLAY/WAYLAND_DISPLAY are unset)."
-    echo "      Use the console installer instead:  ./setup.sh"
-    exit 1
-fi
 
 export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."
