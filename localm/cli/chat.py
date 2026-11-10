@@ -481,11 +481,20 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 if target:
                     from ..auth import resolve_bearer_token
                     from ..inference.http_engine import (
-                        HttpEngine, remote_model_status)
+                        HttpEngine, remote_model_status, served_model_is_requested)
                     _token = resolve_bearer_token(target.get("token"))
-                    # The server keys its startup model by its display name,
-                    # which differs from a path typed on the command line.
+                    # Addresses the model by the name the server reports for it.
                     _active = remote_model_status(target["base_url"], _token)[1]
+                    if _active and model and not served_model_is_requested(
+                            target["base_url"], _token, _active, model):
+                        console.print(
+                            f"[red]The localm server that came up here serves "
+                            f"[bold]{escape(_active)}[/bold], not the requested "
+                            f"[bold]{escape(model)}[/bold].[/red]\n"
+                            f"[dim]To run {escape(model)}, re-run with "
+                            f"[bold]--no-server[/bold] (loads it in this "
+                            f"process).[/dim]")
+                        sys.exit(1)
                     engine = HttpEngine(
                         target["base_url"],
                         token=_token,

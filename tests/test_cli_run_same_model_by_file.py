@@ -265,3 +265,30 @@ def test_gui_by_path_of_a_different_file_is_refused(
     assert result.exit_code == 1, result.output
     assert "cannot apply" in flat
     assert "attaching" not in flat
+
+
+def test_run_autostart_refuses_a_server_that_serves_a_different_model(
+        monkeypatch, stand_in, model_file, tmp_path):
+    srv = stand_in(active="qwen2.5-0.5b",
+                   detail={"id": "qwen2.5-0.5b", "path": "qwen.gguf",
+                           "size_bytes": 999, "sha256": None})
+    engine_spy = MagicMock(name="HttpEngine")
+    monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: ".")
+    monkeypatch.setattr("localm.inference.http_engine.HttpEngine", engine_spy)
+    monkeypatch.setattr("localm.audit.effective_mode",
+                        lambda *a, **k: SessionMode.LOG)
+    calls = {"n": 0}
+
+    def attach_target(*a, **k):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else {"base_url": srv.base_url, "token": None}
+
+    monkeypatch.setattr("localm.instances.attach_target", attach_target)
+    monkeypatch.setattr("subprocess.Popen", lambda cmd, **k: None)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+
+    result = CliRunner().invoke(run, [str(model_file), "-p", "hi"])
+    flat = _flat(result.output)
+    assert result.exit_code == 1, result.output
+    assert not engine_spy.called
+    assert "qwen2.5-0.5b" in flat and "not the requested" in flat

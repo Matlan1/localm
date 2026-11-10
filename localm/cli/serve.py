@@ -71,14 +71,14 @@ def serve(model, host, port, ctx, gpu_layers, no_model, mmproj, device, no_tls, 
     from ..plugins.gui.cli import FORWARDED_EXPLICIT_KEY, main as gui_main
     from click.core import ParameterSource
 
-    ctx = get_current_context()
-    # Records which of serve's options came from the command line, so the gui
-    # command's attach-conflict check sees them as explicit.
-    ctx.meta[FORWARDED_EXPLICIT_KEY] = frozenset(
-        p.name for p in ctx.command.params
-        if p.name and ctx.get_parameter_source(p.name) == ParameterSource.COMMANDLINE)
+    cctx = get_current_context()
+    # Records the names of serve's options given on the command line in
+    # cctx.meta[FORWARDED_EXPLICIT_KEY], read by the gui command's _explicit.
+    cctx.meta[FORWARDED_EXPLICIT_KEY] = frozenset(
+        p.name for p in cctx.command.params
+        if p.name and cctx.get_parameter_source(p.name) == ParameterSource.COMMANDLINE)
     # Invokes the gui plugin's command as 'localm gui --api-mode --no-browser'.
-    ctx.invoke(
+    cctx.invoke(
         gui_main,
         model=model,
         host=host,

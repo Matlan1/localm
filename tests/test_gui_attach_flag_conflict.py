@@ -189,3 +189,26 @@ def test_serve_forwarded_defaults_are_not_conflicts(running):
     assert result.exit_code == 0, result.output
     assert "attaching" in flat
     assert "--api-mode" not in flat
+
+
+def test_serve_forwards_its_ctx_value_as_the_context_length(monkeypatch):
+    """`serve -c 4096` hands the gui command the integer 4096 as ctx."""
+    import click
+    seen = {}
+
+    @click.command()
+    @click.pass_context
+    def fake_gui(_c, **kw):
+        seen.update(kw)
+
+    for name in ("model", "host", "port", "ctx", "gpu_layers", "no_browser",
+                 "no_model", "pull_spec", "debug", "mode", "insecure", "no_tls",
+                 "tls_cert", "tls_key", "show_qr", "project", "force_new",
+                 "isolated", "api_mode", "mmproj", "device"):
+        fake_gui.params.append(click.Option([f"--{name}"]))
+    monkeypatch.setattr(guicli, "main", fake_gui)
+    result = _serve(["some-model", "-c", "4096", "-g", "0"])
+    assert result.exit_code == 0, result.output
+    assert seen["ctx"] == 4096
+    assert seen["gpu_layers"] == 0
+    assert seen["model"] == "some-model"

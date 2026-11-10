@@ -1991,9 +1991,9 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
         not_ours_and_still_alive = not launched_by_us and is_comfy_confirmed(url)
     if not_ours_and_still_alive:
         return True, (
-            "Aborted the in-flight render and cleared the queue, but localm "
-            "did not launch this ComfyUI, so nothing was restarted - restart "
-            "it where you started it."
+            "Aborted the in-flight render, but localm did not launch this "
+            "ComfyUI, so nothing was restarted - restart it where you started "
+            "it."
         )
     return ensure_comfy(api_url=api_url, on_progress=on_progress,
                         wait_seconds=wait_seconds, launch_cmd=launch_cmd,

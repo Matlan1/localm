@@ -2331,7 +2331,9 @@ def unload_cmd(model, force):
         else:
             console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
                           "by a running request and was not unloaded.[/yellow] Try "
-                          "again when it finishes.")
+                          "again when it finishes"
+                          + (", or re-run with [bold]--force[/bold]." if not force
+                             else "."))
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
