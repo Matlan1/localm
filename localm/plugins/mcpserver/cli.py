@@ -23,6 +23,16 @@ import click
               help="Also expose memory_append, letting the client write to your "
                    "durable memory. Off by default: enabling the memory plugin is "
                    "not consent for an external client to write into it.")
+@click.option("--coder-shell", is_flag=True,
+              help="Let run_coder_task auto-approve shell commands when the "
+                   "client passes yes=true (or the project config sets "
+                   "auto_approve). Off by default: without it the coder may "
+                   "write files but every shell call is denied.")
+@click.option("--coder-root", type=click.Path(file_okay=False, exists=True,
+                                              path_type=str),
+              default=None,
+              help="Only let run_coder_task work in this folder or below "
+                   "[default: any folder].")
 @click.option("--share-loaded-models", "share_loaded", is_flag=True,
               help="Answer chat with a model another localm instance on this "
                    "machine already has loaded, instead of loading a second copy "
@@ -31,8 +41,8 @@ import click
                    "chat no more than this machine's chat persistence allows.")
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
-def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
-         print_config):
+def main(model, no_images, no_coder, no_memory, memory_write, coder_shell,
+         coder_root, share_loaded, print_config):
     """Run localm as an MCP server (stdio transport).
 
     MCP clients launch this command on demand - add it to the client's
@@ -51,6 +61,9 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
     (unless --no-images), run_coder_task (coder plugin active, unless
     --no-coder), and memory_recall (memory plugin active, unless --no-memory).
     remove_model and uninstall_plugin are marked destructive.
+
+    run_coder_task never auto-approves shell commands unless you pass
+    --coder-shell, and --coder-root DIR confines the folders it may work in.
 
     memory_append is NOT exposed unless you pass --memory-write: enabling the
     memory plugin turns on localm's own chat memory, which is a separate
@@ -71,6 +84,10 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
             args += ["--no-memory"]
         if memory_write:
             args += ["--memory-write"]
+        if coder_shell:
+            args += ["--coder-shell"]
+        if coder_root:
+            args += ["--coder-root", coder_root]
         if share_loaded:
             args += ["--share-loaded-models"]
         block = {
@@ -121,4 +138,5 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
     from .server import serve_stdio
     serve_stdio(model=model, enable_images=not no_images,
                 enable_coder=not no_coder, enable_memory=not no_memory,
-                enable_memory_write=memory_write, share_loaded=share_loaded)
+                enable_memory_write=memory_write, share_loaded=share_loaded,
+                coder_shell=coder_shell, coder_root=coder_root)

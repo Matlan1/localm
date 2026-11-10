@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The pure-ASGI transport middleware. Three are added after every
 BaseHTTPMiddleware handler so they wrap them all: the request-body cap, the
-disconnect signal and, outermost, the hang alarm's in-flight bookkeeping. One,
-the client-left answer, is added before every other middleware, so it is the
-innermost."""
+disconnect signal and, outermost, the hang alarm's in-flight bookkeeping. Two
+are added before every other middleware, so they are the innermost: the request
+privacy scope, then the client-left answer around it."""
 
 from __future__ import annotations
 
@@ -56,9 +56,67 @@ class ClientLeftMiddleware:
             await send({"type": "http.response.body", "body": b""})
 
 
+class RequestPrivacyMiddleware:
+    """Run a request whose session mode is privacy while the server's is not
+    (``http_server.request_session_mode``: an owner caller's
+    ``X-Localm-Session-Mode``, or its ``X-Client-Id`` surface) inside
+    ``audit.request_privacy``, from the route handler to the last byte of the
+    response. A mode that cannot be resolved counts as privacy and is logged
+    as a warning. The mode is resolved off the event loop, and only for a
+    request that sends ``X-Localm-Session-Mode`` or names the chat or coder
+    surface in ``X-Client-Id``; any other request has the server's mode."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    @staticmethod
+    def _may_narrow(scope) -> bool:
+        from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER, _CALLER_SURFACES
+        mode_name = SESSION_MODE_HEADER.lower().encode()
+        client_name = CLIENT_ID_HEADER.lower().encode()
+        for name, value in scope.get("headers") or ():
+            if name == mode_name:
+                return True
+            if name == client_name and (
+                    value.decode("latin-1").strip().lower() in _CALLER_SURFACES):
+                return True
+        return False
+
+    @staticmethod
+    def _is_privacy(scope) -> bool:
+        from localm.audit import SessionMode
+        try:
+            from starlette.requests import Request
+            return _hs.request_session_mode(Request(scope)) == SessionMode.PRIVACY
+        except Exception as e:   # noqa: BLE001
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("could not resolve the session mode of a request (%s: %s); "
+                         "treating it as privacy mode", type(e).__name__, e)
+            return True
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from fastapi.concurrency import run_in_threadpool
+        from localm.audit import request_privacy
+        private = (self._may_narrow(scope)
+                   and await run_in_threadpool(self._is_privacy, scope))
+        with request_privacy(private):
+            await self.app(scope, receive, send)
+
+
+def add_request_privacy(app: FastAPI) -> None:
+    """Add :class:`RequestPrivacyMiddleware`. Call before any other middleware
+    is added, so it runs in the task that runs the route handler and sends the
+    response body."""
+    app.add_middleware(RequestPrivacyMiddleware)
+
+
 def add_client_left_answer(app: FastAPI) -> None:
     """Add :class:`ClientLeftMiddleware`. Call before any other middleware is
-    added: it must sit inside every BaseHTTPMiddleware handler, which turns a
+    added, except :func:`add_request_privacy`: it must sit inside every
+    BaseHTTPMiddleware handler, which turns a
     handler's CancelledError into ``RuntimeError("No response returned.")``."""
     app.add_middleware(ClientLeftMiddleware)
 
