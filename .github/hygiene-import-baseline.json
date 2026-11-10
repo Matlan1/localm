@@ -58,6 +58,7 @@
     "plugins -> cli": 4,
     "portmux -> bugreport": 2,
     "portmux -> updater": 1,
+    "pyinstall -> netpolicy": 1,
     "rag -> inference": 3,
     "rag -> instances": 5,
     "rag -> netpolicy": 1,
