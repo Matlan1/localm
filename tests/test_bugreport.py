@@ -334,6 +334,21 @@ def test_scrub_secrets_keeps_a_flag_or_ordinary_value_with_spaces_around_the_equ
     assert bugreport._scrub_secrets(line) == line
 
 
+@pytest.mark.parametrize("line, expected", [
+    ("Authorization: Bearer CANARYLINE1AA Authorization: CANARYLINE2 "
+     "Authorization: Basic Q0FOQVJZTElORTM=",
+     "Authorization: <redacted> Authorization: <redacted> Authorization: <redacted>"),
+    ("Authorization: CANARYLINE4 X-Api-Key: CANARYLINE5",
+     "Authorization: <redacted> X-Api-Key: <redacted>"),
+    ("Authorization: CANARYLINE6 Proxy-Authorization: Basic CANARYLINE7",
+     "Authorization: <redacted> Proxy-Authorization: <redacted>"),
+    ("Authorization: user:CANARYLINE8 then it failed",
+     "Authorization: <redacted> then it failed"),
+])
+def test_scrub_secrets_several_headers_on_one_line_are_each_redacted(line, expected):
+    assert bugreport._scrub_secrets(line) == expected
+
+
 def test_scrub_secrets_authorization_redaction_ends_with_the_line():
     out = bugreport._scrub_secrets("Authorization: CANARYRAW1\nn_gpu_layers=35 threads=8")
     assert out == "Authorization: <redacted>\nn_gpu_layers=35 threads=8"

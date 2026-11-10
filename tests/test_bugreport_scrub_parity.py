@@ -88,6 +88,8 @@ _CORPUS = [
     "password = " + SECRET + " and OPENAI_API_KEY = " + SECRET,
     "has_token = false, require_auth = 1, key = value",
     "token_type: Bearer password = abc:" + SECRET,
+    "Authorization: Bearer abcdefgh Authorization: " + SECRET + " Authorization: Basic " + SECRET,
+    "Authorization: abc X-Api-Key: " + SECRET,
     '{"msg":"Authorization: Digest username=\\"u, v\\", realm=\\"R A\\", response=\\"'
     + SECRET + '\\""}',
     "level=error Authorization: Bearer " + SECRET + " status=401 path=/v1/chat",

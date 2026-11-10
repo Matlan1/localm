@@ -121,7 +121,9 @@ _HEADER_SECRET_RE = re.compile(
 # A quoted value, with backslash escapes and an optional one-letter prefix
 # (``b'...'``), goes whole (to the closing quote, or to the end of the line
 # when there is none) and the text after the closing quote is kept; so does a
-# ``[...]`` array. Any other value is an optional scheme word, one credential,
+# ``[...]`` array. Any other value is an optional scheme word, one credential
+# (never a ``Name:`` header label, so a second header on the same line keeps its
+# name for the next match),
 # and every further ``name=value`` parameter (spaces allowed around ``=``)
 # after a comma (Digest and
 # AWS4-HMAC-SHA256 carry several, with quoted values, plain or backslash-
@@ -141,6 +143,7 @@ _AUTH_HEADER_RE = re.compile(
     r"|\[[^\]\r\n]*\]?"
     r"|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+"
     r"|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?"
+    r"(?![A-Za-z0-9_-]+[\"']?:(?:\s|$))"
     r"(?:[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)"
     r"|[^\s,]+)"
     r"(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]*=[ \t]*(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)"
