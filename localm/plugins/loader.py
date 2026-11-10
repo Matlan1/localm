@@ -207,24 +207,34 @@ def _scan(root: Optional[Path]) -> tuple[list[PluginManifest], list[str], list[s
     return manifests, errors, warns
 
 
+def _entry_module_file(manifest: PluginManifest) -> Optional[Path]:
+    """The file of the manifest's entry module inside the plugin directory, or
+    None when there is none. A dotted name is followed into sub-packages only
+    when every part is an identifier."""
+    name = manifest.entry_module
+    candidates = [manifest.path / f"{name}.py", manifest.path / name / "__init__.py"]
+    parts = name.split(".")
+    if len(parts) > 1 and all(p.isidentifier() for p in parts):
+        nested = manifest.path.joinpath(*parts)
+        candidates += [nested.with_name(nested.name + ".py"), nested / "__init__.py"]
+    return next((c for c in candidates if c.is_file()), None)
+
+
 def import_plugin_module(manifest: PluginManifest):
     """
     Import the plugin's entry module from its directory and return the module
-    object. Raises :class:`PluginError` on failure and never leaves a
-    half-imported module behind in ``sys.modules``.
+    object. The module is ``<module>.py`` or ``<module>/__init__.py``; a dotted
+    name (``pkg.tools``) is ``pkg/tools.py`` or ``pkg/tools/__init__.py``.
+    Raises :class:`PluginError` on failure and never leaves a half-imported
+    module behind in ``sys.modules``.
     """
     module_name = f"_localm_plugin_{manifest.name.replace('-', '_')}"
-    module_file = manifest.path / f"{manifest.entry_module}.py"
-    if not module_file.is_file():
-        # Allow package-style entries: <module>/__init__.py
-        pkg_init = manifest.path / manifest.entry_module / "__init__.py"
-        if pkg_init.is_file():
-            module_file = pkg_init
-        else:
-            raise PluginError(
-                f"Plugin {manifest.name!r}: entry module "
-                f"{manifest.entry_module!r} not found in {manifest.path}"
-            )
+    module_file = _entry_module_file(manifest)
+    if module_file is None:
+        raise PluginError(
+            f"Plugin {manifest.name!r}: entry module "
+            f"{manifest.entry_module!r} not found in {manifest.path}"
+        )
 
     spec = importlib.util.spec_from_file_location(
         module_name, module_file,
