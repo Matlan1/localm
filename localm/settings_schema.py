@@ -40,6 +40,9 @@ MAX_GPU_SPLIT_INDEX = 127
 # localm/inference/http_server.py, both scanned on relevant requests.
 MAX_CORS_ORIGINS = 500
 
+# Sanity ceiling for allowed_hosts, the same as for cors_origins.
+MAX_ALLOWED_HOSTS = 500
+
 
 class Widget:
     TEXT     = "text"       # free-form single line (urls, names)
@@ -581,6 +584,12 @@ CORE_FIELDS: list = [
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
+                 group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
+    SettingField("allowed_hosts", Widget.TEXT, "Allowed host names",
+                 "Extra names this server answers to, for a reverse proxy or your own "
+                 "DNS name. Blank = only this machine's own names and addresses; "
+                 'comma-separated list; "*.example.com" covers one level; or "*" for '
+                 "any name, which turns the DNS-rebinding check off.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # A rename needs a restart: the name is also written into the HTTPS
     # certificate's SANs, so it is not display-only.
@@ -1741,6 +1750,8 @@ def _validate_one(key: str, val, field: SettingField, default):
                 f"mdns_name: {val!r} has no usable characters "
                 f"(need ASCII letters, digits, or hyphens)")
         return label
+    if key == "allowed_hosts":
+        return _coerce_allowed_hosts(val)
     if key == "cors_origins":
         # None | "*" | list of origins; a comma string becomes a list so the
         # server's CORS handling (which only honours "*"/list) actually applies.
@@ -1767,6 +1778,39 @@ def _validate_one(key: str, val, field: SettingField, default):
             _refuse_unsafe_path(key, s)
         return s or (None if nullable else "")
     raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+def _coerce_allowed_hosts(val):
+    """None (blank), "*", or a list of normalised host names (see
+    bindhost.normalize_host_name) from a list or a comma-separated string. An
+    entry that is not a host name raises ValueError naming it."""
+    from localm.bindhost import normalize_host_name
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple)):
+        if not all(isinstance(s, str) for s in val):
+            raise ValueError(f"allowed_hosts: expected a list of strings, got {val!r}")
+        entries = [s.strip() for s in val if s.strip()]
+    else:
+        s = str(val).strip()
+        if not s:
+            return None
+        if s == "*":
+            return "*"
+        entries = [p.strip() for p in s.split(",") if p.strip()]
+    if len(entries) > MAX_ALLOWED_HOSTS:
+        raise ValueError(
+            f"allowed_hosts: too many names ({len(entries)}), max {MAX_ALLOWED_HOSTS}")
+    out: list[str] = []
+    for entry in entries:
+        if entry == "*":
+            raise ValueError('allowed_hosts: "*" must be the whole value, not a list entry')
+        norm = normalize_host_name(entry)
+        if norm is None:
+            raise ValueError(f"allowed_hosts: {entry!r} is not a host name or address")
+        if norm not in out:
+            out.append(norm)
+    return out or None
 
 
 # Text-widget settings whose value is a host folder path (or a keyword).

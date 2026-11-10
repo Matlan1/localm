@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The kernel's security middleware: CORS, the origin / open-mode shell-token
 gate, the keyless network-bind gate, the security response headers (an
-enforcing CSP with a per-request nonce) and the API-docs disclosure guard.
+enforcing CSP with a per-request nonce), the API-docs disclosure guard and the
+Host header guard.
 
 ``create_app()`` adds them in that order. Each ``add_middleware`` wraps what was
-added before it, so a request meets the docs guard first and CORS last, and a
+added before it, so a request meets the Host guard first and CORS last, and a
 refusal from the origin gate still passes out through the security headers.
 Every local-trust decision here keys on ``app.state.bind_host`` (what the server
 bound to), never ``request.client.host``: behind portmux every peer is
@@ -12,14 +13,18 @@ bound to), never ``request.client.host``: behind portmux every peer is
 
 from __future__ import annotations
 
+import ipaddress
+import logging
 import secrets
-from typing import Any
+import socket
+from typing import Any, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import localm.inference.http_server as _hs
+from localm.bindhost import host_header_name, normalize_host_name
 from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
 from localm.inference import responses_protocol as _responses
@@ -490,3 +495,188 @@ def add_docs_loopback_gate(app: FastAPI) -> None:
             if not _hs._is_loopback_host(host):
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
         return await call_next(request)
+
+
+HOST_REFUSED_DETAIL = (
+    "Host not allowed: this server answers only to its own names and addresses. "
+    "To reach it through another name (a reverse proxy or your own DNS name), add "
+    "that name to the 'allowed_hosts' setting and restart localm.")
+
+_log = logging.getLogger("localm.security")
+
+def _ip_literal(name: str):
+    try:
+        return ipaddress.ip_address(name)
+    except ValueError:
+        return None
+
+
+def _is_loopback_name(name: str) -> bool:
+    """True for ``localhost``, a ``*.localhost`` name, or a loopback address."""
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    ip = _ip_literal(name)
+    return bool(ip is not None and ip.is_loopback)
+
+
+def _cert_dns_names(certfile: Optional[str]) -> set[str]:
+    """The DNS SANs of the PEM certificate at *certfile*, lowercased. Empty when
+    *certfile* is unset; an unreadable certificate is logged at WARNING and
+    contributes no names."""
+    if not certfile:
+        return set()
+    from pathlib import Path
+
+    from cryptography import x509
+
+    from localm import tls
+    try:
+        cert = x509.load_pem_x509_certificate(Path(certfile).read_bytes())
+        hosts, _ips = tls._cert_sans(cert)
+    except (OSError, ValueError) as exc:
+        _log.warning("Host check: could not read the certificate names from %s: %s",
+                     certfile, exc)
+        return set()
+    return {h.strip().lower().rstrip(".") for h in hosts if h and h.strip()}
+
+
+def own_host_names(certfile: Optional[str] = None) -> set[str]:
+    """This machine's own DNS names: its hostname (short and fully qualified),
+    ``<hostname>.local``, the mDNS name, the Tailscale names, and the DNS names
+    in the certificate at *certfile*. May block on name lookups."""
+    from localm import netname
+    names: set[str] = {"localhost"}
+    for lookup in (socket.gethostname, socket.getfqdn):
+        try:
+            found = lookup()
+        except OSError:
+            found = ""
+        found = (found or "").strip().lower().rstrip(".")
+        if found:
+            names.add(found)
+            names.add(found.split(".")[0])
+    names.update(netname.cert_hostnames())
+    names.update(_cert_dns_names(certfile))
+    return {n for n in names if n}
+
+
+def configured_allowed_hosts() -> tuple[frozenset[str], bool]:
+    """``(names, any_host)`` from the ``allowed_hosts`` setting: the normalised
+    names, and True when the setting is ``"*"``."""
+    from localm.config import load_config
+    raw = load_config().get("allowed_hosts")
+    if raw == "*":
+        return frozenset(), True
+    names = set()
+    if isinstance(raw, (list, tuple)):
+        for entry in raw:
+            norm = normalize_host_name(entry) if isinstance(entry, str) else None
+            if norm:
+                names.add(norm)
+    return frozenset(names), False
+
+
+class HostPolicy:
+    """The names a ``Host`` that is neither loopback nor a network-bind IP
+    literal may carry on one app: exact names, one-label wildcard suffixes
+    (``*.example.com`` matches ``a.example.com``), or any host."""
+
+    def __init__(self, names: frozenset[str], wildcards: frozenset[str],
+                 any_host: bool) -> None:
+        self.names = names
+        self.wildcards = wildcards
+        self.any_host = any_host
+
+    def allows(self, name: str) -> bool:
+        if self.any_host or name in self.names:
+            return True
+        head, _, rest = name.partition(".")
+        return bool(head and rest) and rest in self.wildcards
+
+
+def build_host_policy(bind_host: str, certfile: Optional[str]) -> HostPolicy:
+    """The policy for an app bound to *bind_host*: the ``allowed_hosts``
+    setting, plus on a network bind this machine's own names (see
+    :func:`own_host_names`) and *bind_host* itself."""
+    configured, any_host = configured_allowed_hosts()
+    names = set(configured)
+    if not _hs._is_loopback_host(bind_host):
+        names.update(own_host_names(certfile))
+        norm = normalize_host_name(bind_host)
+        if norm:
+            names.add(norm)
+    wildcards = frozenset(n[2:] for n in names if n.startswith("*.") and len(n) > 2)
+    return HostPolicy(frozenset(n for n in names if not n.startswith("*.")),
+                      wildcards, any_host)
+
+
+class HostHeaderGuard:
+    """Refuse an HTTP or WebSocket request whose ``Host`` header names a host
+    this server does not answer to, before any other middleware or route.
+
+    Enforced only when ``app.state.host_header_guard`` is true (``run_advertised``
+    sets it). Accepted: ``localhost``, ``*.localhost`` and loopback addresses on
+    every bind; on a network bind (``app.state.bind_host`` not loopback) also any
+    IP literal, this machine's own names and the certificate's names; on every
+    bind the ``allowed_hosts`` setting. The port is not compared. Refused:
+    anything else, and a missing, empty, repeated or malformed ``Host``. HTTP
+    gets a 400 JSON reply, a WebSocket a close before accept (code 1008). The
+    policy is built once per app, in a worker thread, the first time a name
+    needs it. The first refusal per app is logged at WARNING, later ones at
+    DEBUG."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        st = scope["app"].state
+        if not getattr(st, "host_header_guard", False):
+            await self.app(scope, receive, send)
+            return
+        values = [v for k, v in scope.get("headers") or () if k == b"host"]
+        name = (host_header_name(values[0].decode("latin-1"))
+                if len(values) == 1 else None)
+        if name is not None and await self._allowed(st, name):
+            await self.app(scope, receive, send)
+            return
+        self._log_refusal(st, name)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        resp = JSONResponse(status_code=400, content={"detail": HOST_REFUSED_DETAIL},
+                            headers={"X-Content-Type-Options": "nosniff",
+                                     "Cache-Control": "no-store"})
+        await resp(scope, receive, send)
+
+    @staticmethod
+    async def _allowed(st, name: str) -> bool:
+        if _is_loopback_name(name):
+            return True
+        bind_host = getattr(st, "bind_host", "127.0.0.1")
+        if not _hs._is_loopback_host(bind_host) and _ip_literal(name) is not None:
+            return True
+        policy = getattr(st, "host_policy", None)
+        if policy is None:
+            import anyio
+            policy = await anyio.to_thread.run_sync(
+                build_host_policy, bind_host, getattr(st, "tls_certfile", None))
+            st.host_policy = policy
+        return policy.allows(name)
+
+    @staticmethod
+    def _log_refusal(st, name: Optional[str]) -> None:
+        shown = repr(name) if name is not None else "a missing or malformed Host header"
+        if getattr(st, "host_refusal_logged", False):
+            _log.debug("refused a request for host %s", shown)
+            return
+        st.host_refusal_logged = True
+        _log.warning("refused a request for host %s: not a name of this server "
+                     "(add it to allowed_hosts to accept it)", shown)
+
+
+def add_host_header_guard(app: FastAPI) -> None:
+    """Add :class:`HostHeaderGuard`."""
+    app.add_middleware(HostHeaderGuard)

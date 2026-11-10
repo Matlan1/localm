@@ -41,6 +41,7 @@ _EFFECTIVE_CHAIN = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
     ("BaseHTTPMiddleware", "_keyless_network_gate"),
@@ -90,7 +91,9 @@ def test_transport_middleware_is_the_outermost_three():
     this order: request progress outermost (a request wedged in any inner
     layer still counts as in flight), then the disconnect signal (bound to the
     raw receive, which BaseHTTPMiddleware would mask), then the body cap (sees
-    the raw body stream before anything buffers it)."""
+    the raw body stream before anything buffers it). The Host header guard,
+    also pure ASGI, sits right inside them and outside every BaseHTTPMiddleware
+    handler."""
     chain = _effective_chain(create_app(None))
     first_base_http = next(i for i, (cls, _) in enumerate(chain)
                            if cls == "BaseHTTPMiddleware")
@@ -98,6 +101,7 @@ def test_transport_middleware_is_the_outermost_three():
         ("RequestProgressMiddleware", None),
         ("_DisconnectSignalMiddleware", None),
         ("_BodyStreamCapMiddleware", None),
+        ("HostHeaderGuard", None),
     )
 
 

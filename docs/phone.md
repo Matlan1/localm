@@ -112,6 +112,11 @@ home LAN a key plus built-in TLS is enough; for anything reachable from the
 internet use Tailscale or a TLS reverse proxy with a real certificate. See
 [network.md](network.md).
 
+localm answers only to its own addresses and names (the LAN IP, the `.local`
+names, the Tailscale names). If you reach it under another name, such as one set
+up in your router's DNS, add that name to `allowed_hosts` in Settings > Server
+and restart; otherwise the phone gets "Host not allowed".
+
 ## What localm does NOT do (on purpose)
 
 - **No native app-store app.** The PWA covers the phone experience without an
