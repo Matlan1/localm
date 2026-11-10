@@ -455,7 +455,7 @@ def test_a_native_video_job_streams_its_previews_as_frames_kept_only_in_memory(v
     assert all(e.get("type") != "frame" for e in job._history)
 
 
-def test_a_native_refusal_fails_the_job_before_any_vram_handover(video_app, monkeypatch):
+def test_a_native_refusal_is_a_400_before_any_job_or_vram_handover(video_app, monkeypatch):
     from fastapi.testclient import TestClient
     app, runner = video_app
     unloads, provisions = [], []
@@ -465,9 +465,8 @@ def test_a_native_refusal_fails_the_job_before_any_vram_handover(video_app, monk
     monkeypatch.setattr(sd_runtime, "provision", lambda *a, **k: provisions.append(a))
     with TestClient(app) as c:
         r = c.post("/api/video", json={"prompt": "p", "width": 100, "height": 96})
-        job = _wait_job(app, r.json()["job_id"])
-    assert job.status == "failed"
-    assert any("multiple of 16" in ln for ln in _lines(job))
+    assert r.status_code == 400
+    assert "multiple of 16" in r.json()["detail"]
     assert unloads == [] and provisions == [] and runner.loads == []
 
 

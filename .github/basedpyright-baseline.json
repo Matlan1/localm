@@ -3884,46 +3884,6 @@
                 }
             },
             {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 20,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 35,
-                    "endColumn": 40,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 36,
-                    "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 62,
-                    "endColumn": 67,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 33,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 16,
