@@ -208,6 +208,37 @@ def test_shim_patches_plain_function_node_sync_and_async(tmp_path):
     assert shim._patch_module(mod) is False
 
 
+def test_shim_source_never_calls_asyncio_iscoroutinefunction():
+    import ast
+    shim_path = _load_shim_module().__file__
+    tree = ast.parse(open(shim_path, encoding="utf-8").read())
+    hits = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "iscoroutinefunction"
+            and not (isinstance(n.value, ast.Name) and n.value.id == "inspect")]
+    assert hits == []
+
+
+def test_shim_wrapper_raises_no_deprecation_warning(tmp_path):
+    import subprocess
+    _import_fake(tmp_path, _BUGGY_SRC, "warnfree_mod")
+    shim_path = _load_shim_module().__file__
+    code = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('shim', {shim_path!r})\n"
+        "shim = importlib.util.module_from_spec(spec); spec.loader.exec_module(shim)\n"
+        f"sys.path.insert(0, {str(tmp_path)!r})\n"
+        "import warnfree_mod as m\n"
+        "assert shim._patch_module(m) is True\n"
+        "m.make_locked_method_func(m.PlainFnNode, 'execute', m.PlainFnNode)\n"
+        "m.make_locked_method_func(m.AsyncPlainFnNode, 'execute', m.AsyncPlainFnNode)\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-W", "error::DeprecationWarning", "-c", code],
+        capture_output=True, text=True, timeout=60,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert r.returncode == 0, r.stderr
+
+
 @pytest.mark.parametrize("src,name", [
     (_TOLERANT_SRC, "tolerant_mod"),
     (_WRONGSHAPE_SRC, "wrongshape_mod"),
