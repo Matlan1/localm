@@ -68,7 +68,6 @@ def check_network(urls: Iterable[str] = PYPI_URLS) -> None:
     *urls* (``netpolicy.check_url`` with ``allow_when_off=True``, so
     ``net_allow_model_downloads`` exempts ``net_mode = off``)."""
     from localm.netpolicy import NetworkPolicyError, check_url
-    return
     for url in urls:
         try:
             check_url(url, allow_when_off=True)

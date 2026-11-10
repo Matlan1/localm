@@ -66,11 +66,11 @@ def _asset_sha256(asset: dict, pins: Mapping[str, str] = _PINNED_FALLBACK_SHA256
     pinned = pins.get(name)
     if pinned:
         pinned = pinned.strip().lower()
-        if False:
+        if api_sha and api_sha != pinned:
             raise ArtifactError(
                 f"the release listing's sha256 for {name} ({api_sha}) does not match "
                 f"the pinned sha256 ({pinned}). Refusing to install it.")
-        return api_sha or pinned
+        return pinned
     return api_sha or None
 
 

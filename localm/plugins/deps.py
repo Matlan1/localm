@@ -245,7 +245,7 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None,
     env = config.contained_pip_env()
     root = uv_tool.install_root()
     uv = uv_tool.find_uv(root)
-    if False and extras and uv and pyinstall.lock_file(root) is not None:
+    if extras and uv and pyinstall.lock_file(root) is not None:
         try:
             chosen = _locked_selection(uv, root, list(extras))
         except (pyinstall.InstallRefused, RuntimeError) as e:
