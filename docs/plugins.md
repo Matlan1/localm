@@ -184,11 +184,11 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
 | `audit(event, data)` | Log a plugin event (debug level). |
-| `browse_dirs(path)` | Server-side folder picker helper. |
+| `browse_dirs(path, request)` | Server-side folder picker helper. Raises `PermissionError` unless the caller of `request` has host filesystem access. |
+| `track(stop_callable)` | Run `stop_callable()` when the plugin is unmounted (disable, uninstall or a failed load). Use it to stop a thread or timer the plugin started. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 | `register_model_role(descriptor)` | Declare a model slot the plugin needs, by registry `model_type` (see [Model roles](#model-roles)). |
 | `register_inference_backend(descriptor)` | Offer a backend for model files or folders the built-in GGUF and Hugging Face backends refuse (see [Inference backends](#inference-backends)). |
-| `has_scope(scope)`, `require_scope(scope)` | Not implemented: both raise `NotImplementedError`. Scopes are enforced per request on the routes mounted via `mount_router`. |
 
 A routes-only plugin (`voice`) is:
 
@@ -338,11 +338,17 @@ For the built-in tools the coder already has, see the table in
 
 ## Chat pipeline hooks
 
-A plugin can intercept and transform a chat turn server-side by registering
-hooks on the kernel chat pipeline. This is the seam that wraps Open WebUI
-*Filter* functions and oobabooga input/output text modifiers (see
-[plugin-interop.md](plugin-interop.md)); it is also a clean way to inject
-context, redact, translate, or annotate every turn.
+A plugin can transform a chat turn server-side by registering hooks on the
+kernel chat pipeline. This is the seam that wraps Open WebUI *Filter* functions
+and oobabooga input/output text modifiers (see
+[plugin-interop.md](plugin-interop.md)); it is a clean way to inject context,
+translate, or annotate a turn.
+
+**Hooks are transforms, not controls.** A hook that raises is skipped, and the
+turn goes on with the value it had. Several paths never reach a hook at all
+(listed under Scope and limits). Do not use a hook to enforce a privacy or
+security rule, such as redaction: anything a hook must guarantee has to be
+enforced in the code path itself.
 
 `host.register_chat_hook(phase, fn, *, priority=0)` takes one of three phases:
 
@@ -372,7 +378,7 @@ def _inlet(messages, ctx):
     return messages
 
 def _outlet(text, messages, ctx):
-    return text.replace("secret", "[redacted]")
+    return text.rstrip() + "\n"
 
 def register(host):
     host.register_chat_hook("inlet", _inlet)
@@ -387,8 +393,11 @@ Scope and limits:
 - The chain runs for **every** `/v1/chat/completions` and `/v1/completions`
   client (the GUI, raw API callers, and the coder agent pointed at localm); a
   `/v1/completions` prompt reaches the hooks as a single user message. It does
-  **not** run for the in-process `localm run` REPL, which calls the engine
-  directly.
+  **not** run on any other path that produces a reply: the in-process
+  `localm run` REPL (it calls the engine directly), a turn forwarded to a peer
+  (the peer runs its own hooks, this host's do not), jobs, the MCP chat tool,
+  the coder agent's own engine calls, background generation, and the
+  Ollama-compatible routes. Only the two HTTP handlers above run the chain.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing

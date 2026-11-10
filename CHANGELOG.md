@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **Installing a plugin from a server folder is checked before the folder is touched.** The plugin install request now refuses a network path (such as `\\host\share`) outright, and needs a key with host filesystem access or a server bound to this machine only. `localm plugin install <folder>` and the plugin page now say plainly that third-party plugins run unsandboxed in the server process, so only code you trust should be installed; the command asks you to confirm (`--yes` skips the question).
+- **A plugin that is turned off no longer contributes coder tools.** The coder agent now loads tool exports only from plugins that are installed and enabled, through the same loader as the rest of the plugin system.
+- **A third-party plugin cannot protect itself from removal, claim a reserved scope, or mount a page outside `/api/` and `/v1/`.** `protected` and `default_enabled` in a third-party manifest are ignored, scope checks run every time plugins are discovered (not only at install), and a plugin route outside those two prefixes is refused.
+- **Chat hooks are documented as transforms, not controls.** The plugin guide now lists every path that skips them and no longer suggests them for redaction.
+
 ### Changed
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123.1 to v1.124.2.** An existing install picks it up the next time music generation starts.

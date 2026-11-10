@@ -235,7 +235,10 @@ localm process's own permissions rather than a sandbox:
   `localm plugin install <path>` / `POST /api/plugins/install-external`)
   refuses a source tree containing any symlink or Windows junction, so a
   malicious plugin source cannot smuggle a file's contents out through a link
-  or drive a large copy through a self-referencing cycle.
+  or drive a large copy through a self-referencing cycle. Third-party plugins
+  run unsandboxed in-process, so install only code you trust. The install
+  route refuses a UNC or device path, and needs host filesystem access or a
+  server bound to loopback; a plugin's routes must sit under `/api/` or `/v1/`.
 - **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
   are privileged and are never granted implicitly: an owner-authenticated
   `POST /v1/keys` call, or `localm key create --allow-privileged` from this

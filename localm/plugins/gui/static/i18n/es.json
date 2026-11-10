@@ -1621,7 +1621,7 @@
   "plugins.external": "Plugins externos",
   "plugins.external.empty.hint": "Instala uno del catálogo de arriba para añadir funciones.",
   "plugins.external.empty.text": "No hay plugins externos instalados",
-  "plugins.externalIntro": "Un plugin de terceros es una carpeta con un manifiesto <code>plugin.toml</code> en <code>~/.localm/plugins/</code>; puede añadir un comando de CLI y exportar herramientas al agente Coder. La instalación es una copia de directorio local.",
+  "plugins.externalIntro": "Un plugin de terceros es una carpeta con un manifiesto <code>plugin.toml</code>; al instalarlo se copia en la carpeta de plugins de esta instalación. Puede añadir un comando de CLI y exportar herramientas al agente Coder. Los plugins de terceros se ejecutan sin sandbox en el mismo proceso, así que instala solo código en el que confíes.",
   "plugins.firstParty": "Plugins oficiales",
   "plugins.install": "Instalar",
   "plugins.installDependencies": "Instalar dependencias",

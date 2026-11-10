@@ -22,7 +22,7 @@ from localm import install_manifest, media_workflows, model_meta  # noqa: E402
 from localm import settings_schema  # noqa: E402
 from localm.inference import hf_shard_index_safety, hf_tokenizer_safety  # noqa: E402
 from localm.model_manager import capabilities, registry  # noqa: E402
-from localm.plugins import engine, loader  # noqa: E402
+from localm.plugins import engine  # noqa: E402
 from tests.fuzz import _bounds  # noqa: E402
 
 _counter = itertools.count()
@@ -75,18 +75,6 @@ _manifest_bytes = st.one_of(
 
 @given(manifest=_manifest_bytes)
 @example(manifest=b"\xff\xfe[plugin]")
-@example(manifest=b'[plugin]\nname="x"\nentry=5\n')
-@example(manifest=b"[plugin]\nname='x'\nentry='m:f'\n" + b"a=" + b"[" * 5000 + b"]" * 5000)
-def test_parse_manifest_raises_only_plugin_error(manifest, tmp_path):
-    d = _plugin_dir(tmp_path, manifest)
-    try:
-        _bounds.returns_within(loader.parse_manifest, d, warnings=[])
-    except loader.PluginError:
-        pass
-
-
-@given(manifest=_manifest_bytes)
-@example(manifest=b"\xff\xfe[plugin]")
 @example(manifest=b'[plugin]\nname="x"\napi_version=inf\n')
 @example(manifest=b'[plugin]\nname="x"\nrequires_extras=5\n')
 def test_parse_spec_raises_only_value_error(manifest, tmp_path):
@@ -105,9 +93,8 @@ def test_discovery_survives_any_manifest(manifest, tmp_path):
     d = root / "plug"
     d.mkdir()
     (d / "plugin.toml").write_bytes(manifest)
-    _bounds.returns_within(loader.discover_plugins, root)
-    _bounds.returns_within(loader.discover_errors, root)
-    _bounds.returns_within(loader.discover_warnings, root)
+    _bounds.returns_within(
+        engine.PluginManager(None, installed_root=root, store_root=root / "none").discover)
 
 
 _json_leaf = st.none() | st.booleans() | st.integers() | st.floats() | st.text(max_size=12)
