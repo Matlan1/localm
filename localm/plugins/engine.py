@@ -2052,9 +2052,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": name}
 
-    @app.post("/api/plugins/install-external",
-              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
-    async def install_external_plugin_engine(body: dict, request: Request):
+    async def install_external_plugin_engine(body: dict, request):
         """Install a third-party plugin from a local directory given as
         `source`, which must contain a `plugin.toml` (400 otherwise). Equivalent
         to `localm plugin install <dir>`. The plugin is copied and verified; it
@@ -2085,6 +2083,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except Exception as e:
             raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": spec.name, "version": spec.version}
+
+    # Bind the `request` annotation to the Request class imported above.
+    install_external_plugin_engine.__annotations__["request"] = Request
+    app.post("/api/plugins/install-external",
+             dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))]
+             )(install_external_plugin_engine)
 
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
