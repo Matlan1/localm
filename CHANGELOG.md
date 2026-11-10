@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **An update installs its Python dependencies from the release's lock, each file checked against its recorded SHA-256.** The dependency step of an update now runs `uv sync --frozen` from the `uv.lock` the signed build carries, instead of resolving the newest versions from the package index. A plugin's dependencies are installed at their locked versions with `--require-hashes` when the install has a `uv.lock`; without one, localm says the files are not hash-checked.
+- **Python package installs follow the network policy.** Plugin dependency installs, the managed ComfyUI's package installs and the PyTorch step of an update are refused under `net_mode = off` unless `net_allow_model_downloads` is on; an update's own dependency step also runs with `update_ignore_net_policy`. A refused update changes nothing.
+- **The llama.cpp runtime is checked against the checksums built into localm.** For the release localm pins, the built-in SHA-256 is used even when the release listing is reachable, and a listing that reports a different digest is refused.
+- **A saved update key set is verified every time it is read.** `updates/trust.json` is trusted only when it is signed, step by step from the built-in keys, by the recovery keys of the set before it; the sets in between are kept in `updates/trust-chain.json`. A file that does not verify stops updates with an error naming it.
+
 ### Changed
 - **`localm mcp` decides whether the coder may run shell commands.** `run_coder_task` now denies every shell call unless the server is started with `--coder-shell`; before, the client's `yes=true` (or a project's `auto_approve`) was enough. File writes are still auto-approved. `--coder-root DIR` limits the folders the client can have the coder work in. The MCP `install_plugin` tool now follows the `auto_install_plugin_deps` setting when `with_deps` is not given.
 - **Linux CUDA setup fetches newer NVIDIA libraries: cuBLAS 12.9.3.13 for the CUDA 12 line, and CUDA runtime 13.5.37 with cuBLAS 13.10.0.20 for the CUDA 13 line.** They stay pinned and checksum-verified; an existing Linux CUDA install picks them up with the next update.
