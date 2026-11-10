@@ -68,6 +68,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Update and runtime downloads no longer pass localm's own credentials to another host.** When a download is redirected to a different host (the update zip goes to the release CDN), only basic headers are sent on; the update token is not. Downloads and metadata reads are also capped in size.
 - **Outbound requests check the network policy themselves.** The shared pinned request helper now runs the policy check and does not follow redirects unless a caller asks for it.
 - **A model search no longer fails when the RAM reading breaks.** When psutil is installed but cannot start on this system, the Hugging Face search on the Models page answered with a server error. It now returns its results without the "too big for video memory and RAM together" mark, and the log says why the RAM could not be read.
+- **The LLVM OpenMP license of the Windows llama.cpp builds is kept under its own name.** Upstream's Windows archives carry only `LICENSE-LLVM-OpenMP`, which `localm setup-llama` saved as `LICENSE.llama-cpp`, and a CUDA install then replaced it with llama.cpp's MIT notice. The runtime folder now holds both: `LICENSE.llama-cpp` with llama.cpp's MIT text and `LICENSE.llvm-openmp` with LLVM's. A later archive placed into the same folder no longer replaces a license file already there, and the amd-rocm SIMD CPU backend copies the OpenMP license along with the OpenMP runtime.
 
 ## [0.3.3] - 2026-11-05
 
