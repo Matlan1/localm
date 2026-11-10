@@ -302,11 +302,12 @@ def test_ca_past_expiry_forces_full_regeneration(tmp_path, monkeypatch):
     monkeypatch.setattr(tls, "_now", lambda: t0)
     ca_cert, ca_key = tls._make_ca(tmp_path)
 
-    # Mint the leaf just after the CA has already expired.
+    # Mint the leaf a day before the CA expires, then let the CA expire.
+    hosts, ips = tls.san_targets()
+    monkeypatch.setattr(tls, "_now", lambda: t0 + timedelta(days=tls._CA_DAYS - 1))
+    tls._make_leaf(tmp_path, ca_cert, ca_key, hosts, ips)
     t1 = t0 + timedelta(days=tls._CA_DAYS + 5)
     monkeypatch.setattr(tls, "_now", lambda: t1)
-    hosts, ips = tls.san_targets()
-    tls._make_leaf(tmp_path, ca_cert, ca_key, hosts, ips)
 
     old_ca_bytes = tls.ca_cert_path(tmp_path).read_bytes()
     assert not tls._leaf_is_reusable(tmp_path, hosts, ips), (
