@@ -353,7 +353,7 @@ _ROUTE_PREFIXES = ("/api/", "/v1/")
 def _mounted_paths(route) -> list:
     """The URL paths *route* serves. An included router (FastAPI keeps it lazy
     and path-less) is expanded into the effective paths of its routes."""
-    contexts = getattr(route, "effective_route_contexts", None)
+    contexts: Any = getattr(route, "effective_route_contexts", None)
     if callable(contexts):
         out = []
         for ctx in contexts():
