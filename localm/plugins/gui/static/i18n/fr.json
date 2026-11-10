@@ -2064,6 +2064,8 @@
   "settings.field.chatMode.label": "Persistance spécifique au chat",
   "settings.field.chatSystemPrompt.help": "Le prompt système avec lequel démarre chaque nouveau chat. Le champ Prompt système d'un chat le remplace pour cette conversation ; laissez ce champ vide pour utiliser celui-ci. Vide = pas de prompt système par défaut.",
   "settings.field.chatSystemPrompt.label": "Prompt système par défaut",
+  "settings.field.chatStyleNote.help": "Dans le chat de cette application et dans localm run, ajoute au message système une courte note : répondre directement et parler de soi à la première personne (« je »). Les requêtes API d'autres programmes ne la reçoivent jamais.",
+  "settings.field.chatStyleNote.label": "Ajouter la note de style du chat",
   "settings.field.chatToolGrammar.help": "Dès que le modèle commence un <tool_call> (l'outil de recherche/lecture web), l'oblige à produire un JSON d'appel d'outil valide (grammaire GBNF paresseuse ; backends locaux compatibles grammaire uniquement). Le texte libre et la réflexion ne sont pas affectés.",
   "settings.field.chatToolGrammar.label": "Contraindre les appels d'outils du chat par grammaire",
   "settings.field.chatWebMaxLookups.help": "Avec l'accès web activé, nombre maximal de recherches et de lectures de pages que le modèle peut lancer pour un message. Elles s'arrêtent aussi s'il répète une recherche ou une page, ou si deux d'affilée n'apportent rien de nouveau. 0 = aucune limite.",

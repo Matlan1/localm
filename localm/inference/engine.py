@@ -16,7 +16,8 @@ from localm.config import load_config
 from localm.console import console
 from localm.debuglog import logger
 from localm import livefeed as _livefeed
-from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
+from localm.inference.backends.base import (
+    LOADING_MODEL_STATUS, RAW_PROMPT_UNSUPPORTED_MESSAGE, BaseBackend)
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
 from localm.kv_cache import resolve_kv_cache_type
 from localm.inference.parallel_setting import resolve_parallel_slots
@@ -1029,6 +1030,12 @@ class Engine:
         return getattr(self._backend, "supports_grammar", False)
 
     @property
+    def supports_raw_prompt(self) -> bool:
+        """True when the active backend takes a raw prompt (see
+        ``BaseBackend.supports_raw_prompt``)."""
+        return bool(getattr(self._backend, "supports_raw_prompt", False))
+
+    @property
     def supports_logprobs(self) -> bool:
         """True when the active backend can report token log probabilities."""
         return bool(getattr(self._backend, "supports_logprobs", False))
@@ -1078,8 +1085,13 @@ class Engine:
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
         cache_prompt: Optional[bool] = None,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
-        """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
+        """Stream the reply to *messages*, or with *raw_prompt* the continuation
+        of that text, tokenised as given with no chat template (*messages* are
+        then not sent to the model). A raw prompt to a backend whose
+        :attr:`supports_raw_prompt` is False raises :class:`UnsupportedInputError`
+        before anything loads. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
         model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
         passed to the backend only when set; check :meth:`unsupported_sampling`
@@ -1087,6 +1099,9 @@ class Engine:
         set; check :attr:`supports_logprobs` first. ``cache_prompt=False`` is
         passed on (see the backend's ``chat_stream``); ``None`` and ``True`` keep
         the prompt cache. The other parameters default to the config values."""
+        if raw_prompt is not None and not self.supports_raw_prompt:
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(RAW_PROMPT_UNSUPPORTED_MESSAGE)
         # Auto-reload if the model was unloaded, under the GPU load lease and
         # the load lock, re-checking inside them.
         if not self._backend.loaded:
@@ -1112,6 +1127,8 @@ class Engine:
             extra["on_logprobs"] = on_logprobs
         if cache_prompt is False:
             extra["cache_prompt"] = False
+        if raw_prompt is not None:
+            extra["raw_prompt"] = raw_prompt
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF

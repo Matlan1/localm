@@ -2746,32 +2746,32 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 56,
-                    "endColumn": 71,
+                    "startColumn": 60,
+                    "endColumn": 75,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 16,
-                    "endColumn": 31,
+                    "startColumn": 20,
+                    "endColumn": 35,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 54,
-                    "endColumn": 69,
+                    "startColumn": 58,
+                    "endColumn": 73,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportOptionalMemberAccess",
                 "range": {
-                    "startColumn": 33,
-                    "endColumn": 39,
+                    "startColumn": 37,
+                    "endColumn": 43,
                     "lineCount": 1
                 }
             },
