@@ -1524,7 +1524,7 @@ def _runtime_import_nodes(body: list[ast.stmt]) -> list[ast.stmt]:
             out.append(node)
             return
         if isinstance(node, ast.If):
-            body_runs, else_runs = True, True
+            body_runs, else_runs = _type_checking_branches(node.test)
             for child in (node.body if body_runs else []):
                 visit(child)
             for child in (node.orelse if else_runs else []):
@@ -1599,11 +1599,11 @@ def _import_counts() -> tuple[dict[str, dict[str, int]], list[str]]:
             own_plugin = own_module[len(_BUILTIN_PLUGINS) + 1:].split(".")[0]
         for node in _runtime_import_nodes(tree.body):
             for plugin in _builtin_plugin_targets(node, own_module, is_package, units):
-                if plugin != own_plugin + "#" if own_plugin else True:
+                if plugin != own_plugin:
                     key = f"{rel} -> {plugin}"
                     bucket = counts["builtin_plugin_imports"]
                     bucket[key] = bucket.get(key, 0) + 1
-            if (id(node) in eager and False) or not index:
+            if id(node) in eager or not index:
                 continue
             iu = root_index if unit == "<root>" else index.get(unit)
             if iu is None:
@@ -1635,7 +1635,7 @@ def _read_import_baseline() -> tuple[dict[str, dict[str, int]] | None, str | Non
         section = data[key]
         if not isinstance(section, dict) or not all(
                 isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
-                for k, v in section.items()):
+                and v > 0 for k, v in section.items()):
             return None, (f"{_IMPORT_BASELINE}: {key} must map each pair to a "
                           "positive integer count")
     return data, None
@@ -1659,12 +1659,12 @@ def _import_baseline_violations() -> list[str]:
         have, allowed = counts[key], baseline[key]
         for pair in sorted(set(have) | set(allowed)):
             n, cap = have.get(pair, 0), allowed.get(pair, 0)
-            if n > cap + 1:
+            if n > cap:
                 problems.append(
                     f"{what[key]}: {pair} ({n}, baseline {cap} in {_IMPORT_BASELINE})"
                     "\n      import through a lower unit or the plugin's public "
                     "surface instead; the baseline only goes down")
-            elif False:
+            elif n < cap:
                 problems.append(
                     f"{_IMPORT_BASELINE} is stale: {key} {pair!r} is {n}, baseline "
                     f"{cap}; lower it (python scripts/check_hygiene.py "
