@@ -7,37 +7,24 @@ import click
 from ._core import console, main
 
 
-def _plugin_api_url(plugin: str) -> str:
-    """The ComfyUI URL this media plugin actually uses.
+def _media_plugin(plugin: str, submodule: str):
+    """The media plugin's *submodule*, or exit 1 with a message when the plugin
+    is not installed and enabled."""
+    from rich.markup import escape
 
-    The GUI and `localm plugin config` write a PER-PLUGIN comfy.api_url, whose
-    own help says it is where THIS plugin's ComfyUI listens. The command line
-    used to call default_api_url(), which only ever reads the shared key, so a
-    per-plugin target was ignored here and the CLI could talk to a different
-    ComfyUI than the GUI for the same plugin.
-
-    Resolved through the plugin's OWN backend, the same call its routes make, so
-    the two agree by construction instead of through two copies of a precedence
-    rule that already differs between the three media plugins. Falls back to the
-    shared default if that plugin is not importable."""
-    from importlib import import_module
-
-    from ..config import load_config
+    from ..plugins.lookup import PluginUnavailable, plugin_api
     try:
-        backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
-        url = backend.settings(load_config()).get("api_url")
-        if url:
-            return str(url)
-    except Exception as exc:                     # noqa: BLE001
-        from ..debuglog import logger
-        logger.debug("could not resolve the %s plugin ComfyUI url (%s); using the shared default", plugin, exc)
-    from ..media.comfy_client import default_api_url
-    return default_api_url()
+        return plugin_api(plugin, submodule)
+    except PluginUnavailable as e:
+        console.print(f"[yellow]{escape(str(e))}[/yellow]")
+        sys.exit(1)
+
 
 def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
     import os as _os
     import subprocess as _sp
+
     from rich.markup import escape
     try:
         if sys.platform == "win32":
@@ -91,9 +78,12 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
 
     *retry* is a zero-arg callable that re-runs the exact same generation and returns
     its own ``(ok, message)``."""
-    from ..media.comfy_client import (enable_func_shim_once,
-                                       is_known_comfy_func_regression,
-                                       restart_comfy, spawned_pid)
+    from ..media.comfy_client import (
+        enable_func_shim_once,
+        is_known_comfy_func_regression,
+        restart_comfy,
+        spawned_pid,
+    )
     if not is_known_comfy_func_regression(message):
         return False, message
     if not _is_interactive():
@@ -105,9 +95,11 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
         "ComfyUI install and self-expires once ComfyUI ships its own fix.")
     # Alongside the fix-this-run shim, offer localm's own managed, patched
     # ComfyUI - once only, and only while the user has no managed instance.
-    from ..media.comfy_client import (managed_comfy_setup_offer_message,
-                                      mark_managed_comfy_setup_offered,
-                                      should_offer_managed_comfy_setup)
+    from ..media.comfy_client import (
+        managed_comfy_setup_offer_message,
+        mark_managed_comfy_setup_offered,
+        should_offer_managed_comfy_setup,
+    )
     if should_offer_managed_comfy_setup(message):
         console.print("[cyan]" + managed_comfy_setup_offer_message() + "[/cyan]")
         mark_managed_comfy_setup_offered()
@@ -183,53 +175,54 @@ def _generate_or_abort(api_url: str, run):
 
 def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
                  **gen_kwargs) -> None:
-    """``localm image`` / ``localm video`` through the plugin's backend facade
-    (any backend other than the inline ComfyUI path): availability, generation
-    with progress lines, Ctrl-C stops the worker, then the backend's VRAM is
-    released. *what* names the worker in the interrupt message; *gen_kwargs*
-    go to ``generate`` together with the privacy, sidecar and VRAM-swap
-    arguments set here. Exits 1 on failure."""
+    """``localm image`` / ``localm music`` / ``localm video`` through the
+    plugin's backend facade (``media_config.generate_media``), whichever backend
+    is selected: configuration notes, the backend's request refusal,
+    availability, generation with progress lines, then the backend's VRAM is
+    released. A backend that needs a ComfyUI server also gets the Ctrl-C abort
+    of the running render and the offer to apply the ``__func__`` fix. *what*
+    names the worker in the interrupt message; *gen_kwargs* go to ``generate``
+    together with the privacy, sidecar and VRAM-swap arguments set here. Exits 1
+    on failure."""
     import os
 
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode
     from ..media.comfy_client import localm_v1_base
+    from ..plugins import media_config
 
     def say(text: str) -> None:
         console.print(f"[dim]{escape(str(text))}[/dim]")
 
-    for note in (s.get("warning"), s.get("backend_note")):
-        if note:
-            say(note)
-    refusal = getattr(media_backend._impl(s), "refusal", None)
-    refused = refusal(s=s, **gen_kwargs) if refusal is not None else None
-    if refused:
-        console.print(f"[red]{escape(str(refused))}[/red]")
-        sys.exit(1)
-    ok, message = media_backend.ensure_available(s, on_progress=say)
-    if not ok:
-        console.print(f"[red]{escape(str(message))}[/red]")
-        sys.exit(1)
-    say(message)
     is_privacy = effective_mode("server") == SessionMode.PRIVACY
     localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
-    try:
-        ok, message = media_backend.generate(
-            s, prompt, out_path,
+
+    def run():
+        return media_config.generate_media(
+            media_backend, s, prompt, out_path, on_progress=say,
             self_url=localm_url, write_sidecar=not is_privacy,
-            swap=bool(localm_url), delete_outputs=is_privacy,
-            on_progress=say, **gen_kwargs)
+            swap=bool(localm_url), delete_outputs=is_privacy, privacy=is_privacy,
+            **gen_kwargs)
+
+    try:
+        if media_backend.supports(s, "NEEDS_COMFY_SERVER"):
+            api_url = s["api_url"]
+            ok, message, path = _generate_or_abort(api_url, run)
+            if not ok:
+                ok, message = _maybe_apply_func_shim_and_retry(
+                    message, api_url, lambda: _generate_or_abort(api_url, run)[:2])
+        else:
+            ok, message, path = run()
     except KeyboardInterrupt:
         console.print(f"\n[yellow]Interrupted - stopping the {what} worker...[/yellow]")
         media_backend.free_vram(s)
         raise
     color = "green" if ok else "red"
     console.print(f"[{color}]{escape(str(message))}[/{color}]")
-    media_backend.free_vram(s)
     if not ok:
         sys.exit(1)
-    _offer_open(out_path)
+    _offer_open(path)
 
 
 @main.command("image")
@@ -271,18 +264,16 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     terminal, you are offered to open it.
     """
     import time as _time
-    from importlib import import_module
 
     from rich.markup import escape
 
-    from ..audit import SessionMode, effective_mode
     from ..config import load_config
 
     width = height = None
     if size:
         from fastapi import HTTPException
 
-        from ..plugins.builtin.image.plug import parse_image_size
+        parse_image_size = _media_plugin("image", "plug").parse_image_size
         try:
             parsed = parse_image_size(size)
         except HTTPException as e:
@@ -294,23 +285,8 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
     _cfg = load_config()
-    image_backend = import_module("localm.plugins.builtin.image.backend")
+    image_backend = _media_plugin("image", "backend")
     s = image_backend.prepare_for_job(image_backend.settings(_cfg), _cfg)
-    if s.get("backend") != "comfy":
-        _via_backend(image_backend, s, prompt, out_path, "image",
-                     negative_prompt=negative, guidance=guidance, cfg=cfg, seed=seed,
-                     input_image=Path(input_image) if input_image else None,
-                     denoise=denoise, lora_name=lora_name, width=width, height=height)
-        return
-
-    from ..image_gen.comfy import (free_comfy_vram,
-                                  generate_image)
-
-    api_url = _plugin_api_url("image")
-    # generate_image() calls ensure_comfy() internally, which auto-launches
-    # ComfyUI from comfy_launch_cmd/comfy_workdir, or returns a clear error
-    # when they are unset.
-
     kwargs = {k: v for k, v in (
         ("negative_prompt", negative), ("guidance", guidance), ("cfg", cfg),
         ("seed", seed), ("denoise", denoise), ("lora_name", lora_name),
@@ -319,82 +295,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         kwargs["input_image"] = Path(input_image)
     if width is not None:
         kwargs["width"], kwargs["height"] = width, height
-
-    console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
-    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    _write_sidecar = not _is_privacy
-
-    def _gen_image():
-        return generate_image(
-            prompt, out_path,
-            api_url=api_url,
-            write_sidecar=_write_sidecar,
-            delete_outputs=_is_privacy,
-            **kwargs,
-        )
-
-    ok, message = _generate_or_abort(api_url, _gen_image)
-    if not ok:
-        ok, message = _maybe_apply_func_shim_and_retry(
-            message, api_url,
-            lambda: _generate_or_abort(api_url, _gen_image))
-    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
-    if not ok:
-        sys.exit(1)
-    free_comfy_vram(api_url)
-    _offer_open(out_path)
-
-
-
-
-def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, duration: float,
-                       write_sidecar: bool, **kwargs) -> None:
-    """``localm music`` through the music plugin's backend facade (any backend
-    other than the inline ComfyUI path): availability, generation with progress
-    lines, Ctrl-C stops the runtime, then the backend's VRAM is released. Exits
-    1 on failure and 2 when *out* does not end in the backend's file suffix. With
-    LOCALM_URL set, that server is asked to unload its chat model first."""
-    import os
-    import time as _time
-
-    from rich.markup import escape
-
-    from ..media.comfy_client import localm_v1_base
-
-    suffix = getattr(music_backend._impl(s), "OUTPUT_SUFFIX", ".flac")
-    out_path = Path(out) if out else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}{suffix}")
-    if out_path.suffix.lower() != suffix:
-        console.print(f"[red]The {escape(str(s.get('backend')))} music backend writes "
-                      f"{suffix} files; give an output path ending in {suffix}.[/red]")
-        sys.exit(2)
-
-    def say(text: str) -> None:
-        console.print(f"[dim]{escape(str(text))}[/dim]")
-
-    for note in (s.get("warning"), s.get("backend_note")):
-        if note:
-            say(note)
-    ok, message = music_backend.ensure_available(s, on_progress=say)
-    if not ok:
-        console.print(f"[red]{escape(str(message))}[/red]")
-        sys.exit(1)
-    say(message)
-    localm_url = localm_v1_base(os.environ.get("LOCALM_URL"))
-    try:
-        ok, message = music_backend.generate(
-            s, tags, out_path, self_url=localm_url, swap=bool(localm_url),
-            write_sidecar=write_sidecar, on_progress=say,
-            lyrics=lyrics, duration_seconds=duration, **kwargs)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted - stopping the music runtime...[/yellow]")
-        music_backend.free_vram(s)
-        raise
-    color = "green" if ok else "red"
-    console.print(f"[{color}]{escape(str(message))}[/{color}]")
-    music_backend.free_vram(s)
-    if not ok:
-        sys.exit(1)
-    _offer_open(out_path)
+    _via_backend(image_backend, s, prompt, out_path, "image", **kwargs)
 
 
 @main.command("music")
@@ -425,54 +326,26 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     auto-launch it when comfy_launch_cmd is configured).
     """
     import time as _time
-    from localm.console import SafeConsole as Console
+
     from rich.markup import escape
-    from ..audit import SessionMode, effective_mode
+
     from ..config import load_config
-    from ..music_gen import generate_music
-    from ..plugins.builtin.music import backend as music_backend
-    console = Console()
+    music_backend = _media_plugin("music", "backend")
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
               (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
-    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    _write_sidecar = not _is_privacy
     _cfg = load_config()
     _s = music_backend.prepare_for_job(music_backend.settings(_cfg), _cfg)
-    if not music_backend.is_comfy(_s):
-        _music_via_backend(music_backend, _s, tags, out, lyrics=lyr, duration=duration,
-                           write_sidecar=_write_sidecar, **kwargs)
-        return
-
-    # generate_music() calls ensure_comfy() internally: auto-launch from
-    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
-
-    api_url = _plugin_api_url("music")
+    declared = getattr(music_backend._impl(_s), "OUTPUT_SUFFIX", None)
+    suffix = declared or ".flac"
     out_path = Path(out) if out \
-        else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
-
-    def _gen_music():
-        return generate_music(
-            tags, out_path,
-            lyrics=lyr,
-            duration_seconds=duration,
-            api_url=api_url,
-            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"),
-            write_sidecar=_write_sidecar,
-            delete_outputs=_is_privacy,
-            **kwargs,
-        )
-
-    ok, message = _generate_or_abort(api_url, _gen_music)
-    if not ok:
-        ok, message = _maybe_apply_func_shim_and_retry(
-            message, api_url, lambda: _generate_or_abort(api_url, _gen_music))
-    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
-    if not ok:
-        sys.exit(1)
-    _offer_open(out_path)
-
-
+        else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}{suffix}")
+    if declared and out_path.suffix.lower() != declared:
+        console.print(f"[red]The {escape(str(_s.get('backend')))} music backend writes "
+                      f"{declared} files; give an output path ending in {declared}.[/red]")
+        sys.exit(2)
+    _via_backend(music_backend, _s, tags, out_path, "music", lyrics=lyr,
+                 duration_seconds=duration, **kwargs)
 
 
 @main.command("video")
@@ -515,15 +388,8 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     generator - expect many minutes per clip; see docs/video.md for model setup.
     """
     import time as _time
-    from importlib import import_module
 
-    from localm.console import SafeConsole as Console
-    from rich.markup import escape
-
-    from ..audit import SessionMode, effective_mode
     from ..config import load_config
-    from ..video_gen import generate_video
-    console = Console()
 
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
@@ -532,39 +398,8 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
     _cfg = load_config()
-    video_backend = import_module("localm.plugins.builtin.video.backend")
+    video_backend = _media_plugin("video", "backend")
     s = video_backend.prepare_for_job(video_backend.settings(_cfg), _cfg)
-    if s.get("backend") != "comfy":
-        _via_backend(video_backend, s, prompt, out_path, "video",
-                     seconds=duration, fps=fps,
-                     input_image=Path(input_image) if input_image else None, **kwargs)
-        return
-
-    # generate_video() calls ensure_comfy() internally: auto-launch from
-    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
-
-    api_url = _plugin_api_url("video")
-    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    _write_sidecar = not _is_privacy
-
-    def _gen_video():
-        return generate_video(
-            prompt, out_path,
-            seconds=duration,
-            fps=fps,
-            api_url=api_url,
-            input_image=Path(input_image) if input_image else None,
-            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"),
-            write_sidecar=_write_sidecar,
-            delete_outputs=_is_privacy,
-            **kwargs,
-        )
-
-    ok, message = _generate_or_abort(api_url, _gen_video)
-    if not ok:
-        ok, message = _maybe_apply_func_shim_and_retry(
-            message, api_url, lambda: _generate_or_abort(api_url, _gen_video))
-    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
-    if not ok:
-        sys.exit(1)
-    _offer_open(out_path)
+    _via_backend(video_backend, s, prompt, out_path, "video",
+                 seconds=duration, fps=fps,
+                 input_image=Path(input_image) if input_image else None, **kwargs)

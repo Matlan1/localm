@@ -38,7 +38,10 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    `auto` picks Metal on Apple Silicon, CUDA for NVIDIA on Windows, ROCm for AMD when
    hipBLAS is available (the ROCm PyTorch wheels in localm's venv, or a system ROCm),
    CPU when no GPU is found, and Vulkan otherwise. A build that does not load on this
-   machine falls back to Vulkan, then CPU, and says so.
+   machine falls back to Vulkan, then CPU, and says so. With only the CPU build
+   installed (for example after `--backend cpu`), a generation on `auto` installs the
+   recommended GPU build; when that download fails or is refused, it keeps the CPU build
+   and says so.
 
    **Linux with an NVIDIA GPU runs on Vulkan.** The pinned upstream release
    publishes a CUDA build for Windows only; its Linux archives are

@@ -108,8 +108,8 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def plugin(home, monkeypatch):
-    """The voice plugin, installed. PluginManager imports it under a synthetic
-    package name, so the module objects the running route uses are these."""
+    """The voice plugin, installed. A first-party plugin loads under its real
+    module name, so the running route uses the same module objects as this file."""
     import sys
 
     import localm.voice as voice
@@ -122,9 +122,9 @@ def plugin(home, monkeypatch):
         if t.name == voice.PREFETCH_THREAD_NAME:
             t.join(timeout=10)
     loaded = SimpleNamespace(
-        app=app, tr=sys.modules["_localm_plugin_voice.transcriptions"],
-        audio=sys.modules["_localm_plugin_voice.audio_model"])
-    assert loaded.tr is not tr and loaded.audio is not audio_model
+        app=app, tr=sys.modules["localm.plugins.builtin.voice.transcriptions"],
+        audio=sys.modules["localm.plugins.builtin.voice.audio_model"])
+    assert loaded.tr is tr and loaded.audio is audio_model
     return loaded
 
 
@@ -471,3 +471,75 @@ class TestConcurrency:
         assert results == [{"text": REPLY}, {"text": REPLY}]
         assert state.engine.peak == 1
         assert state.engine.active_requests == 0
+
+
+MIC_URL = "/api/voice/transcribe"
+
+
+def _mic(client, wav=None):
+    body = base64.b64encode(_wav() if wav is None else wav).decode("ascii")
+    return client.post(MIC_URL, json={"audio_b64": body})
+
+
+class TestMicRoute:
+    def test_an_audio_model_answers_when_whisper_is_missing(self, client, state):
+        r = _mic(client)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"text": REPLY}
+        assert state.whisper_calls == []
+        assert state.asked == [(MODEL, {"activate": False})]
+
+    def test_whisper_stays_the_default_when_it_works(self, client, state):
+        state.whisper = True
+        assert _mic(client).json() == {"text": "whisper words"}
+        assert state.asked == []
+
+    @pytest.mark.parametrize("code", ["download-blocked", "needs-faster-whisper"])
+    def test_an_unavailable_whisper_falls_back_to_an_audio_model(
+            self, client, state, monkeypatch, code):
+        import localm.voice as voice
+        state.whisper = True
+
+        def blocked(*a, **kw):
+            raise voice.VoiceError("The Whisper 'base' speech model is not downloaded "
+                                   "yet", code)
+        monkeypatch.setattr(voice, "_run_in_worker_detailed", blocked)
+        r = _mic(client)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"text": REPLY}
+        assert state.asked == [(MODEL, {"activate": False})]
+
+    def test_an_unavailable_whisper_without_an_audio_model_keeps_its_409(
+            self, client, state, monkeypatch):
+        import localm.voice as voice
+        state.whisper = True
+        state.audio = []
+
+        def blocked(*a, **kw):
+            raise voice.VoiceError("not downloaded yet", "download-blocked")
+        monkeypatch.setattr(voice, "_run_in_worker_detailed", blocked)
+        r = _mic(client)
+        assert r.status_code == 409 and "not downloaded" in r.json()["detail"]
+        assert state.asked == []
+
+    def test_a_decode_failure_is_not_retried_on_the_audio_model(
+            self, client, state, monkeypatch):
+        import localm.voice as voice
+        state.whisper = True
+
+        def bad(*a, **kw):
+            raise voice.VoiceError("cannot decode", "decode")
+        monkeypatch.setattr(voice, "_run_in_worker_detailed", bad)
+        assert _mic(client).status_code == 422
+        assert state.asked == []
+
+    def test_status_reports_the_audio_model_when_whisper_is_unusable(
+            self, client, state, monkeypatch):
+        import localm.voice as voice
+        monkeypatch.setattr(voice, "stt_available", lambda: (False, "no whisper"))
+        body = client.get("/api/voice/status").json()
+        assert body["available"] is True and body["audio_model"] == MODEL
+        assert body["reason"] == ""
+        state.audio = []
+        body = client.get("/api/voice/status").json()
+        assert body["available"] is False and body["audio_model"] == ""

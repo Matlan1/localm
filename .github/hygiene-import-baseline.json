@@ -36,7 +36,7 @@
     "media -> inference": 8,
     "media -> media_workflows": 1,
     "media -> model_manager": 30,
-    "media -> plugins": 4,
+    "media -> plugins": 3,
     "media -> setup_llama": 1,
     "media -> updater_components": 1,
     "media_workflows -> inference": 1,
@@ -70,7 +70,7 @@
     "settings_schema -> media_workflows": 2,
     "settings_schema -> model_source_credentials": 1,
     "settings_schema -> netname": 1,
-    "settings_schema -> plugins": 5,
+    "settings_schema -> plugins": 2,
     "settings_schema -> rag": 1,
     "setup_llama -> inference": 2,
     "setup_llama -> updater_runtime": 1,
@@ -100,20 +100,5 @@
     "vram -> media": 8,
     "vram -> selfclient": 2
   },
-  "builtin_plugin_imports": {
-    "localm/cli/chat.py -> music": 1,
-    "localm/cli/media.py -> image": 1,
-    "localm/cli/media.py -> music": 1,
-    "localm/cli/models.py -> chat": 1,
-    "localm/cli/models.py -> jobs": 1,
-    "localm/media/native_workflows.py -> image": 1,
-    "localm/media/native_workflows.py -> video": 1,
-    "localm/plugins/builtin/browser/plug.py -> coder": 1,
-    "localm/plugins/builtin/jobs/runner.py -> memory": 2,
-    "localm/plugins/builtin/tts/speech_route.py -> voice": 1,
-    "localm/plugins/coder/tools/media.py -> image": 1,
-    "localm/plugins/gui/routes/models/acquisition.py -> music": 2,
-    "localm/plugins/mcpserver/tools/media_coder.py -> image": 2,
-    "localm/settings_schema.py -> tts": 4
-  }
+  "builtin_plugin_imports": {}
 }

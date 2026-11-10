@@ -15,6 +15,14 @@ from localm.plugins.mcpserver.server import (
     build_tools,
 )
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 # A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so
 # even a total failure of the fix cannot dial a real host.
 _UNC = r"\\192.0.2.1\share"
@@ -1163,6 +1171,10 @@ class TestGenerateImageSafety:
         """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
         monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
                             lambda *a, **k: True)
+        monkeypatch.setattr("localm.image_gen.comfy.ensure_comfy",
+                            lambda *a, **k: (True, "up"))
+        monkeypatch.setattr("localm.image_gen.comfy.free_comfy_vram",
+                            lambda *a, **k: True)
     def _call(self, server, args):
         return server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -1479,6 +1491,15 @@ class TestGenerateImageTarget:
     """The MCP image tool targets the ComfyUI the owner configured, resolved
     through the image plugin's own backend, so an MCP client and the GUI reach
     the same instance."""
+
+    @pytest.fixture(autouse=True)
+    def _comfy_lifecycle_stubbed(self, monkeypatch):
+        """ComfyUI's start-up check and VRAM release are stubbed: only the
+        generator is faked here."""
+        monkeypatch.setattr("localm.image_gen.comfy.ensure_comfy",
+                            lambda *a, **k: (True, "up"))
+        monkeypatch.setattr("localm.image_gen.comfy.free_comfy_vram",
+                            lambda *a, **k: True)
 
     def _kwargs(self, monkeypatch, tmp_path, data, managed=False):
         monkeypatch.delenv("FLUX_API_URL", raising=False)

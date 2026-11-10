@@ -915,7 +915,9 @@ class VramSizingMixin:
         ``self._gpu_placement_devices``), or None when the load does not spread
         over 2+ GPUs (one GPU, a CPU-only load, no fresh reading, devices that
         cannot be matched to llama.cpp's, an unreadable model header) or this is
-        the worker process.
+        the worker process. ``self._gpu_placement_unmatched`` is True when the
+        GPUs or the layer sizes could not be matched and the load keeps
+        llama.cpp's default split, else False.
 
         The GPUs are :func:`localm.discover.gguf_split_devices`, read from
         ``self._sizing_gpus`` when the caller already holds a fresh reading. With
@@ -930,6 +932,7 @@ class VramSizingMixin:
         configured split naming an integrated GPU llama.cpp leaves out."""
         self._gpu_placement = None
         self._gpu_placement_devices = []
+        self._gpu_placement_unmatched = False
         if self.n_gpu_layers == 0:
             return None
         from localm.inference.backends.llamacpp import _loader
@@ -950,12 +953,14 @@ class VramSizingMixin:
                 _dbg.warning("GPU placement: the GPUs could not be matched to "
                              "llama.cpp's device list (%s); llama.cpp places the "
                              "layers by its own default%s", reason, unordered)
+                self._gpu_placement_unmatched = True
             return None
         units = self._placement_units()
         if units is None:
             _dbg.warning("GPU placement: the layer sizes of %s could not be read; "
                          "llama.cpp splits it by free memory%s",
                          Path(self.model_path).name, unordered)
+            self._gpu_placement_unmatched = True
             return None
         from localm.inference.backends.llamacpp._gpu_plan import PlanDevice, plan_placement
         plan_devices = [PlanDevice(slot=d["slot"], index=d["index"], name=d["name"],

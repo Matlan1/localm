@@ -57,6 +57,7 @@ export const I18N_EN = {
   // ---- Shared (helpers.js) ----
   "common.advancedFold.setCount": "{n} set",
   "common.artifact.title": "Artifact ({lang})",
+  "common.artifact.navigated": "This artifact tried to load another page, so the canvas was closed. Use Re-render to show it again.",
   "common.codeBlock.canvas": "canvas",
   "common.codeBlock.canvasTitle": "Render this {lang} in a sandboxed canvas",
   "common.codeBlock.copied": "copied",
@@ -2169,7 +2170,7 @@ export const I18N_EN = {
   "settings.field.media.nativeModel.label": "Native model",
   "settings.field.media.nativeModel.help": "Registered name or file path: a full checkpoint, or a diffusion model (encoders and VAE from the native fields, else your registered models). Blank uses the recommended model once downloaded.",
   "settings.field.media.nativeRuntime.label": "Native runtime",
-  "settings.field.media.nativeRuntime.help": "stable-diffusion.cpp build to use. auto uses the best installed build and installs the recommended one only when none is installed.",
+  "settings.field.media.nativeRuntime.help": "stable-diffusion.cpp build to use. auto installs the recommended build for this machine, keeps an installed GPU build, and uses the CPU build only when no GPU build can be installed or loaded.",
   "settings.field.music.nativeRuntime.help": "Compute backend for native music. auto picks the best one for this machine and falls back to Vulkan, then CPU.",
   "settings.field.media.nativeSteps.label": "Native sampling steps",
   "settings.field.media.nativeSteps.help": "Blank uses the model's recommended steps (or 20).",
@@ -2683,6 +2684,7 @@ export const I18N_EN = {
     "This stops the LocaLM server at {address} (serving {dir}). Its model is unloaded first when possible.",
   "settings.instances.unknownDir": "an unknown directory",
   "settings.instances.stoppedToast": "Stopped {name}",
+  "settings.instances.staleToast": "That entry was stale: its server had already exited and pid {pid} now belongs to another program. Removed the entry; nothing was stopped.",
   "settings.instances.stopFailed": "Could not stop: {message}",
 
   // ---- Settings > Recent errors, and the error toast ----

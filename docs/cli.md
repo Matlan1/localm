@@ -397,7 +397,7 @@ base model; they are not supported for HuggingFace-format models.
 localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
-localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
+localm relocate MODEL NEW_PATH  # re-point a moved model and its aliases to the new file
 localm unload [MODEL] [--force] # free VRAM on the running server: all models, or just one
 ```
 
@@ -551,7 +551,7 @@ localm job add NAME --memory --every 21600         # synthesise memory facts, no
 localm job add NAME --rag --collection COLL --cron "0 3 * * *"   # keep a Knowledge collection current
 localm job list                  # id, name, schedule, state, last status
 localm job show JOB_ID           # full definition: schedule, prompt, cwd/scope, allow_shell
-localm job run JOB_ID            # run once now, record the result
+localm job run JOB_ID            # run once now, record the result (in the running server if there is one)
 localm job results JOB_ID [--limit N] [--offset N]  # past run results, newest first
 localm job enable JOB_ID
 localm job disable JOB_ID
