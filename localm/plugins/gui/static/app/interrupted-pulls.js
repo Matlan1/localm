@@ -121,6 +121,7 @@ async function _resume(view, btn) {
   } finally {
     btn.disabled = false;
     loadInterrupted();
+    setTimeout(loadInterrupted, 2500);
   }
 }
 
@@ -153,6 +154,7 @@ async function _dismiss(view, btn) {
   } finally {
     btn.disabled = false;
     loadInterrupted();
+    setTimeout(loadInterrupted, 2500);
   }
 }
 
