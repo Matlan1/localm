@@ -299,13 +299,25 @@ def _posix_ensure_on_path(bindir: Path, prepend: bool = False):
 #  Public install / uninstall                                                   #
 # --------------------------------------------------------------------------- #
 
+def _is_our_symlink(shim: Path, target: Path) -> bool:
+    """True when the symlink *shim* resolves to *target*, this clone's entry
+    point. A link that cannot be resolved is not ours."""
+    try:
+        return Path(os.path.realpath(shim)) == Path(os.path.realpath(target))
+    except OSError:
+        return False
+
+
 def install(clone_root, precedence: str = "append") -> dict:
     """Make ``localm`` available from any terminal. Non-destructive: creates our
     shim and puts our one bin dir on the user PATH; never overwrites another
     tool's command. Returns a dict the caller records in the install manifest:
-    ``{path_dir, shim, path_modified, conflict, precedence, path_note}``
-    (conflict = a pre-existing ``localm`` on PATH, or None; path_note = a human
-    note when the shim was created but its dir could NOT be put on PATH).
+    ``{path_dir, shim, path_modified, conflict, precedence, path_note,
+    shim_created}`` (conflict = a pre-existing ``localm`` on PATH, or None;
+    path_note = a human note when the shim was created but its dir could NOT be
+    put on PATH; shim_created = False when another file or symlink already
+    occupies the shim path, in which case nothing was changed and conflict is
+    that path).
 
     *precedence* is ``"append"`` (default - behind anything already there, so
     nothing that currently works changes) or ``"prepend"`` (this install's
@@ -324,20 +336,21 @@ def install(clone_root, precedence: str = "append") -> dict:
     else:
         d.mkdir(parents=True, exist_ok=True)
         target = _venv_localm(clone_root)
-        # Replace only our OWN symlink on a re-run; never touch a real file there.
-        if shim.is_symlink():
+        # Replace only a symlink that resolves to THIS clone's entry point; any
+        # other symlink or file at the name is left untouched and reported.
+        if shim.is_symlink() and _is_our_symlink(shim, target):
             shim.unlink()
-        elif shim.exists():
-            # Something that is not our symlink occupies the name - do not clobber.
+        elif shim.is_symlink() or shim.exists():
             return {"path_dir": str(d), "shim": str(shim), "path_modified": False,
                     "conflict": str(shim), "precedence": precedence,
-                    "path_note": None}
+                    "path_note": None, "shim_created": False}
         shim.symlink_to(target)
         changed, path_note = _posix_ensure_on_path(d, prepend=prepend)
 
     return {"path_dir": str(d), "shim": str(shim),
             "path_modified": bool(changed), "conflict": conflict,
-            "precedence": precedence, "path_note": path_note}
+            "precedence": precedence, "path_note": path_note,
+            "shim_created": True}
 
 
 def uninstall_command(path_dir: str, shim: str) -> dict:
@@ -500,6 +513,12 @@ def main(argv=None) -> int:
             print(f"  [!] Could not add the global command: {e}")
             return 1
         # Report what was DONE, per the answer given - never a generic claim.
+        if res.get("shim_created") is False:
+            # Nothing was created: exit 30, so setup records no command.
+            print(f"  [!] {res['shim']} already exists and is not this "
+                  "install's command, so it was left untouched. Nothing added; "
+                  "this install is still usable via its own folder.")
+            return 30
         if res.get("conflict") and res.get("precedence") == "prepend":
             if conflict_outranks_user_path(res["conflict"]):
                 print("  [!] This install was put first in your user PATH, but "
