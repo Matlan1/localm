@@ -243,8 +243,10 @@ coding agent's shell access, so you can grant one without the other.
   transfer itself are made by the `huggingface_hub` library, which follows the
   hub's redirect to its download host on its own, without the per-hop check or
   the DNS-rebinding pin. The
-  coder's network reviewer (a cloud model or an off-machine URL) is checked
-  the same way, and falls back to the local model when refused.
+  coder's off-machine backends (the providers, a non-local `--url`, and the
+  network reviewer) are checked the same way when built; privacy mode also
+  refuses an off-machine URL from `LOCALCODER_URL`. The reviewer falls back to
+  the local model when refused.
 - **Packages a model's own code needs** (`localm install-packages`, or
   **install packages** on the Models page). A deliberate action you agree to
   after seeing the list. Before resolving and before installing, localm calls

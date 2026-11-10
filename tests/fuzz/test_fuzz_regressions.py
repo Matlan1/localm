@@ -21,7 +21,7 @@ from localm.inference import gbnf
 from localm.inference.backends.base import InvalidGrammarError
 from localm.inference import hf_shard_index_safety, hf_tokenizer_safety
 from localm.model_manager import capabilities, gguf, registry
-from localm.plugins import engine, loader
+from localm.plugins import engine
 from localm.plugins.mcpserver.server import MCPStdioServer
 from localm.rag import extract
 from tests.fuzz import _bounds
@@ -64,23 +64,6 @@ _HOSTILE_MANIFESTS = {
     "entry_is_a_table": b"[plugin]\nname='x'\nentry={':'=1}\n",
     "nested_too_deep": b"[plugin]\nname='x'\nentry='m:f'\na=" + b"[" * 5000 + b"]" * 5000,
 }
-
-
-class TestLegacyManifest:
-    @pytest.mark.parametrize("case", sorted(_HOSTILE_MANIFESTS))
-    def test_a_hostile_manifest_raises_plugin_error(self, tmp_path, case):
-        d = _plugin(tmp_path, "p", _HOSTILE_MANIFESTS[case])
-        with pytest.raises(loader.PluginError):
-            loader.parse_manifest(d)
-
-    def test_one_hostile_plugin_does_not_hide_the_good_ones(self, tmp_path):
-        _plugin(tmp_path, "a_bad", _HOSTILE_MANIFESTS["not_utf8"])
-        _plugin(tmp_path, "b_bad", _HOSTILE_MANIFESTS["entry_is_an_int"])
-        _plugin(tmp_path, "c_good", b"[plugin]\nname='good'\nentry='m:f'\n")
-        found = [m.name for m in loader.discover_plugins(tmp_path)]
-        assert found == ["good"]
-        errors = loader.discover_errors(tmp_path)
-        assert len(errors) == 2
 
 
 class TestEngineSpec:

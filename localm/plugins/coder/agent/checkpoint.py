@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from localm.debuglog import logger
+from localm.storeformat import StoreFormatTooNew, check_stamp
+
 from ..indexer import _BUILD_DEADLINE_S
 
 def _project_digest(cwd) -> str:
@@ -118,6 +121,13 @@ def _read_checkpoint(p: Path) -> Optional[dict]:
             return None
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        check_stamp(data.get("version"), 1, p, "coder checkpoint")
+    except StoreFormatTooNew as e:
+        logger.warning("%s", e)
         return None
     if data.get("version") == 1 and isinstance(data.get("messages"), list):
         return data

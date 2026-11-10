@@ -1621,7 +1621,7 @@
   "plugins.external": "Plugins externes",
   "plugins.external.empty.hint": "Installez-en un depuis le catalogue ci-dessus pour ajouter des fonctionnalités.",
   "plugins.external.empty.text": "Aucun plugin externe installé",
-  "plugins.externalIntro": "Un plugin tiers est un dossier contenant un manifeste <code>plugin.toml</code> sous <code>~/.localm/plugins/</code> ; il peut ajouter une commande CLI et exporter des outils vers l'agent Coder. L'installation est une simple copie de dossier locale.",
+  "plugins.externalIntro": "Un plugin tiers est un dossier contenant un manifeste <code>plugin.toml</code> ; l'installation le copie dans le dossier des plugins de cette installation. Il peut ajouter une commande CLI et exporter des outils vers l'agent Coder. Les plugins tiers s'exécutent sans bac à sable dans le même processus : n'installez que du code de confiance.",
   "plugins.firstParty": "Plugins officiels",
   "plugins.install": "Installer",
   "plugins.installDependencies": "Installer les dépendances",

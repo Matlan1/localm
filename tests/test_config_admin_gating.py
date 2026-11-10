@@ -125,7 +125,7 @@ def test_gate_is_specific_not_a_blanket_block(app_env):
     targeted trust gate, not a general loss of the scope."""
     c, scoped, _ = app_env
     assert c.patch("/v1/config", headers=_scoped(scoped),
-                   json={"net_allow": ["x.com"]}).status_code == 200
+                   json={"user_name": "x"}).status_code == 200
 
 
 # --------------------------------------------------------------------------- #

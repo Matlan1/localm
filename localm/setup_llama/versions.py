@@ -20,6 +20,7 @@ from localm.setup_llama._common import console
 from localm.setup_llama.pins import (_PINNED_TAG, _ROCM_BUILD, _ROCM_TAG, _TRACK_DEFAULT,
                                      _TRACK_LATEST, _UPSTREAM_REPO)
 import localm.setup_llama as _sl
+from localm.http_ssl import read_bounded
 
 # How many past provisions to remember. Rollback only ever needs the previous
 # DISTINCT tag, but keeping a short run of them means a user who rolled back and
@@ -387,7 +388,7 @@ def _recent_tags(limit: int = 10) -> list:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
-            releases = json.loads(r.read().decode("utf-8"))
+            releases = json.loads(read_bounded(r).decode("utf-8"))
         for rel in releases:
             if not isinstance(rel, dict) or rel.get("draft"):
                 continue
