@@ -591,7 +591,7 @@ class _ExecutionMixin:
                        duration_s=duration_s)
             return result
 
-        if self.patch_mode and call.name in _PATCH_MODE_REFUSED_TOOLS:
+        if getattr(self, "patch_mode", False) is True and call.name in _PATCH_MODE_REFUSED_TOOLS:
             result = ToolResult.error(
                 f"[patch-mode] {call.name} writes a file that cannot be captured as "
                 "a diff - skipped. Turn patch mode off to run it.")
