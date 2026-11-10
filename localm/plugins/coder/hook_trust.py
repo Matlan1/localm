@@ -354,8 +354,10 @@ def keep_trust(cwd: Path):
     project stays trusted for this process."""
     before = _current(cwd)
     how = None
+    old_digest = ""
     if before is not None:
         path, digest = before
+        old_digest = digest
         decided = session_decision(path, digest)
         if decided:
             how = "session"
@@ -372,9 +374,9 @@ def keep_trust(cwd: Path):
     key = config_key(path)
     with _SESSION_LOCK:
         for entry, new in list(_RENEWED.items()):
-            if entry[0] == key and new == before[1]:
+            if entry[0] == key and new == old_digest:
                 _RENEWED[entry] = digest
-        _RENEWED[(key, before[1])] = digest
+        _RENEWED[(key, old_digest)] = digest
     if how == "store":
         try:
             remember_trust(path, digest)
