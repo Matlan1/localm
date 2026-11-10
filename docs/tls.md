@@ -143,7 +143,7 @@ that could fix it. So instead of exiting, a Settings-driven bind that fails
 the check - no key, too short a key, TLS setup failing, or the configured
 address simply not being bindable on this machine right now - falls back to
 127.0.0.1 with a loud warning (console, log, and a hint in the Companion app
-card under Settings > Server) rather than leaving the server unreachable. An
+card under Settings > Server & network) rather than leaving the server unreachable. An
 explicit `-H` from a terminal keeps failing hard (exits) exactly as above,
 since a terminal can always add `--insecure` or fix the key itself.
 
