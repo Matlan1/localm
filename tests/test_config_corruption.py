@@ -142,22 +142,23 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         import json
         assert json.loads(p.read_text(encoding="utf-8"))["port"] == 9191
 
-    def test_recovered_from_bak_still_writes(self, cfg_home):
-        """The second control: an unreadable PRIMARY whose .bak reads fine is a
-        SUCCESSFUL read of real data, so it must not refuse."""
+    def test_a_primary_served_from_bak_is_refused_too(self, cfg_home):
+        """An unreadable PRIMARY whose .bak reads fine is the previous
+        generation, not the current settings: saving would persist the older
+        copy over it, so it refuses and leaves both files as they were."""
         import json
         p = cfg_home / "config.json"
         p.write_text(json.dumps({"net_mode": "off"}), encoding="utf-8")
         cfg.update_config(lambda c: c.__setitem__("port", 9393))   # rotates .bak
         p.write_text("{ corrupt", encoding="utf-8")
+        bak = p.with_name("config.json.bak")
+        bak_before = bak.read_bytes()
 
-        cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
+        with pytest.raises(cfg.ConfigUnreadable):
+            cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
 
-        got = json.loads(p.read_text(encoding="utf-8"))
-        # 8192, not the 4096 DEFAULT: _user_delta drops a value equal to the
-        # default, so the default can never appear in the file.
-        assert got["n_ctx"] == 8192
-        assert got["net_mode"] == "off", "the .bak's real settings were lost"
+        assert p.read_text(encoding="utf-8") == "{ corrupt"
+        assert bak.read_bytes() == bak_before
 
 
 # --------------------------------------------------------------------------- #
@@ -337,17 +338,23 @@ def test_read_json_checked_falls_back_to_the_bak_and_calls_a_default(cfg_home):
     assert cfg._read_json_checked(target, dict) == ({"a": 1}, True)
 
 
-def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys):
+def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys, caplog):
+    import logging
     target = cfg_home / "x.json"
     target.write_text("{bad", encoding="utf-8")
-    assert cfg._read_json_checked(target, {}) == ({}, False)
-    err = capsys.readouterr().err
-    assert err.startswith("[localm] x.json is unreadable (")
-    assert err.endswith("); falling back.\n")
+    cfg._warned_unreadable.clear()
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert cfg._read_json_checked(target, {}) == ({}, False)
+    assert capsys.readouterr().err == ""
+    [msg] = [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()]
+    assert msg.startswith("x.json is unreadable (") and msg.endswith(")")
 
 
 def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
-        cfg_home, monkeypatch, capsys):
+        cfg_home, monkeypatch, capsys, caplog):
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cfg, "os", _OsAs("nt"))
@@ -356,12 +363,16 @@ def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
     assert cfg._read_json_checked(target, {}) == ({}, False)
     assert len(calls) == cfg._REPLACE_RETRIES
     assert len(sleeps) == cfg._REPLACE_RETRIES - 1
-    assert capsys.readouterr().err == (
-        f"[localm] x.json is unreadable ({calls[-1]}); falling back.\n")
+    assert capsys.readouterr().err == ""
+    assert [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()] == [
+        f"x.json is unreadable ({calls[-1]})"]
 
 
 def test_read_json_checked_on_windows_does_not_retry_a_stable_denial(
-        cfg_home, monkeypatch, capsys):
+        cfg_home, monkeypatch, capsys, caplog):
+    import logging
+    cfg._warned_unreadable.clear()
+    caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cfg, "os", _OsAs("nt"))
@@ -369,8 +380,9 @@ def test_read_json_checked_on_windows_does_not_retry_a_stable_denial(
     calls = _deny_open(monkeypatch, target, 1314)
     assert cfg._read_json_checked(target, {}) == ({}, False)
     assert len(calls) == 1 and sleeps == []
-    assert capsys.readouterr().err == (
-        f"[localm] x.json is unreadable ({calls[-1]}); falling back.\n")
+    assert capsys.readouterr().err == ""
+    assert [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()] == [
+        f"x.json is unreadable ({calls[-1]})"]
 
 
 def test_non_dict_config_warning_is_once_per_config_file(cfg_home, monkeypatch, capsys):

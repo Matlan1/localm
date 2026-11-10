@@ -227,7 +227,7 @@ def test_a_confined_job_uses_the_pin_of_the_directory_it_runs_in(
     elsewhere = _project(tmp_path, 'mode = "full"\n')
     monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: str(root))
     auth.set_api_key("owner-key-privacy-pin-0123456789")
-    created = auth.create_key("bot", ["jobs"], allow_privileged=False)
+    created = auth.create_key("bot", ["jobs", "coder"], allow_privileged=False)
     job = Job(name="x", task_kind="coder", prompt="p", cwd=str(elsewhere),
               schedule_kind="interval", schedule=60,
               owner=auth._hash_key(created["key"]))
