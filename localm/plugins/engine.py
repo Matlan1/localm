@@ -350,6 +350,20 @@ def import_tool_module(spec: PluginSpec):
 _ROUTE_PREFIXES = ("/api/", "/v1/")
 
 
+def _mounted_paths(route) -> list:
+    """The URL paths *route* serves. An included router (FastAPI keeps it lazy
+    and path-less) is expanded into the effective paths of its routes."""
+    contexts = getattr(route, "effective_route_contexts", None)
+    if callable(contexts):
+        out = []
+        for ctx in contexts():
+            starlette_route = getattr(ctx, "starlette_route", None)
+            target = starlette_route if starlette_route is not None else ctx
+            out.append(str(getattr(target, "path", "")))
+        return out
+    return [str(getattr(route, "path", ""))]
+
+
 class PluginHost:
     """Concrete `contract.Host`. One per loaded plugin; tracks what it mounted
     so it can be cleanly removed on unload."""
@@ -383,8 +397,8 @@ class PluginHost:
         self._app.include_router(
             router, dependencies=[Depends(require_scope(self._spec.scope))])
         new = [r for r in self._app.router.routes if id(r) not in before]
-        outside = [str(getattr(r, "path", "")) for r in new
-                   if not str(getattr(r, "path", "")).startswith(_ROUTE_PREFIXES)]
+        outside = [path for r in new for path in _mounted_paths(r)
+                   if not path.startswith(_ROUTE_PREFIXES)]
         if outside:
             for r in new:
                 self._app.router.routes.remove(r)
