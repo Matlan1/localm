@@ -52,6 +52,7 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from localm import __version__ as _LOCALM_VERSION
@@ -1033,7 +1034,9 @@ def _coder_available() -> bool:
 
 def build_tools(engines: EngineCache, enable_images: bool = True,
                 enable_coder: bool = True, enable_memory: bool = True,
-                enable_memory_write: bool = False) -> dict[str, dict]:
+                enable_memory_write: bool = False,
+                coder_shell: bool = False,
+                coder_root: Optional[Path] = None) -> dict[str, dict]:
     """Return {tool_name: {schema, handler}} for everything this server offers.
 
     Composes the tool families under ``localm.plugins.mcpserver.tools`` and
@@ -1042,7 +1045,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
     is active, ``generate_image`` unless *enable_images*, ``memory_recall``
     unless *enable_memory* and the memory plugin is active, and
     ``memory_append`` unless additionally *enable_memory_write*. A tool name
-    defined by two families raises ``ToolNameCollision``.
+    defined by two families raises ``ToolNameCollision``. *coder_shell* lets
+    ``run_coder_task`` auto-approve shell commands; *coder_root* confines its
+    ``cwd``.
     """
     from .tools import (chat, diagnostics, media_coder, memory,
                         merge_tool_groups, models, plugin_admin)
@@ -1051,7 +1056,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         ("chat", chat.build(engines)),
         ("memory", memory.build(enable_memory_write=enable_memory_write)),
         ("models", models.build(engines)),
-        ("media_coder", media_coder.build(engines)),
+        ("media_coder", media_coder.build(engines, coder_shell=coder_shell,
+                                          coder_root=coder_root)),
         ("diagnostics", diagnostics.build()),
         ("plugin_admin", plugin_admin.build()),
     ])
@@ -1231,14 +1237,18 @@ class MCPStdioServer:
 def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
                  enable_coder: bool = True, enable_memory: bool = True,
                  enable_memory_write: bool = False,
-                 share_loaded: bool = False) -> None:
+                 share_loaded: bool = False,
+                 coder_shell: bool = False,
+                 coder_root: Optional[Path] = None) -> None:
     """Entry point used by the CLI: build everything and block on stdio."""
     _redirect_consoles_to_stderr()
     engines = EngineCache(default_model=model, share_loaded=share_loaded)
     server = MCPStdioServer(build_tools(
         engines, enable_images=enable_images, enable_coder=enable_coder,
         enable_memory=enable_memory,
-        enable_memory_write=enable_memory_write))
+        enable_memory_write=enable_memory_write,
+        coder_shell=coder_shell,
+        coder_root=Path(coder_root).resolve() if coder_root else None))
     # The protocol stream keeps the real stdout; every other print in this
     # process, on any thread, lands on stderr from here on.
     protocol_out = sys.stdout
