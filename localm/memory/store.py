@@ -321,10 +321,9 @@ def _namespace_lock(ns_hash: str):
 # from its own process too (cli/maintenance.py).
 #
 # The cross-process lock is rag's heartbeat-based collection_write_lock, NOT
-# config._cross_process_lock: that one reclaims any holder older than 30s as
-# abandoned, and store.add()/replace() resolve the embedder INSIDE the lock, which
-# can trigger a VRAM swap lasting minutes - a wall-clock reclaim would reap a live
-# holder and let both write. collection_lock has no wall-clock limit and keys
+# storekit.store_lock: a waiter on that one gives up after 10 s, and
+# store.add()/replace() resolve the embedder INSIDE the lock, which can trigger a
+# VRAM swap lasting minutes. collection_lock has no wall-clock limit and keys
 # staleness on a heartbeat instead.
 
 # How long recall's reinforcement waits for a busy namespace before skipping the
