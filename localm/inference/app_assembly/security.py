@@ -26,7 +26,7 @@ from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
 from localm.inference import responses_protocol as _responses
 
-_LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+_LOCAL_ORIGIN_RE = re.compile(rf"^{LOCAL_ORIGIN_PATTERN}$")
 
 
 def simple_request_origin_allowed(request: Any) -> bool:
