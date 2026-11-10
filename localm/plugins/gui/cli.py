@@ -570,8 +570,10 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
     Returns False when a new server should start: with --new or --isolated, or
     when instances.find_attachable finds nothing for the project root.
     Otherwise prints the attach, asks an instance whose mode is not "full" to
-    mount its GUI (_mount_remote_gui), prints its address, opens it unless
-    --no-browser (_open_attached) and returns True. Exits 1 before any of that
+    mount its GUI (_mount_remote_gui) unless *api_mode* is set, prints its
+    address, opens it unless --no-browser (_open_attached) and returns True.
+    With *api_mode* the running instance is never asked to mount anything.
+    Exits 1 before any of that
     when an option given on the command line conflicts with the running
     instance (_attach_conflicts)."""
     from localm import instances
@@ -601,7 +603,7 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
         f"[bold green]Attaching[/bold green] to the localm already "
         f"running for [cyan]{root_dir}[/cyan] "
         f"(pid {existing.get('pid')}, port {existing.get('port')}).")
-    if existing.get("mode") != "full":
+    if not api_mode and existing.get("mode") != "full":
         reason = _mount_remote_gui(existing)
         if reason is None:
             console.print(
