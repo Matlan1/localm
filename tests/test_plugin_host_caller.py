@@ -35,7 +35,7 @@ def _client() -> tuple:
     host = PluginHost(app, MagicMock(), PluginSpec(name="probe", scope=S.CHAT))
     router = APIRouter()
 
-    @router.get("/probe/who")
+    @router.get("/api/probe/who")
     def who(request: Request, owner: Optional[str] = None):
         return {"owner": host.caller_is_owner(request),
                 "principal": host.caller_principal(request),
@@ -56,7 +56,7 @@ def test_plugin_host_satisfies_the_contract(home):
 
 def test_open_mode_caller_is_the_owner_with_no_principal(home):
     c, _host = _client()
-    got = c.get("/probe/who").json()
+    got = c.get("/api/probe/who").json()
     assert got == {"owner": True, "principal": None, "owns": True}
 
 
@@ -67,19 +67,19 @@ def test_keyed_callers_are_told_apart(home, monkeypatch):
     bob = auth.create_key("bob", [S.CHAT])["key"]
     c, _host = _client()
 
-    a = c.get("/probe/who", headers=_bearer(alice)).json()
-    b = c.get("/probe/who", headers=_bearer(bob)).json()
+    a = c.get("/api/probe/who", headers=_bearer(alice)).json()
+    b = c.get("/api/probe/who", headers=_bearer(bob)).json()
     assert a["owner"] is False and b["owner"] is False
     assert a["principal"] and b["principal"] and a["principal"] != b["principal"]
     assert alice not in a["principal"]
     assert a["owns"] is True                                  # owner=None: unrestricted
 
-    assert c.get("/probe/who", params={"owner": a["principal"]},
+    assert c.get("/api/probe/who", params={"owner": a["principal"]},
                  headers=_bearer(alice)).json()["owns"] is True
-    assert c.get("/probe/who", params={"owner": a["principal"]},
+    assert c.get("/api/probe/who", params={"owner": a["principal"]},
                  headers=_bearer(bob)).json()["owns"] is False
 
-    owner = c.get("/probe/who", params={"owner": a["principal"]},
+    owner = c.get("/api/probe/who", params={"owner": a["principal"]},
                   headers=_bearer("owner-secret-for-the-probe-test-0123456789")).json()
     assert owner["owner"] is True and owner["owns"] is True
 
@@ -87,4 +87,4 @@ def test_keyed_callers_are_told_apart(home, monkeypatch):
 def test_no_valid_key_while_keys_exist_is_refused_before_the_route(home, monkeypatch):
     monkeypatch.setenv("LOCALM_API_KEY", "owner-secret-for-the-probe-test-0123456789")
     c, _host = _client()
-    assert c.get("/probe/who").status_code == 401
+    assert c.get("/api/probe/who").status_code == 401

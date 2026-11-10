@@ -188,8 +188,21 @@ def tool_git_push(
     remote: str = "origin",
     branch: str = "",
 ) -> ToolResult:
-    """Push the current branch to a remote."""
-    args = ["push", remote]
+    """Push the current branch to a remote.
+
+    A *remote* that is empty after stripping, or a *remote* or *branch* that
+    begins with ``-``, is refused; the two are passed after ``--`` so git never
+    reads either as an option."""
+    remote = (remote or "origin").strip()
+    branch = (branch or "").strip()
+    for label, value in (("remote", remote), ("branch", branch)):
+        if value.startswith("-"):
+            return ToolResult.error(
+                f"git push refused: the {label} {value!r} begins with '-', which "
+                "git would read as an option.")
+    if not remote:
+        return ToolResult.error("git push refused: the remote is empty.")
+    args = ["push", "--", remote]
     if branch:
         args.append(branch)
     out, ok = _git(cwd, *args, timeout=60)

@@ -64,7 +64,7 @@ def test_scoped_key_cannot_see_owner_only_fields_in_schema(app_env):
     assert rag <= owner_keys, "owner must see the owner-only fields"
     assert not (rag & scoped_keys), "scoped key must NOT see any of them"
     # A normal config:write field is still delivered to the scoped key.
-    assert "net_allow" in scoped_keys
+    assert "user_name" in scoped_keys
 
 
 def test_get_config_strips_owner_only_values_for_scoped_key(app_env):
@@ -93,7 +93,7 @@ def test_scoped_key_patch_forbidden_owner_allowed(app_env):
                           json={"rag_indexing_mode": "blacklist"})
     assert mode_denied.status_code == 403, mode_denied.text
     # The SAME scoped key may still change a non-owner-only setting.
-    ok = c.patch("/v1/config", headers=_scoped(scoped), json={"net_allow": ["x.com"]})
+    ok = c.patch("/v1/config", headers=_scoped(scoped), json={"user_name": "x"})
     assert ok.status_code == 200, ok.text
     # And the owner sets the root successfully.
     owned = c.patch("/v1/config", headers=_owner(), json=body)
@@ -124,7 +124,7 @@ def test_net_allow_private_is_owner_only(app_env):
     assert c.get("/v1/config", headers=_owner()).json().get("net_allow_private") is True
     # A plain (non-owner-only) network field stays fully usable by the scoped key.
     assert c.patch("/v1/config", headers=_scoped(scoped),
-                   json={"net_allow": ["x.com"]}).status_code == 200
+                   json={"user_name": "x"}).status_code == 200
 
 
 def test_net_allow_private_value_hidden_from_scoped_key(app_env):
@@ -176,12 +176,12 @@ def test_patch_response_hides_admin_only_field_values_from_a_scoped_writer(app_e
     update_config(lambda cfg: cfg.update({"update_token": "s3cr3t-owner-set-token"}))
     # The scoped (non-owner) key makes an ORDINARY write (something it IS
     # allowed to set) ...
-    resp = c.patch("/v1/config", headers=_scoped(scoped), json={"net_allow": ["x.com"]})
+    resp = c.patch("/v1/config", headers=_scoped(scoped), json={"user_name": "x"})
     assert resp.status_code == 200, resp.text
     assert "update_token" not in resp.json(), \
         "an admin_only field's value must not be echoed back to a non-owner key"
     # The owner's own PATCH response still carries it.
-    owner_resp = c.patch("/v1/config", headers=_owner(), json={"net_allow": ["y.com"]})
+    owner_resp = c.patch("/v1/config", headers=_owner(), json={"user_name": "y"})
     assert owner_resp.json().get("update_token") == "s3cr3t-owner-set-token"
 
 

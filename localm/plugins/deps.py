@@ -17,10 +17,12 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from localm import config, uv_tool
+from localm import config, pyinstall, uv_tool
 from localm.debuglog import logger
 
 #: Progress sink: called with one human-readable line at a time (a pip output
@@ -169,23 +171,118 @@ def _tail(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
-def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
+def _locked_selection(uv: str, root: Path, extras: list) -> list:
+    """The entries of the ``uv.lock`` at *root* for localm's dependencies plus
+    *extras* (:func:`localm.pyinstall.locked_requirements`) that apply on this
+    machine and are not installed at the locked version or newer. Raises what
+    ``locked_requirements`` raises."""
+    import importlib.metadata as md
+
+    from packaging.version import InvalidVersion, Version
+    out = []
+    for entry in pyinstall.locked_requirements(uv, root, extras,
+                                               env=config.contained_pip_env()):
+        if not entry.applies():
+            continue
+        try:
+            installed = md.version(entry.name)
+        except md.PackageNotFoundError:
+            out.append(entry)
+            continue
+        try:
+            if Version(installed) < Version(entry.version):
+                out.append(entry)
+        except InvalidVersion:
+            out.append(entry)
+    return out
+
+
+def _unmet_dependencies(names: Iterable[str]) -> list:
+    """The requirements of the installed distributions *names* (each one's
+    ``Requires-Dist`` whose marker holds with no extra) that are not satisfied."""
+    import importlib.metadata as md
+    unmet = []
+    for name in names:
+        try:
+            reqs = md.requires(name) or []
+        except md.PackageNotFoundError:
+            continue
+        for r in reqs:
+            head, _, marker = r.partition(";")
+            if marker and not _marker_applies(marker, ""):
+                continue
+            if not is_satisfied(head.strip()):
+                unmet.append(f"{name} needs {head.strip()}")
+    return unmet
+
+
+def _run_pip(reqs: list, *, on_progress: ProgressCb = None,
+             extras: Optional[list] = None):
     """Install *reqs* into the CURRENT interpreter's environment. Tries ``uv pip
-    install`` (the uv :func:`localm.uv_tool.find_uv` finds, run by full path) first, then ``pip``, streaming output to *on_progress*. Returns
-    ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
+    install`` (the uv :func:`localm.uv_tool.find_uv` finds, run by full path) first,
+    then ``pip``, streaming output to *on_progress*. Returns ``(ok,
+    combined_output)``. ``--python sys.executable`` pins uv to this venv
     regardless of the ambient VIRTUAL_ENV.
+
+    Refuses, before anything runs, when the network policy refuses the package
+    index (:func:`localm.pyinstall.check_network`). When *extras* are given, uv
+    is found and the install root has a ``uv.lock``, installs the locked
+    versions of what those extras need with ``--require-hashes --no-deps``
+    (:func:`_locked_selection`) instead of *reqs*, and fails when a package it
+    installed then has an unmet dependency; a lock that cannot be read is a
+    failure. Otherwise installs *reqs* from the index without hash checking and
+    says so on *on_progress*.
 
     ``env`` pins uv's AND pip's caches inside the data dir. Both are set: the uv
     attempt runs first and pip second, and each caches to a per-user location
     OUTSIDE the data dir when left to its default. See
     ``config.contained_pip_env``."""
+    try:
+        pyinstall.check_network()
+    except pyinstall.InstallRefused as e:
+        _emit(on_progress, str(e))
+        return False, str(e)
     env = config.contained_pip_env()
-    uv = uv_tool.find_uv(uv_tool.install_root())
+    root = uv_tool.install_root()
+    uv = uv_tool.find_uv(root)
+    if extras and uv and pyinstall.lock_file(root) is not None:
+        try:
+            chosen = _locked_selection(uv, root, list(extras))
+        except (pyinstall.InstallRefused, RuntimeError) as e:
+            _emit(on_progress, str(e))
+            return False, str(e)
+        if not chosen:
+            return True, ""
+        _emit(on_progress, f"Installing the versions in {pyinstall.LOCK_NAME}, "
+                           "each file checked against its sha256...")
+        with tempfile.TemporaryDirectory(prefix="localm-deps-") as tmp:
+            req_file = Path(tmp) / "requirements.txt"
+            req_file.write_text("".join(e.line() + "\n" for e in chosen), encoding="utf-8")
+            hashed = ["--require-hashes", "--no-deps", "-r", str(req_file)]
+            ok, out = _run_attempts(
+                [[uv, "pip", "install", "--python", sys.executable, *hashed],
+                 [sys.executable, "-m", "pip", "install", *hashed]], env, on_progress)
+        if ok:
+            unmet = _unmet_dependencies(e.name for e in chosen)
+            if unmet:
+                msg = "the installed packages have unmet dependencies: " + "; ".join(unmet)
+                _emit(on_progress, msg)
+                return False, out + "\n" + msg
+        return ok, out
+    _emit(on_progress, f"No {pyinstall.LOCK_NAME} covers this install, so the package "
+                       "files are not checked against known hashes.")
     attempts = [[sys.executable, "-m", "pip", "install", *reqs]]
     if uv:
         attempts.insert(0, [uv, "pip", "install", "--python", sys.executable, *reqs])
     else:
         _emit(on_progress, "uv not found, using pip...")
+    return _run_attempts(attempts, env, on_progress)
+
+
+def _run_attempts(attempts: list, env: dict, on_progress: ProgressCb):
+    """Run each argv of *attempts* in turn until one exits 0, streaming its
+    output to *on_progress*. Returns ``(ok, output of the last attempt run)``;
+    a program that is not found moves on to the next."""
     last = ""
     for cmd in attempts:
         _emit(on_progress, "$ " + " ".join(cmd))
@@ -213,10 +310,13 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
 
 
 def install_requirements(reqs: Iterable[str], *,
-                         on_progress: ProgressCb = None) -> InstallResult:
-    """Install any of *reqs* that are not already satisfied. Re-checks after the
-    install so a pip that exits 0 but did not actually provide a package is still
-    reported as failed."""
+                         on_progress: ProgressCb = None,
+                         extras: Optional[Iterable[str]] = None) -> InstallResult:
+    """Install any of *reqs* that are not already satisfied; *extras* are the
+    localm extras *reqs* came from, which lets the install take their locked,
+    hashed versions (:func:`_run_pip`). Re-checks after the install so a pip
+    that exits 0 but did not actually provide a package is still reported as
+    failed."""
     reqs = list(reqs)
     todo = missing_requirements(reqs)
     res = InstallResult(ok=True, skipped=[r for r in reqs if r not in todo])
@@ -224,7 +324,8 @@ def install_requirements(reqs: Iterable[str], *,
         _emit(on_progress, "All dependencies already satisfied.")
         return res
     _emit(on_progress, "Installing: " + ", ".join(todo))
-    ok, out = _run_pip(todo, on_progress=on_progress)
+    ok, out = _run_pip(todo, on_progress=on_progress,
+                       extras=list(extras) if extras is not None else None)
     res.log = out
     if not ok:
         res.ok = False
@@ -252,4 +353,4 @@ def install_plugin_extras(extras: Iterable[str], *,
     if not reqs:
         _emit(on_progress, "No pip extras declared for this plugin.")
         return InstallResult(ok=True)
-    return install_requirements(reqs, on_progress=on_progress)
+    return install_requirements(reqs, on_progress=on_progress, extras=list(extras))

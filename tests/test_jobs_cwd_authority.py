@@ -114,7 +114,7 @@ def test_a_jobs_only_keys_directory_is_confined_to_the_project_root(jobs_app,
     victim = tmp_path / "elsewhere"
     victim.mkdir()
     auth.set_api_key(KEY_ONE)
-    scoped = auth.create_key("bot", [JOBS], allow_privileged=False)
+    scoped = auth.create_key("bot", [JOBS, S.CODER], allow_privileged=False)
 
     r = _post_job(jobs_app, scoped["key"], victim)
 
@@ -158,7 +158,7 @@ def test_a_jobs_only_key_can_still_schedule_a_coder_job_at_all(jobs_app, tmp_pat
     work = tmp_path / "proj"
     work.mkdir()
     auth.set_api_key(KEY_ONE)
-    scoped = auth.create_key("bot", [JOBS], allow_privileged=False)
+    scoped = auth.create_key("bot", [JOBS, S.CODER], allow_privileged=False)
 
     r = _post_job(jobs_app, scoped["key"], work)
 
@@ -170,7 +170,7 @@ def test_a_non_coder_job_is_unaffected(jobs_app):
     """Only coder jobs carry a cwd; a chat job must not be touched."""
     from localm import auth
     auth.set_api_key(KEY_ONE)
-    scoped = auth.create_key("bot", [JOBS], allow_privileged=False)
+    scoped = auth.create_key("bot", [JOBS, S.CHAT], allow_privileged=False)
 
     with TestClient(jobs_app) as c:
         r = c.post("/api/jobs", json={
@@ -188,7 +188,7 @@ def test_the_update_route_is_gated_too(jobs_app, tmp_path):
     victim = tmp_path / "elsewhere"
     victim.mkdir()
     auth.set_api_key(KEY_ONE)
-    scoped = auth.create_key("bot", [JOBS], allow_privileged=False)
+    scoped = auth.create_key("bot", [JOBS, S.CODER], allow_privileged=False)
 
     with TestClient(jobs_app) as c:
         made = c.post("/api/jobs", json={
@@ -229,7 +229,7 @@ def test_the_runner_confines_a_jobs_only_keys_job_to_the_project_root(
     victim = tmp_path / "elsewhere"
     victim.mkdir()
     auth.set_api_key(KEY_ONE)
-    _created, job = _scoped_job(auth, victim, [JOBS])
+    _created, job = _scoped_job(auth, victim, [JOBS, S.CODER])
 
     assert runner.run_job(job, engine=None)["status"] == "ok"
 
@@ -247,7 +247,7 @@ def test_the_confinement_is_surfaced_not_silent(home, tmp_path, monkeypatch,
     victim = tmp_path / "elsewhere"
     victim.mkdir()
     auth.set_api_key(KEY_ONE)
-    _created, job = _scoped_job(auth, victim, [JOBS])
+    _created, job = _scoped_job(auth, victim, [JOBS, S.CODER])
 
     with caplog.at_level("WARNING"):
         result = runner.run_job(job, engine=None)
@@ -334,7 +334,6 @@ def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
     legitimately allowed a directory loses it the moment its key is revoked,
     rather than keeping a grant recorded at creation."""
     from localm import auth
-    from localm.instances import resolve_root_dir
     runner, captured = _fake_agent_capture(monkeypatch)
     work = tmp_path / "proj"
     work.mkdir()
@@ -346,10 +345,11 @@ def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
 
     assert auth.revoke_key(created["id"]) is True
     captured.clear()
-    assert runner.run_job(job, engine=None)["status"] == "ok"
+    result = runner.run_job(job, engine=None)
 
-    assert captured["cwd"] == Path(resolve_root_dir()).resolve(), \
-        "a revoked key kept the arbitrary-directory freedom it was granted at creation"
+    assert result["status"] == "error" and "could not be re-confirmed" in result["error"]
+    assert "cwd" not in captured, \
+        "a revoked key's job still ran in the directory it was granted at creation"
 
 
 def test_an_unreadable_keystore_does_not_grant_the_freedom(home, tmp_path,
@@ -359,7 +359,6 @@ def test_an_unreadable_keystore_does_not_grant_the_freedom(home, tmp_path,
     same trap that produced two privilege escalations in the neighbouring
     owner-key check."""
     from localm import auth
-    from localm.instances import resolve_root_dir
     runner, captured = _fake_agent_capture(monkeypatch)
     work = tmp_path / "proj"
     work.mkdir()
@@ -367,9 +366,10 @@ def test_an_unreadable_keystore_does_not_grant_the_freedom(home, tmp_path,
     _created, job = _scoped_job(auth, work, [S.CODER_FULL, JOBS], privileged=True)
 
     monkeypatch.setattr(auth, "_load_keystore", lambda: [])
-    assert runner.run_job(job, engine=None)["status"] == "ok"
+    result = runner.run_job(job, engine=None)
 
-    assert captured["cwd"] == Path(resolve_root_dir()).resolve()
+    assert result["status"] == "error"
+    assert "cwd" not in captured
 
 
 def test_scopes_for_key_hash_answers_none_for_an_expired_key(home):

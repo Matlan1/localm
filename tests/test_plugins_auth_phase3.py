@@ -50,14 +50,13 @@ def test_uninstall_refuses_catalog_protected_chat(tmp_path):
     assert (mgr._installed_root / "chat").is_dir()   # not deleted
 
 
-def test_uninstall_refuses_manifest_protected_plugin(tmp_path):
-    """A plugin not in the catalog but whose installed manifest sets
-    protected = true must also be refused (manifest is the engine's source)."""
+def test_uninstall_ignores_the_protected_flag_of_a_third_party_manifest(tmp_path):
+    """A plugin not in the catalog is not protected, whatever its manifest says:
+    protection comes from the catalog only."""
     mgr = _manager(tmp_path)
     _write_plugin(mgr._installed_root, "guarded", protected=True)
-    with pytest.raises(ValueError, match="protected"):
-        mgr.uninstall("guarded")
-    assert (mgr._installed_root / "guarded").is_dir()
+    assert mgr.uninstall("guarded") is True
+    assert not (mgr._installed_root / "guarded").exists()
 
 
 def test_uninstall_allows_unprotected_plugin(tmp_path):

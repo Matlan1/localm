@@ -512,7 +512,8 @@ def test_resolve_prompt_answers(tmp_path, answer, trusted, remembered):
     with patch.object(hooks_cli.console, "input", return_value=answer):
         hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
     assert agent._tool_hooks.trusted is trusted
-    assert ToolHooks.load(agent.cwd).trusted is remembered
+    hooks = agent._tool_hooks
+    assert hook_trust.is_trusted(hooks.trust_path, hooks.digest) is remembered
 
 
 def test_trust_prompt_renders_its_choice_keys(tmp_path):

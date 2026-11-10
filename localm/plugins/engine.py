@@ -23,7 +23,10 @@ import sys
 import threading
 import tomllib
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
                                      KNOWN_SURFACE_KEYS,
@@ -226,6 +229,8 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         if unknown:
             warnings.append(
                 "unknown manifest key(s) ignored: " + ", ".join(unknown))
+    from localm.plugins import catalog as _cat
+    first_party = builtin or any(e.name == name for e in _cat.CATALOG)
     surface = Surface(
         tab_id=str(s.get("tab_id", "")),
         label=str(s.get("label", "")),
@@ -246,8 +251,8 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         capabilities=str_lists["capabilities"],
         data_subdir=str(p.get("data_subdir", "")),
         builtin=builtin,
-        protected=bool(p.get("protected", False)),
-        default_enabled=bool(p.get("default_enabled", False)),
+        protected=first_party and bool(p.get("protected", False)),
+        default_enabled=first_party and bool(p.get("default_enabled", False)),
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
@@ -255,6 +260,18 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         tool_exports=list(exports),
         path=str(plugin_dir),
     )
+
+
+def _entry_module_file(base: Path, mod_name: str) -> Optional[Path]:
+    """The file of module *mod_name* inside plugin dir *base*: ``<mod>.py`` or
+    ``<mod>/__init__.py``; a dotted name is followed into sub-packages only when
+    every part is an identifier."""
+    candidates = [base / f"{mod_name}.py", base / mod_name / "__init__.py"]
+    parts = mod_name.split(".")
+    if len(parts) > 1 and all(p.isidentifier() for p in parts):
+        nested = base.joinpath(*parts)
+        candidates += [nested.with_name(nested.name + ".py"), nested / "__init__.py"]
+    return next((c for c in candidates if c.is_file()), None)
 
 
 def _import_module(spec: PluginSpec):
@@ -265,13 +282,9 @@ def _import_module(spec: PluginSpec):
     mod_name, _, attr = entry.partition(":")
     attr = attr or "register"
     base = Path(spec.path)
-    mod_file = base / f"{mod_name}.py"
-    if not mod_file.is_file():
-        pkg = base / mod_name / "__init__.py"
-        if pkg.is_file():
-            mod_file = pkg
-        else:
-            raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
+    mod_file = _entry_module_file(base, mod_name)
+    if mod_file is None:
+        raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     # Drop modules cached from a PRIOR load of this plugin: the top-level name
     # and its submodules (e.g. <uniq>.backend), so every module loads from the
@@ -291,9 +304,66 @@ def _import_module(spec: PluginSpec):
     return module, attr, uniq
 
 
+def _scope_problem(spec: PluginSpec, claimed: dict) -> Optional[str]:
+    """Why *spec*'s scope cannot be used by a third-party plugin, or None.
+    *claimed* maps a scope to the installed plugin that already uses it."""
+    from localm import scopes as S
+    if spec.scope in S.all_known_scopes():
+        return (f"plugin {spec.name!r} declares scope {spec.scope!r}, which is a "
+                f"reserved localm scope and cannot be claimed by a third-party "
+                f"plugin")
+    other = claimed.get(spec.scope)
+    if other and other != spec.name:
+        return (f"plugin {spec.name!r} declares scope {spec.scope!r}, which is "
+                f"already used by installed plugin {other!r}")
+    return None
+
+
+def import_tool_module(spec: PluginSpec):
+    """Import the module that holds a plugin's ``[tools] exports``: its legacy
+    ``entry`` module, else its ``register`` module. Reuses the module the engine
+    already loaded for the plugin when it is the same file."""
+    import dataclasses
+    entry = spec.entry or spec.register_entry
+    if not entry:
+        raise ValueError(f"plugin {spec.name!r}: no entry module for tool exports")
+    use = dataclasses.replace(spec, register_entry=entry)
+    uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
+    mod_name = entry.partition(":")[0]
+    base = Path(spec.path or ".")
+    want = _entry_module_file(base, mod_name)
+    cached = sys.modules.get(uniq)
+    cached_file = getattr(cached, "__file__", None)
+    try:
+        if (cached is not None and cached_file and want is not None
+                and Path(cached_file).samefile(want)):
+            return cached
+    except OSError:
+        pass
+    return _import_module(use)[0]
+
+
 # --------------------------------------------------------------------------- #
 #  Host: the API a plugin uses to attach itself                               #
 # --------------------------------------------------------------------------- #
+
+_ROUTE_PREFIXES = ("/api/", "/v1/")
+
+
+def _mounted_paths(route) -> list:
+    """The URL paths *route* serves. An included router (FastAPI keeps it lazy
+    and path-less) is expanded into the effective paths of its routes."""
+    accessor = getattr(route, "effective_route_contexts", None)
+    if callable(accessor):
+        out = []
+        contexts: Any = accessor()
+        for ctx in contexts:
+            starlette_route = getattr(ctx, "starlette_route", None)
+            target = starlette_route if starlette_route is not None else ctx
+            out.append(str(getattr(target, "path", "")))
+        return out
+    return [str(getattr(route, "path", ""))]
+
 
 class PluginHost:
     """Concrete `contract.Host`. One per loaded plugin; tracks what it mounted
@@ -308,6 +378,7 @@ class PluginHost:
         self._chat_phases: list = []        # chat-pipeline phases this plugin hooked
         self._backends: list = []           # inference backends this plugin registered
         self._static_prefixes: set = set()  # URL prefixes this plugin already serves
+        self._stoppers: list = []           # stop callables from track()
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
         self.model_roles: list = []
@@ -327,6 +398,15 @@ class PluginHost:
         self._app.include_router(
             router, dependencies=[Depends(require_scope(self._spec.scope))])
         new = [r for r in self._app.router.routes if id(r) not in before]
+        outside = [path for r in new for path in _mounted_paths(r)
+                   if not path.startswith(_ROUTE_PREFIXES)]
+        if outside:
+            for r in new:
+                self._app.router.routes.remove(r)
+            self._app.openapi_schema = None
+            raise ValueError(
+                f"plugin {self._spec.name!r}: route path(s) {outside!r} are outside "
+                f"/api/ and /v1/")
         # include_router appends, and the GUI's catch-all StaticFiles mount at
         # '/' matches every path, so Starlette would return that first.
         # Relocate the plugin's routes to just before the catch-all.
@@ -437,7 +517,22 @@ class PluginHost:
             _log.warning("plugin %s: on_startup callback failed: %s",
                          self._spec.name, e)
 
+    def track(self, stop_callable) -> None:
+        """Register *stop_callable* (no arguments) to run when this plugin is
+        unmounted, so a thread or timer the plugin started can be stopped. A
+        stopper that raises is logged and does not stop the others."""
+        if not callable(stop_callable):
+            raise ValueError("track() needs a callable")
+        self._stoppers.append(stop_callable)
+
     def unmount(self) -> None:
+        stoppers, self._stoppers = self._stoppers, []
+        for stop in reversed(stoppers):
+            try:
+                stop()
+            except Exception as e:
+                _log.warning("plugin %s: stop callback failed: %s",
+                             self._spec.name, e)
         # Drop queued startup work so a disabled plugin's deferred callbacks
         # cannot fire when the lifespan drains them.
         self._manager.discard_startup_callbacks(self._spec.name)
@@ -544,20 +639,6 @@ class PluginHost:
             c.setdefault("plugins", {})[key] = value
         update_config(_mutate)
 
-    def has_scope(self, scope: str) -> bool:
-        # Not implemented: the host has no request context. Scope checks happen
-        # per-request at the route dependency level (require_scope on the
-        # routes mount_router adds).
-        raise NotImplementedError(
-            "host-side scope checks are not implemented; scopes are enforced "
-            "per-request on the routes mounted via mount_router()")
-
-    def require_scope(self, scope: str) -> None:
-        # See has_scope.
-        raise NotImplementedError(
-            "host-side scope checks are not implemented; scopes are enforced "
-            "per-request on the routes mounted via mount_router()")
-
     def caller_is_owner(self, request: Any) -> bool:
         """True when the caller of *request* is the owner: open mode (no key
         configured anywhere) or an ADMIN/owner key or session. False for a
@@ -604,9 +685,14 @@ class PluginHost:
         except Exception:
             pass
 
-    def browse_dirs(self, path: str) -> dict:
+    def browse_dirs(self, path: str, request: Any) -> dict:
         """Server-side folder-picker helper: immediate subdirectories of *path*
-        (blank -> the user's home). Hidden dirs are omitted."""
+        (blank -> the user's home). Hidden dirs are omitted. Raises
+        PermissionError unless the caller of *request* has host filesystem
+        access (``http_server.effective_fs_access``)."""
+        from localm.inference.http_server import effective_fs_access
+        if effective_fs_access(request) != "host":
+            raise PermissionError("this caller does not have host filesystem access")
         base = Path(path).expanduser() if path else Path.home()
         dirs = []
         try:
@@ -823,7 +909,26 @@ class PluginManager:
                                          "; ".join(warns))
                 except Exception as e:       # one bad manifest must not break discovery
                     self._discover_errors[child.name] = str(e)
+        self._drop_scope_collisions()
         return self._specs
+
+    def _drop_scope_collisions(self) -> None:
+        """Remove from ``_specs`` every third-party spec whose scope is reserved
+        or already claimed by a first-party plugin or an earlier (by name)
+        third-party plugin, and record why in ``_discover_errors``."""
+        from localm.plugins import catalog as _cat
+        first_party = {e.name for e in _cat.CATALOG}
+        claimed = {sp.scope: n for n, sp in self._specs.items() if n in first_party}
+        for name in sorted(self._specs):
+            if name in first_party:
+                continue
+            reason = _scope_problem(self._specs[name], claimed)
+            if reason:
+                self._specs.pop(name)
+                self._discover_errors[name] = reason
+                _log.warning("plugin %s: %s", name, reason)
+            else:
+                claimed[self._specs[name].scope] = name
 
     def _store_dir(self, name: str) -> Optional[Path]:
         # Returns None for a non-conforming id, before the join, so no
@@ -1410,23 +1515,11 @@ class PluginManager:
         plugin name like "rag"/"web"/"voice", not only a deliberate
         ``scope = "chat"`` line: ``mount_router`` gates every route the
         plugin registers on this raw string."""
-        from localm import scopes as S
-        scope = spec0.scope
-        # all_known_scopes() is KERNEL_SCOPES | BUILTIN_PLUGIN_SCOPES |
-        # EXTRA_SCOPES, and PRIVILEGED_SCOPES is a subset of that union, so
-        # this one check covers all three reserved categories.
-        if scope in S.all_known_scopes():
-            raise ValueError(
-                f"plugin {spec0.name!r} declares scope {scope!r}, which is a "
-                f"reserved localm scope and cannot be claimed by a "
-                f"third-party plugin")
         self.discover()
-        collision = next((n for n, sp in self._specs.items()
-                           if n != spec0.name and sp.scope == scope), None)
-        if collision:
-            raise ValueError(
-                f"plugin {spec0.name!r} declares scope {scope!r}, which is "
-                f"already used by installed plugin {collision!r}")
+        claimed = {sp.scope: n for n, sp in self._specs.items() if n != spec0.name}
+        reason = _scope_problem(spec0, claimed)
+        if reason:
+            raise ValueError(reason)
 
     def _copy_third_party_source(self, source: Path, *, force: bool):
         """Validate + copy a third-party plugin source dir into the installed
@@ -1958,10 +2051,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     """Instantiate a PluginManager bound to *app*, load enabled plugins, and add
     the management endpoints. Returns the manager."""
     from fastapi import Depends, HTTPException
+    from fastapi import Request as _Request
     from localm import scopes
     from localm.inference.http_server import require_scope
 
     global _server_manager_attached
+    globals()["Request"] = _Request
     with _backend_manager_lock:
         _server_manager_attached = True
     manager = PluginManager(app, inference_engine=inference_engine)
@@ -1999,15 +2094,28 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     @app.post("/api/plugins/install-external",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
-    async def install_external_plugin_engine(body: dict):
+    async def install_external_plugin_engine(body: dict, request: Request):
         """Install a third-party plugin from a local directory given as
         `source`, which must contain a `plugin.toml` (400 otherwise). Equivalent
         to `localm plugin install <dir>`. The plugin is copied and verified; it
-        becomes available the next time the plugin list is read."""
+        becomes available the next time the plugin list is read. Third-party
+        plugins run unsandboxed in-process, so install only code you trust."""
         from pathlib import Path as _P
+
+        from localm.inference.http_server import effective_fs_access
+        from localm.pathsafe import reject_unsafe_path_string
+        from localm.plugins.deps_task import host_pip_allowed
         source = (body or {}).get("source", "")
-        if not source:
+        if not source or not isinstance(source, str):
             raise HTTPException(400, "Missing 'source' (local directory path)")
+        try:
+            reject_unsafe_path_string(source)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if effective_fs_access(request) != "host" and not host_pip_allowed(app):
+            raise HTTPException(
+                403, "Installing a plugin from a server folder needs host "
+                     "filesystem access or a server bound to loopback.")
         src = _P(source)
         if not (src.is_dir() and (src / "plugin.toml").is_file()):
             raise HTTPException(400, f"No plugin.toml in {source!r}")
@@ -2101,7 +2209,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     # Background-job registry, registered at KERNEL level so a headless
     # ``localm serve`` has one too. Every consumer reads app.state.jobs PER
     # REQUEST, so registration order inside attach_engine does not matter.
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     from localm.plugins.gui.routes import jobs as _job_routes
     app.state.jobs = JobManager()
     _job_routes.register(app, app.state.jobs)

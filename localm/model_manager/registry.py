@@ -2286,6 +2286,24 @@ _NATIVE_MODEL_KEYS = ("model", "vae", "clip_l", "clip_g", "t5xxl", "llm", "clip_
                       "dit", "text_encoder", "lm")
 
 
+_RENAME_HOOKS: "dict[str, Callable[[str, str], list[str]]]" = {}
+
+
+def register_rename_hook(name: str, hook: "Callable[[str, str], list[str]]") -> None:
+    """Register *hook* to run on every model rename, after the registry entry
+    has moved. *hook* is called as ``hook(old_name, new_name)`` and returns the
+    human-readable notes to show the user (an empty list when nothing needed
+    migrating). An exception it raises is reported as a note and never undoes
+    the rename. *name* identifies the hook; registering a name again replaces
+    the earlier hook."""
+    _RENAME_HOOKS[name] = hook
+
+
+def unregister_rename_hook(name: str) -> None:
+    """Remove the hook registered as *name*; an unknown name is ignored."""
+    _RENAME_HOOKS.pop(name, None)
+
+
 def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
     """Best-effort: rewrite every *old_name* reference this process can reach
     inside <data dir>, after rename_model has already moved the registry
@@ -2332,21 +2350,6 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
         notes.append(f"Could not update config.json references: {e}")
 
     try:
-        from localm.plugins.builtin.jobs.store import JobStore
-        store = JobStore()
-        migrated = 0
-        for job in store.list():
-            if job.model == old_name:
-                store.update(job.id, model=new_name)
-                migrated += 1
-        if migrated:
-            notes.append(f"Updated {migrated} scheduled job(s) to the new name")
-    except Exception as e:
-        logger.debug("rename_model: jobs migration failed for %s -> %s: %s",
-                     old_name, new_name, e)
-        notes.append(f"Could not update scheduled jobs: {e}")
-
-    try:
         from localm.rag.store import relabel_embedding_model
         migrated, busy = relabel_embedding_model(old_name, new_name)
         if migrated:
@@ -2362,20 +2365,6 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
         notes.append(f"Could not update RAG collection metadata: {e}")
 
     try:
-        from localm.plugins.builtin.chat.plug import relabel_pinned_model
-        migrated, failed = relabel_pinned_model(old_name, new_name)
-        if migrated:
-            notes.append(f"Updated {len(migrated)} saved chat(s) pinned to it")
-        if failed:
-            notes.append(
-                "Could not update the saved chat(s) "
-                f"{', '.join(failed)}: they are still pinned to '{old_name}'")
-    except Exception as e:
-        logger.debug("rename_model: saved chat migration failed for %s -> %s: %s",
-                     old_name, new_name, e)
-        notes.append(f"Could not update saved chats: {e}")
-
-    try:
         from localm.media.native_workflows import relabel_model
         migrated, failed = relabel_model(old_name, new_name)
         if migrated:
@@ -2388,6 +2377,14 @@ def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
         logger.debug("rename_model: media workflow migration failed for %s -> %s: %s",
                      old_name, new_name, e)
         notes.append(f"Could not update media workflows: {e}")
+
+    for hook_name, hook in list(_RENAME_HOOKS.items()):
+        try:
+            notes.extend(hook(old_name, new_name) or [])
+        except Exception as e:
+            logger.debug("rename_model: %s migration failed for %s -> %s: %s",
+                         hook_name, old_name, new_name, e)
+            notes.append(f"Could not update {hook_name}: {e}")
 
     notes.append(
         "A per-project .localcoder/config.toml 'model' setting (if any) lives "

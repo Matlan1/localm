@@ -44,8 +44,9 @@ REPLY_RESERVE_SHARE = 0.10
 # Summaries a CompactionCache keeps.
 CACHE_ENTRIES = 64
 
-# Minimum number of most recent messages kept verbatim; the cut moves back to
-# the nearest user turn, so the tail can be longer.
+# Number of most recent messages kept verbatim before the cut is moved to a
+# user turn: back to the nearest one, so the tail can be longer, or forward to
+# the next one when none is at or before the cut, so the tail can be shorter.
 KEEP_RECENT = 4
 
 # Largest reply asked of the summariser, which answers without its reasoning
@@ -149,8 +150,9 @@ def _split(messages: list[dict], keep_recent: int = KEEP_RECENT
            ) -> tuple[list[dict], list[dict], list[dict]]:
     """(leading system messages, older middle, recent tail).
 
-    The tail holds at least the last *keep_recent* messages. Its first message
-    is, in order of preference: the nearest user-written message at or before
+    The tail holds the last *keep_recent* messages or more, except when its
+    first message is found after the default cut, which makes it shorter. Its
+    first message is, in order of preference: the nearest user-written message at or before
     the default cut, else the next one after it; else the nearest user
     message of any kind at or before the default cut; else the nearest
     assistant message at or before it, else the next one after it. With none

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm import scopes as S
-from localm.plugins.gui.jobs import Job
+from localm.jobmanager import Job
 from localm.plugins.gui.web import attach_gui
 
 

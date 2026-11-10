@@ -20,7 +20,7 @@ import asyncio
 import threading
 import time
 
-from localm.plugins.gui.jobs import Job, JobManager
+from localm.jobmanager import Job, JobManager
 
 
 def _job(**kw) -> Job:

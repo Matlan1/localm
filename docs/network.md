@@ -243,8 +243,10 @@ coding agent's shell access, so you can grant one without the other.
   transfer itself are made by the `huggingface_hub` library, which follows the
   hub's redirect to its download host on its own, without the per-hop check or
   the DNS-rebinding pin. The
-  coder's network reviewer (a cloud model or an off-machine URL) is checked
-  the same way, and falls back to the local model when refused.
+  coder's off-machine backends (the providers, a non-local `--url`, and the
+  network reviewer) are checked the same way when built; privacy mode also
+  refuses an off-machine URL from `LOCALCODER_URL`. The reviewer falls back to
+  the local model when refused.
 - **Packages a model's own code needs** (`localm install-packages`, or
   **install packages** on the Models page). A deliberate action you agree to
   after seeing the list. Before resolving and before installing, localm calls
@@ -262,11 +264,16 @@ coding agent's shell access, so you can grant one without the other.
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`
   (including `off`). The embedding model that memory and Knowledge need is
-  fetched automatically on first use under `ask` and `allow`. Both fetch from a
-  fixed, hardcoded repository named by
-  localm's own code rather than a caller-supplied URL, so they never call
-  `check_url` and are not subject to the domain lists, the SSRF guard, or the
-  DNS-rebinding pin - none of which a fixed destination needs.
+  fetched automatically on first use under `ask` and `allow`. Both check the
+  Hugging Face endpoint against the policy (the domain lists and the address
+  check) and then fetch from a fixed, hardcoded repository named by
+  localm's own code rather than a caller-supplied URL; the transfer itself
+  runs inside `huggingface_hub`, without the per-hop check or the
+  DNS-rebinding pin. The compute kernel transformers fetches from the Hub for
+  a checkpoint whose quantization needs one (FP8 on a GPU that runs it
+  natively, mxfp4, eetq, fbgemm_fp8, metal) is handled the same way: `off` and
+  the domain lists refuse it, `ask` and `allow` let it through without a
+  prompt.
 - **The periodic update check.** It respects `net_mode` (blocked when `off`,
   unless explicitly exempted) but, like the embedding/Whisper downloads
   above, targets a fixed endpoint rather than a caller-supplied URL, so it

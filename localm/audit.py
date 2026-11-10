@@ -274,9 +274,12 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
             return SessionMode.PRIVACY
 
     try:
-        from localm.config import load_config
+        from localm.config import load_config, load_config_checked
         cfg = load_config()
+        read_ok = load_config_checked()[1]
     except Exception:
+        return SessionMode.PRIVACY
+    if not read_ok:
         return SessionMode.PRIVACY
 
     if surface in ("chat", "coder"):

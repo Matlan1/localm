@@ -33,6 +33,8 @@ def _safe_echo(message: object = "", **kwargs) -> None:
     click.echo(strip_controls(str(message)), **kwargs)
 
 import localm.plugins.coder.cli as _cli
+from localm.netpolicy import NetworkPolicyError
+from localm.remotegate import OffMachineModelRefused
 from localm.stdio import force_utf8_stdio
 from ..backends.http import (
     HTTPBackend,
@@ -230,11 +232,11 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
               help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
 @click.option("--trust-hooks", "trust_hooks", is_flag=True,
-              help="Trust the tool hooks and MCP servers in this project's "
-                   ".localcoder/config.toml as they are now, and remember that "
-                   "until they change. Without it, untrusted hooks do not run and "
-                   "untrusted MCP servers are not started; an interactive "
-                   "session asks.")
+              help="Trust this project's .localcoder folder (its tool hooks, MCP "
+                   "servers, auto_approve, verify, model and mode settings, "
+                   "system.md, memory.md and skills) as it is now, and remember "
+                   "that until it changes. Without it, none of those is used "
+                   "while untrusted; an interactive session asks.")
 def main(
     task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
@@ -305,6 +307,14 @@ def main(
         print_error("--until requires a TASK to work on.")
         sys.exit(2 if ci else 1)
 
+    # The project's trust decides which of its settings and files apply, so it
+    # is settled before they are read.
+    from .hooks_cli import settle_project_trust
+    settle_project_trust(
+        work_dir, trust_flag=trust_hooks,
+        can_prompt=(not ci and output_format != "json"
+                    and sys.stdin.isatty() and sys.stdout.isatty()))
+
     # Resolve CI defaults, project config (.localcoder/config.toml), the session
     # mode plus privacy setup, and the LLM gen kwargs.
     model, max_turns, yes, always_confirm, session_mode, gen_kw, max_tokens_explicit = (
@@ -330,7 +340,8 @@ def main(
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci,
-        machine_output=bool(task) and output_format in ("json", "jsonl"))
+        machine_output=bool(task) and output_format in ("json", "jsonl"),
+        session_mode=session_mode)
     # Every coder request needs structured tool calls. A localm server answers
     # one --model cannot serve with an installed model that can, unless pinned;
     # any other server ignores both.
@@ -368,14 +379,15 @@ def main(
     # confirmation unless --yes was passed, and a non-interactive run cannot
     # confirm, so the gate in execution.py fails CLOSED.
     if task and not yes:
-        # build_agent adds run_shell and run_shell_background to always_confirm
-        # for this case.
+        # build_agent adds EXECUTES_PROJECT_CODE to always_confirm for this case.
         print_warning(
-            "Unattended one-shot: run_shell is code execution and the web tools "
-            "egress data. run_shell and run_shell_background now require --yes "
-            "(else they are denied this run); network tools still obey net_mode "
-            "(off/ask/allow). Pass --yes to auto-approve, or run interactively to "
-            "confirm each call.", to_stderr=True)
+            "Unattended one-shot: run_shell, run_tests and untrusted MCP tools run "
+            "code and the web tools egress data. Tools that run code now require "
+            "--yes (else they are denied this run), and so does any file write, "
+            "push or network call after the run has read untrusted content; "
+            "network tools still obey net_mode (off/ask/allow). Pass --yes to "
+            "auto-approve, or run interactively to confirm each call.",
+            to_stderr=True)
 
     # ------------------------------------------------------------------ #
     #  Create agent
@@ -787,8 +799,23 @@ def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
     return platform != "win32" and (machine_output or not stdout_tty)
 
 
+def _gate_mode(session_mode):
+    """The off-machine gate's mode string for a resolved SessionMode, or None."""
+    return getattr(session_mode, "value", session_mode)
+
+
+def _url_typed_on_command_line() -> bool:
+    """True when ``--url`` came from the command line rather than the
+    ``LOCALCODER_URL`` environment variable or a default."""
+    from click.core import ParameterSource
+    ctx = click.get_current_context(silent=True)
+    return (ctx is not None
+            and ctx.get_parameter_source("url") == ParameterSource.COMMANDLINE)
+
+
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
-                   force_new, work_dir, ci, probe_only=False, machine_output=False):
+                   force_new, work_dir, ci, probe_only=False, machine_output=False,
+                   session_mode=None):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
@@ -798,7 +825,24 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     WITHOUT starting a server, so the caller can report whether it answers.
 
     ``machine_output`` is True for a ``--output-format json|jsonl`` run, whose
-    stdout carries only the result document or the event lines."""
+    stdout carries only the result document or the event lines.
+
+    A provider flag or a ``--url`` typed on the command line passes the
+    off-machine gate's "user typed it" override; ``LOCALCODER_URL`` does not,
+    so privacy mode refuses it. *session_mode* is the session's resolved mode
+    (None resolves the ambient coder mode)."""
+    try:
+        return _build_backend_gated(
+            provider, url, model, api_key, native_tools, port, no_server,
+            force_new, work_dir, ci, probe_only, machine_output, session_mode)
+    except (OffMachineModelRefused, NetworkPolicyError) as e:
+        print_error(str(e))
+        sys.exit(2 if ci else 1)
+
+
+def _build_backend_gated(provider, url, model, api_key, native_tools, port,
+                         no_server, force_new, work_dir, ci, probe_only,
+                         machine_output, session_mode):
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -815,21 +859,27 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     if provider == "openai":
         if not model:
             model = "gpt-4o"
-        backend = make_openai_backend(model=model)
+        backend = make_openai_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif provider == "anthropic":
         if not model:
             model = "claude-opus-4-5"
         # Anthropic Messages API (x-api-key + anthropic-version + /v1/messages).
-        backend = make_anthropic_backend(model=model)
+        backend = make_anthropic_backend(
+            model=model, gate_mode=_gate_mode(session_mode),
+            user_typed_remote=True)
 
     elif url:
         # Explicit URL - no server management
         if not model:
             print_error("--url requires --model")
             sys.exit(2 if ci else 1)
-        backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key,
-                              native_tools=native_tools)
+        backend = HTTPBackend(
+            url.rstrip("/"), model, api_key=api_key, native_tools=native_tools,
+            gate_mode=_gate_mode(session_mode),
+            user_typed_remote=_url_typed_on_command_line())
         backend.assume_ctx_window = True
 
     else:

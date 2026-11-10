@@ -38,7 +38,7 @@ from localm.media.native_models import (
 )
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
-from localm.plugins.gui.jobs import frame_event
+from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
