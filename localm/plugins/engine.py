@@ -1528,8 +1528,8 @@ class PluginManager:
         directory WITHOUT mounting routes (the app-free sibling of
         ``install_external``, mirroring ``set_installed_state``): validate the
         manifest, copy it into the installed folder, and enable it. Rolls back a
-        copy that does not parse. A running GUI server loads it on its next
-        start. Returns the parsed PluginSpec."""
+        copy that does not parse. A running server loads it the next time
+        its plugin list is read. Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name)

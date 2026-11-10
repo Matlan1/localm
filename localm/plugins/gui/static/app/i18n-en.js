@@ -1760,7 +1760,7 @@ export const I18N_EN = {
   "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once (network access is set to \"ask\", so it is not fetched automatically).",
   "memory.modal.title": "Memory - what the model knows about you",
   "memory.modal.writable": "Durable facts localm remembers about you, added to the prompt while the memory toggle is on. Memory grows automatically as you chat; edit freely - one fact per line; Save replaces the list.",
-  "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is still recalled while the memory toggle is on.",
+  "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is recalled only if \"Allow memory recall in privacy mode\" is on.",
   "memory.saved": "Memory saved",
   "memory.saveFailed": "Save failed: {message}",
   "memory.corrections.head": "Suggested corrections ({count}) - nothing changes until you choose",
@@ -1883,7 +1883,7 @@ export const I18N_EN = {
   "settings.field.ctxReserve.label": "Context window (minimum)",
   "settings.field.ctxReserve.help": "Every load keeps a window of at least this many tokens usable. MoE models keep more experts in system RAM to hold it on the GPU; the coding agent asks for 32768.",
   "settings.field.unloadForRoom.label": "Unload other models to make room",
-  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a new model needs their VRAM; ask asks first; never keeps them and uses the VRAM that is left (slower). Another instance's model is always asked about.",
+  "settings.field.unloadForRoom.help": "always unloads this instance's idle models when a new model needs their VRAM; ask asks first; never keeps them (slower; a manual switch still asks). Another instance's model is always asked about.",
   "settings.field.kvCacheType.label": "KV cache type",
   "settings.field.kvCacheType.help": "f16 is the default. q8_0 stores the KV cache in about half the memory, so about 1.9x the context fits in VRAM, with slightly slower decoding. q8_0 needs flash attention.",
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
@@ -2105,7 +2105,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Network
   "settings.field.netMode.label": "Network access",
-  "settings.field.netMode.help": "Model-initiated web access: off = refused (model downloads too, unless allowed); ask = chat and coder ask first, jobs and API clients do not; allow = no prompt. The SSRF guard always applies.",
+  "settings.field.netMode.help": "Model-initiated web access: off = refused (model downloads too, unless allowed); ask = chat and coder ask first, jobs and API clients do not; allow = no prompt. The SSRF guard applies in every mode.",
   "settings.field.netAllow.label": "Allowed domains",
   "settings.field.netAllow.help": "Domains localm may reach, model requests and model downloads alike. Empty = any. e.g. example.com (also covers *.example.com). A list must also name the hosts you pull models from.",
   "settings.field.netDeny.label": "Denied domains",

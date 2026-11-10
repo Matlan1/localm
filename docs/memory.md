@@ -234,8 +234,8 @@ is treated as context.
 
 When memory injects facts, the server reports it so you are never guessing:
 
-- The GUI shows a **"used N memories"** chip on the reply; click it to open the
-  memory manager.
+- The GUI shows a memory chip with the number of facts used on the reply (hover
+  it for the facts); click it to open the memory manager.
 - `POST /v1/chat/completions` carries an `X-Localm-Memory` response header with
   the count, the injected items, and a **degrade reason** when the semantic
   signal could not be used: `no_embedder` (no embedding model resolved -

@@ -266,7 +266,8 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                    "projector takes audio.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (<data dir>/logs/), capture native llama.cpp "
-                   "stderr, and record raw model output (with markers) in the log.")
+                   "stderr, and record raw model output (with markers) in the log, "
+                   "except in privacy mode (chat content is never written there).")
 @click.option("--mode", default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
               help="Session persistence [default: config 'chat_mode'/'mode', else privacy]. "

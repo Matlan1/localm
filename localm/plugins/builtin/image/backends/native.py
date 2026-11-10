@@ -117,7 +117,7 @@ def missing_model_message() -> str:
     return (f"No native image model is set up. Download the recommended one "
             f"({rec.name}, {rec.size_bytes / 1024 ** 3:.1f} GB) with "
             f"'localm pull {rec.spec} --type diffusion-unet --sha256 {rec.sha256}', or set "
-            "'Native image model' in Settings > Images to a model you have.")
+            "'Native model' in Settings > Media (Image) to a model you have.")
 
 
 def resolve_models(s: dict) -> dict:
