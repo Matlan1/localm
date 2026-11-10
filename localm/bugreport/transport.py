@@ -217,7 +217,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
         import urllib.error
         import urllib.request
 
-        from localm.http_ssl import verified_urlopen
+        from localm.http_ssl import read_bounded, verified_urlopen
 
         def opener(u, data, hdrs, to):  # noqa: E306
             req = urllib.request.Request(u, data=data, headers=hdrs, method="POST")
@@ -226,7 +226,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                 # the setup-llama failure message tells the user to use to report
                 # it, so it must work under the same conditions setup-llama does.
                 with verified_urlopen(req, timeout=to) as resp:
-                    return resp.status, resp.read().decode("utf-8", "replace")
+                    return resp.status, read_bounded(resp).decode("utf-8", "replace")
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:

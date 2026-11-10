@@ -129,6 +129,13 @@ ATTACH_TOKEN = "attach-token-h3b"
 COORD_TOKEN = "coordination-token-h3b"
 
 
+def _tmp_suffix():
+    """The suffix ``config.atomic_write_private`` gives its temp file: unique to
+    the writing process and thread."""
+    import threading
+    return f".{os.getpid()}.{threading.get_ident()}.tmp"
+
+
 def _drive_every_sibling_writer(home):
     """Run all three sibling writers once. Returns the temp path each used,
     paired with a marker that must appear in that temp file's content - without
@@ -146,9 +153,10 @@ def _drive_every_sibling_writer(home):
         root_dir=str(home), mode="api", token=ATTACH_TOKEN)
     assert instances.set_mode(home, "iid-h3b", "full") is True
 
+    suffix = _tmp_suffix()
     return {
-        str(sessions.sessions_file()) + ".tmp": SESSION_MARKER,
-        str(reg) + ".tmp": ATTACH_TOKEN,          # register_instance AND set_mode
+        str(sessions.sessions_file()) + suffix: SESSION_MARKER,
+        str(reg) + suffix: ATTACH_TOKEN,          # register_instance AND set_mode
     }
 
 
@@ -253,7 +261,7 @@ def test_a_failed_restriction_still_persists_the_entry_and_never_raises(
     expected = _drive_every_sibling_writer(home)
 
     for tmp_path_str in expected:
-        dest = tmp_path_str[:-len(".tmp")]
+        dest = tmp_path_str[:-len(_tmp_suffix())]
         assert os.path.isfile(dest), f"{dest} was not persisted"
         assert tmp_path_str in calls, f"{dest}: the temp file was never restricted"
         assert dest in calls, (

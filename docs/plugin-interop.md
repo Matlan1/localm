@@ -20,7 +20,7 @@ Compatibility is a spectrum, not a yes/no. For any target project, its plugins m
 
 The recurring demands an LLM-app plugin makes: call the model; register a tool the model can call; intercept/transform the prompt or response; read/write a setting; add a UI panel; access files/network/subprocess; be discovered and packaged.
 
-localm's host contract (see `localm/plugins/contract.py`) already covers `mount_router`, `mount_static`, `add_settings`, `register_tab`, `plugin_config` / `save_plugin_config`, `engine`, `audit`, `browse_dirs`, and `register_chat_hook`. Plus, outside the plugin host: the coder agent's `TOOL_REGISTRY` (model-callable tools), the kernel `/v1/chat/completions` path, the capability scope taxonomy (`localm/scopes.py`), the settings schema, and the network policy.
+localm's host contract (see `localm/plugins/contract.py`) already covers `mount_router`, `mount_static`, `add_settings`, `register_tab`, `plugin_config` / `save_plugin_config`, `engine`, `audit`, `browse_dirs`, `track`, and `register_chat_hook`. Plus, outside the plugin host: the coder agent's `TOOL_REGISTRY` (model-callable tools), the kernel `/v1/chat/completions` path, the capability scope taxonomy (`localm/scopes.py`), the settings schema, and the network policy.
 
 A decisive reuse point: **localm already adapts foreign tools into one registry.** The coder's `register_mcp_tools` (external MCP servers) and `register_plugin_tools` (plugin tool exports) both feed one `TOOL_REGISTRY`, gating untrusted sources as destructive. Every "tools" mapping below is just a new *source* into that same machinery.
 

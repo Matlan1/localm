@@ -79,8 +79,9 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `keep_alive` | On `/api/chat` with no messages, or `/api/generate` with no prompt and no images: a zero (`0`, `"0"`, or a zero duration such as `"0s"`) unloads the model, anything else loads it. The reply is `{"model", "created_at", "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "unload"}` (`"load"` for a load; `"response": ""` in place of `message` on generate). A model that another instance serves is left to that instance: a load answers as usual, an unload is a 409 naming the other instance. Unloading needs `models:write` (a 403 without it; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`), an unknown model is a 404, and a model still in use (a chat model after a short grace period) a 409 that leaves it loaded. Add `"force": true` (a localm extension) to the unload request to stop the model's requests in flight and unload it anyway; a reply in progress is cut off. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
 
-Refused with a 400, rather than silently dropped: `raw`, `suffix`, a
-request-level `template`, and a non-empty `context`. Also a 400: a missing
+Refused with a 400 on `/api/generate`, rather than silently dropped: `raw`,
+`suffix`, a request-level `template`, and a non-empty `context` (`/api/chat`
+has no such fields and ignores them like any unknown key). Also a 400: a missing
 `model`, a `format` string other than `"json"`, an `options.stop` that is not a
 string or a list of strings, a `think` that is not a boolean or a string, a
 message with a role other than `system`, `user`, `assistant` or `tool`,

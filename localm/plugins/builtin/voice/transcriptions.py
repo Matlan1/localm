@@ -35,6 +35,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from localm import voice_formats
+from localm.bindhost import LOCAL_ORIGIN_PATTERN
 from localm.executor import get_plugin_executor
 from localm.inference.errors import route_errors
 from localm.multipartform import Form, MultipartError, read_form
@@ -55,7 +56,7 @@ _UNSUPPORTED_FIELDS = ("include[]", "include", "chunking_strategy",
                        "known_speaker_names[]", "known_speaker_names",
                        "known_speaker_references[]", "known_speaker_references")
 _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}$")
-_LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+_LOCAL_ORIGIN_RE = re.compile(rf"^{LOCAL_ORIGIN_PATTERN}$")
 
 
 @dataclass

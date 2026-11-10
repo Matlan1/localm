@@ -18,6 +18,60 @@ test("artifactSrcdoc puts the CSP before a pre-head <script> (R41-D4)", () => {
     + "before its own <head>");
 });
 
+// Each artifact places a script somewhere a splice anchored on one of its own
+// tags could miss; the parsed srcdoc must hold the CSP meta in <head>, ahead of
+// every script in document order.
+const SCRIPT_PLACEMENTS = {
+  "before <html>": "<script>A()</script><html><body>x</body></html>",
+  "before <!doctype>": "<script>A()</script><!doctype html><html><body>x</body></html>",
+  "between <html> and <head>":
+    "<!doctype html><html lang='en'><script>A()</script><head></head><body>x</body></html>",
+  "inside svg in a document":
+    "<html><body><svg><script>A()</script></svg></body></html>",
+  "after a commented-out <html>":
+    "<!-- <html> --><script>A()</script><html><body>x</body></html>",
+  "inside an attribute-looking comment":
+    "<html a='<!--'><script>A()</script><head></head></html>",
+  "after an early </head>":
+    "</head><script>A()</script><html><head></head><body>x</body></html>",
+  "uppercase tags": "<SCRIPT>A()</SCRIPT><HTML><HEAD></HEAD><BODY>x</BODY></HTML>",
+};
+
+for (const [where, code] of Object.entries(SCRIPT_PLACEMENTS)) {
+  test(`artifactSrcdoc parses the CSP before a script placed ${where}`, () => {
+    const { window: win } = loadApp();
+    const out = win.artifactSrcdoc(code, "html");
+    const doc = new win.DOMParser().parseFromString(out, "text/html");
+    const metas = [...doc.querySelectorAll('meta[http-equiv="Content-Security-Policy"]')];
+    assert.equal(metas.length, 1, out);
+    const csp = metas[0];
+    assert.equal(csp.parentElement, doc.head, "a CSP meta outside <head> is ignored");
+    assert.match(csp.getAttribute("content"), /default-src 'none'/);
+    const scripts = [...doc.querySelectorAll("script")];
+    assert.ok(scripts.length >= 1, `the artifact script was lost: ${out}`);
+    for (const s of scripts) {
+      assert.ok(
+        csp.compareDocumentPosition(s) & win.Node.DOCUMENT_POSITION_FOLLOWING,
+        `a script ${where} precedes the CSP: ${out}`);
+    }
+  });
+}
+
+test("artifactSrcdoc keeps the artifact's html attributes and doctype choice", () => {
+  const { window: win } = loadApp();
+  const out = win.artifactSrcdoc(
+    "<!doctype html><html lang='de' class='dark'><head><title>t</title></head>"
+    + "<body data-x='1'>x</body></html>", "html");
+  const doc = new win.DOMParser().parseFromString(out, "text/html");
+  assert.equal(doc.documentElement.getAttribute("lang"), "de");
+  assert.equal(doc.documentElement.getAttribute("class"), "dark");
+  assert.equal(doc.body.getAttribute("data-x"), "1");
+  assert.equal(doc.title, "t");
+  assert.equal(doc.compatMode, "CSS1Compat");
+  const noDoctype = win.artifactSrcdoc("<html><body>x</body></html>", "html");
+  assert.ok(!/<!doctype/i.test(noDoctype), noDoctype);
+});
+
 test("artifactSrcdoc still injects a network-blocking CSP for normal docs", () => {
   const { window: win } = loadApp();
   const full = win.artifactSrcdoc(

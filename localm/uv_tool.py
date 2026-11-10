@@ -178,12 +178,12 @@ def read_pin(root) -> tuple[str, str]:
 
 def _download(url: str, dest: Path, timeout: float = 120.0) -> None:
     import urllib.request
-    from localm.http_ssl import verified_urlopen
+    from localm.http_ssl import read_bounded, verified_urlopen
     req = urllib.request.Request(url, headers={"User-Agent": "localm"}, method="GET")
     with verified_urlopen(req, timeout=timeout) as resp:
         if not 200 <= int(resp.status) < 300:
             raise OSError(f"HTTP {resp.status}")
-        dest.write_bytes(resp.read())
+        dest.write_bytes(read_bounded(resp))
 
 
 def _run_installer(script: Path, env: dict) -> int:
