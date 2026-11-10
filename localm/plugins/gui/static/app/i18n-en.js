@@ -2684,6 +2684,7 @@ export const I18N_EN = {
     "This stops the LocaLM server at {address} (serving {dir}). Its model is unloaded first when possible.",
   "settings.instances.unknownDir": "an unknown directory",
   "settings.instances.stoppedToast": "Stopped {name}",
+  "settings.instances.staleToast": "That entry was stale: its server had already exited and pid {pid} now belongs to another program. Removed the entry; nothing was stopped.",
   "settings.instances.stopFailed": "Could not stop: {message}",
 
   // ---- Settings > Recent errors, and the error toast ----

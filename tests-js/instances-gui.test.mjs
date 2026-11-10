@@ -160,6 +160,35 @@ test("instances-gui: confirming Stop POSTs the instance id, toasts, and refreshe
   assert.ok(listFetchesAfter > listFetchesBefore, "a successful stop refreshes the card");
 });
 
+test("instances-gui: a stale entry is reported as stale, not as a stopped server", async () => {
+  const calls = [];
+  const fetchCalls = [];
+  const baseFetch = makeFetch([OTHER_ROW], calls,
+    { body: { status: "stale", pid: 222, instance_id: "otherinstance0002" } });
+  const { window } = loadAppWithPages({
+    fetchImpl: async (url, opts) => { fetchCalls.push(String(url)); return baseFetch(url, opts); },
+  });
+  const toasts = [];
+  window.toast = (msg, isError) => toasts.push({ msg: String(msg), isError: !!isError });
+  await window.refreshInstancesCard();
+  await new Promise((r) => setTimeout(r, 0));
+
+  runScript(window, `confirmDanger = (title, message, label, onConfirm) => onConfirm();`);
+  const stopBtn = [...instancesRows(window)[0].querySelectorAll("button")]
+    .find((b) => b.textContent === "Stop");
+  const listFetchesBefore = fetchCalls.filter((u) => u === "/api/instances").length;
+  stopBtn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(calls.length, 1);
+  assert.ok(toasts.some((t) => !t.isError && t.msg.includes("stale") && t.msg.includes("222")),
+    `expected the stale toast naming the pid, got: ${JSON.stringify(toasts)}`);
+  assert.ok(!toasts.some((t) => t.msg.startsWith("Stopped")), "must not report a stopped server");
+  const listFetchesAfter = fetchCalls.filter((u) => u === "/api/instances").length;
+  assert.ok(listFetchesAfter > listFetchesBefore, "the card refreshes so the removed row goes");
+});
+
 test("instances-gui: a server-side failure is reported as an error, not swallowed as success", async () => {
   const calls = [];
   const { window } = loadAppWithPages({

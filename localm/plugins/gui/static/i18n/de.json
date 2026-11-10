@@ -2265,6 +2265,7 @@
   "settings.instances.stopFailed": "Stoppen fehlgeschlagen: {message}",
   "settings.instances.stopTitle": "Diese Instanz stoppen?",
   "settings.instances.stoppedToast": "{name} gestoppt",
+  "settings.instances.staleToast": "Dieser Eintrag war veraltet: Sein Server war bereits beendet, und PID {pid} gehört jetzt einem anderen Programm. Der Eintrag wurde entfernt; nichts wurde gestoppt.",
   "settings.instances.title": "Andere laufende Instanzen",
   "settings.instances.unknownDir": "ein unbekanntes Verzeichnis",
   "settings.intro": "Gespeichert in <code>config.json</code> in Ihrem Datenverzeichnis. Wählen Sie links einen Bereich; jeder speichert für sich. Engine-Werte greifen beim nächsten Laden des Modells.",
