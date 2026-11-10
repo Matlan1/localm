@@ -181,6 +181,14 @@ def test_arm64_provision_fetches_the_build_then_its_runtime_bundle(provision):
         "pypi": []}
 
 
+def test_arm64_provision_writes_the_nvidia_notice_beside_the_bundle(provision, tmp_path):
+    """Upstream's cudart-llama-*-bin-ubuntu-cuda-13.4-arm64.tar.gz carries the
+    three NVIDIA libraries and no license file, so the notice is written."""
+    provision()
+    assert ((tmp_path / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
+
+
 def test_arm64_provision_of_the_12_line_downloads_nothing(provision):
     with pytest.raises(click.ClickException, match="has no cuda build for linux on arm64"):
         provision("cuda-12")

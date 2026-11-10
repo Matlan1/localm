@@ -854,9 +854,11 @@ def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, l
               f"Downloading {urls[cudart]}",
               "OK - cuda runtime loads on this machine.")
     assert world.requests == [f"{API}/{UPSTREAM}/releases/tags/{PIN}", urls[build], urls[cudart]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "cublas64_12.dll",
-                             "cublasLt64_12.dll", "cudart64_12.dll", "ggml-cuda.dll", "ggml.dll",
-                             "llama.dll"]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.nvidia-cuda",
+                             "cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll",
+                             "ggml-cuda.dll", "ggml.dll", "llama.dll"]
+    assert ((world.lib / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
     assert world.marker() == f"cuda {PIN}\n"
 
 
@@ -874,7 +876,9 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
     for pkg, libs in (("nvidia-cuda-runtime-cu12", {"nvidia/cuda_runtime/lib/libcudart.so.12": b"rt"}),
                       ("nvidia-cublas-cu12", {"nvidia/cublas/lib/libcublas.so.12": b"b",
                                               "nvidia/cublas/lib/libcublasLt.so.12": b"lt"})):
-        body = _zip({**libs, "nvidia/METADATA": b"meta"}, len(pkg))
+        body = _zip({**libs, "nvidia/METADATA": b"meta",
+                     f"{pkg}.dist-info/licenses/License.txt": f"EULA {pkg}".encode()},
+                    len(pkg))
         wurl = world.serve(f"https://files.pythonhosted.org/packages/{pkg}.whl", body)
         wheels[pkg] = wurl
         pins[pkg] = ("12.9.79", _sha(body))
@@ -901,8 +905,12 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
         "https://pypi.org/pypi/nvidia-cuda-runtime-cu12/12.9.79/json", wheels["nvidia-cuda-runtime-cu12"],
         "https://pypi.org/pypi/nvidia-cublas-cu12/12.9.79/json", wheels["nvidia-cublas-cu12"]]
     assert world.files() == [".localm-backend", ".localm-cuda-runtime.json",
-                             "LICENSE.llama-cpp", "libcublas.so.12", "libcublasLt.so.12",
-                             "libcudart.so.12", "libggml-cuda.so", "libllama.so"]
+                             "LICENSE.llama-cpp", "LICENSE.nvidia-cublas-cu12",
+                             "LICENSE.nvidia-cuda-runtime-cu12", "libcublas.so.12",
+                             "libcublasLt.so.12", "libcudart.so.12", "libggml-cuda.so",
+                             "libllama.so"]
+    for pkg in wheels:
+        assert (world.lib / f"LICENSE.{pkg}").read_bytes() == f"EULA {pkg}".encode()
     assert world.marker() == f"cuda {PIN}\n"
     from localm.setup_llama import cuda as _cuda
     rec = _cuda.read_cuda_runtime(world.lib)
@@ -945,9 +953,9 @@ def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
               "OK - cuda runtime loads on this machine.")
     listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
     assert world.requests == [listing, listing, urls[build], urls[cudart]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.13",
-                             "libcublasLt.so.13", "libcudart.so.13", "libggml-cuda.so",
-                             "libggml.so", "libllama.so"]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "LICENSE.nvidia-cuda",
+                             "libcublas.so.13", "libcublasLt.so.13", "libcudart.so.13",
+                             "libggml-cuda.so", "libggml.so", "libllama.so"]
     assert world.marker() == f"cuda {PIN}\n"
 
 

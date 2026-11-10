@@ -155,3 +155,60 @@ def test_gui_attach_without_no_browser_still_opens(running, monkeypatch):
     assert result.exit_code == 0, result.output
     assert opened["native"], "should try a native window first"
     assert opened["web"], "should fall back to the browser when no native window"
+
+
+def _serve(args):
+    from localm.cli import main as root
+    return CliRunner().invoke(root, ["serve", *args])
+
+
+def test_serve_explicit_conflicting_options_are_refused_not_attached(running):
+    result = _serve(["--no-model", "--port", "8650", "--ctx", "4096", "--mode", "log"])
+    flat = _flat(result.output)
+    assert result.exit_code == 1, result.output
+    assert "cannot apply" in flat
+    assert "--port 8650" in flat
+    assert "--ctx" in flat
+    assert "--mode" in flat
+    assert "--new" in flat
+    assert "attaching" not in flat
+
+
+def test_serve_without_conflicting_options_still_attaches(running):
+    result = _serve(["--no-model", "--port", "8793"])
+    flat = _flat(result.output)
+    assert result.exit_code == 0, result.output
+    assert "attaching" in flat
+    assert "cannot apply" not in flat
+
+
+def test_serve_forwarded_defaults_are_not_conflicts(running):
+    # serve always forwards api_mode=True and no_browser=True; neither was typed.
+    result = _serve([])
+    flat = _flat(result.output)
+    assert result.exit_code == 0, result.output
+    assert "attaching" in flat
+    assert "--api-mode" not in flat
+
+
+def test_serve_forwards_its_ctx_value_as_the_context_length(monkeypatch):
+    """`serve -c 4096` hands the gui command the integer 4096 as ctx."""
+    import click
+    seen = {}
+
+    @click.command()
+    @click.pass_context
+    def fake_gui(_c, **kw):
+        seen.update(kw)
+
+    for name in ("model", "host", "port", "ctx", "gpu_layers", "no_browser",
+                 "no_model", "pull_spec", "debug", "mode", "insecure", "no_tls",
+                 "tls_cert", "tls_key", "show_qr", "project", "force_new",
+                 "isolated", "api_mode", "mmproj", "device"):
+        fake_gui.params.append(click.Option([f"--{name}"]))
+    monkeypatch.setattr(guicli, "main", fake_gui)
+    result = _serve(["some-model", "-c", "4096", "-g", "0"])
+    assert result.exit_code == 0, result.output
+    assert seen["ctx"] == 4096
+    assert seen["gpu_layers"] == 0
+    assert seen["model"] == "some-model"
