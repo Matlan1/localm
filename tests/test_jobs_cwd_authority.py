@@ -347,7 +347,7 @@ def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
     captured.clear()
     result = runner.run_job(job, engine=None)
 
-    assert result["status"] == "error" and "no longer exists" in result["error"]
+    assert result["status"] == "error" and "could not be re-confirmed" in result["error"]
     assert "cwd" not in captured, \
         "a revoked key's job still ran in the directory it was granted at creation"
 

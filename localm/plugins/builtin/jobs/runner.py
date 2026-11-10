@@ -681,8 +681,10 @@ def _creator_refusal(job: Job) -> Optional[str]:
         return None
     held = scopes_for_key_hash(job.owner)
     if held is None:
-        return ("the key that created this job no longer exists or cannot be "
-                "read, so the job was not run")
+        return ("the key that created this job could not be re-confirmed at "
+                "run time (it may have been revoked or expired, or - if it was "
+                "the owner key - simply rolled since; run or edit the job as the "
+                "owner to repair it), so the job was not run")
     required = TASK_KIND_SCOPES.get(job.task_kind)
     if required is not None and not S.grants(held, required):
         return (f"the key that created this job no longer holds the "

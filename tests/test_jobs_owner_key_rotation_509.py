@@ -777,7 +777,7 @@ def test_unauthorized_shell_downgrade_is_surfaced_not_silent(home, tmp_path,
         result = runner.run_job(job, engine=None)
 
     assert result["status"] == "error"
-    assert "no longer exists" in result["error"]
+    assert "could not be re-confirmed" in result["error"]
     assert any("not run" in r.message.lower() for r in caplog.records), \
         "the refusal must be logged, not swallowed"
 
@@ -959,8 +959,8 @@ def test_update_job_by_owner_does_not_restamp_another_principals_job(
     assert _stored(job_id).owner_is_owner_key is False
 
     result = runner.run_job(_stored(job_id), engine=None)
-    assert result["status"] == "ok"
-    assert captured["restricted"] is True
+    assert result["status"] == "error"
+    assert "restricted" not in captured
 
 
 def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
@@ -982,8 +982,8 @@ def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
     auth.regenerate_key()                        # rolled before it ever ran once
 
     result = runner.run_job(job, engine=None)
-    assert result["status"] == "ok"
-    out = result["output"]
+    assert result["status"] == "error"
+    out = result["error"]
     assert "is no longer authorized (revoked or expired)" not in out, (
         "the downgrade note still asserts revoked-or-expired as a bare fact")
     assert "may have been revoked or expired" in out

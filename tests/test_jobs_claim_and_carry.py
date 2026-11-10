@@ -271,7 +271,7 @@ def test_runner_skips_a_job_whose_creator_key_is_gone(home):
     finally:
         runner._run_chat = orig
     assert result["status"] == "error"
-    assert "no longer exists" in result["error"] and not called
+    assert "could not be re-confirmed" in result["error"] and not called
 
 
 def test_runner_skips_a_job_whose_creator_lost_the_task_kind_scope(home):
