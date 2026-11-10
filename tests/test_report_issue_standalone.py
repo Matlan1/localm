@@ -622,8 +622,9 @@ def test_powershell_reporter_scrubs_credential_named_assignments():
     text = ps1.read_text(encoding="utf-8")
     # The header-line port, including the Authorization header name and its
     # optional leading scheme word.
-    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)" in text
+    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)" in text
     assert r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+" in text
+    assert "(?i)(authorization[" in text
     # All three branches of the query port.
     assert r"(?<=[?&])" in text
     assert r"(?<![A-Za-z0-9])" in text

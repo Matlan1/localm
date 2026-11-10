@@ -226,8 +226,10 @@ def test_scrub_secrets_redacts_authorization_header_regardless_of_scheme():
      "Proxy-Authorization: <redacted>"),
     ('Authorization: Digest username="u", realm="Restricted Area", nonce="n", '
      'uri="/a", response="CANARYRESP9"', "CANARYRESP9", "Authorization: <redacted>"),
-    ("Authorization: Token CANARYONE10 CANARYTWO11", "CANARYTWO11",
-     "Authorization: <redacted>"),
+    ("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host "
+     "Signature=CANARYSPACED10", "CANARYSPACED10", "Authorization: <redacted>"),
+    ("Authorization: Token CANARYONE11 then the request failed", "CANARYONE11",
+     "Authorization: <redacted> then the request failed"),
     ("Authorization: Bearer\nCANARYNEXTLINE12", "CANARYNEXTLINE12",
      "Authorization: <redacted>"),
     ("Authorization: Bearer\r\n CANARYFOLDED13", "CANARYFOLDED13",
@@ -270,6 +272,21 @@ def test_scrub_secrets_redacts_an_authorization_value_whole_for_any_scheme(
 def test_scrub_secrets_bearer_word_never_hides_the_credential_after_it(text):
     out = bugreport._scrub_secrets(text)
     assert "CANARYAFTER" not in out, out
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("failed: Authorization: Bearer CANARYPROSE1 key sk-abcdefghijklmnop at /srv/m.gguf",
+     "failed: Authorization: <redacted> key <redacted> at /srv/m.gguf"),
+    ("RuntimeError: Authorization: Bearer CANARYPROSE2 for someone@example.org",
+     "RuntimeError: Authorization: <redacted> for <redacted-email>"),
+    ("headers: Authorization: Bearer CANARYPROSE3, Accept: */*, User-Agent: x",
+     "headers: Authorization: <redacted>, Accept: */*, User-Agent: x"),
+    ("Authorization: Token CANARYPROSE4, retrying in 5s",
+     "Authorization: <redacted>, retrying in 5s"),
+])
+def test_scrub_secrets_authorization_redaction_keeps_the_text_after_the_value(
+        line, expected):
+    assert bugreport._scrub_secrets(line) == expected
 
 
 def test_scrub_secrets_authorization_redaction_ends_with_the_line():
