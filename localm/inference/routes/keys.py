@@ -87,6 +87,14 @@ def register(app: FastAPI, ctx) -> None:
                 "Refusing to set rag_roots: only the owner key may confine a "
                 "new key's RAG-indexing reach to specific folders."
             )
+        if not is_owner:
+            beyond = [s for s in scopes.normalize(scope_list)
+                      if not _hs.caller_grants(request, s)]
+            if beyond:
+                raise HTTPException(
+                    403,
+                    f"Refusing to grant scope(s) {', '.join(beyond)}: a key may "
+                    "only mint keys with scopes it holds itself.")
         try:
             created = create_key(body.get("name", ""), scope_list,
                                  allow_privileged=is_owner, expires=expires,
@@ -103,6 +111,9 @@ def register(app: FastAPI, ctx) -> None:
         if mgr is not None:
             try:
                 warns = mgr.scope_deps_warnings(scope_list)
+                warns += scopes.unknown_scope_warnings(
+                    scope_list,
+                    {(sp.scope or n) for n, sp in mgr.discover().items()})
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.warning("could not check plugin readiness for granted scopes: %s",
