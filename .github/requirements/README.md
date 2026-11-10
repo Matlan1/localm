@@ -1,7 +1,11 @@
 # CI requirement sets
 
-The workflows install Python packages only with `pip install --require-hashes`, except
-`macos-smoke.yml`, which runs the user-facing `setup.sh` install on purpose.
+The workflows install their dependencies only with `pip install --require-hashes`, except
+`macos-smoke.yml`, which runs the user-facing `setup.sh` install on purpose. Two things
+are outside that: the project's own editable install (`pip install --no-deps -e .`) is
+built by pip in an isolated environment, which fetches the `hatchling` backend and
+`editables` from PyPI without a pin or a hash, and the same holds for the build tools of
+the few dependencies that ship only as a source archive.
 
 - Most jobs build the set at run time: `uv export --locked --no-emit-project --extra ...`
   writes the hash-locked list for the extras the job needs from the committed `uv.lock`,
@@ -20,8 +24,8 @@ The workflows install Python packages only with `pip install --require-hashes`, 
   - `build.txt`: `build`, the `hatchling` build backend and `twine`, the toolchain that
     produces and checks the sdist and wheel. `publish-pypi.yml` and `release-attest.yml`
     both install it with `--require-hashes` and build with `python -m build
-    --no-isolation`, so both builds run the same locked packages. The backend named in
-    `pyproject.toml` is never resolved at build time.
+    --no-isolation`, so both builds run the same locked packages. In those two
+    workflows the backend named in `pyproject.toml` is never resolved at build time.
 
 Regenerate from the repository root (to move a pin, edit its version in the command; delete `mutmut-constraints.txt` afterwards):
 

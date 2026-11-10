@@ -32,10 +32,14 @@ with ComfyUI's `venv` here):
 ```bash
 git clone https://github.com/comfyanonymous/ComfyUI
 cd ComfyUI
-python -m venv venv
+python3 -m venv venv                  # Windows: python -m venv venv
 venv/bin/pip install torch torchvision --index-url <your GPU's wheel index>   # Windows: venv\Scripts\pip
 venv/bin/pip install -r requirements.txt
 ```
+
+On Debian and Ubuntu the system Python has no `venv` support until you install
+it (`sudo apt install python3-venv`); without it the third line stops with an
+`ensurepip is not available` error and creates no `venv/bin/pip`.
 
 Or use a launcher like Stability Matrix (https://lykos.ai/) which automates
 this and manages plugins.
@@ -80,12 +84,8 @@ launch-comfyui.bat
 Or from the ComfyUI directory:
 
 ```bash
-venv/bin/python main.py
+venv\Scripts\python main.py
 ```
-
-It prints `Starting server at http://127.0.0.1:8188`. localm does not read this
-printed URL; make sure it matches what localm expects (`FLUX_API_URL`, or the
-`comfy_api_url` config key, below).
 
 #### Linux / macOS
 
@@ -94,6 +94,11 @@ From the ComfyUI directory:
 ```bash
 venv/bin/python main.py
 ```
+
+On either system it prints `Starting server` and then
+`To see the GUI go to: http://127.0.0.1:8188`. localm does not read this
+printed URL; make sure it matches what localm expects (`FLUX_API_URL`, or the
+`comfy_api_url` config key, below).
 
 ### 5. Configure localm (optional: for auto-launch)
 
@@ -168,7 +173,9 @@ Features handled for you:
 - **VRAM handover**: before generation, localm unloads the LLM so FLUX gets
   the full VRAM budget, then reloads it after ComfyUI releases its models.
   The `localm image` CLI does this only when the `LOCALM_URL` environment
-  variable points at a running localm server.
+  variable holds a running localm server's API base, including the `/v1`
+  suffix (for example `http://127.0.0.1:8642/v1`), and that server has an API
+  key the command can read; a server with no API key refuses the request.
 - **Fail-fast probe**: ComfyUI is probed before the LLM is unloaded, so an
   unreachable server costs nothing. With `comfy_launch_cmd` set, localm
   starts ComfyUI itself and waits for it to come up.

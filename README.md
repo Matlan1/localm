@@ -109,7 +109,7 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 
 ### Prefer a window? Use the graphical installer
 
-Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and, after one question in the console (keep the Python tooling inside the folder, or share it), the install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, and your hardware's recommendation is preselected); where models and data live; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and, after one or two questions in the console (keep the Python tooling inside the folder, or share it; and, when uv is not there yet, whether to install it), the install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, and your hardware's recommendation is preselected); where models and data live; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
 
 It performs the same install as the console setup below and covers the same choices, grouped into those pages (so not in the console's order). Everything after this section describes the console path; if you used the window, you are already finished.
 
@@ -120,7 +120,7 @@ Clone anywhere and double-click `setup.bat`. It asks whether uv (the Python pack
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
 
-There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then asks whether `localm gui` should open as its own app window or a browser tab (default: browser tab; see [native app](docs/native-app.md)), installs localm into the venv (extras `coder`, `voice` and `monitor`, plus `desktop` for the app window), installs the PyTorch stack for HuggingFace models when the backend you pick maps to one, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). With the default Portable choice nothing is installed outside the clone (apart from a desktop shortcut or global command if you choose them), and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
+There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then asks whether `localm gui` should open as its own app window or a browser tab (default: browser tab; see [native app](docs/native-app.md)), installs localm into the venv (extras `coder`, `voice` and `monitor`, plus `desktop` for the app window), detects your GPU and lets you pick the llama.cpp backend (see [GPU setup](#gpu-setup)), installs the PyTorch stack for HuggingFace models when that backend maps to one, downloads and load-tests the backend, builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). With the default Portable choice nothing is installed outside the clone (apart from a desktop shortcut or global command if you choose them), and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
 
 ### Recommended (Linux/macOS): self-contained setup
 
@@ -225,7 +225,7 @@ Not every plugin needs an extra: the image/music/video plugins generate with bui
 <details>
 <summary>Expand if you got a release zip some other way than <code>git clone</code></summary>
 
-Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside a `localm-<version>.zip.sig` signature, as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
+Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside its signature file (`localm-<version>.zip.sig`; `.zip.envelope` for 0.3.0), as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
 
 - **Quick, zero-dependency check:** compute the file's SHA256 (`sha256sum localm-<version>.zip` on Linux/macOS, or `certutil -hashfile localm-<version>.zip SHA256` on Windows) and compare it against a digest you trust, for example one pasted into the release notes text, or one you already have from a copy obtained another way.
 - **Authoritative check:** `python scripts/verify_release.py localm-<version>.zip` verifies the zip against the same signing keys the auto-updater trusts (pinned in [`localm/updater.py`](localm/updater.py) as `_PINNED_KEYSET` - you can cross-check those keys against what GitHub's web UI shows independently of any zip you downloaded). It auto-finds the adjacent `.envelope` file (0.3.0) or `.sig` file, or accepts an explicit `--sig`/`--sha256`; see `python scripts/verify_release.py --help` for the full usage.
@@ -310,7 +310,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-Any OpenAI-compatible client works the same way, including AI browsers with a local-model option (BrowserOS and similar), LM Studio, and Ollama - point them at the same base URL.
+Any OpenAI-compatible client works the same way, including AI browsers with a local-model option (BrowserOS and similar) - point it at the same base URL.
 
 The usage block adds performance numbers - which fields appear depends on streaming and the endpoint; see [docs/server-api.md](docs/server-api.md) for the full breakdown and API surface.
 
@@ -323,7 +323,7 @@ The full CLI reference lives in [docs/cli.md](docs/cli.md). Here are the core co
 ```bash
 localm run MODEL                  # interactive chat or single prompt
 localm gui [MODEL]                # browser GUI
-localm serve MODEL                # OpenAI-compatible server
+localm serve [MODEL]              # OpenAI-compatible server
 localm coder [TASK]               # AI coding agent
 localm benchmark MODEL            # TTFT and tok/s measurements
 localm doctor                      # check installation

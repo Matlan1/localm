@@ -123,6 +123,12 @@ for MoE experts kept in host memory, default 0 = disabled) directly after
 `type_v`; b11479 is the last release without it. Every field from
 `abort_callback` onward moved 8 bytes later, which is `LlamaContextParamsV3`
 (every bundled amd-rocm build from lemonade b1349 / upstream b11719 on has it).
+
+ggml-org b12191 then inserted a `float moe_cache_cpu_share` (share of MoE cache
+misses computed on the CPU instead of uploaded, default 0) directly after
+`moe_cache_size`; b12190 is the last release without it. With its alignment pad
+it moves every field from `abort_callback` onward another 8 bytes later, which
+is `LlamaContextParamsV4`.
 No bare `LlamaContextParams` name - go through `_abi.context_params_class()` /
 `_api.llama_context_default_params()`.
 
@@ -241,7 +247,7 @@ A header-diff VERIFIER (not a generator). It parses `llama_model_params` /
 field's natural-alignment offset, and diffs them against `_structs.py`:
 
 ```
-python scripts/check_llama_abi.py                 # ALL pinned refs (LLAMA_ABI_REFS["v1"], ["v2"], ["v3"], ["ctx_v3"])
+python scripts/check_llama_abi.py                 # ALL pinned refs (LLAMA_ABI_REFS["v1"], ["v2"], ["v3"], ["ctx_v3"], ["ctx_v4"])
 python scripts/check_llama_abi.py --ref latest    # newest upstream release
 python scripts/check_llama_abi.py --header path/to/llama.h
 ```

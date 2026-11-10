@@ -46,7 +46,7 @@ localm run hf-model --device cpu          # HuggingFace models: device override 
 localm run mymodel --no-server            # load the model in this process
 ```
 
-By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server is not up within about 20 seconds, `run` says so and loads MODEL in its own process as well, while the background server keeps starting. `--ctx`, `--gpu-layers`, `--mmproj` and `--device` apply when `run` loads the model or starts the server; attached to a server that is already running they are not applied. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
+By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server is not up within about 20 seconds, `run` says so and loads MODEL in its own process as well, while the background server keeps starting. `--ctx`, `--gpu-layers`, `--mmproj` and `--device` apply when `run` loads the model or starts the server; attached to a server that is already running they are not applied, and `run` names the ones it did not apply. The same model named by its path or by another registered name for the same file is not a different model. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
 
 A message mymodel cannot handle - an image it cannot read, or a conversation
 that has outgrown the context window it was trained for - is answered by an
@@ -68,7 +68,7 @@ localm run D:\hf-models\gemma-3-4b-it
 ### GUI
 
 ```bash
-localm gui                       # picks the first registered model, opens browser
+localm gui                       # picks the first registered model, opens browser (or the app window with the desktop extra, see native-app.md)
 localm gui mymodel               # or name one
 localm gui --no-model            # open model-less, straight to the Models page
 localm gui --no-browser          # start the server, open the URL yourself
@@ -88,7 +88,7 @@ localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit dev
 
 Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](gui.md) for details.
 
-A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). An attach cannot change the running server, so a second `localm gui` that names another model, another `--port` or `--host`, or passes `--ctx`, `--gpu-layers`, `--mode`, `--pull`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--qr`, `--api-mode`, `--mmproj` or `--device` exits 1 and lists what it could not apply; drop the option or add `--new`. `gui` and `serve` run in the foreground until Ctrl+C.
+A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). An attach cannot change the running server, so a second `localm gui` that names another model, another `--port` or `--host`, or passes `--ctx`, `--gpu-layers`, `--mode`, `--pull`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--qr`, `--api-mode`, `--mmproj` or `--device` exits 1 and lists what it could not apply; drop the option or add `--new`. A second `localm serve` refuses the same options the same way. `gui` and `serve` run in the foreground until Ctrl+C.
 
 Past loopback, built-in TLS is on by default: `--no-tls` serves plain HTTP, and `--tls-cert FILE --tls-key FILE` use your own PEM certificate instead of localm's local-CA one. Without an API key, a bind past loopback is refused unless `--insecure` is passed (see [Configuration](#configuration)).
 
@@ -272,7 +272,7 @@ localm rename mymodel newname                # rename it outright (unlike alias,
 
 `localm rename` also updates, best effort, the references to the old name inside the data directory (config, jobs, Knowledge collections); a per-project `.localcoder/config.toml` `model` setting is not touched. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
 
-Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type, and the same holds for `localm pull --type` with no terminal, such as a script.
+Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type (a name already registered for the file just takes the type), and the same holds for `localm pull --type` with no terminal, such as a script.
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
@@ -398,10 +398,10 @@ localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
 localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
-localm unload [MODEL]           # free VRAM on the running server: all models, or just one
+localm unload [MODEL] [--force] # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. When the removal would delete the file, it also refuses while a running localm server that uses this data directory (whichever folder it serves) still has that file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model that is not busy with a request and stops the image, video and music runtimes no job is using; a model still busy after a short wait is left loaded and named in the output (exit code 1 when nothing could be unloaded for that reason). A named model that is not loaded is a no-op.
+`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. When the removal would delete the file, it also refuses while a running localm server that uses this data directory (whichever folder it serves) still has that file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model that is not busy with a request and stops the image, video and music runtimes no job is using; a model still busy after a short wait is left loaded and named in the output (exit code 1 when nothing could be unloaded for that reason). A named model that is still busy after the wait is left loaded and the command exits 1. `--force` stops the requests running on a busy model (the reply being written is cut off) and unloads it. A named model that is not loaded is a no-op.
 
 ---
 
@@ -461,7 +461,7 @@ localm comfy restart               # stop it, then launch a fresh one
 handle on a ComfyUI localm launched belongs to the process that launched it -
 only that process can end it. `localm comfy stop` never kills a ComfyUI you
 started yourself: it aborts the render and frees the VRAM, and says so rather
-than implying the process is gone. `localm comfy restart` does the same to a
+than implying the process is gone. When that ComfyUI does not accept the abort, `stop` says so and exits 1. `localm comfy restart` does the same to a
 ComfyUI you started yourself and launches nothing; it relaunches only one localm
 started, or starts one when none is running. A cold start compiles GPU kernels and can take
 minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`. `localm comfy status` also works without a server, but then reports whether localm launched the running ComfyUI as unknown.
@@ -607,7 +607,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -972,7 +972,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `dispatch_parallel` | Run up to 2 sub-tasks at once, each in its own git worktree | yes | no |
 | `fetch_url` | Fetch a URL and return its text, HTML stripped | see below | no |
 | `web_search` | Search the web, returning titles, URLs and snippets | see below | no |
-| `generate_image` | Generate or refine an image with the local pipeline | no | no |
+| `generate_image` | Generate or refine an image with the local pipeline (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
 | `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
 | `browser_navigate` | Open a URL in the automated browser (browser plugin) | see below | no |
@@ -1010,7 +1010,7 @@ Six things the table cannot express, and each of them matters:
   the project controls (a test suite runs the project's own test files). A one-shot
   `localm coder "TASK"` without `--yes` denies them, `--interactive-confirm` asks
   before each, and an untrusted MCP server's tools ask before every call even under
-  `--yes`. `generate_image` still has real side effects and does not ask.
+  `--yes`. `generate_image` writes a file and asks exactly like `write_file`.
 - **Untrusted content re-arms confirmation.** Once the session has read a web page,
   a search result, an MCP tool's output or a skill, every destructive, network or
   code-running tool asks again until your next message, even with writes

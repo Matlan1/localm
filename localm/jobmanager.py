@@ -796,8 +796,9 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
     except Exception:
         return
     if sys.platform == "win32":
+        from localm import sysprog as _sysprog
         try:
-            done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+            done = subprocess.run([_sysprog.require("taskkill"), "/F", "/T", "/PID", str(pid)],
                                   capture_output=True, timeout=10)
             if done.returncode == 0:
                 return
@@ -1176,6 +1177,8 @@ class JobManager:
                 # Stamp BEFORE the end event goes out, so a subscriber that lists
                 # jobs on "end" never sees this one still in flight.
                 job.mark_finished()
+                if job.status != "done":
+                    job.result = None
                 if announcer:
                     if job.status == "failed":
                         announcer.announce_failure_detail()
@@ -1232,6 +1235,8 @@ class JobManager:
             finally:
                 # Stamp before "end" is emitted, as in start_cli.
                 job.mark_finished()
+                if job.status != "done":
+                    job.result = None
                 job.push({
                     "type": "end",
                     "status": job.status,

@@ -32,7 +32,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Collection, Optional
 
 from localm.debuglog import logger
 
@@ -177,6 +177,55 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     from localm.config import atomic_write_private
     atomic_write_private(path, json.dumps(entry, indent=2))
     return path
+
+
+def hold_marker_path(home: Path, instance_id: str) -> Path:
+    return run_dir(home) / f"{instance_id}.hold"
+
+
+def register_hold_marker(home: Path, *, instance_id: str, port: int,
+                         host: str, token: str, scheme: str = "http") -> Path:
+    """Write the hold-check-only marker of an ``--isolated`` server. It lets a
+    CLI sharing this home ask the server which model files it holds, and is
+    invisible to discovery: it is not a ``.json`` registry entry, so
+    ``list_entries``, ``snapshot`` and attach never see it."""
+    d = run_dir(home)
+    _lock_down_dir(d)
+    entry = {
+        "instance_id": instance_id,
+        "pid": os.getpid(),
+        "port": port,
+        "host": host,
+        "scheme": scheme,
+        "token": token,
+    }
+    path = hold_marker_path(home, instance_id)
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(entry, indent=2))
+    return path
+
+
+def list_hold_markers(home: Path) -> list[dict]:
+    """Readable hold markers of LIVE isolated servers (each gains ``alive``).
+    A marker whose process is gone, or that is unreadable, is removed."""
+    d = run_dir(home)
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    for f in sorted(d.glob("*.hold")):
+        entry = read_entry(f)
+        living = False
+        if entry is not None:
+            try:
+                living = pid_alive(int(entry.get("pid", -1) or -1))
+            except (TypeError, ValueError):
+                living = False
+        if not living:
+            unregister_instance(f)
+            continue
+        entry["alive"] = True
+        out.append(entry)
+    return out
 
 
 def unregister_instance(path) -> None:
@@ -964,8 +1013,12 @@ def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
 
 
 def find_attachable(home: Path, root_dir: str,
-                    probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+                    probe: Optional[Callable[[dict], bool]] = None,
+                    *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
     """The live, identity-verified instance serving *root_dir*, or None.
+
+    Entries whose ``instance_id`` is in *exclude_ids* are skipped (neither
+    probed nor reaped).
 
     Attaches ONLY on a verified /whoami handshake (app==localm + matching
     instance_id), so an impostor on a reused port is never attached to. A same-dir
@@ -978,6 +1031,8 @@ def find_attachable(home: Path, root_dir: str,
     target = _canon(root_dir)
     for entry in list_entries(home):
         if _canon(entry.get("root_dir", "")) != target:
+            continue
+        if exclude_ids and entry.get("instance_id") in exclude_ids:
             continue
         try:
             alive = probe(entry)
@@ -1009,14 +1064,15 @@ def attach_url(entry: dict) -> str:
 
 
 def attach_target(home: Path, root_dir: str,
-                  probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+                  probe: Optional[Callable[[dict], bool]] = None,
+                  *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
     """The thin-client attach point for the instance serving *root_dir*, or None.
 
     A CLI chat / coder client uses this to talk to the running instance's ``/v1``
     (with its registry ``token``) instead of starting its own server + model.
     Returns ``{base_url, token, port, scheme, mode}`` (loopback - same
-    machine)."""
-    entry = find_attachable(home, root_dir, probe=probe)
+    machine). *exclude_ids* as for find_attachable."""
+    entry = find_attachable(home, root_dir, probe=probe, exclude_ids=exclude_ids)
     if not entry:
         return None
     from localm.bindhost import self_connect_host, url_host
@@ -1169,6 +1225,11 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
             home, instance_id=instance_id, port=port, host=host,
             root_dir=root_dir, mode=mode, token=token, scheme=scheme,
         )
+        _OWN_PATHS[instance_id] = path
+    else:
+        path = register_hold_marker(
+            home, instance_id=instance_id, port=port, host=host,
+            token=token, scheme=scheme)
         _OWN_PATHS[instance_id] = path
     try:
         yield {"instance_id": instance_id, "root_dir": root_dir, "port": port,

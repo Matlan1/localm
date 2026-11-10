@@ -324,7 +324,7 @@ class TestStopRealHttp:
                                    "shutdown request must have been accepted")))
             res = CliRunner().invoke(main, ["stop", "realsrv1"])
             assert res.exit_code == 0, res.output
-            assert "declined an unauthenticated shutdown" not in res.output
+            assert "refused the shutdown request" not in res.output
             assert _wait_sync(lambda: len(shutdown_calls) == 1, True, 3.0), (
                 "the real /v1/server/shutdown route never actually invoked "
                 "its shutdown sequence - the auth gate may not have been "

@@ -478,7 +478,8 @@ def _check_selected_version(new_version: str, requested: str) -> None:
 
 
 def _refuse_downgrade(new_version: str) -> None:
-    """Raise unless *new_version* is strictly newer than the running version.
+    """Raise unless *new_version* is strictly newer than the running version,
+    or when the running version cannot be read.
 
     The anti-rollback check: the signature proves authenticity, not freshness, and
     an OLD release's build.zip is still validly signed. This adds freshness."""
@@ -486,6 +487,12 @@ def _refuse_downgrade(new_version: str) -> None:
     current = _version.read_version()
     if not new_version:
         raise LocalmError("the update has no VERSION", reason="cannot confirm it is newer")
+    if not _version._leading_digit(current):
+        raise LocalmError(
+            "cannot read the installed localm version",
+            reason="without it an update cannot be confirmed as newer; choose the "
+                   "version to install (Settings > Updates, or 'localm update "
+                   "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
             f"refusing to 'update' to {new_version}: not newer than the installed {current}",
@@ -883,7 +890,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
     # hops, native cert store first, certifi as fallback. The https-only-redirect
     # guard is http_ssl.HttpsOnlyRedirect, installed by default.
-    from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
+    from localm.http_ssl import RedirectDowngradeRefused, copy_bounded, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with verified_urlopen(req, timeout=timeout) as resp:
@@ -891,11 +898,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+                copy_bounded(resp, f)
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}") from None
     except RedirectDowngradeRefused as e:
@@ -1693,6 +1696,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         if not cmd:
             from localm import updater_parts
             updater_parts.note_kept_record(target, previous_version, new_version)
+        from localm import config as _config, mgmt_events
+        mgmt_events.record("update_applied", home=_config.HOME_DIR,
+                           version_from=previous_version, version_to=new_version)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,

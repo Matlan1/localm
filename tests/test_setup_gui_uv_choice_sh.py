@@ -240,3 +240,28 @@ def test_each_launcher_question_is_tagged_once():
     for i, ln in enumerate(lines):
         if re.search(r"^\s*read\s+-r\s+-p", ln):
             assert lines[i - 1].strip().startswith("# SETUP-Q:"), ln
+
+
+def test_no_display_is_refused_before_any_question_or_uv_install(tmp_path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shutil.copy2(ROOT / "setup-gui.sh", clone / "setup-gui.sh")
+    stubs = tmp_path / "stubs"
+    _write_exec(stubs / "curl", "#!/bin/sh\necho CURL-RAN\nexit 1\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, PATH=os.pathsep.join([str(stubs), *_tools_path()]),
+               HOME=_posix(home))
+    for var in ("DISPLAY", "WAYLAND_DISPLAY", "UV_INSTALL_DIR", "UV_UNMANAGED_INSTALL"):
+        env.pop(var, None)
+    raw = subprocess.run([_bash(), (clone / "setup-gui.sh").as_posix()], cwd=str(clone),
+                         env=env, input=b"1\ny\n", capture_output=True, timeout=120)
+    out = raw.stdout.decode("utf-8", "replace")
+    if "Darwin" in subprocess.run([_bash(), "-c", "uname -s"], capture_output=True,
+                                  text=True).stdout:
+        pytest.skip("macOS needs no DISPLAY")
+    assert raw.returncode == 1, out
+    assert "No graphical display was found" in out
+    assert "Keep localm's Python tooling" not in out
+    assert "CURL-RAN" not in out
+    assert not (clone / ".uv").exists()

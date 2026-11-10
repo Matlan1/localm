@@ -294,7 +294,41 @@ def is_search_backend_origin(url: str, cfg: dict) -> bool:
             and _origin(url) == mine)
 
 
-_SEARCH_BACKEND_REFUSED_V6 = (ipaddress.ip_network("fd00:ec2::/32"),)
+_METADATA_V6_NETS = (ipaddress.ip_network("fd00:ec2::/32"),)
+_NAT64_NETS = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+_IPV4_COMPATIBLE_NET = ipaddress.ip_network("::/96")
+
+
+def _embedded_ipv4(ip) -> Optional[ipaddress.IPv4Address]:
+    """The IPv4 address an IPv6 address *ip* carries in IPv4-mapped
+    (``::ffff:0:0/96``), IPv4-compatible (``::/96``, except ``::`` and ``::1``),
+    NAT64 (``64:ff9b::/96``, and ``64:ff9b:1::/48`` read in its last 32 bits) or
+    6to4 (``2002::/16``) form, or None (also for an IPv4 *ip*)."""
+    if ip.version != 6:
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if any(ip in net for net in _NAT64_NETS) or (
+            ip in _IPV4_COMPATIBLE_NET and int(ip) > 1):
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def is_link_local_or_metadata_ip(ip) -> bool:
+    """True for a link-local address (169.254.0.0/16, fe80::/10), the cloud
+    metadata range fd00:ec2::/32, and an IPv6 address carrying a link-local
+    IPv4 address in IPv4-mapped, IPv4-compatible, NAT64 (64:ff9b::/96,
+    64:ff9b:1::/48) or 6to4 form (:func:`_embedded_ipv4`)."""
+    if ip.is_link_local:
+        return True
+    if ip.version != 6:
+        return False
+    if any(ip in net for net in _METADATA_V6_NETS):
+        return True
+    embedded = _embedded_ipv4(ip)
+    return embedded is not None and embedded.is_link_local
 
 
 def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -303,7 +337,10 @@ def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address
     not link-local or unspecified (an IPv4-mapped IPv6 address is judged by its
     IPv4 address), ``::1``, or an IPv6 unique-local address outside the cloud
     metadata range fd00:ec2::/32. Every other address, including link-local in
-    NAT64, IPv4-compatible and 6to4 form, is refused."""
+    NAT64, IPv4-compatible and 6to4 form (:func:`is_link_local_or_metadata_ip`),
+    is refused."""
+    if is_link_local_or_metadata_ip(ip):
+        return False
     if not _is_blocked_ip(ip):
         return True
     mapped = getattr(ip, "ipv4_mapped", None)
@@ -314,8 +351,7 @@ def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address
                     and not ip.is_link_local and not ip.is_unspecified)
     if ip == ipaddress.IPv6Address("::1"):
         return True
-    return (ip in ipaddress.ip_network("fc00::/7")
-            and not any(ip in net for net in _SEARCH_BACKEND_REFUSED_V6))
+    return ip in ipaddress.ip_network("fc00::/7")
 
 
 def _check_search_backend_address(host: str) -> None:
@@ -532,28 +568,31 @@ def _check_public_address(host: str) -> None:
 
 
 def is_link_local_host(host: str) -> bool:
-    """True if *host* is (or resolves to) a link-local address
-    (169.254.0.0/16, fe80::/10) - including every numeric/short-form IPv4
+    """True if *host* is (or resolves to) an address
+    :func:`is_link_local_or_metadata_ip` flags (link-local 169.254.0.0/16 and
+    fe80::/10, the metadata range fd00:ec2::/32, and a link-local IPv4 address
+    in IPv4-mapped, IPv4-compatible, NAT64 or 6to4 form) - including every
+    numeric/short-form IPv4
     spelling of one (see _literal_ipv4), which ipaddress.ip_address() and
     socket.getaddrinfo alike can fail to classify directly. Unresolvable or
     unparseable hosts return False, the same contract _check_public_address
     uses for a host it cannot resolve.
 
-    This is narrower than _check_public_address: it flags ONLY link-local,
-    never loopback/private/public, for a caller (an owner-configured local
+    This is narrower than _check_public_address: it flags ONLY link-local and
+    metadata addresses, never loopback/private/public, for a caller (an owner-configured local
     service endpoint) that must allow loopback and LAN but still refuse
     cloud-metadata addresses."""
     lit = _literal_ipv4(host)
     if lit is not None:
         return lit.is_link_local
     try:
-        return ipaddress.ip_address(host).is_link_local
+        return is_link_local_or_metadata_ip(ipaddress.ip_address(host))
     except ValueError:
         pass
     try:
         for info in socket.getaddrinfo(host, None):
             try:
-                if ipaddress.ip_address(info[4][0]).is_link_local:
+                if is_link_local_or_metadata_ip(ipaddress.ip_address(info[4][0])):
                     return True
             except ValueError:
                 continue
@@ -714,10 +753,17 @@ class ResponseTooLarge(Exception):
 
 
 def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
-                   search_backend: bool = False, **kwargs):
+                   search_backend: bool = False, allow_redirects: bool = False,
+                   allow_when_off: bool = False, **kwargs):
     """A single policy-pinned HTTP request for callers that manage their own
     response (streamed downloads, HEAD probes) instead of going through
-    safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
+    safe_fetch_bytes. Runs :func:`check_url` on *url* first (with
+    *allow_when_off* and *search_backend* passed through) and raises
+    NetworkPolicyError when it refuses.
+
+    *allow_redirects* defaults to False: a 3xx response is returned to the
+    caller, never followed. A caller that follows redirects passes True and
+    owns validating each hop.
 
     The socket is pinned to the pre-validated IP and the original hostname is sent
     as the ``Host`` header. The pinned session is attached to the returned response
@@ -734,10 +780,12 @@ def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
     when the decoded body is longer than *max_bytes*.
 
     *search_backend* is passed to :func:`_session_for` (see :func:`check_url`)."""
+    check_url(url, allow_when_off=allow_when_off, search_backend=search_backend)
     session = (_session_for(url, search_backend=True) if search_backend
                else _session_for(url))
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
+    kwargs["allow_redirects"] = allow_redirects
     if max_bytes is not None:
         return _capped_request(session, method, url, headers, max_bytes, kwargs)
     resp = session.request(method, url, headers=headers, **kwargs)

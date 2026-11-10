@@ -235,7 +235,7 @@ test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off "
   // net_mode=off reloaded the whole app to the Chat tab mid-search, discarding
   // the query and any results already on screen.
   let status = 200;
-  const NETOFF = "Network access is off. Turn it on, or allow downloads only, in Settings → Network.";
+  const NETOFF = "Network access is off. Turn it on, or allow model downloads while network access is off, in Settings > Server & network.";
   const fetchImpl = async (url) => (status === 200 ? okBody
     : String(url).startsWith("/api/discover/") ? policyRefusal(NETOFF) : rejectedToken);
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });

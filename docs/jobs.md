@@ -112,7 +112,7 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server - jobs never stack model loads. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. A `localm job run` from a terminal is a separate process: a chat or memory job loads its model there, beside whatever the server has loaded. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
@@ -133,7 +133,12 @@ A caller without the owner key or a `coder:full` key cannot choose a coder job's
 `cwd`: the job is stored with the instance's project root instead, and the
 response shows the `cwd` that will be used. `model` must be a registered model
 name, and a UNC or device-path `cwd` is refused. `collection` is required for a
-`rag` job and refused at creation if it is not a valid collection name.
+`rag` job and refused at creation if it is not a valid collection name. A key
+confined to RAG folders (`rag_roots`) gets `403` when it creates a `rag` job, or
+points one with an update, at an existing collection holding documents from
+outside those folders. At run time such a job re-syncs under its creating key's
+folders, and is not run (an error result is recorded) when they no longer cover
+the collection.
 
 ## Two things live under `/api/jobs`
 
@@ -255,7 +260,7 @@ time limit, so a long index is never cut short; a holder that dies stops
 reporting and its lock is reclaimed automatically.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
-or denied folder policy as an interactive add (Settings > Knowledge), including
+or denied folder policy as an interactive add (Settings > Plugins > Knowledge (RAG)), including
 the always-refused credential folders. A folder that was legal when it was
 indexed but is outside the policy now is skipped and reported, never indexed.
 Secret-looking files dropped into an indexed folder are filtered exactly as they
