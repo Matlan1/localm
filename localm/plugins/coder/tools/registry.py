@@ -530,6 +530,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
         },
+        destructive=True,
     ),
     # Off unless the session holds the browser capability AND the setting is on
     # (see Agent._apply_browser_toolset); each wrapper re-checks. Not in

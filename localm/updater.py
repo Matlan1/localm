@@ -1689,6 +1689,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         if not cmd:
             from localm import updater_parts
             updater_parts.note_kept_record(target, previous_version, new_version)
+        from localm import config as _config, mgmt_events
+        mgmt_events.record("update_applied", home=_config.HOME_DIR,
+                           version_from=previous_version, version_to=new_version)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,

@@ -376,15 +376,23 @@ def test_install_backend_win_amd_rx7000_with_rocm_is_hip(monkeypatch):
     assert hwdetect.recommended_install_backend(d) == "hip"
 
 
-def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
-    # An UNKNOWN AMD card on Windows defaults to the bundled gfx103X build
-    # (amd-rocm), with setup-llama's load-test + vulkan fallback as the net.
-    # Empty gpu_names ("could not read the adapter name") is the unknown case, so
-    # it is amd-rocm and not vulkan, even with a system ROCm toolkit present.
+@pytest.mark.parametrize("name", [
+    "", "amd radeon(tm) graphics", "amd radeon pro w6800", "amd radeon rx 580",
+    "amd radeon rx 5700", "amd radeon vii", "amd instinct mi100",
+])
+def test_install_backend_win_amd_not_gfx103x_without_rocm_is_vulkan(monkeypatch, name):
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
+    assert hwdetect.recommended_install_backend(
+        Detection(vendors=["amd"], gpu_names=name)) == "vulkan"
+
+
+@pytest.mark.parametrize("name", ["", "amd radeon(tm) graphics", "amd radeon rx 580"])
+def test_install_backend_win_amd_unknown_name_with_rocm_is_hip(monkeypatch, name):
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     assert hwdetect.recommended_install_backend(
-        Detection(vendors=["amd"], gpu_names="")) == "amd-rocm"
+        Detection(vendors=["amd"], gpu_names=name)) == "hip"
 
 
 def test_install_backend_win_amd_order_must_be_exact(monkeypatch):
@@ -511,19 +519,6 @@ def test_torch_variant_unknown_backend_routes_by_gpu():
 ])
 def test_amd_gfx_family(name, fam):
     assert hwdetect.amd_gfx_family(name) == fam
-
-
-@pytest.mark.parametrize("name,known", [
-    ("rx 5700", True),
-    ("rx 7900", True),
-    ("rx 9070", True),
-    ("radeon vii", True),
-    ("instinct mi100", True),
-    ("rx 6800", False),
-    ("", False),
-])
-def test_amd_known_non_gfx103x(name, known):
-    assert hwdetect._amd_known_non_gfx103x(name) is known
 
 
 # ------------------------- torch_pip_args (wheel source) -------------------

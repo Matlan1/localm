@@ -291,16 +291,6 @@ def detect() -> Detection:
                                   else "the display-adapter enumeration did not run"))
 
 
-def _amd_known_non_gfx103x(names: str) -> bool:
-    """True when the AMD adapter name CLEARLY indicates a family the self-contained
-    gfx103X (RDNA2 / RX 6000) ROCm build does NOT cover: RDNA1 (RX 5000), RDNA3
-    (RX 7000), RDNA4 (RX 9000), Radeon VII, Instinct. Conservative - an unknown or
-    RX 6000 name returns False so the self-contained build stays the default (the
-    setup-llama load-test + vulkan fallback is the net if this guess is ever wrong)."""
-    return any(tag in names for tag in
-               ("rx 5", "rx 7", "rx 9", "radeon vii", "instinct"))
-
-
 def _rocm_toolkit_present() -> bool:
     """Whether a working system ROCm/HIP toolkit is installed on THIS machine,
     independent of GPU-name matching - the SAME signal ``detect()`` probes
@@ -392,7 +382,7 @@ def _hardware_install_backend(d: Detection) -> str:
     if "nvidia" in d.vendors:
         return "cuda"
     if d.vendors == ["amd"]:
-        if sys.platform == "win32" and not _amd_known_non_gfx103x(d.gpu_names):
+        if sys.platform == "win32" and amd_gfx_family(d.gpu_names) == "gfx103x":
             return "amd-rocm"
         if _rocm_toolkit_present():
             return "hip"

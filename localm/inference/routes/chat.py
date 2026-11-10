@@ -37,6 +37,7 @@ from localm.inference.backends.base import (
     TriggerValidatorUnavailableError, messages_contain_audio, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
+from localm.inference.load_lease import LoadBusyError
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.inference_gate import InferenceGate, exclusively
 from localm.inference.openai_compat import (
@@ -748,6 +749,8 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 async with sem_emb:
                     vecs_emb = await loop.run_in_executor(None, _run_embed)
+            except LoadBusyError:
+                raise
             except _rr.RerankerUnavailableError as e:
                 raise HTTPException(
                     503, f"Embedding model {resolved_model!r} unavailable: "
@@ -882,6 +885,8 @@ def register(app: FastAPI, ctx) -> None:
         except _rr.RerankerUnavailableError as e:
             raise HTTPException(
                 503, f"Reranker unavailable: {_hs.path_formatter(request)(e)}") from e
+        except LoadBusyError:
+            raise
         except RuntimeError as e:
             raise HTTPException(503, f"Reranking failed: {e}") from e
         results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
@@ -1070,6 +1075,8 @@ def register(app: FastAPI, ctx) -> None:
                                                 timing=timing,
                                                 on_logprobs=lp_records.extend,
                                                 **gen_kwargs)
+                except LoadBusyError:
+                    raise
                 except _hs._BACKEND_ERROR_TYPES as e:
                     raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except RuntimeError as e:

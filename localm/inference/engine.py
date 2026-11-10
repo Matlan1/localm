@@ -38,6 +38,11 @@ from localm.textnorm import scrub_stream
 # create_backend, run under this lock by a reload, may load backend plugins and
 # take localm.plugins.engine._backend_manager_lock (inner), then
 # backend_registry._LOCK (innermost); neither is ever held while taking this one.
+#
+# The GPU load lease (localm.inference.load_lease) is OUTER to this lock:
+# lease -> _LOAD_LOCK -> embedder._LOCK. Every acquire of this lock waits at
+# most load_lease.LOAD_WAIT_TIMEOUT_S (load_lease.bounded / load_guard) and
+# raises LoadBusyError past it. See test_lock_order_lease_outer_load_lock_inner.
 class _LoadLock:
     """A re-entrant lock that counts its outermost acquires and releases.
 
@@ -506,10 +511,31 @@ class Engine:
         self._load_cancel = event
         self._backend.set_load_cancel(event)
 
-    def load(self) -> None:
+    def _lease_keys(self) -> tuple:
+        """The GPU load lease keys of this engine's load
+        (:func:`localm.inference.load_lease.lease_keys`)."""
+        from localm.inference import load_lease
+        args = getattr(self, "_backend_args", None) or {}
+        return load_lease.lease_keys(device=args.get("device"),
+                                     n_gpu_layers=args.get("n_gpu_layers"))
+
+    def _load_guard(self):
+        """The GPU load lease, then the load lock, each waited for at most
+        ``load_lease.LOAD_WAIT_TIMEOUT_S``; raises ``LoadBusyError`` past it."""
+        from localm.inference import load_lease
         if not hasattr(self, "_load_lock"):
             self._load_lock = _LOAD_LOCK
-        with self._load_lock:
+        return load_lease.load_guard(self._load_lock, self._lease_keys(),
+                                     purpose=f"loading {getattr(self, 'display_name', 'a model')}")
+
+    def load(self) -> None:
+        """Load the model unless it is loaded. Holds the GPU load lease and the
+        load lock for the load; raises
+        :class:`~localm.inference.load_lease.LoadBusyError` when either is
+        still held elsewhere after ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
+        if self._backend.loaded:
+            return
+        with self._load_guard():
             if self._backend.loaded:
                 return
             self.loading = True
@@ -977,7 +1003,7 @@ class Engine:
         if getattr(self._backend, "can_embed", True) is False:
             return self._embed_via_dedicated(texts)
         if not self._backend.loaded:
-            with _LOAD_LOCK:
+            with self._load_guard():
                 if not self._backend.loaded:
                     self._backend.load()
                     _livefeed.kick("model loaded")
@@ -1070,12 +1096,10 @@ class Engine:
         if raw_prompt is not None and not self.supports_raw_prompt:
             from localm.inference.backends.base import UnsupportedInputError
             raise UnsupportedInputError(RAW_PROMPT_UNSUPPORTED_MESSAGE)
-        # Auto-reload if the model was unloaded. Holds the process-global load
-        # lock so a reload cannot race another load onto the GPU, and
-        # double-checks inside the lock so a model another thread just brought
-        # back is not reloaded.
+        # Auto-reload if the model was unloaded, under the GPU load lease and
+        # the load lock, re-checking inside them.
         if not self._backend.loaded:
-            with _LOAD_LOCK:
+            with self._load_guard():
                 if not self._backend.loaded:
                     if on_status is not None:
                         on_status(LOADING_MODEL_STATUS)
