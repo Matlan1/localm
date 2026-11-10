@@ -44,6 +44,7 @@ _CLASSIFIED = {
     ("inference/http_engine.py", "HttpEngine.context_capacity"): "operator-cli",
     ("inference/http_engine.py", "HttpEngine.chat_stream"): "operator-cli",
     ("inference/http_engine.py", "remote_model_status"): "operator-cli",
+    ("inference/http_engine.py", "remote_model_identity"): "operator-cli",
     ("instances.py", "fetch_any_whoami"): "peer",
     ("media/comfy_client.py", "comfy_port_holder"): "comfy",
     ("media/comfy_client.py", "_localm_unload"): "self",

@@ -960,6 +960,15 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                     cmd.append("--no-model")
                 if port:
                     cmd.extend(["-p", str(port)])
+                # --new: the child starts its own server even while another one
+                # serves this project, and the wait below skips every instance
+                # that was registered before the spawn.
+                preexisting_ids: frozenset = frozenset()
+                if force_new:
+                    cmd.append("--new")
+                    preexisting_ids = frozenset(
+                        e.get("instance_id") for e in instances.list_entries(home_dir())
+                        if e.get("instance_id"))
 
                 import os
                 kwargs = {}
@@ -1035,7 +1044,8 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             if proc.poll() is not None:
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
-                            _tgt = instances.attach_target(home_dir(), _root)
+                            _tgt = instances.attach_target(
+                                home_dir(), _root, exclude_ids=preexisting_ids)
                             if _tgt:
                                 break
                     if _tgt:
