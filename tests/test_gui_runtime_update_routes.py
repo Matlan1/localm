@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 import localm.config as cfg
 from localm import setup_llama as sl
-from localm.plugins.gui import jobs as gui_jobs
+from localm import jobmanager as gui_jobs
 from localm.plugins.gui.web import attach_gui
 
 
@@ -194,6 +194,56 @@ def test_update_switches_backend_when_one_is_named(app, runtime_dir, no_subproce
     assert r.status_code == 200, r.text
     assert no_subprocess[0]["args"] == [
         "setup-llama", "--backend", "cuda", "--force", "--yes"]
+
+
+def test_update_refuses_a_user_supplied_build_with_no_backend_named(
+        app, runtime_dir, no_subprocess):
+    """A runtime from `setup-llama --from` / `--url` records the marker
+    backend "custom", which --backend does not accept. With no backend named
+    the route must refuse with a 400 that says why and names the way out,
+    instead of starting a job that dies on a click usage error."""
+    sl._record_provisioned_backend(runtime_dir, "custom")
+    assert "custom" not in sl.BACKENDS
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update")
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "build you supplied yourself" in detail
+    assert "--from" in detail
+    assert no_subprocess == []
+
+
+def test_update_replaces_a_user_supplied_build_when_a_backend_is_named(
+        app, runtime_dir, no_subprocess):
+    """Naming a backend is the explicit way to replace a custom build with a
+    downloaded one, so it is dispatched as asked."""
+    sl._record_provisioned_backend(runtime_dir, "custom")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "vulkan"})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--force", "--yes"]
+
+
+@pytest.mark.parametrize("body", [{"rollback": True},
+                                  {"rollback": True, "backend": "auto"},
+                                  {"tag": "b10355"}])
+def test_rollback_or_tag_refuses_a_user_supplied_build(
+        app, runtime_dir, no_subprocess, body):
+    """Rollback and a tag with no real backend named resolve to the installed
+    "custom" marker too, and get the same refusal."""
+    sl._record_provisioned_backend(runtime_dir, "custom")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json=body)
+
+    assert r.status_code == 400, r.text
+    assert "build you supplied yourself" in r.json()["detail"]
+    assert no_subprocess == []
 
 
 def test_update_forwards_a_tag(app, runtime_dir, no_subprocess):

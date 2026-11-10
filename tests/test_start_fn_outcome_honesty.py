@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-from localm.plugins.gui import jobs as gj
+from localm import jobmanager as gj
 
 
 def _wait_for_terminal(job, timeout=3.0):

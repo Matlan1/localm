@@ -211,9 +211,9 @@ def scoped(tmp_path, monkeypatch, engines):
     attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=switch_model,
                active_model=lambda: "m-a")
     jobs = FakeJobs()
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli",
                         lambda self, *a, **kw: jobs.start_cli(*a, **kw))
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_fn",
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_fn",
                         lambda self, *a, **kw: jobs.start_fn(*a, **kw))
     monkeypatch.setattr("localm.config.load_registry", lambda: dict(_REGISTRY))
     monkeypatch.setattr("localm.discover.hf_search", lambda *a, **kw: [])

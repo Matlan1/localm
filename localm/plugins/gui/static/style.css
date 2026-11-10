@@ -1972,7 +1972,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
 /* interrupted: the server stopped while the operation was in flight, so its
-   outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
+   outcome is UNKNOWN (localm/jobmanager.py _JOB_STATUSES). Yellow
    "needs attention", the same treatment st-skipped/st-unknown get - not the red
    of st-failed, which would assert the work failed when nobody measured that. */
 .job-state.st-interrupted {
