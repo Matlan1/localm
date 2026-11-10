@@ -397,7 +397,7 @@ base model; they are not supported for HuggingFace-format models.
 localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
-localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
+localm relocate MODEL NEW_PATH  # re-point a moved model and its aliases to the new file
 localm unload [MODEL] [--force] # free VRAM on the running server: all models, or just one
 ```
 

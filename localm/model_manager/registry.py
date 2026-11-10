@@ -1934,13 +1934,24 @@ def relocate_model(name: str, new_path: str) -> bool:
         console.print(f"[red]Corrupt registry entry for {escape(name)}[/red]")
         return False
     new_path = str(p.resolve())
-    # Atomic read-modify-write so a concurrent registry writer (GUI thread, a
-    # parallel pull, sync_models_dir) is not clobbered by a stale save.
+    old_path = entry.get("path")
+
+    def _same_file(other: object) -> bool:
+        if not isinstance(old_path, str) or not old_path or not isinstance(other, str):
+            return False
+        if other == old_path:
+            return True
+        return os.path.normcase(os.path.abspath(other)) == os.path.normcase(os.path.abspath(old_path))
+
+    # Atomic read-modify-write: the named entry and every alias on the same old
+    # file are re-pointed together.
     def _apply(r: dict) -> None:
-        e = r.get(name)
-        if isinstance(e, dict):
-            e["path"] = new_path
-            e.pop("missing", None)          # it is present again at the new path
+        for key, e in r.items():
+            if not isinstance(e, dict):
+                continue
+            if key == name or _same_file(e.get("path")):
+                e["path"] = new_path
+                e.pop("missing", None)
     _mm.update_registry(_apply)
     # p: the caller-supplied, now-validated new_path, resolved - a real
     # filesystem path the caller named, not restricted to a safe charset.

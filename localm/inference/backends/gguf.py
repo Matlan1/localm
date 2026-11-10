@@ -899,11 +899,21 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                               if d.device.index == chosen_main), None)
             if main_slot is None:
                 main_slot = max(placed, key=lambda d: d.device.free - d.need).device.slot
-        auto_ratios = (None if gpu_devices is not None
+        configured = load_config().get("gpu_split_indices")
+        keep_default = (gpu_layers != 0 and gpu_devices is None
+                        and bool(getattr(self, "_gpu_placement_unmatched", False))
+                        and isinstance(configured, (list, tuple)) and len(configured) >= 2)
+        auto_ratios = (None if gpu_devices is not None or keep_default
                        else resolve_auto_split_ratios(wait_for_inflight=True))
         worker_split = auto_ratios
         main_gpu = None
-        if gpu_layers != 0 and gpu_devices is None:
+        if keep_default:
+            # An empty mapping makes the worker's apply_gpu_split keep llama.cpp's
+            # default split instead of the configured torch-numbered indices.
+            # See test_unmatched_gpus_keep_the_default_split.
+            worker_split = {}
+            main_gpu = default_split_main_gpu(gpus=vram_before, wait_for_inflight=True)
+        elif gpu_layers != 0 and gpu_devices is None:
             placement = configured_split_placement(ratios=auto_ratios,
                                                    gpus=vram_before,
                                                    wait_for_inflight=True)
@@ -917,7 +927,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 from localm.discover import single_gpu_index
                 self.load_gpu_index = single_gpu_index(
                     load_config().get("gpu_split_indices"), gpus=[], quiet=True)
-        elif not auto_ratios:
+        elif not auto_ratios and not keep_default:
             plan = self._implicit_split_fit(gpu_layers)
             if plan is not None and plan.tensor_split:
                 worker_split = plan.tensor_split
@@ -930,7 +940,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             elif plan is not None and not plan.default_fits:
                 self._report_split_fit(plan)
         if (gpu_layers != 0 and gpu_devices is None and placement is None
-                and not isinstance(worker_split, dict)):
+                and not keep_default and not isinstance(worker_split, dict)):
             main_gpu = default_split_main_gpu(gpus=vram_before, wait_for_inflight=True)
 
         # The context ceiling is sized from the devices this load uses: a fit
