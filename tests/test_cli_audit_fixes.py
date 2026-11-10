@@ -193,3 +193,52 @@ def test_the_http_reranker_refusal_still_names_its_route(env):
     with pytest.raises(reranker.RerankerModelError) as ei:
         reranker.resolve_reranker("chat-model")
     assert "/v1/rerank" in str(ei.value)
+
+
+# ------------------------------------------- unregistered embedding GGUF path
+
+def _gguf(path, arch, extra=None):
+    from tests.test_model_type_detection import _build_gguf_bytes
+    path.write_bytes(_build_gguf_bytes(arch, extra))
+    return path
+
+
+def test_an_unregistered_embedding_gguf_path_is_refused_by_its_header(env):
+    from localm.model_manager.registry import chat_load_refusal
+    emb = _gguf(env / "enc.gguf", "bert", {"bert.pooling_type": "mean"})
+    msg = chat_load_refusal(str(emb), {})
+    assert msg and "embedding model" in msg and "/v1/embeddings" in msg
+
+
+def test_an_unregistered_decoder_embedding_is_refused_by_its_pooling_key(env):
+    from localm.model_manager.registry import chat_load_refusal
+    emb = _gguf(env / "qwen-emb.gguf", "qwen3", {"qwen3.pooling_type": "last"})
+    assert chat_load_refusal(str(emb), {}) is not None
+
+
+def test_an_unregistered_chat_gguf_path_is_not_refused(env):
+    from localm.model_manager.registry import chat_load_refusal
+    chat = _gguf(env / "chat.gguf", "llama")
+    assert chat_load_refusal(str(chat), {}) is None
+    assert chat_load_refusal(str(env / "missing.gguf"), {}) is None
+    assert chat_load_refusal("not-a-path", {}) is None
+
+
+def test_a_registered_model_set_to_llm_is_still_loadable(env):
+    from localm.model_manager.registry import chat_load_refusal
+    emb = _gguf(env / "enc.gguf", "bert", {"bert.pooling_type": "mean"})
+    reg = {"enc": {"path": str(emb), "source": "local", "model_type": "llm"}}
+    assert chat_load_refusal("enc", reg) is None
+
+
+def test_run_with_an_unregistered_embedding_path_exits_1(env, monkeypatch):
+    emb = _gguf(env / "enc.gguf", "bert", {"bert.pooling_type": "mean"})
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise AssertionError("an Engine was built for an embedding file")
+
+    monkeypatch.setattr("localm.inference.engine.Engine", _Boom)
+    r = CliRunner().invoke(main, ["run", str(emb), "--no-server", "-p", "hi"])
+    assert r.exit_code == 1, r.output
+    assert "embedding" in r.output.lower()
