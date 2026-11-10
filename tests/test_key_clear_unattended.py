@@ -108,6 +108,26 @@ def test_clear_removes_a_keystore_that_cannot_be_parsed(monkeypatch):
     assert auth.any_key_configured() is False
 
 
+def test_clear_removes_a_named_key_that_has_expired(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.create_key("old", ["models:read"], expires=1.0)
+    r = CliRunner().invoke(main, ["key", "clear"], input="y\n")
+    assert r.exit_code == 0, r.output
+    assert not auth.keystore_file().exists()
+    assert "already open mode" not in r.output
+
+
+def test_clear_asks_when_the_owner_key_file_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    auth.key_file().mkdir(parents=True)
+    assert auth.get_api_key() is None
+    assert auth.any_key_configured() is True
+    r = CliRunner().invoke(main, ["key", "clear"], input="n\n")
+    assert "already open mode" not in r.output, r.output
+    assert "Cancelled" in r.output
+    assert auth.key_file().is_dir()
+
+
 def test_clear_with_nothing_configured_changes_nothing():
     r = CliRunner().invoke(main, ["key", "clear", "--yes"])
     assert r.exit_code == 0, r.output

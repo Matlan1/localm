@@ -906,6 +906,14 @@ class TestAttachOrNew:
         assert gui.served == [] and gui.apps == []
         assert gui.windows == [] and gui.opened == []
 
+    def test_a_second_serve_reports_a_gui_instance_and_mounts_nothing(self, gui):
+        gui.running_instance(mode="full")
+        r = gui.invoke("serve", command=localm.cli.main)
+        assert r.exit_code == 0, r.output
+        assert "Attaching" in r.flat
+        assert gui.mounts == []
+        assert gui.served == [] and gui.opened == [] and gui.windows == []
+
     def test_a_failed_mount_still_opens_the_address(self, gui):
         gui.running_instance(mode="api")
         gui.mount_status = 404
