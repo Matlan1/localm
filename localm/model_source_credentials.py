@@ -42,13 +42,13 @@ def credentials_path() -> Path:
 
 def _read_all_checked() -> tuple:
     """``(records, read_ok)``. ``read_ok`` is False when the file is PRESENT
-    and either could not be read even after ``config._read_json_checked``'s
+    and either could not be read even after ``storekit.read_json_checked``'s
     own retry, or parses to something other than a JSON object - mirrors
     ``auth._load_keystore_checked`` for this store. A read-modify-write
     (``set_credentials``) must refuse on ``read_ok`` False rather than persist
     ``{}`` over an existing file. A plain read treats both as no records."""
-    from localm.config import _read_json_checked
-    data, read_ok = _read_json_checked(credentials_path(), {})
+    from localm.storekit import read_json_checked
+    data, read_ok = read_json_checked(credentials_path(), {})
     if not isinstance(data, dict):
         return {}, False
     return data, read_ok
@@ -59,7 +59,7 @@ def _read_all() -> dict:
 
 
 def _write_all(records: dict) -> bool:
-    from localm.config import atomic_write_private
+    from localm.storekit import atomic_write_private
     path = credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # retrying=True: set_credentials serializes every writer of this file
@@ -140,7 +140,7 @@ def validate_credential_updates(updates: dict) -> dict:
 
 
 def _unreadable_store_error(path: Path):
-    from localm.config import ConfigUnreadable
+    from localm.storekit import ConfigUnreadable
     return ConfigUnreadable(
         f"{path.name} exists but could not be read as a JSON object, so "
         f"saving would replace every stored credential with just this change; "
@@ -149,7 +149,7 @@ def _unreadable_store_error(path: Path):
 
 
 def check_credentials_readable() -> None:
-    """Raise ``config.ConfigUnreadable`` if the credentials file exists but
+    """Raise ``storekit.ConfigUnreadable`` if the credentials file exists but
     could not be read or does not hold a JSON object; return None when it is
     readable or absent. Writes
     nothing and takes no lock."""
@@ -161,13 +161,14 @@ def set_credentials(updates: dict) -> None:
     """Apply *updates* (a subset of CREDENTIAL_KEYS -> str | None) as one
     read-modify-write. A blank or None value clears that key. Raises
     ValueError (see validate_credential_updates) before anything is written,
-    and ``config.ConfigUnreadable``, writing nothing, if the store file exists
+    and ``storekit.ConfigUnreadable``, writing nothing, if the store file exists
     but could not be read or does not hold a JSON object."""
     checked = validate_credential_updates(updates)
-    from localm.config import _cross_process_lock, ensure_dirs
+    from localm.config import ensure_dirs
+    from localm.storekit import store_lock
     ensure_dirs()
     path = credentials_path()
-    with _CRED_LOCK, _cross_process_lock(path):
+    with _CRED_LOCK, store_lock(path):
         records, read_ok = _read_all_checked()
         if not read_ok:
             raise _unreadable_store_error(path)

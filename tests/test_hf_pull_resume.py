@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
 
+from localm import procid
+
 from localm import model_manager as mm
 from localm.model_manager.pull import (
     _ensure_hf_resumable_download,
@@ -235,7 +237,7 @@ class TestPartialOwnership:
             pytest.skip("the test folder is not on a local disk here")
         with monkeypatch.context() as m:
             m.setattr(platform, "node", lambda: "cloned-vm-other-name")
-            m.setattr(instances, "_PID_SPACE", None)
+            m.setattr(procid, "_PID_SPACE", None)
             clone_space = instances.pid_space_id()
         assert clone_space != this_pid_space(), "the injected name took no effect"
         pid, _ = live_child
@@ -301,7 +303,7 @@ class TestPartialOwnership:
             pytest.skip("no machine identifier is readable here")
         with monkeypatch.context() as m:
             m.setattr(platform, "node", lambda: "renamed-host-before")
-            m.setattr(instances, "_PID_SPACE", None)
+            m.setattr(procid, "_PID_SPACE", None)
             old_space = instances.pid_space_id()
         assert old_space != this_pid_space(), "the injected rename took no effect"
         if not local:

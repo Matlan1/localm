@@ -34,6 +34,8 @@ import time
 
 import pytest
 
+from localm import procid
+
 import localm.config as config
 import localm.model_manager as model_manager
 from localm.model_manager.pull import (
@@ -392,7 +394,7 @@ def _space_under_host_name(monkeypatch, name: str) -> str:
     from localm import instances
     with monkeypatch.context() as m:
         m.setattr(platform, "node", lambda: name)
-        m.setattr(instances, "_PID_SPACE", None)
+        m.setattr(procid, "_PID_SPACE", None)
         return instances.pid_space_id()
 
 
@@ -692,12 +694,11 @@ def test_a_holder_in_another_pid_namespace_keeps_its_lock(home):
 
 
 def test_the_pid_space_id_differs_between_platforms_on_one_host(monkeypatch):
-    from localm import instances
     from localm.model_manager import pull
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "win32")
     windows = pull._pid_space_id()
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
     monkeypatch.setattr(sys, "platform", "linux")
     linux = pull._pid_space_id()
     assert windows != linux
@@ -728,15 +729,14 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
     name records a pid that may be alive here as an unrelated process. Its
     MachineGuid or Linux machine-id gives it another pid space, so the lock
     stays."""
-    from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
         ident = start_identity_of(other.pid)
         with monkeypatch.context() as m:
-            m.setattr(instances, "_PID_SPACE", None)
-            m.setattr(instances, "machine_guid", lambda: "another-machine-guid")
-            m.setattr(instances, "linux_machine_id", lambda: "another-machine-id")
+            m.setattr(procid, "_PID_SPACE", None)
+            m.setattr(procid, "machine_guid", lambda: "another-machine-guid")
+            m.setattr(procid, "linux_machine_id", lambda: "another-machine-id")
             remote_space = pull._pid_space_id()
         # The injection took: the same host name, another machine identifier.
         assert remote_space != this_pid_space()

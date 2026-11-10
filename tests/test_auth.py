@@ -930,9 +930,9 @@ def test_scrypt_derive_honours_dklen_surrogates_and_its_memory_budget(auth):
 
 
 def test_atomic_write_private_passes_retrying_through(auth, monkeypatch, tmp_path):
-    import localm.config as cfg
+    import localm.storekit as storekit
     seen = []
-    monkeypatch.setattr(cfg, "atomic_write_private",
+    monkeypatch.setattr(storekit, "atomic_write_private",
                         lambda path, text, **kw: seen.append(kw))
     auth._atomic_write_private(tmp_path / "f", "x")
     auth._atomic_write_private(tmp_path / "f", "x", retrying=True)
