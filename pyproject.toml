@@ -170,14 +170,14 @@ browser = [
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
-    # Capped to the 5.20 line. The win32 ROCm torch below is built without
+    # Capped to the 5.22 line. The win32 ROCm torch below is built without
     # torch.distributed, and a transformers release that imports it on the
     # `from transformers import AutoTokenizer` path breaks every HF model load there.
     # Move the cap only to a release that imports, loads and generates on that torch
     # from a fresh install of the lock.
     "transformers[kernels]~=5.22.2",
     # Pinned exactly so repeated setup runs resolve the same tokenizers; it must sit
-    # inside the range the capped transformers requires (5.20: >=0.23.1,<0.24).
+    # inside the range the capped transformers requires (5.22: >=0.23.1,<0.24).
     "tokenizers==0.23.3",
     "accelerate>=1.14.0",
     # hf.py's _cpu_budget() imports psutil directly to build the "cpu" entry of
