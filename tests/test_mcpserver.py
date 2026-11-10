@@ -1871,6 +1871,28 @@ class TestNewToolCalls:
         assert "installed" in resp["result"]["content"][0]["text"]
         mock_install.assert_called_once_with("coder", True)
 
+    @pytest.mark.parametrize("setting,args,expect_deps", [
+        (False, {}, False),
+        (True, {}, True),
+        (False, {"with_deps": True}, True),
+        (True, {"with_deps": False}, False),
+    ])
+    def test_install_plugin_with_deps_follows_the_setting(
+            self, setting, args, expect_deps):
+        from localm.plugins.deps import InstallResult
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.set_installed_state"), \
+             patch("localm.plugins.engine.PluginManager.plugin_missing_deps", return_value=True), \
+             patch("localm.config.load_config",
+                   return_value={"auto_install_plugin_deps": setting}), \
+             patch("localm.plugins.engine.PluginManager.install_plugin_deps",
+                   return_value=InstallResult(ok=True)) as mock_deps:
+            resp = _req(server, "tools/call",
+                        {"name": "install_plugin",
+                         "arguments": {"plugin": "voice", **args}})
+        assert resp["result"]["isError"] is False
+        assert mock_deps.called is expect_deps
+
     def test_install_plugin_with_deps_installed_ok_is_success(self):
         from localm.plugins.deps import InstallResult
         server, _ = _server()
@@ -2092,9 +2114,10 @@ def _project(tmp_path, name="proj"):
     return p
 
 
-def _coder_server(factory, default_model="stub-model"):
+def _coder_server(factory, default_model="stub-model", **build_kw):
     engines = EngineCache(default_model=default_model, engine_factory=factory)
-    return MCPStdioServer(build_tools(engines, enable_images=False)), engines
+    return MCPStdioServer(build_tools(engines, enable_images=False,
+                                      **build_kw)), engines
 
 
 def _run_task(server, cwd, mid=1, **extra):
@@ -2259,9 +2282,58 @@ class TestRunCoderTaskInProcess:
         _run_task(server, project)
         assert not marker.exists(), "run_shell ran without a confirmation channel"
 
-        server, _ = _coder_server(_scripted_engine_factory(script))
+        server, _ = _coder_server(_scripted_engine_factory(script),
+                                  coder_shell=True)
         _run_task(server, project, yes=True)
         assert marker.exists(), "run_shell did not run under yes=true"
+
+    def test_yes_does_not_approve_shell_without_coder_shell(
+            self, coder_env, tmp_path, monkeypatch):
+        project = _project(tmp_path)
+        marker = project / "marker.txt"
+        cmd = f'"{sys.executable}" -c "open(\'marker.txt\', \'w\').close()"'
+        script = [_tool_call("run_shell", command=cmd), "finished"]
+        server, _ = _coder_server(_scripted_engine_factory(script))
+        resp = _run_task(server, project, yes=True)
+        text = resp["result"]["content"][0]["text"]
+        assert not marker.exists(), "yes=true approved shell on a server without --coder-shell"
+        assert "[denied]" in text and "run_shell" in text
+
+    def test_project_auto_approve_does_not_approve_shell_without_coder_shell(
+            self, coder_env, tmp_path):
+        project = _project(tmp_path)
+        (project / ".localcoder").mkdir()
+        (project / ".localcoder" / "config.toml").write_text(
+            "auto_approve = true\n", encoding="utf-8")
+        marker = project / "marker.txt"
+        cmd = f'"{sys.executable}" -c "open(\'marker.txt\', \'w\').close()"'
+        script = [_tool_call("run_shell", command=cmd), "finished"]
+        server, _ = _coder_server(_scripted_engine_factory(script))
+        _run_task(server, project)
+        assert not marker.exists(), "a project's auto_approve approved shell without --coder-shell"
+
+    def test_yes_still_auto_approves_file_writes_without_coder_shell(
+            self, coder_env, tmp_path):
+        project = _project(tmp_path)
+        script = [_tool_call("write_file", path="new.txt", content="hi\n"), "finished"]
+        server, _ = _coder_server(_scripted_engine_factory(script))
+        _run_task(server, project, yes=True)
+        assert (project / "new.txt").read_text(encoding="utf-8").strip() == "hi"
+
+    def test_coder_root_refuses_a_cwd_outside_it(self, coder_env, tmp_path):
+        inside = _project(tmp_path, "inside")
+        outside = _project(tmp_path, "outside")
+        server, _ = _coder_server(_scripted_engine_factory(["done"]),
+                                  coder_root=inside.resolve())
+        refused = _run_task(server, outside)["result"]
+        assert refused["isError"] is True
+        assert "--coder-root" in refused["content"][0]["text"]
+        server, _ = _coder_server(_scripted_engine_factory(["done"]),
+                                  coder_root=inside.resolve())
+        assert _run_task(server, inside)["result"]["isError"] is False
+        server, _ = _coder_server(_scripted_engine_factory(["done"]),
+                                  coder_root=inside.resolve())
+        assert _run_task(server, inside / ".." / "outside")["result"]["isError"] is True
 
     def test_max_turns_caps_the_run_and_a_capped_run_is_an_error(
             self, coder_env, tmp_path):
@@ -2543,7 +2615,8 @@ class TestRunCoderTaskInProcess:
             "    time.sleep(0.05)\n", encoding="utf-8")
         call = _tool_call("run_shell", command=f'"{sys.executable}" sleeper.py',
                           timeout=120)
-        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]))
+        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]),
+                                  coder_shell=True)
         started = time.monotonic()
         resp = _run_task(server, project, yes=True, timeout_seconds=3)
         elapsed = time.monotonic() - started
@@ -2569,3 +2642,77 @@ class TestRunCoderTaskInProcess:
         assert "at most" in resp["result"]["content"][0]["text"]
         assert engine.active_requests == 0
         assert engine.calls == []
+
+
+# Every client-supplied argument whose name says it is a path, a file, a folder
+# or a repository, mapped to the guard its handler applies. A new argument of
+# that shape fails the test below until it is classified here.
+_PATH_LIKE = __import__("re").compile(
+    r"(^|_)(cwd|path|paths|file|files|source|repo|dir|folder|image|output)($|_)")
+
+_PATH_ARG_GUARDS = {
+    ("list_model_files", "repo"): "hf-repo-id",
+    ("pull_model", "repo"): "hf-repo-id",
+    ("pull_model", "file"): "hf-repo-file",
+    ("generate_image", "output_path"): "confined-to-data-dir",
+    ("generate_image", "input_image"): "input-image-allowlist",
+    ("run_coder_task", "cwd"): "unc-refused-and-coder-root",
+}
+
+
+class TestToolTablePathArguments:
+    def _table(self, coder_active=True):
+        engines = EngineCache(default_model="stub", engine_factory=_stub_engine_factory)
+        with patch("localm.plugins.mcpserver.server._coder_available",
+                   return_value=coder_active):
+            return build_tools(engines, enable_images=True, enable_coder=True)
+
+    def test_every_path_like_argument_has_a_guard(self):
+        found = {(name, arg)
+                 for name, tool in self._table().items()
+                 for arg in tool["inputSchema"].get("properties", {})
+                 if _PATH_LIKE.search(arg)}
+        assert found == set(_PATH_ARG_GUARDS), (
+            "path-like tool arguments and their guards disagree: "
+            f"unguarded={sorted(found - set(_PATH_ARG_GUARDS))} "
+            f"stale={sorted(set(_PATH_ARG_GUARDS) - found)}")
+
+    def test_the_path_like_name_pattern_matches_the_known_names(self):
+        for arg in ("cwd", "output_path", "input_image", "repo", "file",
+                    "source", "path", "dir"):
+            assert _PATH_LIKE.search(arg), arg
+        for arg in ("prompt", "model", "name", "texts", "plugin", "limit"):
+            assert not _PATH_LIKE.search(arg), arg
+
+    @pytest.mark.parametrize("tool,arg", [
+        ("generate_image", "output_path"),
+        ("run_coder_task", "cwd"),
+        ("pull_model", "repo"),
+    ])
+    def test_a_device_path_is_refused_by_the_guard(self, tool, arg, tmp_path):
+        base = {"generate_image": {"prompt": "x"},
+                "run_coder_task": {"task": "x"},
+                "pull_model": {"name": "m"}}[tool]
+        server = MCPStdioServer(self._table())
+        resp = _req(server, "tools/call",
+                    {"name": tool, "arguments": {**base, arg: _DEVICE}})
+        assert resp["result"]["isError"] is True, resp
+
+
+class TestCoderFlags:
+    def test_print_config_carries_the_new_flags(self):
+        from click.testing import CliRunner
+        from localm.plugins.mcpserver.cli import main
+        out = CliRunner().invoke(
+            main, ["--print-config", "--coder-shell", "--coder-root", "."]).output
+        block = json.loads(out[:out.index("\n\n#")])
+        args = block["mcpServers"]["localm"]["args"]
+        assert "--coder-shell" in args
+        assert args[args.index("--coder-root") + 1] == "."
+
+    def test_coder_shell_is_off_by_default(self):
+        import inspect
+        from localm.plugins.mcpserver.server import serve_stdio
+        sig = inspect.signature(serve_stdio)
+        assert sig.parameters["coder_shell"].default is False
+        assert sig.parameters["coder_root"].default is None
