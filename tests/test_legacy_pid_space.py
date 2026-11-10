@@ -15,7 +15,7 @@ import pytest
 
 import localm.config as config
 import localm.model_manager as model_manager
-from localm import instances
+from localm import instances, procid
 from localm.model_manager import pull
 from localm.model_manager.pull import PullInFlight, _part_lock, _part_lock_dir
 
@@ -57,8 +57,8 @@ def _legacy_or_skip() -> str:
 
 class TestTheLegacyId:
     def test_it_is_the_formula_the_earlier_version_used(self, monkeypatch):
-        monkeypatch.setattr(instances, "sys", types.SimpleNamespace(platform="win32"))
-        monkeypatch.setattr(instances, "machine_guid", lambda: "GUID")
+        monkeypatch.setattr(procid, "sys", types.SimpleNamespace(platform="win32"))
+        monkeypatch.setattr(procid, "machine_guid", lambda: "GUID")
         monkeypatch.setattr("platform.node", lambda: "host")
         monkeypatch.setattr(instances.os, "stat", _no_proc_stat(os.stat))
         expected = hashlib.sha256(
@@ -72,8 +72,8 @@ class TestTheLegacyId:
         assert legacy != instances.pid_space_id()
 
     def test_it_is_none_when_nothing_identifies_the_host(self, monkeypatch):
-        monkeypatch.setattr(instances, "sys", types.SimpleNamespace(platform="linux"))
-        monkeypatch.setattr(instances, "machine_guid", lambda: "")
+        monkeypatch.setattr(procid, "sys", types.SimpleNamespace(platform="linux"))
+        monkeypatch.setattr(procid, "machine_guid", lambda: "")
         monkeypatch.setattr("platform.node", lambda: "")
         monkeypatch.setattr(instances.os, "stat", _no_proc_stat(os.stat))
         assert instances.legacy_pid_space_id() is None
@@ -90,10 +90,10 @@ def _no_proc_stat(real):
 class TestTyingARecordToThisHost:
     @staticmethod
     def _linux(monkeypatch, tmp_path, boot="boot-a"):
-        monkeypatch.setattr(instances, "sys", types.SimpleNamespace(platform="linux"))
+        monkeypatch.setattr(procid, "sys", types.SimpleNamespace(platform="linux"))
         boot_file = tmp_path / "boot_id"
         boot_file.write_text(boot + "\n", encoding="ascii")
-        monkeypatch.setattr(instances, "_LINUX_BOOT_ID", boot_file)
+        monkeypatch.setattr(procid, "_LINUX_BOOT_ID", boot_file)
 
     def test_linux_this_boot_is_this_host(self, monkeypatch, tmp_path):
         self._linux(monkeypatch, tmp_path)
@@ -108,19 +108,19 @@ class TestTyingARecordToThisHost:
 
     def test_linux_unreadable_boot_id_is_not(self, monkeypatch, tmp_path):
         self._linux(monkeypatch, tmp_path)
-        monkeypatch.setattr(instances, "_LINUX_BOOT_ID", tmp_path / "missing")
+        monkeypatch.setattr(procid, "_LINUX_BOOT_ID", tmp_path / "missing")
         assert instances.legacy_record_is_this_host(
             {"start": {"boot": "boot-a", "ticks": 5}}) is False
 
     def test_windows_with_a_machine_guid_is(self, monkeypatch):
-        monkeypatch.setattr(instances, "sys", types.SimpleNamespace(platform="win32"))
-        monkeypatch.setattr(instances, "machine_guid", lambda: "GUID")
+        monkeypatch.setattr(procid, "sys", types.SimpleNamespace(platform="win32"))
+        monkeypatch.setattr(procid, "machine_guid", lambda: "GUID")
         assert instances.legacy_record_is_this_host({"start": None}) is True
-        monkeypatch.setattr(instances, "machine_guid", lambda: "")
+        monkeypatch.setattr(procid, "machine_guid", lambda: "")
         assert instances.legacy_record_is_this_host({"start": None}) is False
 
     def test_another_platform_never_is(self, monkeypatch):
-        monkeypatch.setattr(instances, "sys", types.SimpleNamespace(platform="darwin"))
+        monkeypatch.setattr(procid, "sys", types.SimpleNamespace(platform="darwin"))
         assert instances.legacy_record_is_this_host({"start": None}) is False
         assert instances.legacy_record_is_this_host("not a record") is False
 

@@ -130,11 +130,33 @@ $body = "# localm bug report: $summary`n`n" +
         "## What happened`n$detail`n`n" +
         "## How it was filed`n- Filed via the standalone PowerShell reporter (no Python on this machine).`n`n" +
         "## Environment`n- OS: $os`n- PowerShell: $($PSVersionTable.PSVersion)"
+# Headers of the debug-log records that carry chat content: the same markers as
+# _CONTENT_MARKER_RES in localm/_log_digest.py. See
+# test_powershell_content_marker_matches_every_log_digest_content_sample.
+$contentMarker = '(?m)(?:raw model output:\s*$|\bmemory embed_one failed for |\bjobs web tool: \S+ \{|assembled chat prompt \(\d+ message\(s\)\):\s*$|chat completion reply \(finish_reason=\S+\):\s*$|\bmemory (?:auto-)?consolidate (?:prompt|response):\s*$|\bmemory consolidation: (?:evaluating candidate \[\d+/\d+\]: |decision for )|\brag index: |\brag extract identity: )'
+
+# The last $maxBytes of a file as text.
+function Read-LogEnd([string]$path, [int]$maxBytes) {
+  $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+  try {
+    if ($fs.Length -gt $maxBytes) { [void]$fs.Seek(-$maxBytes, 'End') }
+    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+    try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+  } finally { $fs.Dispose() }
+}
+
 if ($logPath -and (Test-Path -LiteralPath $logPath)) {
   try {
-    $tail = (Get-Content -LiteralPath $logPath -Tail 120 -ErrorAction Stop) -join "`n"
-    if ($tail) { $body += "`n`n## Recent log tail`n$fence`n" + (Scrub $tail) + "`n$fence" }
-  } catch { }
+    $logEnd = Read-LogEnd (Resolve-Path -LiteralPath $logPath).ProviderPath 2000000
+    if ($logEnd -match $contentMarker) {
+      $body += "`n`n## Log`nNo log was attached: it holds chat content, which a bug report never includes."
+    } else {
+      $tail = (($logEnd -split "\r?\n") | Select-Object -Last 120) -join "`n"
+      if ($tail.Trim()) { $body += "`n`n## Recent log tail`n$fence`n" + (Scrub $tail) + "`n$fence" }
+    }
+  } catch {
+    $body += "`n`n## Log`nNo log was attached: the log file could not be read."
+  }
 }
 $body = Scrub $body
 

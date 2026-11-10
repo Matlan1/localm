@@ -26,6 +26,8 @@ on:
       - ".github/workflows/docker.yml"
       - "pyproject.toml"
       - "hatch_build.py"
+      - "LICENSE"
+      - "THIRD-PARTY-NOTICES.md"
   release:
     types: [published]
   workflow_dispatch:

@@ -25,6 +25,14 @@ from localm.plugins.builtin.image import backend as image_backend
 from localm.plugins.builtin.image.backends import native
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+
 # --------------------------------------------------------------------------- #
 #  auto / explicit backend choice                                             #
 # --------------------------------------------------------------------------- #
@@ -796,7 +804,7 @@ def test_a_comfyui_job_with_steps_is_refused_before_anything_runs(native_app, mo
     from localm.config import update_config
     app, runner = native_app
     update_config(lambda cfg: cfg["plugins"]["image"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_image.backend"]
+    mod = sys.modules["localm.plugins.builtin.image.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (_ for _ in ()).throw(
                             AssertionError("ComfyUI must not be reached")))
@@ -815,7 +823,7 @@ def test_a_comfyui_job_gets_none_of_the_native_only_arguments(native_app, monkey
     from localm.config import update_config
     app, runner = native_app
     update_config(lambda cfg: cfg["plugins"]["image"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_image.backend"]
+    mod = sys.modules["localm.plugins.builtin.image.backend"]
     seen = {}
 
     def comfy_generate(s, prompt, out_path, *, self_url, write_sidecar, **kwargs):
@@ -874,7 +882,7 @@ def test_explicit_comfy_without_comfyui_fails_and_never_runs_native(native_app, 
     from localm.config import update_config
     app, runner = native_app
     update_config(lambda cfg: cfg["plugins"]["image"].update({"backend": "comfy"}))
-    mod = sys.modules["_localm_plugin_image.backend"]
+    mod = sys.modules["localm.plugins.builtin.image.backend"]
     monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
                         lambda s, on_progress=None: (False, "ComfyUI is not running"))
     with TestClient(app) as c:
@@ -1524,7 +1532,7 @@ def test_reference_images_without_the_vision_encoder_carry_its_download(native_a
 
     from localm.media.sdcpp import pairing
     app, runner = native_app
-    plugin_native = importlib.import_module("_localm_plugin_image.backends.native")
+    plugin_native = importlib.import_module("localm.plugins.builtin.image.backends.native")
     monkeypatch.setattr(plugin_native, "input_refusal", lambda s, **kw: native.NO_LLM_VISION_21)
     with TestClient(app) as c:
         r = c.post("/api/imagine", json={"prompt": "p"})
@@ -1543,7 +1551,7 @@ def test_reference_images_without_the_vision_encoder_carry_its_download(native_a
 def test_a_refusal_that_is_not_a_missing_file_offers_no_download(native_app, monkeypatch):
     from fastapi.testclient import TestClient
     app, _runner = native_app
-    plugin_native = importlib.import_module("_localm_plugin_image.backends.native")
+    plugin_native = importlib.import_module("localm.plugins.builtin.image.backends.native")
     monkeypatch.setattr(plugin_native, "input_refusal",
                         lambda s, **kw: "A mask needs a base image.")
     with TestClient(app) as c:

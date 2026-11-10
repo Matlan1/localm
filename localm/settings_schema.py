@@ -591,10 +591,9 @@ CORE_FIELDS: list = [
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("allowed_hosts", Widget.TEXT, "Allowed host names",
-                 "Extra names this server answers to, for a reverse proxy or your own "
-                 "DNS name. Blank = only this machine's own names and addresses; "
-                 'comma-separated list; "*.example.com" covers one level; or "*" for '
-                 "any name, which turns the DNS-rebinding check off.",
+                 "Extra names this server answers to (reverse proxy, own DNS name), "
+                 'comma-separated; "*.example.com" covers one level; "*" allows any '
+                 "name and turns the DNS-rebinding check off.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     # A rename needs a restart: the name is also written into the HTTPS
     # certificate's SANs, so it is not display-only.
@@ -2021,8 +2020,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
-               "stable-diffusion.cpp build to use. auto uses the best installed build and "
-               "installs the recommended one only when none is installed.",
+               "stable-diffusion.cpp build to use. auto installs the recommended build for "
+               "this machine, keeps an installed GPU build, and uses the CPU build only "
+               "when no GPU build can be installed or loaded.",
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
@@ -2428,20 +2428,25 @@ TTS_FIELDS: list = [
 ]
 
 
+def _tts_data():
+    """The tts plugin's shipped settings data module, read whether or not the
+    plugin is enabled."""
+    from localm.plugins.lookup import shipped_data
+    return shipped_data("tts", "settings")
+
+
 def tts_defaults() -> dict:
     """The tts plugin's shipped template defaults (documentation keys stripped).
 
     Read through the plugin's own settings module so the template has exactly
     one reader, shared with the plugin's /api/tts/config.
     """
-    from localm.plugins.builtin.tts.settings import defaults
-    return defaults()
+    return _tts_data().defaults()
 
 
 def known_tts_voices() -> list:
     """The shipped voice ids, or [] when the vendored list cannot be read."""
-    from localm.plugins.builtin.tts.settings import voice_ids
-    return voice_ids()
+    return _tts_data().voice_ids()
 
 
 def tts_admin_only_fields() -> set:
@@ -2488,8 +2493,7 @@ def tts_schema_json(block: Optional[dict], *, is_owner: bool = True) -> list:
         if options:
             d["options"] = options
             if f.key == "voice":
-                from localm.plugins.builtin.tts.settings import voices
-                d["option_labels"] = [v["label"] for v in voices()]
+                d["option_labels"] = [v["label"] for v in _tts_data().voices()]
             elif f.key == "model":
                 by_repo = dict(TTS_MODEL_OPTIONS)
                 d["option_labels"] = [by_repo[o] for o in options]
@@ -2521,8 +2525,7 @@ def _tts_relative_asset(key: str, value: str) -> str:
         raise ValueError(f"{key}: must not step outside the plugin folder, got {value!r}")
     if any(p == "" for p in parts[:-1]):        # a trailing "/" is fine, "a//b" is not
         raise ValueError(f"{key}: has an empty path segment, got {value!r}")
-    from localm.plugins.builtin.tts.settings import asset_root
-    root = asset_root().resolve()
+    root = _tts_data().asset_root().resolve()
     target = (root / value).resolve()
     if root != target and root not in target.parents:
         raise ValueError(f"{key}: resolves outside the tts plugin's static folder")

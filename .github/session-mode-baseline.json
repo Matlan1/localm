@@ -1,7 +1,7 @@
 {
   "localm/bugreport/diagnostics.py": 1,
-  "localm/cli/chat.py": 8,
-  "localm/cli/media.py": 8,
+  "localm/cli/chat.py": 4,
+  "localm/cli/media.py": 2,
   "localm/debuglog.py": 2,
   "localm/inference/app_assembly/transport.py": 1,
   "localm/inference/http_server.py": 1,
@@ -20,7 +20,7 @@
   "localm/plugins/coder/agent/loop.py": 1,
   "localm/plugins/coder/agent/persistence.py": 2,
   "localm/plugins/coder/agent/session.py": 1,
-  "localm/plugins/coder/cli/_main.py": 4,
+  "localm/plugins/coder/cli/_main.py": 5,
   "localm/plugins/coder/cli/repl.py": 3,
   "localm/plugins/coder/project_config.py": 1,
   "localm/plugins/coder/runner.py": 2,

@@ -19,8 +19,8 @@ FROM ${UBUNTU_IMAGE}
 
 ARG BACKEND=cpu
 ARG EXTRAS=coder,monitor,rag
-ARG UV_VERSION=0.13.6
-ARG UV_SHA256=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+ARG UV_VERSION=0.13.7
+ARG UV_SHA256=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
 ARG IMAGE_VERSION=unknown
 ARG IMAGE_REVISION=unknown
 
@@ -46,7 +46,12 @@ RUN curl -fsSL -o /tmp/uv.tar.gz \
       "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
  && echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c - \
  && tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 uv-x86_64-unknown-linux-gnu/uv \
- && rm /tmp/uv.tar.gz
+ && rm /tmp/uv.tar.gz \
+ && mkdir -p /usr/share/doc/uv \
+ && curl -fsSL -o /usr/share/doc/uv/LICENSE-MIT \
+      "https://raw.githubusercontent.com/astral-sh/uv/${UV_VERSION}/LICENSE-MIT" \
+ && curl -fsSL -o /usr/share/doc/uv/LICENSE-APACHE \
+      "https://raw.githubusercontent.com/astral-sh/uv/${UV_VERSION}/LICENSE-APACHE"
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin localm \
  && mkdir /opt/localm /opt/venv /opt/python /data \
@@ -74,6 +79,7 @@ RUN case "${BACKEND}" in \
  && LOCALM_HOME=/tmp/localm-build-home /opt/venv/bin/localm setup-llama ${backend_args} --yes \
  && rm -rf /tmp/localm-build-home
 
+COPY --chown=root:root --chmod=0644 LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/localm/
 COPY --chown=root:root --chmod=0755 docker/entrypoint.sh /usr/local/bin/localm-docker-entrypoint
 COPY --chown=root:root --chmod=0755 docker/healthcheck.sh /usr/local/bin/localm-docker-healthcheck
 

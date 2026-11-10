@@ -426,16 +426,14 @@ def _run_memory(job: Job, *, engine=None) -> str:
     skips with a clear status in privacy mode, never a silent success). Returns a
     human-readable summary saved as the job result. Raises RuntimeError when a
     model call failed during synthesis, so the job is recorded as an error."""
-    # Import the memory plugin's synthesizer directly, which resolves the
-    # bundled-store source even when the memory plugin is not installed or enabled;
-    # the privacy and write gates inside synthesize_memory still apply. Valid only
-    # while synthesize_memory stays module-level-stateless (fresh store per call,
-    # shared state on disk/config). Guarded, so a memory module that cannot import
-    # degrades to a clear job result.
+    # The memory plugin is reached only while it is installed and enabled; a
+    # disabled plugin, or one whose module cannot import, gives a clear job result.
+    from localm.plugins.lookup import plugin_api
     try:
-        from localm.plugins.builtin.memory.plug import synthesize_memory
+        memory = plugin_api("memory", "plug")
     except Exception as e:
         return f"Memory is unavailable, so nothing was consolidated: {e}"
+    synthesize_memory = memory.synthesize_memory
     eng = engine
     if eng is None:
         raise RuntimeError(
@@ -463,8 +461,8 @@ def _run_memory(job: Job, *, engine=None) -> str:
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
     if result.get("status") == "error":
-        from localm.plugins.builtin.memory.plug import _model_failed_detail
-        raise RuntimeError("memory synthesis failed: " + _model_failed_detail(result))
+        raise RuntimeError("memory synthesis failed: "
+                           + memory._model_failed_detail(result))
     # A contradiction to a saved (user-typed) fact waits as a suggested correction to
     # review in the memory panel, never silently applied or dropped. Reports the TOTAL
     # pending, not just this run's new ones.

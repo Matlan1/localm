@@ -792,7 +792,8 @@ def test_credential_lock_timeout_after_the_config_save_is_reported(app_env, monk
     set_credentials({"hf_token": "hf_keep_me"})
     lock = credentials_path().with_name(credentials_path().name + ".lock")
     lock.write_bytes(b"4194303:0123456789abcdef0123456789abcdef")
-    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    import localm.storekit as storekit
+    monkeypatch.setattr(storekit, "_CROSS_LOCK_TIMEOUT", 0.3)
 
     r = _answering(c).patch("/v1/config", headers=_owner(),
                             json={"hf_token": "", "import_max_depth": 5})

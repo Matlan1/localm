@@ -315,6 +315,8 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         | HOST_PATH_OWNER_KEYS | _NEWLY_OWNER_ONLY
         | {"hf_trust_remote_code"}
         | {"net_allow_private", "cors_origins"}
+        # allowed_hosts decides which Host names the DNS-rebinding guard accepts.
+        | {"allowed_hosts"}
         # update_allow_prerelease decides which builds the updater suggests
         # installing.
         | {"update_allow_prerelease"}

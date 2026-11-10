@@ -7,6 +7,19 @@ import click
 from ._core import console, main
 
 
+def _media_plugin(plugin: str, submodule: str):
+    """The media plugin's *submodule*, or exit 1 with a message when the plugin
+    is not installed and enabled."""
+    from rich.markup import escape
+
+    from ..plugins.lookup import PluginUnavailable, plugin_api
+    try:
+        return plugin_api(plugin, submodule)
+    except PluginUnavailable as e:
+        console.print(f"[yellow]{escape(str(e))}[/yellow]")
+        sys.exit(1)
+
+
 def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
     import os as _os
@@ -251,7 +264,6 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     terminal, you are offered to open it.
     """
     import time as _time
-    from importlib import import_module
 
     from rich.markup import escape
 
@@ -261,7 +273,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     if size:
         from fastapi import HTTPException
 
-        from ..plugins.builtin.image.plug import parse_image_size
+        parse_image_size = _media_plugin("image", "plug").parse_image_size
         try:
             parsed = parse_image_size(size)
         except HTTPException as e:
@@ -273,7 +285,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
     _cfg = load_config()
-    image_backend = import_module("localm.plugins.builtin.image.backend")
+    image_backend = _media_plugin("image", "backend")
     s = image_backend.prepare_for_job(image_backend.settings(_cfg), _cfg)
     kwargs = {k: v for k, v in (
         ("negative_prompt", negative), ("guidance", guidance), ("cfg", cfg),
@@ -318,7 +330,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from rich.markup import escape
 
     from ..config import load_config
-    from ..plugins.builtin.music import backend as music_backend
+    music_backend = _media_plugin("music", "backend")
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
               (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
@@ -376,7 +388,6 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     generator - expect many minutes per clip; see docs/video.md for model setup.
     """
     import time as _time
-    from importlib import import_module
 
     from ..config import load_config
 
@@ -387,7 +398,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
     _cfg = load_config()
-    video_backend = import_module("localm.plugins.builtin.video.backend")
+    video_backend = _media_plugin("video", "backend")
     s = video_backend.prepare_for_job(video_backend.settings(_cfg), _cfg)
     _via_backend(video_backend, s, prompt, out_path, "video",
                  seconds=duration, fps=fps,

@@ -94,11 +94,19 @@ beside the libraries in the runtime folder, as `LICENSE.<package>` (for example
 localm writes `LICENSE.nvidia-cuda` beside their libraries, naming NVIDIA's CUDA
 license (<https://docs.nvidia.com/cuda/eula/index.html>).
 
-## Python dependencies (installed from PyPI, not redistributed here)
+## Python dependencies (installed from PyPI)
 
 localm declares its Python dependencies in `pyproject.toml`. They are installed
-from PyPI by pip or uv and are NOT redistributed inside this repository, so no
-license text is reproduced here. The great majority of declared dependencies are
+from PyPI by pip or uv and are NOT redistributed inside this repository, the
+release zip, the wheel or the sdist, so no license text is reproduced here. The
+Docker image (`ghcr.io/matlan1/localm`) is different: it contains the installed
+dependencies, uv, the provisioned llama.cpp runtime and, in the `cuda` and
+`cuda13` images, NVIDIA's CUDA runtime libraries. It carries their license texts:
+localm's `LICENSE` and this file in `/usr/share/doc/localm/`, uv's licenses in
+`/usr/share/doc/uv/`, each Python package's own license files in its `.dist-info`
+folder under `/opt/venv`, the llama.cpp and NVIDIA license files beside the
+runtime libraries as described above, and the Ubuntu packages' copyright files
+in `/usr/share/doc/<package>/`. The great majority of declared dependencies are
 permissive (MIT / BSD / Apache-2.0 / HPND / ISC / PSF / OLDAP-2.8), with these exceptions:
 
 - **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle), `hypothesis`
