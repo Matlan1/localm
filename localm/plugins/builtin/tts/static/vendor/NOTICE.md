@@ -6,7 +6,7 @@ npm packages so the plugin runs offline without a CDN:
 | Package | Version | License | Text |
 |---|---|---|---|
 | `kokoro-js` | 1.2.1 | Apache-2.0 | `LICENSE.kokoro-js` |
-| `@huggingface/transformers` (transformers.js) | 4.3.1 | Apache-2.0 | `LICENSE.transformers-js` |
+| `@huggingface/transformers` (transformers.js) | 4.3.2 | Apache-2.0 | `LICENSE.transformers-js` |
 | `onnxruntime-web` | 1.31.0-dev.20260914-8d85527a0 | MIT (c) Microsoft Corporation | `LICENSE.onnxruntime-web` |
 | `phonemizer` | 1.2.1 | Apache-2.0 | (bundled, see the kokoro-js notice) |
 | eSpeak NG (compiled into `phonemizer`) | see below | GPL-3.0-or-later | `LICENSE.espeak-ng` |
@@ -38,7 +38,7 @@ required.
     onnxruntime/ort-wasm-simd-threaded.wasm           14264838 B
 
 Byte-exact copies of `dist/` from `onnxruntime-web@1.31.0-dev.20260914-8d85527a0`,
-the runtime build that `@huggingface/transformers@4.3.1` pins and compiles into
+the runtime build that `@huggingface/transformers@4.3.2` pins and compiles into
 `kokoro.min.js` (the bundle carries that version string and builds its runtime URL
 from it). The transformers.js package does not ship these files in its own `dist/`.
 
