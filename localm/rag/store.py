@@ -479,14 +479,14 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         # cross-process lock.
         with _collection_lock(self.name), self._write_lock("a document removal"):
             self._load(use_cache=False)
-            source = self._stored_doc_key(source)
-            if source is None:
+            key = self._stored_doc_key(source)
+            if key is None:
                 return False
             keep = [i for i, c in enumerate(self._chunks)
-                    if c.get("source") != source]
+                    if c.get("source") != key]
             self._chunks = [self._chunks[i] for i in keep]
             if self._vectors is not None:
                 self._vectors = [self._vectors[i] for i in keep]
-            del self._meta["docs"][source]
+            del self._meta["docs"][key]
             self._save()
             return True
