@@ -45,7 +45,7 @@ def index_urls(cmd: Iterable) -> list:
     plus every index or find-links URL its options name and every ``http(s)``
     requirement it lists. Ignores options that name local paths."""
     args = [str(a) for a in cmd]
-    urls = list(PYPI_URLS)
+    urls: list[str] = list(PYPI_URLS)
     for i, a in enumerate(args):
         value = None
         for opt in _INDEX_OPTIONS:

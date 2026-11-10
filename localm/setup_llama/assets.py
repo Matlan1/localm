@@ -133,7 +133,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
         if (any(m in name for m in matchers) and "cudart" not in name
                 and _asset_arch_ok(name, arch)
                 and a.get("browser_download_url")):
-            return a["browser_download_url"], _asset_sha256(a), tag
+            return a["browser_download_url"], _sl._asset_sha256(a), tag
 
     # Fallback: the release listing was unavailable, so the asset name has to
     # come from somewhere else.
@@ -210,7 +210,7 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
     for a in assets:
         if f"windows-rocm-{asset_tag}" in a.get("name", ""):
             url = a.get("browser_download_url") or fallback_url
-            return url, _asset_sha256(a) or fallback_sha, None
+            return url, _sl._asset_sha256(a) or fallback_sha, None
     # Surface the fallback so the user knows the build may not be current
     # (the lemonade-sdk release lookup was unreachable, or this release is
     # missing the expected asset for this GPU family); mirrors the
@@ -241,7 +241,7 @@ def _resolve_linux_cuda_asset(backend: str, cuda_line: str,
     for a in assets:
         name = str(a.get("name", "")).lower()
         if name.endswith(suffix) and a.get("browser_download_url"):
-            return a["browser_download_url"], _asset_sha256(a, _CUDA_LINUX_PINNED_SHA256), tag
+            return a["browser_download_url"], _sl._asset_sha256(a, _CUDA_LINUX_PINNED_SHA256), tag
     pinned_name = f"llama-{tag}-bin-ubuntu{suffix}"
     pinned_sha = _CUDA_LINUX_PINNED_SHA256.get(pinned_name)
     if not assets and pinned_sha:
@@ -417,4 +417,4 @@ def _resolve_linux_cudart_asset(tag: str, line: str = _CUDA_LINE) -> tuple[str, 
         raise click.ClickException(
             f"llama.cpp release {tag} has no Linux {line} CUDA runtime bundle for "
             f"{arch} - falling back to vulkan.")
-    return asset["browser_download_url"], _asset_sha256(asset)
+    return asset["browser_download_url"], _sl._asset_sha256(asset)

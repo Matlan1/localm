@@ -15,6 +15,7 @@ import pytest
 
 from localm import hwdetect, setup_llama as sl
 from localm.setup_llama.download import ArtifactError
+from localm.setup_llama.pins import _CUDA_LINUX_PINNED_SHA256
 
 PIN = sl._PINNED_TAG
 UPSTREAM = "ggml-org/llama.cpp"
@@ -104,7 +105,7 @@ def test_generic_resolver_returns_the_pin_not_the_listing(machine):
 
 def test_linux_cuda_third_party_resolver_refuses_a_disagreeing_digest(machine):
     name = f"llama-{PIN}-bin-ubuntu-cuda-x64.tar.gz"
-    assert name in sl._CUDA_LINUX_PINNED_SHA256
+    assert name in _CUDA_LINUX_PINNED_SHA256
     machine("linux", "x64", [_row(name, "sha256:" + OTHER, repo=sl._CUDA_LINUX_REPO)])
     with pytest.raises(ArtifactError):
         sl._resolve_backend_asset("cuda", "cuda-12", tag=PIN)
