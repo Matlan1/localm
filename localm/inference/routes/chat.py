@@ -1058,6 +1058,7 @@ def register(app: FastAPI, ctx) -> None:
 
             gen_error: Exception | None = None
             lp_records: list = []
+            timing: dict = {}
             _hs._admit_generation(sem, engine)
             async with sem:
                 # Cancelable on client disconnect: an aborted request releases the
@@ -1066,6 +1067,7 @@ def register(app: FastAPI, ctx) -> None:
                 # else falls through to the generic backstop.
                 try:
                     text = await _generate_full(engine, messages, request,
+                                                timing=timing,
                                                 on_logprobs=lp_records.extend,
                                                 **gen_kwargs)
                 except _hs._BACKEND_ERROR_TYPES as e:
@@ -1083,8 +1085,16 @@ def register(app: FastAPI, ctx) -> None:
                     text = _hs.inference_error_text(e, _hs.path_formatter(request))
 
             generated = text
+            stopped = False
             if gen_error is None and req.stop:
-                text, _stopped = apply_stop(text, req.stop)
+                text, stopped = apply_stop(text, req.stop)
+            if gen_error is not None:
+                finish_reason = "error"
+            elif stopped:
+                finish_reason = "stop"
+            else:
+                finish_reason = _hs._outcome(timing.get("outcome", {}),
+                                             "finish_reason", engine)
             visible = text
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
@@ -1096,7 +1106,7 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_caller_recorder(request), None, messages, text,
                             outcome=outcome)
-            _hs._log_chat_reply(text, finish_reason="error" if gen_error is not None else "stop")
+            _hs._log_chat_reply(text, finish_reason=finish_reason)
 
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,
@@ -1107,9 +1117,7 @@ def register(app: FastAPI, ctx) -> None:
             choice: dict[str, Any] = {
                 "text": (prompt + text) if req.echo and gen_error is None else text,
                 "index": 0,
-                # "error", not "stop", when generation failed, matching the
-                # terminal frame the streaming twin emits.
-                "finish_reason": "error" if gen_error is not None else "stop"}
+                "finish_reason": finish_reason}
             if n_logprobs is not None:
                 choice["logprobs"] = (
                     _hs.completion_text_logprobs(generated, lp_records, n_logprobs,

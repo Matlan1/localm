@@ -122,6 +122,26 @@ def test_sampling_stop_and_budget_reach_the_backend(env):
     assert r.json()["usage"]["prompt_tokens"] == 5
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_spent_token_budget_finishes_with_length(env, stream):
+    engine = _recording_engine(reply="abc")
+    engine.last_finish_reason = "length"
+    with TestClient(_app(engine)) as c:
+        r = c.post("/v1/completions", json={
+            "model": "m", "prompt": "p", "max_tokens": 1, "stream": stream})
+        cut = c.post("/v1/completions", json={
+            "model": "m", "prompt": "p", "stop": ["b"], "stream": stream})
+    assert r.status_code == 200 and cut.status_code == 200
+    if stream:
+        reasons = [json.loads(line[6:])["choices"][0]["finish_reason"]
+                   for resp in (r, cut) for line in resp.text.splitlines()
+                   if line.startswith("data: {") and json.loads(line[6:])["choices"]]
+        assert "length" in reasons and reasons.count("stop") == 1
+    else:
+        assert r.json()["choices"][0]["finish_reason"] == "length"
+        assert cut.json()["choices"][0]["finish_reason"] == "stop"
+
+
 def test_a_backend_without_a_raw_path_is_refused_not_answered_as_chat(env):
     engine = _recording_engine(raw=False)
     with TestClient(_app(engine)) as c:
@@ -210,6 +230,18 @@ def test_the_gguf_text_path_tokenises_the_raw_prompt_without_the_template(monkey
     assert got["tokens"] == [1, 2]
 
 
+def test_a_raw_prompt_that_spells_its_start_token_gets_no_second_one(monkeypatch):
+    from tests._bare_llama import make_bare_llama
+    llm = make_bare_llama(_model_ptr=1, _ctx_ptr=1)
+    encoded: list = []
+    llm._tokenizer.encode = (lambda text, add_bos=True, untrusted_ranges=():
+                             encoded.append(add_bos) or [1])
+    monkeypatch.setattr(llm, "_generate", lambda tokens, **kw: iter(()))
+    llm.create_chat_completion([], raw_prompt="<s>[INST] hi [/INST]")
+    llm.create_chat_completion([], raw_prompt="[INST] hi [/INST]")
+    assert encoded == [False, True]
+
+
 def test_the_gguf_raw_path_refuses_a_prompt_that_tokenises_to_nothing(monkeypatch):
     from localm.inference.backends.base import UnsupportedInputError
     from tests._bare_llama import make_bare_llama
@@ -248,11 +280,8 @@ def test_the_gguf_worker_and_backend_pass_raw_prompt_down(tmp_path):
 
 
 def test_the_hf_text_path_tokenises_the_raw_prompt_without_the_template(monkeypatch):
-    pytest.importorskip("transformers", exc_type=ImportError)
-    from localm.inference.backends.llamacpp import _loader
-    if _loader.native_lib_loaded():
-        pytest.skip("llama.cpp's native runtime is already loaded in this process")
-    import transformers
+    import sys
+    import types
 
     from localm.inference.backends import _hf_worker as hfmod
     be = hfmod.HFWorker.__new__(hfmod.HFWorker)
@@ -274,7 +303,10 @@ def test_the_hf_text_path_tokenises_the_raw_prompt_without_the_template(monkeypa
         def __iter__(self):
             return iter(())
 
-    monkeypatch.setattr(transformers, "TextIteratorStreamer", _FakeStreamer)
+    fake = types.ModuleType("transformers")
+    fake.TextIteratorStreamer = _FakeStreamer
+    fake.StoppingCriteriaList = list
+    monkeypatch.setitem(sys.modules, "transformers", fake)
     monkeypatch.setattr(hfmod, "_grammar_processor", lambda *a, **k: None)
     list(be.chat_stream([{"role": "user", "content": "ignored"}], raw_prompt=PROMPT,
                         thinking=False, max_tokens=8))
