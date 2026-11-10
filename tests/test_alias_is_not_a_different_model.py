@@ -86,7 +86,7 @@ class TestBothGuardsUseIt:
         from pathlib import Path
         src = Path(__file__).resolve().parents[1] / "localm" / "cli" / "chat.py"
         t = src.read_text(encoding="utf-8")
-        assert "names_same_model(active, model)" in t, (
+        assert "served_model_is_requested(" in t, (
             "localm run compares the names, so an alias of the loaded model "
             "reads as a different model")
         assert "if active and active != model:" not in t
@@ -96,5 +96,11 @@ class TestBothGuardsUseIt:
         src = (Path(__file__).resolve().parents[1] / "localm" / "plugins"
                / "gui" / "cli.py")
         t = src.read_text(encoding="utf-8")
-        assert "names_same_model(active, model)" in t
+        assert "served_model_is_requested(" in t
         assert "if active and active != model:" not in t
+
+    def test_the_shared_check_resolves_aliases_first(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "localm" / "inference"
+               / "http_engine.py")
+        assert "if names_same_model(active, requested):" in src.read_text(encoding="utf-8")
