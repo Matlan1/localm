@@ -148,3 +148,39 @@ def test_relocate_cli_command(env, monkeypatch):
     r = CliRunner().invoke(models_cli.relocate_cmd, ["m", str(new)])
     assert r.exit_code == 0, r.output
     assert Path(mm.load_registry()["m"]["path"]) == new.resolve()
+
+
+def test_relocate_repoints_every_alias_on_the_same_file(env):
+    import localm.model_manager as mm
+    tmp, _ = env
+    old = _gguf(tmp / "ext" / "model.gguf")
+    other = _gguf(tmp / "ext" / "other.gguf")
+    mm.save_registry({"mymodel": {"path": str(old), "source": "local", "missing": True}})
+    assert mm.alias_model("mymodel", "three") is True
+    reg = mm.load_registry()
+    reg["unrelated"] = {"path": str(other), "source": "local"}
+    mm.save_registry(reg)
+
+    new = _gguf(tmp / "moved" / "model.gguf")
+    assert mm.relocate_model("mymodel", str(new)) is True
+
+    reg = mm.load_registry()
+    assert Path(reg["mymodel"]["path"]) == new.resolve()
+    assert Path(reg["three"]["path"]) == new.resolve(), "the alias must follow the file"
+    assert "missing" not in reg["three"]
+    assert Path(reg["unrelated"]["path"]) == other, "an entry on another file is untouched"
+
+
+def test_relocate_through_an_alias_repoints_the_original(env):
+    import localm.model_manager as mm
+    tmp, _ = env
+    old = _gguf(tmp / "ext" / "model.gguf")
+    mm.save_registry({"one": {"path": str(old), "source": "local", "missing": True}})
+    assert mm.alias_model("one", "three") is True
+
+    new = _gguf(tmp / "moved" / "model.gguf")
+    assert mm.relocate_model("three", str(new)) is True
+
+    reg = mm.load_registry()
+    assert Path(reg["one"]["path"]) == new.resolve()
+    assert "missing" not in reg["one"]

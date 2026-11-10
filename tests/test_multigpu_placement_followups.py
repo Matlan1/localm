@@ -471,3 +471,29 @@ class TestCooperativeUnloadAsksDefaultSplitPeers:
         gpus = _torch_readings((20.0, False))
         assert self._asked(monkeypatch, gpus, 0) == [0]
         assert self._asked(monkeypatch, gpus, 1) == []
+
+
+class TestUnmatchedGpusKeepTheDefaultSplit:
+    """When the GPUs cannot be matched to llama.cpp's device list, a configured
+    split of 2+ GPUs is not written in torch's numbering: the worker keeps
+    llama.cpp's default split, as the warning says."""
+
+    def test_unmatched_gpus_keep_the_default_split(self, tmp_path, caplog):
+        gpus = _torch_readings((20.0, False), (20.0, False))
+        cfg = _config(gpu_split_indices=[0, 1], gpu_split_ratios=[3.0, 1.0],
+                      main_gpu_index=None)
+        with caplog.at_level("WARNING", logger="localm"), \
+                mock.patch.object(discover, "gguf_split_devices",
+                                  return_value=([], "the device names do not match")):
+            params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+        assert params["gpu_split_ratios"] == {}
+        assert _worker_writes(params, cfg, gpus) == (
+            discover._LLAMA_SPLIT_MODE_LAYER, 0, None)
+        assert any("could not be matched" in w for w in _warnings(caplog))
+
+    def test_matched_gpus_still_apply_the_configured_split(self, tmp_path):
+        gpus = _torch_readings((20.0, False), (20.0, False))
+        cfg = _config(gpu_split_indices=[0, 1], gpu_split_ratios=[3.0, 1.0],
+                      main_gpu_index=None)
+        params = _load(_backend(tmp_path), gpus, _registry(gpus), cfg)
+        assert params["gpu_split_ratios"] != {}
