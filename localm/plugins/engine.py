@@ -327,7 +327,7 @@ def import_tool_module(spec: PluginSpec):
     use = dataclasses.replace(spec, register_entry=entry)
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
     mod_name = entry.partition(":")[0]
-    base = Path(spec.path)
+    base = Path(spec.path or ".")
     want = _entry_module_file(base, mod_name)
     cached = sys.modules.get(uniq)
     cached_file = getattr(cached, "__file__", None)
