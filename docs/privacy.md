@@ -27,7 +27,7 @@ section.
 Set globally (`mode`), per surface (`chat_mode`, `coder_mode`, which inherit the
 global when unset), by the `--mode` flag on `localm gui` / `serve` / `run`, by the
 `LOCALM_MODE` environment variable, in the desktop launcher's Privacy card, or in
-the app under Settings > Privacy. The `--mode` flag works by setting the
+the app under Settings > Privacy & data. The `--mode` flag works by setting the
 `LOCALM_MODE` environment variable for the process (and its children), so the two
 are one precedence level, not two. Precedence: `LOCALM_MODE` env (direct, or via
 `--mode`) > a project's `.localcoder/config.toml` `mode` (coder surface only) >
@@ -193,7 +193,7 @@ Without it, privacy mode saves no such bug report: a command that fails at a
 terminal asks whether to save one (the default is no), and an error with no
 terminal to ask (a background task, a server) saves nothing.
 
-Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
+Set it in **Settings > Privacy & data** (in-app, persistent), with the **desktop
 launcher** checkbox, with `--keep-diagnostics` on `localm gui` (`serve` and
 `run` have no such flag - use the `LOCALM_KEEP_DIAGNOSTICS` environment
 variable for those, a per-run override either way). The hang watchdog trace
@@ -275,7 +275,10 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   kept.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
-  never stored in config and never included.
+  never stored in config and never included. A few of those keys hold text
+  you typed (the ComfyUI launch command, folder and URL, the search URL, the
+  allowed CORS origins, the coder reviewer); they pass through the same
+  redaction as the rest of the report.
 
 **What a report deliberately keeps**, because it is what makes the report
 useful to debug: your install location, data directory path, native runtime
@@ -297,8 +300,9 @@ a newer release exists. This is a network behaviour, not something that writes t
 disk, so it isn't one of the two dials - it's covered by the [network
 policy](network.md) instead.
 
-- **When it fires.** A quiet check at most once every 6 hours while the GUI is
-  open (a client-side throttle - there is no background daemon; a headless
+- **When it fires.** A quiet check at most once every 6 hours per browser while
+  the GUI is open (a client-side throttle kept in that browser's storage, so a
+  browser that blocks storage checks on every load - there is no background daemon; a headless
   `localm serve` that nobody opens the GUI on never checks), plus whenever you
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.

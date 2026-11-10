@@ -301,10 +301,9 @@ def resolve_media_placement(config: Optional[dict], api_url: str):
     from localm.discover import applied_split_device_count, plan_media_placement
     if applied_split_device_count(cfg) < 2:
         return None, media_split_notice(cfg)
-    # Gate 3 - the running ComfyUI must actually offer the Select*Device nodes AND
-    # enumerate 2+ GPUs (probe /object_info). An older ComfyUI (including localm's own
-    # managed pin) or a single visible card declines with a stated reason, never a
-    # graph ComfyUI would reject.
+    # Gate 3 - the running ComfyUI must offer the Select*Device nodes and enumerate
+    # 2+ GPUs (probe /object_info). A ComfyUI without the nodes, or with one visible
+    # card, declines with a stated reason, never a graph ComfyUI would reject.
     cap = probe_placement_capability(api_url)
     plan = plan_media_placement(cfg, gpu_options=cap.gpu_options) if cap.available else None
     return plan, media_split_notice(cfg, placement=plan, capability=cap)

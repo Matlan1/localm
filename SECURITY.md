@@ -547,7 +547,8 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   installed with a warning that it is unverified (pass `--sha256` to pin one). The
   stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
   against pinned SHA-256 values.
-- **Your data is never in the swap.** The updater never touches the venv, `.git`,
+- **Your data is never in the swap.** The file swap never touches the venv (an
+  update that changes dependencies reinstalls the packages there afterwards), `.git`,
   your data directory (models, config, sessions), or `.localcoder`; provisioned
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
   up first and rolls back on failure rather than leaving a half-applied tree.

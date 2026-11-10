@@ -225,7 +225,7 @@ Not every plugin needs an extra: the image/music/video plugins generate with bui
 <details>
 <summary>Expand if you got a release zip some other way than <code>git clone</code></summary>
 
-Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside a `localm-<version>.zip.sig` signature, as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
+Every [GitHub Release](https://github.com/Matlan1/localm/releases) publishes `localm-<version>.zip` alongside its signature file (`localm-<version>.zip.sig`; `.zip.envelope` for 0.3.0), as Assets on that release. This matters if you obtained a release zip some other way than the `git clone` install above (a browser download, a mirror, a forwarded copy):
 
 - **Quick, zero-dependency check:** compute the file's SHA256 (`sha256sum localm-<version>.zip` on Linux/macOS, or `certutil -hashfile localm-<version>.zip SHA256` on Windows) and compare it against a digest you trust, for example one pasted into the release notes text, or one you already have from a copy obtained another way.
 - **Authoritative check:** `python scripts/verify_release.py localm-<version>.zip` verifies the zip against the same signing keys the auto-updater trusts (pinned in [`localm/updater.py`](localm/updater.py) as `_PINNED_KEYSET` - you can cross-check those keys against what GitHub's web UI shows independently of any zip you downloaded). It auto-finds the adjacent `.envelope` file (0.3.0) or `.sig` file, or accepts an explicit `--sig`/`--sha256`; see `python scripts/verify_release.py --help` for the full usage.
@@ -310,7 +310,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-Any OpenAI-compatible client works the same way, including AI browsers with a local-model option (BrowserOS and similar), LM Studio, and Ollama - point them at the same base URL.
+Any OpenAI-compatible client works the same way, including AI browsers with a local-model option (BrowserOS and similar) - point it at the same base URL.
 
 The usage block adds performance numbers - which fields appear depends on streaming and the endpoint; see [docs/server-api.md](docs/server-api.md) for the full breakdown and API surface.
 
@@ -323,7 +323,7 @@ The full CLI reference lives in [docs/cli.md](docs/cli.md). Here are the core co
 ```bash
 localm run MODEL                  # interactive chat or single prompt
 localm gui [MODEL]                # browser GUI
-localm serve MODEL                # OpenAI-compatible server
+localm serve [MODEL]              # OpenAI-compatible server
 localm coder [TASK]               # AI coding agent
 localm benchmark MODEL            # TTFT and tok/s measurements
 localm doctor                      # check installation

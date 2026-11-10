@@ -129,7 +129,7 @@ example one issued for a real hostname) instead of the built-in local CA.
 ### From the GUI: Settings > Server
 
 Everything above has a Settings equivalent, so a browser-only user (no
-terminal) can bind past loopback too - Settings > Server:
+terminal) can bind past loopback too - Settings > Server & network:
 
 - **Bind address** (`bind_host`) - blank for loopback-only, `0.0.0.0` for
   every IPv4 interface, `::` for every interface on both IPv4 and IPv6, or a
