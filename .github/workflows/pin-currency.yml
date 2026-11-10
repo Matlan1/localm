@@ -193,9 +193,10 @@ jobs:
       - name: Install
         shell: bash
         run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra monitor -o "$RUNNER_TEMP/requirements.txt"
-          pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          pip install --no-deps -e .
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
 
       - name: Header ABI diff against the candidate
         shell: bash
