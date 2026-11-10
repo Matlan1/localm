@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-Bind-host classification: is a given host string a loopback address.
+Bind-host classification: is a given host string a loopback address, and the
+parsing of a ``Host`` header value (``host_header_name``).
 
 ``is_loopback_host()`` lives here so every consumer shares one kernel-level
 implementation. ``inference/http_server.py``, ``inference/routes/keys.py``,
@@ -16,6 +17,7 @@ peer always looks like 127.0.0.1 even for a genuinely remote client.
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from typing import Optional
 
@@ -201,3 +203,42 @@ def is_own_address(host) -> bool:
     if addr.is_loopback:
         return True
     return addr in _interface_addresses()
+
+
+_HOST_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+(:\d{1,5})?$")
+_HOST_V6_RE = re.compile(r"^\[([0-9A-Fa-f:.]+)\](:\d{1,5})?$")
+
+
+def host_header_name(value: str) -> Optional[str]:
+    """The host of a ``Host`` header value: lowercased, port removed, one
+    trailing dot removed, an IPv6 literal unbracketed and canonicalised. None
+    when *value* is not ``name[:port]``, ``IPv4[:port]`` or ``[IPv6][:port]``."""
+    m = _HOST_V6_RE.match(value)
+    if m:
+        try:
+            return str(ipaddress.IPv6Address(m.group(1)))
+        except ValueError:
+            return None
+    if not _HOST_NAME_RE.match(value):
+        return None
+    name = value.rsplit(":", 1)[0].lower()
+    if name.endswith("."):
+        name = name[:-1]
+    if not name or name.startswith(".") or ".." in name:
+        return None
+    return name
+
+
+def normalize_host_name(value: str) -> Optional[str]:
+    """*value* (a name or address, optionally with a port) in the form
+    :func:`host_header_name` returns, or None when it is not one. A bare IPv6
+    literal is accepted without brackets, and a leading ``*.`` is kept."""
+    value = (value or "").strip()
+    try:
+        return str(ipaddress.IPv6Address(value))
+    except ValueError:
+        pass
+    if value.startswith("*."):
+        rest = host_header_name(value[2:])
+        return f"*.{rest}" if rest and ":" not in value else None
+    return host_header_name(value)

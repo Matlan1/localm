@@ -69,7 +69,9 @@ def register(app: FastAPI, ctx) -> None:
     def export_logs(req: LogExportRequest):
         """Copy every log of this running instance into a user-chosen folder
         (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
-        subfolder so repeated exports never clobber each other. Logs live under
+        subfolder so repeated exports never clobber each other. An explicit
+        user-requested export, not an automatic write: it ignores the session
+        mode. Logs live under
         <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so both
         are swept. Returns the counts and the destination path.
 

@@ -10,8 +10,8 @@ plus a short-lived leaf certificate that the server actually presents.
 Installing the CA removes the browser's "not secure" warning and lets the PWA
 install. Because the CA is REUSED when the leaf is regenerated, a device trusted
 once stays trusted even if this machine's LAN IP later changes. That reuse is
-not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one has
-reached its own expiry or its files are missing/unreadable, and every device
+not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one is
+within its renewal window (the last 30 days) or past expiry, or its files are missing/unreadable, and every device
 then has to trust the new one.
 
 This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
@@ -176,7 +176,8 @@ def san_targets(
     extra_ips: Optional[Iterable[str]] = None,
 ) -> tuple[list[str], list[str]]:
     """Return ``(hostnames, ip_strings)`` the server cert should cover: loopback,
-    this machine's hostname, its primary LAN IP, any Tailscale IP, plus any
+    this machine's hostname, the addresses the OS resolver returns for it (a
+    Tailscale address only when the resolver returns it), its primary LAN IP, plus any
     caller-supplied extras. Best-effort and never raises; results are sorted and
     de-duplicated. IPs are canonicalised so equivalent forms do not duplicate."""
     hostnames: set[str] = {"localhost"}
@@ -427,7 +428,8 @@ def _make_ca(home: Path):
 
 
 def _load_or_make_ca(home: Path):
-    """Reuse the persisted CA when present and unexpired, else mint a new one."""
+    """Reuse the persisted CA when present and outside its renewal window (more
+    than ``_RENEW_MARGIN_DAYS`` before its expiry), else mint a new one."""
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
 
@@ -436,7 +438,7 @@ def _load_or_make_ca(home: Path):
         try:
             cert = x509.load_pem_x509_certificate(cp.read_bytes())
             key = serialization.load_pem_private_key(kp.read_bytes(), password=None)
-            if cert.not_valid_after_utc > _now():
+            if cert.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) > _now():
                 return cert, key
         except Exception:
             # The files exist but are corrupt or unreadable: mint a fresh CA
@@ -470,7 +472,7 @@ def _make_leaf(home: Path, ca_cert, ca_key, hostnames: list[str], ips: list[str]
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=5))
-        .not_valid_after(now + timedelta(days=_LEAF_DAYS))
+        .not_valid_after(min(now + timedelta(days=_LEAF_DAYS), ca_cert.not_valid_after_utc))
         .add_extension(x509.SubjectAlternativeName(san), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
@@ -556,7 +558,8 @@ def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
     except Exception:
         return False
 
-    # A CA at or near its own expiry forces regeneration of both it and the leaf.
+    # A CA inside its renewal window makes the leaf unreusable; ensure_cert then
+    # replaces the CA (_load_or_make_ca) and issues a new leaf under it.
     if ca.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
         return False
     if cert.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
@@ -602,7 +605,7 @@ def ensure_cert(
     normally reusing the CA so a device that trusted localm once stays trusted.
 
     The CA survives an ordinary leaf regeneration, but NOT unconditionally:
-    ``_load_or_make_ca`` reuses it only while it is unexpired and its files are
+    ``_load_or_make_ca`` reuses it only outside its renewal window and while its files are
     readable, and mints a fresh one otherwise. A new CA means every device
     repeats the one-time trust step.
     """

@@ -235,3 +235,48 @@ def test_a_checkpoint_stamped_newer_than_understood_is_refused_and_named(tmp_pat
     assert str(p) in caplog.text and "newer" in caplog.text
     p.write_text(json.dumps({"version": 1, "messages": []}), encoding="utf-8")
     assert _read_checkpoint(p) == {"version": 1, "messages": []}
+
+
+def test_restricted_clear_leaves_legacy_checkpoints_alone(tmp_path, monkeypatch):
+    """A restricted session deletes nothing under .localcoder and no other
+    session's legacy checkpoint; it removes only its own per-id file."""
+    home = tmp_path / "home"
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    from localm.plugins.coder.agent.checkpoint import _legacy_home_checkpoint_path_for
+    proj = tmp_path / "proj"; proj.mkdir()
+    legacy = proj / ".localcoder" / "checkpoint.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}", encoding="utf-8")
+    legacy_home = _legacy_home_checkpoint_path_for(proj)
+    legacy_home.parent.mkdir(parents=True, exist_ok=True)
+    legacy_home.write_text("{}", encoding="utf-8")
+
+    a = _agent(proj, mode=SessionMode.LOG, restricted=True)
+    own = a._checkpoint_path
+    own.parent.mkdir(parents=True, exist_ok=True)
+    own.write_text("{}", encoding="utf-8")
+
+    a.clear_checkpoint()
+    assert legacy.exists()
+    assert legacy_home.exists()
+    assert not own.exists()
+
+
+def test_unrestricted_clear_removes_legacy_checkpoints(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    from localm.plugins.coder.agent.checkpoint import _legacy_home_checkpoint_path_for
+    proj = tmp_path / "proj"; proj.mkdir()
+    legacy = proj / ".localcoder" / "checkpoint.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}", encoding="utf-8")
+    legacy_home = _legacy_home_checkpoint_path_for(proj)
+    legacy_home.parent.mkdir(parents=True, exist_ok=True)
+    legacy_home.write_text("{}", encoding="utf-8")
+
+    a = _agent(proj, mode=SessionMode.LOG)
+    a.clear_checkpoint()
+    assert not legacy.exists()
+    assert not legacy_home.exists()

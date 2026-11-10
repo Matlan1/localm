@@ -908,10 +908,11 @@ def _gpu_util_probe() -> None:
     last value; nothing user-facing blocks."""
     global _gpu_util_inflight, _gpu_util_last, _gpu_util_last_at
     import subprocess
+    from localm import sysprog
     pct = None
     try:
         p = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu",
+            [sysprog.require("nvidia-smi"), "--query-gpu=utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
         )

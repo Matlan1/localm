@@ -420,6 +420,41 @@ class TestAcceptPeerRouteEndpoint:
         assert route.api_key == "peer-key-123"
         assert route.instance_id == "peer-acc"
 
+    @pytest.mark.parametrize("bad", ["peer-key\nX-Injected: 1", "peer\rkey",
+                                     "peer\x00key", "peer key", "peer-k\u00e9y"])
+    def test_a_key_with_a_character_a_key_cannot_hold_is_refused_unechoed(
+            self, tmp_path, monkeypatch, caplog, bad):
+        import logging
+        caplog.set_level(logging.DEBUG)
+        d = tmp_path / "reg"
+        peer = _FakePeerServer(key="peer-key")
+        _write_peer(d, "peer-bad", peer.port, model="shared-model")
+        client = self._client()
+        r = client.post("/v1/models/shared-model/peer-route",
+                        headers=self._write_hdr(client),
+                        json={"instance_id": "peer-bad", "api_key": bad})
+        assert r.status_code == 400, r.text
+        assert bad not in r.text and bad.strip() not in r.text
+        assert bad not in caplog.text
+        assert peer.auth_seen == []
+        assert peer_routing.get_route("shared-model") is None
+
+    def test_verify_peer_credential_refuses_such_a_key_without_sending(self, tmp_path):
+        peer = _FakePeerServer(key="peer-key")
+        target = _write_peer(tmp_path / "reg", "peer-v", peer.port, model="shared-model")
+        with pytest.raises(peer_routing.PeerCredentialError) as e:
+            peer_routing.verify_peer_credential(target, "peer-key\nX: y")
+        assert "peer-key" not in str(e.value)
+        assert peer.auth_seen == []
+
+    def test_peer_recording_mode_refuses_such_a_key_without_sending(self, tmp_path):
+        peer = _FakePeerServer(key="peer-key")
+        target = _write_peer(tmp_path / "reg", "peer-m", peer.port, model="shared-model")
+        with pytest.raises(peer_routing.PeerUnreachable) as e:
+            peer_routing.peer_recording_mode(target, "peer-key\nX: y", "privacy")
+        assert "peer-key" not in str(e.value)
+        assert peer.auth_seen == []
+
     def test_stale_offer_is_rejected(self, tmp_path, monkeypatch):
         """The client's offer names a peer that is no longer live/matching -
         the endpoint must re-verify, not trust the caller."""
