@@ -32,7 +32,8 @@ def _x64_process(monkeypatch):
     monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
 
 
-def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = ()) -> None:
+def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = (),
+                    licenses: dict = None) -> None:
     """A real, valid zip shaped like an nvidia-* wheel: some .so* files under a
     package dir, plus non-.so metadata files that must NOT be copied out.
 
@@ -46,6 +47,8 @@ def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = ()) -> Non
             zf.writestr(f"nvidia/pkg/lib/{name}", b"\x7fELF" + os.urandom(300 * 1024))
         for name in extra_names:
             zf.writestr(f"nvidia_pkg-1.0.dist-info/{name}", b"not a library")
+        for name, text in (licenses or {}).items():
+            zf.writestr(f"nvidia_pkg-1.0.dist-info/{name}", text)
 
 
 _REAL_SHAPED_PYPI_RESPONSE = {
@@ -168,9 +171,75 @@ def test_fetch_pypi_runtime_lib_copies_only_so_files(monkeypatch, tmp_path):
 
     assert n == 2
     copied = sorted(p.name for p in target.iterdir())
-    assert copied == ["libcudart.so.12", "libcudart.so.12.9.79"]
+    assert copied == ["LICENSE.nvidia-cuda-runtime-cu12",
+                      "libcudart.so.12", "libcudart.so.12.9.79"]
     assert not (target / "METADATA").exists()
     assert not (target / "RECORD").exists()
+
+
+def _serve_wheel(monkeypatch, wheel_src: Path, package: str) -> None:
+    def fake_download(url, dest):
+        dest.write_bytes(wheel_src.read_bytes())
+        return sl._DownloadResult(bytes_received=dest.stat().st_size,
+                                  content_length=dest.stat().st_size,
+                                  content_type="application/zip", final_url=url)
+
+    monkeypatch.setattr(sl, "_download", fake_download)
+    monkeypatch.setattr(sl, "_pypi_wheel_url_and_sha",
+                        lambda pkg: (f"https://fake/{package}.whl", None))
+
+
+def test_fetch_pypi_runtime_lib_keeps_the_wheels_license(monkeypatch, tmp_path):
+    """The real wheels carry ``<dist>.dist-info/licenses/License.txt``; its
+    bytes land beside the libraries as LICENSE.nvidia-<package>."""
+    text = b"End User License Agreement\n(fixture text)\n"
+    wheel_src = tmp_path / "src" / "fake.whl"
+    wheel_src.parent.mkdir()
+    _make_wheel_zip(wheel_src, so_names=("libcublas.so.12",),
+                    extra_names=("METADATA",), licenses={"licenses/License.txt": text})
+    _serve_wheel(monkeypatch, wheel_src, "nvidia-cublas-cu12")
+    target = tmp_path / "runtime"
+    target.mkdir()
+
+    assert sl._fetch_pypi_runtime_lib("nvidia-cublas-cu12", target) == 1
+
+    assert (target / "LICENSE.nvidia-cublas-cu12").read_bytes() == text
+    assert sorted(p.name for p in target.iterdir()) == [
+        "LICENSE.nvidia-cublas-cu12", "libcublas.so.12"]
+
+
+def test_fetch_pypi_runtime_lib_keeps_every_license_file(monkeypatch, tmp_path):
+    wheel_src = tmp_path / "src" / "fake.whl"
+    wheel_src.parent.mkdir()
+    _make_wheel_zip(wheel_src, so_names=("libcudart.so.13",),
+                    licenses={"licenses/License.txt": b"first",
+                              "licenses/LICENSE-extra.txt": b"second"})
+    _serve_wheel(monkeypatch, wheel_src, "nvidia-cuda-runtime")
+    target = tmp_path / "runtime"
+    target.mkdir()
+
+    sl._fetch_pypi_runtime_lib("nvidia-cuda-runtime", target)
+
+    texts = sorted((target / n).read_bytes() for n in
+                   ("LICENSE.nvidia-cuda-runtime", "LICENSE.nvidia-cuda-runtime.1"))
+    assert texts == [b"first", b"second"]
+
+
+def test_fetch_pypi_runtime_lib_without_a_license_writes_the_notice(monkeypatch, tmp_path, capsys):
+    """A wheel that carries no license file gets the notice naming NVIDIA's
+    CUDA license and a printed note, never nothing."""
+    wheel_src = tmp_path / "src" / "fake.whl"
+    wheel_src.parent.mkdir()
+    _make_wheel_zip(wheel_src, so_names=("libcudart.so.12",), extra_names=("METADATA",))
+    _serve_wheel(monkeypatch, wheel_src, "nvidia-cuda-runtime-cu12")
+    target = tmp_path / "runtime"
+    target.mkdir()
+
+    sl._fetch_pypi_runtime_lib("nvidia-cuda-runtime-cu12", target)
+
+    assert ((target / "LICENSE.nvidia-cuda-runtime-cu12").read_text(encoding="utf-8")
+            == sl.NVIDIA_CUDA_LICENSE_NOTICE)
+    assert "carries no license file" in capsys.readouterr().out
 
 
 def test_fetch_pypi_runtime_lib_refuses_wrong_checksum(monkeypatch, tmp_path):
@@ -439,3 +508,6 @@ def test_fetch_pypi_runtime_lib_real_network(tmp_path):
     assert n > 0
     so_files = list(target.iterdir())
     assert any("cudart" in f.name for f in so_files)
+    license_text = (target / "LICENSE.nvidia-cuda-runtime-cu12").read_text(encoding="utf-8")
+    assert "End User License Agreement" in license_text
+    assert license_text != sl.NVIDIA_CUDA_LICENSE_NOTICE
