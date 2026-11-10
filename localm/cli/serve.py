@@ -68,10 +68,17 @@ def serve(model, host, port, ctx, gpu_layers, no_model, mmproj, device, no_tls, 
     Compatible with any OpenAI client library.
     """
     from click import get_current_context
-    from ..plugins.gui.cli import main as gui_main
+    from ..plugins.gui.cli import FORWARDED_EXPLICIT_KEY, main as gui_main
+    from click.core import ParameterSource
 
+    ctx = get_current_context()
+    # Records which of serve's options came from the command line, so the gui
+    # command's attach-conflict check sees them as explicit.
+    ctx.meta[FORWARDED_EXPLICIT_KEY] = frozenset(
+        p.name for p in ctx.command.params
+        if p.name and ctx.get_parameter_source(p.name) == ParameterSource.COMMANDLINE)
     # Invokes the gui plugin's command as 'localm gui --api-mode --no-browser'.
-    get_current_context().invoke(
+    ctx.invoke(
         gui_main,
         model=model,
         host=host,

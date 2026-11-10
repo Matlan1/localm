@@ -302,3 +302,82 @@ def remote_active_model(base_url: str, token: Optional[str] = None,
     label. Prefer ``remote_model_status`` when you must distinguish "no model" from
     "could not read the model list" (see that function)."""
     return remote_model_status(base_url, token, timeout=timeout)[1]
+
+
+def remote_model_identity(base_url: str, token: Optional[str], model_id: str,
+                          *, timeout: float = 5.0) -> dict:
+    """The file identity a server reports for *model_id* via
+    ``GET /v1/models/{model_id}``: ``{"file", "size", "sha256"}``, where ``file``
+    is the model file's base name. Each value is None when the server did not
+    report it; all three are None when the request fails or is refused."""
+    import requests
+    from urllib.parse import quote
+    ident: dict = {"file": None, "size": None, "sha256": None}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = requests.get(f"{base_url.rstrip('/')}/models/{quote(model_id, safe='')}",
+                         headers=headers, timeout=timeout)
+        if r.status_code >= 400:
+            return ident
+        body = r.json()
+    except Exception:
+        return ident
+    if not isinstance(body, dict):
+        return ident
+    if isinstance(body.get("path"), str) and body["path"]:
+        ident["file"] = body["path"]
+    if isinstance(body.get("size_bytes"), int) and not isinstance(body["size_bytes"], bool):
+        ident["size"] = body["size_bytes"]
+    if isinstance(body.get("sha256"), str) and body["sha256"]:
+        ident["sha256"] = body["sha256"].lower()
+    return ident
+
+
+def requested_model_identity(requested: str) -> Optional[dict]:
+    """The local file identity of a model named on the command line: a registered
+    name or a path on disk (registry.get_operator_model_info). Returns
+    ``{"path", "size", "sha256"}`` (sha256 only for a registered name that records
+    one), or None when *requested* resolves to no model file."""
+    from pathlib import Path
+    from localm.model_manager import load_registry
+    from localm.model_manager.registry import get_operator_model_info
+    try:
+        reg = load_registry()
+        info = get_operator_model_info(requested, reg=reg)
+        if info is None or not info[0]:
+            return None
+        path = Path(info[0]).resolve()
+        ident: dict = {"path": str(path), "size": None, "sha256": None}
+        if path.is_file():
+            ident["size"] = path.stat().st_size
+    except (OSError, ValueError):
+        return None
+    entry = reg.get(requested)
+    if isinstance(entry, dict) and isinstance(entry.get("sha256"), str) and entry["sha256"]:
+        ident["sha256"] = entry["sha256"].lower()
+    return ident
+
+
+def served_model_is_requested(base_url: str, token: Optional[str], active: str,
+                              requested: str) -> bool:
+    """True when the server's *active* model is the model *requested* on the
+    command line, by name or by file.
+
+    Same name, or two registered names for one file (names_same_model), is True
+    without a request. Otherwise the requested name or path is resolved locally
+    (requested_model_identity), the server's identity for *active* is read
+    (remote_model_identity) and the two are compared with
+    peer_routing._same_file: same path or sha256, or the same base name and byte
+    size. False when they differ, when *requested* resolves to no model file, or
+    when the server's identity cannot be read."""
+    from localm.model_manager import names_same_model
+    if not active or not requested:
+        return False
+    if names_same_model(active, requested):
+        return True
+    mine = requested_model_identity(requested)
+    if mine is None:
+        return False
+    theirs = remote_model_identity(base_url, token, active)
+    from localm.peer_routing import _same_file
+    return _same_file(mine, theirs) is True
