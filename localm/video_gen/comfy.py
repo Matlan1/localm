@@ -455,7 +455,7 @@ def generate_video(
 
         # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
         if swap:
-            _localm_unload(localm_url, instance_token)
+            _localm_unload(localm_url, instance_token, on_failure=_say, label="video")
 
         # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
         # nodes per the plan resolve_media_placement() decided. A component whose loader is
