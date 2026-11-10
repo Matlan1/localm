@@ -60,6 +60,8 @@ _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each
 if TYPE_CHECKING:
     from localm.audit import AuditLogT
 
+    from ..patch_overlay import PatchOverlay
+
 
 def _executed_forms(tool: str, command: str) -> list[str]:
     """*command* plus the text the platform shell actually runs for it, for
@@ -126,6 +128,9 @@ class _ExecutionMixin:
         always_confirm: set
         confirm_handler: Any
         _project_map: Any
+        patch_mode: bool
+        _patch_overlay: PatchOverlay
+        _patch_chunks: list[str]
 
         @property
         def auto_approve(self) -> bool: ...
