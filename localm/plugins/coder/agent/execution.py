@@ -571,6 +571,28 @@ class _ExecutionMixin:
                                summary="refused: protected .localcoder/.git target")
                     return result
 
+        # Scope check - reject file operations that fall outside the active glob.
+        # Runs ahead of the patch-mode intercept, so an out-of-scope write is not
+        # captured as a diff either.
+        # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
+        # confines those dynamically-registered file tools too: built-in file tools
+        # are default-denied at authoring time (_SCOPED_TOOLS), while the dynamic
+        # families are not in the registry then and are gated here by prefix.
+        if self.scope and (call.name in _SCOPED_TOOLS
+                           or call.name.startswith(("mcp_", "plugin_"))):
+            offending = self._scope_violation(call)
+            if offending is not None:
+                result = ToolResult.error(
+                    f"'{offending}' is outside the active scope '{self.scope}'. "
+                    "Only files matching this glob pattern can be accessed."
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                # No duration_s: never reached tool_def.fn.
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary=f"outside scope '{self.scope}'")
+                return result
+
         # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.
         # A write tool the interceptor cannot express as a diff must NOT fall
         # through to a real disk write. search_replace is eligible too
@@ -624,26 +646,6 @@ class _ExecutionMixin:
             self._emit("tool_result", tool=call.name, ok=False,
                        summary=f"[patch-mode] {call.name} skipped")
             return result
-
-        # Scope check - reject file operations that fall outside the active glob.
-        # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
-        # confines those dynamically-registered file tools too: built-in file tools
-        # are default-denied at authoring time (_SCOPED_TOOLS), while the dynamic
-        # families are not in the registry then and are gated here by prefix.
-        if self.scope and (call.name in _SCOPED_TOOLS
-                           or call.name.startswith(("mcp_", "plugin_"))):
-            offending = self._scope_violation(call)
-            if offending is not None:
-                result = ToolResult.error(
-                    f"'{offending}' is outside the active scope '{self.scope}'. "
-                    "Only files matching this glob pattern can be accessed."
-                )
-                if interactive:
-                    print_tool_error(call.name, result.output)
-                # No duration_s: never reached tool_def.fn.
-                self._emit("tool_result", tool=call.name, ok=False,
-                           summary=f"outside scope '{self.scope}'")
-                return result
 
         # The shell tools are NOT in _SCOPED_TOOLS: a path-arg check cannot confine
         # a process. Flag the gap at runtime instead - a warning, never a block.
@@ -762,14 +764,16 @@ class _ExecutionMixin:
             and getattr(self, "taint_rearms_confirm", True) is True
             and (tool_def.destructive or call.name in _NETWORK_TOOLS or executes_code)
         )
-        needs_confirm = shell_unchecked or data_hit is not None or tainted or (
+        # net_mode "ask" asks under auto_approve too.
+        net_ask = net_mode == "ask"
+        needs_confirm = shell_unchecked or data_hit is not None or tainted or net_ask or (
             gated and (not self.auto_approve or forced or lenient_call)
         )
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
         lenient_only = (
             lenient_call and gated and not shell_unchecked and data_hit is None
-            and not tainted and self.auto_approve and not forced
+            and not tainted and not net_ask and self.auto_approve and not forced
         )
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
@@ -807,10 +811,13 @@ class _ExecutionMixin:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
                 # reached through confirm_handler) offers "a" only for a call
-                # that can be session-allowed. A GUI handler never sets the
-                # answer flags, so consuming them there reads False and "".
+                # that can be session-allowed, and a call that cannot is asked
+                # as an exact approval, so a handler's own allow-list (the GUI's
+                # "always allow") neither answers nor records it. A GUI handler
+                # never sets the answer flags, so consuming them there reads
+                # False and "".
                 with offering_session_allow(session_allowable), \
-                        requiring_exact_approval(data_hit is not None or tainted):
+                        requiring_exact_approval(not session_allowable):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())
@@ -834,7 +841,8 @@ class _ExecutionMixin:
                         "needs an explicit approval of this exact call, and this "
                         "run is non-interactive with no approval handler - denied.")
                     reason = "localm-data"
-                elif tainted and not (gated and (not self.auto_approve or forced)):
+                elif tainted and not net_ask and not (
+                        gated and (not self.auto_approve or forced)):
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: this run has read "
                         "untrusted content (a web page, search result, MCP or "
