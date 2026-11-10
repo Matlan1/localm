@@ -36,8 +36,10 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from localm.storekit import NamespaceLockRegistry, atomic_write
 
 _router = APIRouter()
 
@@ -92,6 +94,30 @@ def _home() -> Path:
     return home_dir()
 
 
+# Serialisation scope: writers inside this process (request handlers and the
+# executor thread running relabel_pinned_model) take one lock per target file.
+# The CLI and other processes are not covered; relabel_pinned_model re-checks
+# the file's updated_at before it replaces it.
+_LOCKS = NamespaceLockRegistry()
+
+
+def _principal_dir(request: Request) -> str | None:
+    """The per-caller storage namespace: None for the owner (the shared files),
+    otherwise the caller's key hash."""
+    from localm.inference.http_server import memory_principal
+    prin = memory_principal(request)
+    if prin is None:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", prin):
+        raise HTTPException(403, "Unusable caller identity")
+    return prin
+
+
+def _chats_root(principal: str | None) -> Path:
+    base = _home() / "chats"
+    return base if principal is None else base / "_principals" / principal / "chats"
+
+
 def _persist_enabled() -> bool:
     """Chat persistence/writes are off in privacy mode (the default)."""
     from localm.audit import SessionMode, effective_mode
@@ -104,10 +130,10 @@ def _persist_enabled() -> bool:
 # Server-side persistence for GUI chat conversations so they survive browser
 # reloads, profile wipes, and other devices on the LAN.
 
-def _conv_path(conv_id: str) -> Path:
+def _conv_path(conv_id: str, principal: str | None = None) -> Path:
     if not _CONV_ID.match(conv_id) or conv_id.lower() in _RESERVED_NAMES:
         raise HTTPException(400, "Invalid conversation id")
-    return _home() / "chats" / f"{conv_id}.json"
+    return _chats_root(principal) / f"{conv_id}.json"
 
 
 # Caches the projected index row per file keyed by (mtime, size), so the sidebar
@@ -157,7 +183,8 @@ def _log_unreadable(p: Path, err: Exception) -> None:
 
 
 @_router.get("/api/conversations")
-async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
+async def conversations_list(request: Request, meta: bool = False,
+                             limit: int = 0, offset: int = 0):
     """List conversations newest-first.
 
     Pass ``meta=true`` for a lightweight index (id, title, updated_at, pinned,
@@ -172,7 +199,7 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
     """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
-    chats_dir = _home() / "chats"
+    chats_dir = _chats_root(_principal_dir(request))
     rows = []
     unreadable: list[str] = []
     if chats_dir.is_dir():
@@ -203,12 +230,12 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
 
 
 @_router.get("/api/conversations/{conv_id}")
-async def conversation_get(conv_id: str):
+async def conversation_get(conv_id: str, request: Request):
     """The full body of one conversation. Answers 404 when it does not exist
     and 403 when chat persistence is off (privacy mode)."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id)
+    path = _conv_path(conv_id, _principal_dir(request))
     if not path.is_file():
         raise HTTPException(404, "No such conversation")
     try:
@@ -222,12 +249,13 @@ async def conversation_get(conv_id: str):
 
 
 @_router.put("/api/conversations/{conv_id}")
-async def conversation_upsert(conv_id: str, req: ConversationUpsert):
+async def conversation_upsert(conv_id: str, req: ConversationUpsert,
+                              request: Request):
     if not _persist_enabled():
         raise HTTPException(
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
-    path = _conv_path(conv_id)
+    path = _conv_path(conv_id, _principal_dir(request))
     payload = json.dumps(
         {"id": conv_id, "title": req.title,
          "updated_at": req.updated_at,
@@ -239,55 +267,75 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert):
     if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
         raise HTTPException(413, "Conversation too large to persist")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    tmp.replace(path)
+    with _LOCKS.get(str(path)):
+        atomic_write(path, payload)
     return {"status": "saved", "id": conv_id}
 
 
 @_router.delete("/api/conversations/{conv_id}")
-async def conversation_delete(conv_id: str):
+async def conversation_delete(conv_id: str, request: Request):
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
-    path = _conv_path(conv_id)
-    if path.is_file():
-        path.unlink()
-        return {"status": "deleted", "id": conv_id}
+    path = _conv_path(conv_id, _principal_dir(request))
+    with _LOCKS.get(str(path)):
+        if path.is_file():
+            path.unlink()
+            return {"status": "deleted", "id": conv_id}
     return {"status": "absent", "id": conv_id}
+
+
+def _all_chat_files() -> list:
+    """Every stored conversation file: the owner's and each principal's."""
+    base = _home() / "chats"
+    if not base.is_dir():
+        return []
+    files = list(base.glob("*.json"))
+    files.extend(base.glob("_principals/*/chats/*.json"))
+    return sorted(files)
+
+
+def _updated_at_of(p: Path):
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data.get("updated_at") if isinstance(data, dict) else None
 
 
 def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
     """Rewrite ``pinned_model`` from *old_name* to *new_name* in every stored
-    conversation that carries it.
+    conversation (the owner's and every principal's) that carries it.
 
     A rewritten conversation gets a fresh ``updated_at`` so that a browser
     holding an older cached copy takes this one rather than uploading its own
-    over it. Returns ``(rewritten, failed)``: the ids rewritten, and the ids of
-    files that name *old_name* but could not be rewritten. A file that does not
+    over it. Each file is rewritten under its per-file lock, and a file whose
+    ``updated_at`` changed since it was read is left as it is and listed in
+    ``failed``. Returns ``(rewritten, failed)``: the ids rewritten, and the ids
+    of files that name *old_name* but were not rewritten. A file that does not
     contain *old_name* is not parsed. Works in every session mode: it edits
     files that already exist and creates none."""
     import time
 
-    chats_dir = _home() / "chats"
-    if not chats_dir.is_dir():
-        return [], []
     needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
     rewritten: list = []
     failed: list = []
-    for p in sorted(chats_dir.glob("*.json")):
+    for p in _all_chat_files():
         try:
-            text = p.read_text(encoding="utf-8")
-            if needle not in text:
-                continue
-            data = json.loads(text)
-            if not isinstance(data, dict) or data.get("pinned_model") != old_name:
-                continue
-            data["pinned_model"] = new_name
-            data["updated_at"] = int(time.time() * 1000)
-            tmp = p.with_name(p.name + ".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(p)
-            rewritten.append(p.stem)
+            with _LOCKS.get(str(p)):
+                text = p.read_text(encoding="utf-8")
+                if needle not in text:
+                    continue
+                data = json.loads(text)
+                if not isinstance(data, dict) or data.get("pinned_model") != old_name:
+                    continue
+                read_stamp = data.get("updated_at")
+                data["pinned_model"] = new_name
+                data["updated_at"] = int(time.time() * 1000)
+                if _updated_at_of(p) != read_stamp:
+                    failed.append(p.stem)
+                    continue
+                atomic_write(p, json.dumps(data, ensure_ascii=False))
+                rewritten.append(p.stem)
         except FileNotFoundError:
             continue
         except (OSError, ValueError, RecursionError) as e:
@@ -304,8 +352,10 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
 # Named personas: a system prompt plus sampling defaults. Explicit user assets
 # (like knowledge collections), stored in prompts.json in every session mode.
 
-def _prompts_file() -> Path:
-    return _home() / "prompts.json"
+def _prompts_file(principal: str | None = None) -> Path:
+    if principal is None:
+        return _home() / "prompts.json"
+    return _home() / "chats" / "_principals" / principal / "prompts.json"
 
 
 def _check_prompt_name(name: str) -> str:
@@ -320,7 +370,7 @@ class _PromptsUnreadable(Exception):
     """prompts.json EXISTS but could not be read or parsed."""
 
 
-def _load_prompts() -> dict:
+def _load_prompts(principal: str | None = None) -> dict:
     """The persona library, or ``{}`` when the user genuinely has none.
 
     Raises _PromptsUnreadable when the file EXISTS but cannot be read or
@@ -329,7 +379,7 @@ def _load_prompts() -> dict:
     single entry being written. Same absent-vs-unreadable split as
     conversation_get above.
     """
-    prompts_file = _prompts_file()
+    prompts_file = _prompts_file(principal)
     if not prompts_file.is_file():
         return {}                       # genuinely absent: an empty library
     try:
@@ -343,7 +393,7 @@ def _load_prompts() -> dict:
     return data
 
 
-def _prompts_or_refuse() -> dict:
+def _prompts_or_refuse(principal: str | None = None) -> dict:
     """``_load_prompts()``, turning an unreadable library into a 500 that
     REFUSES the request.
 
@@ -351,7 +401,7 @@ def _prompts_or_refuse() -> dict:
     path-free because this is a network surface; the concrete reason goes to the
     log."""
     try:
-        return _load_prompts()
+        return _load_prompts(principal)
     except _PromptsUnreadable as e:
         from localm.debuglog import logger
         logger.warning(
@@ -360,40 +410,41 @@ def _prompts_or_refuse() -> dict:
         raise HTTPException(500, "Prompt library is unreadable") from e
 
 
-def _save_prompts(data: dict) -> None:
-    prompts_file = _prompts_file()
+def _save_prompts(data: dict, principal: str | None = None) -> None:
+    prompts_file = _prompts_file(principal)
     prompts_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = prompts_file.with_name(prompts_file.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    tmp.replace(prompts_file)
+    atomic_write(prompts_file, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 @_router.get("/api/prompts")
-async def prompts_list():
-    data = _prompts_or_refuse()
+async def prompts_list(request: Request):
+    data = _prompts_or_refuse(_principal_dir(request))
     return {"prompts": [
         {"name": name, **entry} for name, entry in sorted(data.items())
     ]}
 
 
 @_router.put("/api/prompts/{name}")
-async def prompt_upsert(name: str, req: PromptUpsert):
+async def prompt_upsert(name: str, req: PromptUpsert, request: Request):
     name = _check_prompt_name(name)
-    data = _prompts_or_refuse()
-    data[name] = {"system": req.system, "params": req.params}
-    _save_prompts(data)
+    principal = _principal_dir(request)
+    with _LOCKS.get(str(_prompts_file(principal))):
+        data = _prompts_or_refuse(principal)
+        data[name] = {"system": req.system, "params": req.params}
+        _save_prompts(data, principal)
     return {"status": "saved", "name": name}
 
 
 @_router.delete("/api/prompts/{name}")
-async def prompt_delete(name: str):
+async def prompt_delete(name: str, request: Request):
     name = _check_prompt_name(name)
-    data = _prompts_or_refuse()
-    if name not in data:
-        raise HTTPException(404, f"No such persona: {name}")
-    del data[name]
-    _save_prompts(data)
+    principal = _principal_dir(request)
+    with _LOCKS.get(str(_prompts_file(principal))):
+        data = _prompts_or_refuse(principal)
+        if name not in data:
+            raise HTTPException(404, f"No such persona: {name}")
+        del data[name]
+        _save_prompts(data, principal)
     return {"status": "deleted", "name": name}
 
 
