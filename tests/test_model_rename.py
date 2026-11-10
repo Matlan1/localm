@@ -57,6 +57,11 @@ def real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.model_manager import registry as _registry
+    from localm.plugins.builtin.chat.plug import rename_notes as _chat_notes
+    from localm.plugins.builtin.jobs.plug import rename_notes as _jobs_notes
+    monkeypatch.setitem(_registry._RENAME_HOOKS, "saved chats", _chat_notes)
+    monkeypatch.setitem(_registry._RENAME_HOOKS, "scheduled jobs", _jobs_notes)
     return home
 
 

@@ -98,10 +98,11 @@ scrub() {
       }
       $t =~ s{([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+}{$1<redacted>}g;
       $t =~ s{(://)[^/@\s]+\@}{$1<redacted>\@}g;
+      $t =~ s{(?i)(bearer\s+)(?![A-Za-z0-9_-]+(?:\s*:|=[^=\s]))[A-Za-z0-9._~+/=\-]{8,}}{$1<redacted>}g;
       $t =~ s{(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?!["']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`"'\)\]\}]{0,4}(?:[\s&#]|$))(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^&\s#"'\)\]\}]*)}{$1<redacted>}g;
-      $t =~ s{(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+}{$1<redacted>}g;
-      $t =~ s{(?i)(["'](?:(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig))["']\s*:\s*)(?!\s*["']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["']?\s*(?:[,\}\]]|$))(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^,\}\]\s]*)}{$1<redacted>}g;
-      $t =~ s{(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}}{$1<redacted>}g;
+      $t =~ s{(?i)(authorization[\"']?\s*:\s*)(?=\S)(?!<redacted>)(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[\"']?\s*(?:[,\}\]]|$))(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?|\[[^\]\r\n]*\]?|(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\s+|[A-Za-z][A-Za-z0-9_-]*[ \t]+(?=[^\s,]))?(?:[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*)|[^\s,]+)(?:,[ \t]*[A-Za-z][A-Za-z0-9_-]*=(?:\"(?:[^\"\\\r\n]|\\.)*\"?|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])*(?:\\\")?|[^\s,]*))*)}{$1<redacted>}g;
+      $t =~ s{(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+}{$1<redacted>}g;
+      $t =~ s{(?i)([\"'](?:(?:[A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9_-]*[A-Za-z0-9][_-](?:key|auth|sig))[\"']\s*:\s*)(?=\S)(?!<redacted>)(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[\"']?\s*(?:[,\}\]]|$))(?:[A-Za-z]?\"(?:[^\"\\\r\n]|\\.)*\"?|[A-Za-z]?'(?:[^'\\\r\n]|\\.)*'?|\[[^\]\r\n]*\]?|(?:(?:bearer|basic|digest|negotiate|ntlm)[ \t]+)?[^,\}\]\s]*)}{$1<redacted>}g;
       $t =~ s{(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}}{<redacted>}g;
       $t =~ s{(?<![^$E])[^$E]*?[^\@$E](?:\@|%40)[^\@.%+$E]+(?:\.[^\@.%+$E]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^$E]*}{email_repl($&)}ge;
       $t =~ s~(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._\$-]))[A-Za-z0-9][A-Za-z0-9._\$-]*~$1<host>~gi;

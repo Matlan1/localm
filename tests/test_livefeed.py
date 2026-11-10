@@ -339,7 +339,7 @@ def test_loading_an_engine_kicks_the_feed_after_the_load_ends_either_way(recorde
 
 
 def test_a_job_starting_and_finishing_kicks_the_feed(recorder):
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
 
     class Store:
         def write(self, rows):

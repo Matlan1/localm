@@ -70,6 +70,19 @@ def is_untrusted_tool(name: str, tool_def=None, result=None) -> bool:
     return bool(getattr(tool_def, "untrusted_output", False))
 
 
+# Tools whose output is instructions from outside the session (a skill body or
+# bundled file). Framed as instructions, and still untrusted for confirmation.
+_UNTRUSTED_INSTRUCTION_TOOLS: frozenset = frozenset({"use_skill"})
+
+
+def taints_session(name: str, tool_def=None, result=None) -> bool:
+    """Whether a result of *name* puts untrusted content into the session's
+    context: every tool :func:`is_untrusted_tool` names, and ``use_skill``."""
+    if name in _UNTRUSTED_INSTRUCTION_TOOLS:
+        return True
+    return is_untrusted_tool(name, tool_def, result)
+
+
 def _attr_safe(name: str) -> str:
     """Make a tool name safe to interpolate into a name="..." attribute.
 

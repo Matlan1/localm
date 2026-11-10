@@ -141,9 +141,15 @@ def key_group():
 @click.option("--reveal", is_flag=True,
               help="Print the full key instead of a masked preview.")
 def key_show(reveal):
-    """Show the active owner key (masked) or 'open mode'."""
+    """Show the active owner key (masked), or whether the server is keyed
+    without one, or 'open mode'."""
     from localm import auth
     active = auth.get_api_key()
+    if not active and auth.any_key_configured():
+        console.print("[yellow]no owner key[/yellow] - named keys, or a key file "
+                      "that cannot be read, are configured, so the server "
+                      "requires a key ('localm key list' shows named keys).")
+        return
     if not active:
         console.print("[yellow]open mode[/yellow] - no API key set; the server "
                       "accepts unauthenticated requests.")
@@ -219,7 +225,7 @@ def key_clear(yes):
     Removing the last key needs an interactive terminal and always asks, --yes
     included; piped input is refused."""
     from localm import auth, sessions
-    if auth.get_api_key() is None:
+    if not auth.any_key_configured():
         console.print("[dim]No API key set (already open mode).[/dim]")
         return
     last = auth.removal_leaves_no_key(clear_all=True)

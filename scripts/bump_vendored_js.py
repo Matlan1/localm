@@ -27,6 +27,11 @@ are printed and nothing is touched):
                 tests-js/vendor-katex.test.mjs         VENDORED_VERSION, the
                   three PINNED hashes, the ``npm pack`` comment
 
+Each library's license text (vendor/LICENSE.marked, LICENSE.dompurify and
+LICENSE.dompurify-mpl, LICENSE.highlightjs, LICENSE.katex) is the release's own
+LICENSE file and is replaced when the release carries a different one; a
+release without it is refused.
+
 Library files are written exactly as the npm tarball carries them. A pinned hash
 is sha256, base64, over CRLF-normalised bytes.
 
@@ -117,18 +122,22 @@ LIBS = {
     "marked": Lib(
         key="marked", npm="marked", test="vendor-marked.test.mjs",
         files=(("package/lib/marked.umd.js", "marked.min.js"),),
+        extra_files=(("package/LICENSE", "LICENSE.marked"),),
         banner_re=r"marked v(\d+\.\d+\.\d+)", banner_file="marked.min.js",
         pinned=True, shasum_comment=True,
         title_re=r'(the banner comment says )(\d+\.\d+\.\d+)(")'),
     "DOMPurify": Lib(
         key="DOMPurify", npm="dompurify", test="vendor-dompurify.test.mjs",
         files=(("package/dist/purify.min.js", "purify.min.js"),),
+        extra_files=(("package/LICENSE", "LICENSE.dompurify"),
+                     ("package/LICENSE-MPL", "LICENSE.dompurify-mpl")),
         banner_re=r"@license DOMPurify (\d+\.\d+\.\d+)", banner_file="purify.min.js",
         pinned=False),
     "highlight.js": Lib(
         key="highlight.js", npm="@highlightjs/cdn-assets", test="vendor-highlightjs.test.mjs",
         files=(("package/highlight.min.js", "highlight.min.js"),),
-        extra_files=(("package/styles/github-dark.min.css", "github-dark.min.css"),),
+        extra_files=(("package/styles/github-dark.min.css", "github-dark.min.css"),
+                     ("package/LICENSE", "LICENSE.highlightjs")),
         banner_re=r"Highlight\.js v(\d+\.\d+\.\d+)", banner_file="highlight.min.js",
         pinned=True, title_re=r"(and both say )(\d+\.\d+\.\d+)(\")"),
     "KaTeX": Lib(
@@ -136,6 +145,7 @@ LIBS = {
         files=(("package/dist/katex.min.js", "katex.min.js"),
                ("package/dist/katex.min.css", "katex.min.css"),
                ("package/dist/contrib/auto-render.min.js", "auto-render.min.js")),
+        extra_files=(("package/LICENSE", "LICENSE.katex"),),
         banner_re=r'version:"(\d+\.\d+\.\d+)"', banner_file="katex.min.js",
         pinned=True, fonts=True),
 }
@@ -473,11 +483,14 @@ def build_plan(lib: Lib, tag: str, tar_files: dict, tar_fonts: dict, shasum: str
     for member, dest in lib.extra_files:
         if member in tar_files:
             new_bytes[dest] = tar_files[member]
+        elif dest.startswith("LICENSE."):
+            raise Refused(f"the {lib.npm}@{new} tarball has no {member}; a release "
+                          "is not vendored without its license text")
 
     changes = []
     for dest, data in new_bytes.items():
         old_data = vendor_files.get(dest)
-        text = dest.endswith(_TEXT_SUFFIXES)
+        text = dest.endswith(_TEXT_SUFFIXES) or dest.startswith("LICENSE.")
         if old_data is not None and _same_content(old_data, data, text):
             continue
         changes.append(Change(vendor / dest, f"{VENDOR_REL}/{dest}", old_data, data))

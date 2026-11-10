@@ -100,7 +100,7 @@ def _emit_outcome(status: str) -> None:
     interactive CLI use has no consumer for this frame and must not print raw
     sentinel JSON to a real terminal.
 
-    The GUI job runner (``localm/plugins/gui/jobs.py``) otherwise infers a
+    The GUI job runner (``localm/jobmanager.py``) otherwise infers a
     job's outcome from the subprocess exit code alone, so an exception raised
     by a display step AFTER the real work already succeeded reports a completed
     operation as failed. Call this BEFORE that risky step, once real work

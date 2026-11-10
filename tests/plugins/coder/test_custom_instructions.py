@@ -4,8 +4,16 @@
 in the agent system prompt, distinct from LOCALCODER.md project memory.
 """
 
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
 
 
 # --------------------------------------------------------------------------- #
