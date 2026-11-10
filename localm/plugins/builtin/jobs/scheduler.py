@@ -18,7 +18,7 @@ import asyncio
 import time
 from typing import Callable, Optional
 
-from localm.plugins.builtin.jobs.store import Job, JobStore
+from localm.plugins.builtin.jobs.store import Job, JobStore, claim_is_live
 
 # How often the loop wakes to look for due jobs.
 DEFAULT_POLL_SECONDS = 30
@@ -214,7 +214,10 @@ class JobScheduler:
     # ---- pure decision logic ----------------------------------------------
     def due(self, job: Job, now: float) -> bool:
         """True if *job* should run at *now* (epoch seconds). Does NOT consider
-        ``enabled``; the caller filters that."""
+        ``enabled``; the caller filters that. A job whose run claim is live
+        (another run in flight, in this or another process) is never due."""
+        if claim_is_live(job.claim):
+            return False
         if job.schedule_kind == "interval":
             try:
                 interval = int(job.schedule)
@@ -232,7 +235,10 @@ class JobScheduler:
                 return False
             if matches_now:
                 # Avoid double-firing within the same matching minute on a
-                # sub-minute poll: only fire once per cron-minute per job.
+                # sub-minute poll: only fire once per cron-minute per job. A run
+                # recorded by another process inside this minute counts too.
+                if job.last_run is not None and job.last_run >= minute:
+                    return False
                 return not already
             # Catch-up: a slot that came due while the server was DOWN fires
             # ONCE on the next tick, for any missed matching minute strictly
@@ -312,6 +318,17 @@ class JobScheduler:
                 if job.schedule_kind == "cron":
                     self._cron_fired[job.id] = int(now // 60) * 60
                 try:
+                    claimed = self.store.claim(
+                        job.id, predicate=lambda j: j.enabled and self.due(j, now))
+                except Exception as e:
+                    from localm.debuglog import logger
+                    logger.warning("jobs scheduler: could not claim job %s: %s",
+                                   job.id, e)
+                    continue
+                if claimed is None:
+                    continue          # gone, disabled, already run or running elsewhere
+                job = claimed
+                try:
                     result = run_job(job, engine=engine)
                 except Exception as e:    # the runner shouldn't raise, but guard
                     result = {"status": "error", "output": "", "error": str(e),
@@ -319,6 +336,7 @@ class JobScheduler:
                 try:
                     self.store.record_result(job.id, result)
                 except Exception as e:
+                    self.store.release_claim(job.id, job.claim)
                     # Recording must never crash the scheduler loop; the
                     # persistence failure is logged at debug instead.
                     from localm.debuglog import logger

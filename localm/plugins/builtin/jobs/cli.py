@@ -224,7 +224,16 @@ def job_run(job_id):
     if job is None:
         click.echo(f"No such job: {job_id}", err=True)
         sys.exit(1)
-    result = run_job(job, engine=None)
+    claimed = store.claim(job_id)
+    if claimed is None:
+        click.echo(f"Job {job_id} is already running; not starting a second run.",
+                   err=True)
+        sys.exit(1)
+    try:
+        result = run_job(claimed, engine=None)
+    except BaseException:
+        store.release_claim(job_id, claimed.claim)
+        raise
     store.record_result(job_id, result)
     if result.get("status") == "ok":
         _safe_echo(result.get("output", ""))
