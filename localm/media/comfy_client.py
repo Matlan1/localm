@@ -720,6 +720,18 @@ def slot_is_satisfied(slot: dict) -> bool:
 #  VRAM management
 # ---------------------------------------------------------------------------
 
+def localm_v1_base(url: Optional[str]) -> Optional[str]:
+    """*url* as a ``/v1`` base: a server root (what ``LOCALM_URL`` holds) gets
+    ``/v1`` appended, an address already ending in ``/v1`` is kept. None and
+    empty stay None."""
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    if not url:
+        return None
+    return url if url.endswith("/v1") else url + "/v1"
+
+
 def _localm_unload(localm_url: Optional[str] = None,
                     instance_token: Optional[str] = None, *,
                     media: bool = True) -> Optional[dict]:
@@ -757,7 +769,7 @@ def _localm_unload(localm_url: Optional[str] = None,
     than a real True/False - see http_server._add_vram_fields. A box with no VRAM
     telemetry at all simply omits the three fields.
     """
-    url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
+    url = localm_v1_base(localm_url or os.environ.get("LOCALM_URL", ""))
     if not url:
         return None
     try:

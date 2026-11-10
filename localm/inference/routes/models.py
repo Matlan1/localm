@@ -218,7 +218,8 @@ def register(app: FastAPI, ctx) -> None:
         """
         if model:
             from localm.config import load_registry
-            if model not in load_registry() and model != _hs._default_model_name:
+            if (model not in load_registry() and model != _hs._default_model_name
+                    and model not in _hs._engines):
                 raise HTTPException(404, f"Model not registered: {model}")
             return await _hs.unload_one_model(model, force=force)
         return await _hs.unload_all_models(force=force, media=media)
