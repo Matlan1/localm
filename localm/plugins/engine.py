@@ -639,6 +639,14 @@ class PluginHost:
             c.setdefault("plugins", {})[key] = value
         update_config(_mutate)
 
+    def set_global_config(self, request: Any, key: str, value: Any) -> None:
+        """Write global config *key* with the owner tier of the settings schema
+        applied to the caller of *request*. Raises ``PermissionError`` for an
+        owner-only key and a non-owner caller, ``ValueError`` for an unknown key
+        or a value the schema rejects."""
+        from localm.config_write import set_global_config_key
+        set_global_config_key(key, value, is_owner=self.caller_is_owner(request))
+
     def caller_is_owner(self, request: Any) -> bool:
         """True when the caller of *request* is the owner: open mode (no key
         configured anywhere) or an ADMIN/owner key or session. False for a
