@@ -449,7 +449,8 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   uses the `uv` this install found instead.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.
-- **Your data is never in the swap.** The updater never touches the venv, `.git`,
+- **Your data is never in the swap.** The file swap never touches the venv (an
+  update that changes dependencies reinstalls the packages there afterwards), `.git`,
   your data directory (models, config, sessions), or `.localcoder`; provisioned
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
   up first and rolls back on failure rather than leaving a half-applied tree.

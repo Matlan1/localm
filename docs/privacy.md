@@ -308,8 +308,9 @@ a newer release exists. This is a network behaviour, not something that writes t
 disk, so it isn't one of the two dials - it's covered by the [network
 policy](network.md) instead.
 
-- **When it fires.** A quiet check at most once every 6 hours while the GUI is
-  open (a client-side throttle - there is no background daemon; a headless
+- **When it fires.** A quiet check at most once every 6 hours per browser while
+  the GUI is open (a client-side throttle kept in that browser's storage, so a
+  browser that blocks storage checks on every load - there is no background daemon; a headless
   `localm serve` that nobody opens the GUI on never checks), plus whenever you
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
