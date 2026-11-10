@@ -32,6 +32,12 @@ def _first_party_plugins_available(monkeypatch):
     monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stop_event(monkeypatch):
+    """A memory stop event no earlier unload in this process has set."""
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
+
+
 
 class _FakeProc:
     exitcode = -11

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,7 @@ def _cookie_request(sid):
     class _Req:
         cookies = {hs.SESSION_COOKIE: sid}
         headers: dict = {}
+        url = types.SimpleNamespace(port=None)
     return _Req()
 
 

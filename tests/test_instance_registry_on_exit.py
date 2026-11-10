@@ -66,11 +66,16 @@ class TestOwnEntry:
         assert not Path(info["path"]).exists()
         assert info["instance_id"] not in instances._OWN_PATHS
 
-    def test_an_isolated_instance_records_nothing(self, tmp_path):
+    def test_an_isolated_instance_records_only_its_hold_marker(self, tmp_path):
         app = SimpleNamespace(state=SimpleNamespace())
         with instances.advertise(app, tmp_path, host="127.0.0.1", port=1,
                                  mode="api", isolated=True) as info:
-            assert info["instance_id"] not in instances._OWN_PATHS
+            path = Path(info["path"])
+            assert path == instances.hold_marker_path(tmp_path, info["instance_id"])
+            assert instances.list_entries(tmp_path) == []
+            entry = instances.unregister_own(info["instance_id"])
+            assert entry is not None and not path.exists()
+            assert instances.list_entries(tmp_path) == []
             assert instances.unregister_own(info["instance_id"]) is None
 
 
