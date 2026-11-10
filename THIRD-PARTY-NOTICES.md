@@ -62,8 +62,8 @@ binaries also ships their license text:
 
 | Component | License |
 |---|---|
-| llama.cpp | MIT (c) 2023-2024 The ggml authors |
-| ggml | MIT (c) 2023-2024 The ggml authors |
+| llama.cpp | MIT (c) 2023-2026 The ggml authors |
+| ggml | MIT (c) 2023-2026 The ggml authors |
 | AMD ROCm runtime libraries (GPU builds) | Permissive (MIT / BSD-style); see AMD's distribution |
 | libgomp (GCC's OpenMP runtime, Linux; from Debian's `libgomp1` package) | GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1; `setup-llama` writes the notice beside it as `LICENSE.libgomp` |
 

@@ -208,6 +208,16 @@ def test_every_package_in_the_tts_notice_has_a_root_row_with_the_same_licence(pa
     assert listed == tts_notice_rows()[package]
 
 
+def test_the_llama_cpp_rows_carry_the_copyright_line_of_the_notice_setup_llama_writes():
+    from localm.setup_llama.library_files import _LLAMA_CPP_MIT_NOTICE
+    line = next(ln for ln in _LLAMA_CPP_MIT_NOTICE.splitlines() if ln.startswith("Copyright"))
+    holder = line.removeprefix("Copyright ")
+    rows = [cells for cells in _rows(NOTICES.read_text(encoding="utf-8"))
+            if cells[0] in ("llama.cpp", "ggml")]
+    assert len(rows) == 2
+    assert all(cells[1] == f"MIT {holder}" for cells in rows)
+
+
 def test_the_root_file_does_not_call_a_copyleft_bundle_permissive():
     text = NOTICES.read_text(encoding="utf-8")
     assert "GPL-3.0" in set(root_vendored_rows().values())
