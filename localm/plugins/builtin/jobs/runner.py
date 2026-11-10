@@ -67,6 +67,7 @@ def run_job(job: Job, *, engine=None) -> dict:
     try:
         refusal = _creator_refusal(job)
         if refusal:
+            logger.warning("jobs: job %s was not run: %s", job.id, refusal)
             raise PermissionError(refusal)
         eng = engine
         if job.task_kind in ("chat", "memory"):
@@ -667,7 +668,8 @@ def _creator_refusal(job: Job) -> Optional[str]:
     job needs its creating key to still exist and to hold the scope for the job's
     task kind; a revoked or expired key, an unreadable keystore, or a key whose
     scopes were narrowed all refuse the run."""
-    if job.owner is None or getattr(job, "owner_is_owner_key", False):
+    if (getattr(job, "owner", None) is None
+            or getattr(job, "owner_is_owner_key", False)):
         return None
     from localm import scopes as S
     from localm.auth import (_hash_key, _legacy_owner_identity, get_api_key,
