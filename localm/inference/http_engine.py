@@ -316,8 +316,8 @@ def remote_model_identity(base_url: str, token: Optional[str], model_id: str,
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         r = requests.get(f"{base_url.rstrip('/')}/models/{quote(model_id, safe='')}",
-                         headers=headers, timeout=timeout)
-        if r.status_code >= 400:
+                         headers=headers, timeout=timeout, allow_redirects=False)
+        if r.status_code != 200:
             return ident
         body = r.json()
     except Exception:
