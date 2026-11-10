@@ -26,6 +26,8 @@ def register_foreign_tool(
     registered: list,
     warnings: list,
     reuse_if_already_ours: Optional[Callable[[ToolDef], bool]] = None,
+    executes_project_code: bool = False,
+    confirm_always: bool = False,
 ) -> None:
     """
     Insert one foreign (MCP or plugin) tool into TOOL_REGISTRY under
@@ -42,6 +44,9 @@ def register_foreign_tool(
     prompt - the model's highest-trust context) before insertion, and the
     entry is flagged ``untrusted_docs=True`` so prompts.py records its
     catalogue block as an untrusted range of the system prompt.
+
+    *executes_project_code* and *confirm_always* set the ToolDef flags of the
+    same names.
     """
     if reg_name in TOOL_REGISTRY:
         if reuse_if_already_ours is not None and reuse_if_already_ours(TOOL_REGISTRY[reg_name]):
@@ -57,5 +62,7 @@ def register_foreign_tool(
         params=params,
         destructive=destructive,
         untrusted_docs=True,
+        executes_project_code=executes_project_code,
+        confirm_always=confirm_always,
     )
     registered.append(reg_name)

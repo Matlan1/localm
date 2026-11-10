@@ -21,6 +21,13 @@ from localm.plugins.coder.memory import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 def test_find_memory_file_none(tmp_path):
     assert find_memory_file(tmp_path) is None
 

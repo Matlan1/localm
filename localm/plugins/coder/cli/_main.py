@@ -232,11 +232,11 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
               help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
 @click.option("--trust-hooks", "trust_hooks", is_flag=True,
-              help="Trust the tool hooks and MCP servers in this project's "
-                   ".localcoder/config.toml as they are now, and remember that "
-                   "until they change. Without it, untrusted hooks do not run and "
-                   "untrusted MCP servers are not started; an interactive "
-                   "session asks.")
+              help="Trust this project's .localcoder folder (its tool hooks, MCP "
+                   "servers, auto_approve, verify, model and mode settings, "
+                   "system.md, memory.md and skills) as it is now, and remember "
+                   "that until it changes. Without it, none of those is used "
+                   "while untrusted; an interactive session asks.")
 def main(
     task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
@@ -307,6 +307,14 @@ def main(
         print_error("--until requires a TASK to work on.")
         sys.exit(2 if ci else 1)
 
+    # The project's trust decides which of its settings and files apply, so it
+    # is settled before they are read.
+    from .hooks_cli import settle_project_trust
+    settle_project_trust(
+        work_dir, trust_flag=trust_hooks,
+        can_prompt=(not ci and output_format != "json"
+                    and sys.stdin.isatty() and sys.stdout.isatty()))
+
     # Resolve CI defaults, project config (.localcoder/config.toml), the session
     # mode plus privacy setup, and the LLM gen kwargs.
     model, max_turns, yes, always_confirm, session_mode, gen_kw, max_tokens_explicit = (
@@ -371,14 +379,15 @@ def main(
     # confirmation unless --yes was passed, and a non-interactive run cannot
     # confirm, so the gate in execution.py fails CLOSED.
     if task and not yes:
-        # build_agent adds run_shell and run_shell_background to always_confirm
-        # for this case.
+        # build_agent adds EXECUTES_PROJECT_CODE to always_confirm for this case.
         print_warning(
-            "Unattended one-shot: run_shell is code execution and the web tools "
-            "egress data. run_shell and run_shell_background now require --yes "
-            "(else they are denied this run); network tools still obey net_mode "
-            "(off/ask/allow). Pass --yes to auto-approve, or run interactively to "
-            "confirm each call.", to_stderr=True)
+            "Unattended one-shot: run_shell, run_tests and untrusted MCP tools run "
+            "code and the web tools egress data. Tools that run code now require "
+            "--yes (else they are denied this run), and so does any file write, "
+            "push or network call after the run has read untrusted content; "
+            "network tools still obey net_mode (off/ask/allow). Pass --yes to "
+            "auto-approve, or run interactively to confirm each call.",
+            to_stderr=True)
 
     # ------------------------------------------------------------------ #
     #  Create agent

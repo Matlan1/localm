@@ -163,7 +163,7 @@ def test_install_all_satisfied_skips_pip(monkeypatch):
     monkeypatch.setattr(deps, "is_satisfied", lambda r: True)
     called = {"n": 0}
     monkeypatch.setattr(deps, "_run_pip",
-                        lambda reqs, on_progress=None: called.__setitem__("n", 1))
+                        lambda reqs, on_progress=None, extras=None: called.__setitem__("n", 1))
     res = deps.install_requirements(["a>=1", "b>=2"])
     assert res.ok and res.installed == [] and res.skipped == ["a>=1", "b>=2"]
     assert called["n"] == 0            # pip never invoked
@@ -175,7 +175,7 @@ def test_install_success(monkeypatch):
     monkeypatch.setattr(deps, "is_satisfied",
                         lambda r: state["installed"])
 
-    def fake_pip(reqs, on_progress=None):
+    def fake_pip(reqs, on_progress=None, extras=None):
         state["installed"] = True
         return True, "Successfully installed x"
 
@@ -189,7 +189,7 @@ def test_install_pip_fails_surfaces_error(monkeypatch):
     never a hollow success."""
     monkeypatch.setattr(deps, "is_satisfied", lambda r: False)
     monkeypatch.setattr(deps, "_run_pip",
-                        lambda reqs, on_progress=None: (False, "ERROR: could not build wheel"))
+                        lambda reqs, on_progress=None, extras=None: (False, "ERROR: could not build wheel"))
     res = deps.install_requirements(["x>=1"])
     assert res.ok is False
     assert res.failed == ["x>=1"]
@@ -201,7 +201,7 @@ def test_install_pip_lies_still_missing(monkeypatch):
     -> reported failed, not installed."""
     monkeypatch.setattr(deps, "is_satisfied", lambda r: False)  # never satisfied
     monkeypatch.setattr(deps, "_run_pip",
-                        lambda reqs, on_progress=None: (True, "Successfully installed (not really)"))
+                        lambda reqs, on_progress=None, extras=None: (True, "Successfully installed (not really)"))
     res = deps.install_requirements(["x>=1"])
     assert res.ok is False
     assert res.failed == ["x>=1"]

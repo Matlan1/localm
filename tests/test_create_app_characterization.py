@@ -659,7 +659,7 @@ def test_validation_error_prunes_input_nested_past_the_recursion_limit():
 def test_assembly_sets_exactly_these_state_fields():
     from localm.inference.chat_pipeline import ChatPipeline
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
 
     app = create_app(None)
     assert set(app.state._state) == {

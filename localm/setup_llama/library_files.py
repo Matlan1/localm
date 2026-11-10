@@ -211,7 +211,7 @@ def _copy_blas_library_dirs(src_dir: Path, target: Path) -> int:
 # llama.cpp/ggml binaries without their license text (MIT requires it).
 _LLAMA_CPP_MIT_NOTICE = """MIT License
 
-Copyright (c) 2023-2024 The ggml authors
+Copyright (c) 2023-2026 The ggml authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

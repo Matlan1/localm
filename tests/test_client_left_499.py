@@ -104,7 +104,7 @@ def _errors(caplog):
 @pytest.fixture
 def image_app(home, monkeypatch):
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     app = create_app(None)
     PluginManager(app, external_root=home / "noplugins").install("image")
     app.state.jobs = JobManager()
@@ -157,7 +157,7 @@ def speech_app(home, monkeypatch):
     from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
     from localm.plugins.builtin.tts import speech_route
     from localm.plugins.engine import PluginManager
-    from localm.plugins.gui.jobs import JobManager
+    from localm.jobmanager import JobManager
     models = home / "models"
     models.mkdir()
     (models / "voice-1.gguf").write_bytes(b"GGUF")

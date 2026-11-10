@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from localm.plugins.gui.jobs import Job, JobManager
+from localm.jobmanager import Job, JobManager
 
 
 def _finished(mgr: JobManager, *, kind: str = "pull", age_s: float,

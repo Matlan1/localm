@@ -80,7 +80,7 @@ def test_remove_route_accepts_every_non_chat_type(app, home, monkeypatch, model_
         captured["args"] = list(cli_args)
         return _Job()
 
-    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+    monkeypatch.setattr("localm.jobmanager.JobManager.start_cli", fake_start_cli)
     with TestClient(app) as client:
         r = client.post("/api/models/remove", json={"model": "the-part"})
     assert r.status_code == 200, r.text

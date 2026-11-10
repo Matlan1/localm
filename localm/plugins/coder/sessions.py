@@ -264,13 +264,13 @@ class CoderSession:
                 self._detect_verify(cwd) if auto_verify else None)
         self.verify_cmd = verify_cmd
 
-        # The shell-execution family keeps its confirmation even under
+        # Every tool that runs project code keeps its confirmation even under
         # auto_approve. A RESTRICTED session never has those tools, so the set
         # is left empty there.
         always_confirm: set = set()
         if interactive_confirm and not restricted:
-            from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
-            always_confirm |= set(_SHELL_EXEC_TOOLS)
+            from localm.plugins.coder.agent.constants import EXECUTES_PROJECT_CODE
+            always_confirm.add(EXECUTES_PROJECT_CODE)
 
         # Record WHERE this session ran, so the rail can offer it again later.
         # record_project refuses outright in privacy mode, and never raises.

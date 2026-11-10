@@ -27,6 +27,13 @@ def open_gate(monkeypatch):
                         lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _trusted_project(monkeypatch):
+    """Treat every project these tests use as trusted."""
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+
+
 def _serve(status: int, body: dict | None):
     """A real loopback HTTP server answering every GET with *status*/*body*."""
     payload = json.dumps(body or {}).encode()

@@ -37,4 +37,4 @@ TARGET_REPO = "Matlan1/localm"
 #   wrangler secret put SHARED_SECRET         # required for the update routes (gate)
 #   wrangler secret put UPDATE_GITHUB_TOKEN   # SEPARATE PAT: Contents = Read only (releases/builds)
 # The issue token cannot read code; the update token cannot write. SHARED_SECRET is
-# REQUIRED once you enable updates (the update routes serve private builds).
+# REQUIRED once you enable updates (the update routes serve release builds).
