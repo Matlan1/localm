@@ -251,7 +251,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
-        tool_entry=str(p.get("entry", "") or ""),
+        entry=str(p.get("entry", "")),
         tool_exports=list(exports),
         path=str(plugin_dir),
     )
