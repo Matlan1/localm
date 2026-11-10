@@ -248,6 +248,9 @@ localm process's own permissions rather than a sandbox:
   generated file OUT of the data directory needs host filesystem access, the
   same dial as the folder picker that chooses the destination. The same rule
   covers the `generate_image` MCP tool, which reaches the same upload.
+  That tool's `output_path` writes only a new image file (`.png`, `.jpg`,
+  `.jpeg`, `.webp`) in the data directory's `mcp-images` folder or the image
+  gallery; any other path, and a file that already exists, is refused.
   Known limit, if you issue several media keys: those source folders are
   SHARED, so one media key can use another's generated image as an img2img
   source. The uploads inbox has no per-key ownership at all, so this is a

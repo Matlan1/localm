@@ -51,6 +51,7 @@ class TestTheSwitchGuardsTheRoutes:
             r = c.post("/api/browser/session", json={})
             assert r.status_code == 409, r.text
             assert "switched off" in r.json()["detail"]
+            assert "Settings > Server & network" in r.json()["detail"]
 
     def test_navigating_is_refused_while_the_setting_is_off(self, app):
         with TestClient(app) as c:
