@@ -115,6 +115,27 @@ class NativeAWQLinear(nn.Module):
         )
 
 
+# Module-name segments kept in full precision: multimodal towers and hybrid
+# attention input projections that AWQ checkpoints leave unquantized.
+_FULL_PRECISION_SEGMENTS = (
+    "visual",
+    "vision_tower",
+    "merger",
+    "multi_modal_projector",
+    "in_proj_a",
+    "in_proj_b",
+)
+
+
+def _keeps_full_precision(module_name: str) -> bool:
+    """True when a dotted segment of *module_name* starts with one of
+    ``_FULL_PRECISION_SEGMENTS`` ("model.visual.blocks.0.qkv", "visual_layer",
+    "layers.3.linear_attn.in_proj_a"). Independent of the pattern matching of
+    the installed transformers. See test_full_precision_segments_match_at_any_depth."""
+    return any(part.startswith(key) for part in module_name.split(".")
+               for key in _FULL_PRECISION_SEGMENTS)
+
+
 def _try_create_native_awq_quantizer_cls():
     """Create NativeAwqQuantizer subclassing HfQuantizer if transformers is present."""
     try:
@@ -155,16 +176,7 @@ def _try_create_native_awq_quantizer_cls():
                     getattr(self.quantization_config, "modules_to_not_convert", None) or []
                 ) + list(getattr(model, "_keep_in_fp32_modules", None) or [])
 
-            # Multimodal and hybrid attention layers that remain unquantized in AWQ checkpoints
-            extra_skips = [
-                "visual",
-                "vision_tower",
-                "merger",
-                "multi_modal_projector",
-                "in_proj_a",
-                "in_proj_b",
-            ]
-            self.modules_to_not_convert = list(set(base_skips + extra_skips))
+            self.modules_to_not_convert = list(set(base_skips + list(_FULL_PRECISION_SEGMENTS)))
 
             try:
                 from transformers.pytorch_utils import Conv1D
@@ -176,9 +188,9 @@ def _try_create_native_awq_quantizer_cls():
             for module_name, module in model.named_modules():
                 if not isinstance(module, linear_classes):
                     continue
-                if self.modules_to_not_convert and not should_convert_module(
-                    module_name, self.modules_to_not_convert
-                ):
+                if _keeps_full_precision(module_name):
+                    continue
+                if base_skips and not should_convert_module(module_name, base_skips):
                     continue
                 if module_name.endswith("lm_head"):
                     continue

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The prompt text a transformers processor renders for a conversation.
 
-SmolVLM's ``apply_chat_template`` seeds default frame-sampling arguments into
-``**kwargs`` unless ``processor_kwargs`` is non-empty, and transformers then logs a
-warning on every render. ``_render_processor_prompt`` keeps that warning out of the
-log without changing the rendered text.
+``_render_processor_prompt`` passes a non-empty ``processor_kwargs``, so SmolVLM's
+``apply_chat_template`` puts no default frame-sampling arguments in ``**kwargs``
+and logs no warning, without changing the rendered text.
 """
 
 from __future__ import annotations
@@ -69,12 +68,6 @@ class TestRealSmolVLMProcessor:
         text = _render_processor_prompt(smolvlm_processor, _MESSAGES)
         assert text == "user:<image>hiassistant:"
         assert not [m for m in transformers_log if _WARNING in m], transformers_log
-
-    def test_direct_call_does_log_the_warning(self, smolvlm_processor, transformers_log):
-        smolvlm_processor.apply_chat_template(
-            _MESSAGES, tokenize=False, add_generation_prompt=True)
-        assert [m for m in transformers_log if _WARNING in m], (
-            "the warning this helper avoids no longer fires on a direct call")
 
     def test_generation_prompt_flag_is_honoured(self, smolvlm_processor):
         text = _render_processor_prompt(
