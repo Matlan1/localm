@@ -104,6 +104,18 @@ def _host_only(url: str) -> str:
         return "(no host)"
 
 
+def _for_log(text: str, *urls: str) -> str:
+    """*text* for a log line: unchanged when the debug log may hold chat content
+    (``debug_content_enabled``), otherwise with every occurrence of each of
+    *urls* replaced by its host (:func:`_host_only`)."""
+    from localm.debuglog import debug_content_enabled
+    if debug_content_enabled():
+        return text
+    for url in sorted({u for u in urls if u}, key=len, reverse=True):
+        text = text.replace(url, _host_only(url))
+    return text
+
+
 def _new_profile_dir() -> str:
     """A fresh profile folder holding the WebRTC preference."""
     folder = tempfile.mkdtemp(prefix="localm-browser-")
@@ -551,7 +563,8 @@ class BrowserSession:
                     if previous is not None:
                         await self._close_quietly(previous)
                     self._note("showing the new window %s in place of %s, "
-                               "which was closed" % (page.url, previous_url))
+                               "which was closed" % (page.url, previous_url),
+                               page.url, previous_url)
                 else:
                     self._refuse(self._window_name(url),
                                  "the page opened a new window without a "
@@ -575,7 +588,7 @@ class BrowserSession:
                 page = await self._ctx.new_page()
                 await self._drive(page)
                 self._note("the page %s closed itself; a blank page is open in "
-                           "its place" % closed.url)
+                           "its place" % closed.url, closed.url)
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not replace a page that closed "
                            "itself: %s", self.session_id, exc)
@@ -712,9 +725,9 @@ class BrowserSession:
     def _refuse(self, url: str, reason: str, *, kind: str = "request") -> None:
         if len(self.state.blocked) < _LOG_CAP:
             self.state.blocked.append(Blocked(url=url, reason=reason, kind=kind))
-        from localm.debuglog import debug_content_enabled
-        shown = url if debug_content_enabled() else _host_only(url)
-        logger.info("browser %s blocked %s: %s", self.session_id, shown, reason)
+        logger.info("browser %s blocked %s: %s", self.session_id,
+                    _for_log(url, url) if url else _host_only(url),
+                    _for_log(reason, url))
 
     async def _on_route(self, route, request) -> None:
         """Decide one request. An unexpected failure aborts it.
@@ -724,8 +737,10 @@ class BrowserSession:
         try:
             await self._route(route, request)
         except Exception as exc:                     # noqa: BLE001
+            failed = getattr(request, "url", "") or ""
             logger.warning("browser %s gate failed for %s, refusing it: %s",
-                           self.session_id, getattr(request, "url", "?"), exc)
+                           self.session_id, _for_log(failed, failed) or "?",
+                           _for_log(str(exc), failed))
             self._refuse(getattr(request, "url", "") or "",
                          "the network gate failed on this request")
             try:
@@ -759,7 +774,8 @@ class BrowserSession:
                 response = await route.fetch(url=current, max_redirects=0)
             except Exception as exc:                 # noqa: BLE001
                 logger.debug("browser %s fetch failed for %s: %s",
-                             self.session_id, current, exc)
+                             self.session_id, _for_log(current, current),
+                             _for_log(str(exc), current, url))
                 await route.abort()
                 return
             if not (300 <= response.status < 400):
@@ -813,12 +829,13 @@ class BrowserSession:
             except Exception:
                 pass
 
-    def _note(self, text: str) -> None:
+    def _note(self, text: str, *urls: str) -> None:
         """Record something the session did on its own, as a console line of
-        type ``localm``."""
+        type ``localm``. The log line names only the host of each of *urls*
+        that *text* holds, unless the debug log may hold chat content."""
         if len(self.state.console) < _LOG_CAP:
             self.state.console.append({"type": "localm", "text": text})
-        logger.info("browser %s: %s", self.session_id, text)
+        logger.info("browser %s: %s", self.session_id, _for_log(text, *urls))
 
     # -- the driving surface ------------------------------------------------ #
 

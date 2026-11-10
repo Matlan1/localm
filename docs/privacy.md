@@ -340,6 +340,7 @@ recalled unless you opted into read-only recall in privacy mode).
 While such a request is being answered, the debug log holds back the content
 of every other chat on that server as well.
 
-A page request the browser plugin refuses is logged with its host only; the
-full address (path and query string) is logged only when the debug log is on
-and no session is in privacy mode.
+The browser plugin's log lines (a request it refused, a request that failed,
+a window it replaced) name the host only; the full address (path and query
+string) is logged only when the debug log is on and no session is in privacy
+mode.

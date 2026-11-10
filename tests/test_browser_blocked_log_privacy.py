@@ -72,3 +72,60 @@ def test_urls_without_a_usable_host(monkeypatch, caplog, url, shown):
     line = _refuse(caplog, url)
     assert line == f"browser s1 blocked {shown}: host not allowed"
     assert "secret" not in line
+
+
+def _messages(caplog) -> list:
+    return [r.getMessage() for r in caplog.records]
+
+
+def test_a_reason_that_quotes_the_url_is_shortened_too(monkeypatch, caplog):
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    caplog.set_level(logging.INFO, logger=bs.logger.name)
+    _session()._refuse(URL, f"URL is not allowed: {URL}")
+    assert _messages(caplog)[-1] == (
+        "browser s1 blocked search.example.com:8443: "
+        "URL is not allowed: search.example.com:8443")
+
+
+def test_a_failed_gate_logs_the_host_only(monkeypatch, caplog):
+    import asyncio
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    caplog.set_level(logging.DEBUG, logger=bs.logger.name)
+
+    class _Request:
+        url = URL
+
+    class _Route:
+        aborted = False
+
+        async def abort(self):
+            self.aborted = True
+
+    async def _raises(route, request):
+        raise RuntimeError(f"could not decide {request.url}")
+
+    s = _session()
+    s._route = _raises
+    route = _Route()
+    asyncio.run(s._on_route(route, _Request()))
+    assert route.aborted
+    blob = "\n".join(_messages(caplog))
+    assert "gate failed for search.example.com:8443" in blob
+    for secret in ("diagnosis", "abc123", "hunter2", "/find"):
+        assert secret not in blob
+
+
+@pytest.mark.parametrize("mode,full", [("privacy", False), ("full", True)])
+def test_a_note_logs_the_host_only_and_keeps_the_console_line(
+        monkeypatch, caplog, mode, full):
+    monkeypatch.setenv("LOCALM_MODE", mode)
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    caplog.set_level(logging.INFO, logger=bs.logger.name)
+    s = _session()
+    s._note("the page %s closed itself" % URL, URL)
+    assert s.state.console == [{"type": "localm",
+                                "text": f"the page {URL} closed itself"}]
+    line = _messages(caplog)[-1]
+    assert (URL in line) is full
+    assert ("diagnosis" in line) is full
+    assert "search.example.com:8443" in line

@@ -322,3 +322,154 @@ def test_a_privacy_request_cannot_write_through_the_memory_routes(memory_app):
                    json={"text": "User prefers Rust and cargo"})
         assert r.status_code == 403, r.text
         assert "Rust and cargo" not in c.get("/api/memory", headers=hdr).text
+
+
+def test_the_memory_outlet_runs_inside_the_request_scope(memory_app, monkeypatch):
+    app, _captured, _hdr = memory_app
+    from localm.plugins.builtin.memory import plug
+    seen: list = []
+    monkeypatch.setattr(plug, "_maybe_auto_consolidate",
+                        lambda principal=None: seen.append(
+                            (audit.request_is_privacy(), plug._persist_enabled())))
+    with TestClient(app) as c:
+        _chat(c, "hello there", PRIVACY)
+        _chat(c, "hello there")
+    assert seen == [(True, False), (False, True)]
+
+
+# --------------------------------------------------------------------------- #
+#  Other work a request hands to a thread                                     #
+# --------------------------------------------------------------------------- #
+
+def test_compaction_generates_inside_the_request_scope(full_mode_debug, monkeypatch):
+    import asyncio
+
+    import localm.inference.compact as compact
+    import localm.inference.http_server as hs
+    seen: dict = {}
+
+    def _compact(messages, generate, **kwargs):
+        seen["request_is_privacy"] = audit.request_is_privacy()
+        seen["content_allowed"] = debuglog.debug_content_enabled()
+        seen["thread"] = threading.get_ident()
+        return messages, False
+
+    monkeypatch.setattr(compact, "compact_messages", _compact)
+    engine = _engine()
+    engine.context_capacity.return_value = 4096
+
+    async def _run(private: bool):
+        with audit.request_privacy(private):
+            await hs._compact_for_capacity(
+                engine, [{"role": "user", "content": SECRET}])
+
+    asyncio.run(_run(True))
+    assert seen["thread"] != threading.get_ident()
+    assert (seen["request_is_privacy"], seen["content_allowed"]) == (True, False)
+    asyncio.run(_run(False))
+    assert (seen["request_is_privacy"], seen["content_allowed"]) == (False, True)
+    assert audit.any_coder_session_is_privacy() is False
+
+
+def test_a_job_run_on_demand_runs_inside_the_request_scope(
+        full_mode_debug, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    import localm.plugins.builtin.jobs.runner as runner
+    seen: list = []
+
+    def _run_job(job, engine=None):
+        seen.append((audit.request_is_privacy(), debuglog.debug_content_enabled()))
+        return {"status": "ok", "output": "ran", "error": None,
+                "started": 0.0, "finished": 0.0}
+
+    monkeypatch.setattr(runner, "run_job", _run_job)
+    app = create_app(_engine())
+    mgr = app.state.plugin_manager
+    mgr.install("jobs")
+    mgr.enable("jobs")
+    shell = getattr(app.state, "shell_token", None)
+    hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
+    with TestClient(app) as c:
+        r = c.post("/api/jobs", headers=hdr, json={
+            "name": "j", "prompt": "hi", "schedule_kind": "interval",
+            "schedule": 3600})
+        assert r.status_code == 200, r.text
+        jid = r.json()["id"]
+        assert c.post(f"/api/jobs/{jid}/run",
+                      headers={**hdr, **PRIVACY}).status_code == 200
+        assert c.post(f"/api/jobs/{jid}/run", headers=hdr).status_code == 200
+    assert seen == [(True, False), (False, True)]
+
+
+def test_a_client_that_goes_away_mid_stream_leaves_no_content_and_no_scope(
+        full_mode_debug):
+    """The response's ``send`` fails after the first body chunk, as it does for
+    a closed connection, while the model is still generating."""
+    import asyncio
+    import json
+    import time
+
+    gate: list = []
+    done = threading.Event()
+
+    def _slow(messages, **kwargs):
+        try:
+            for i in range(200):
+                gate.append(debuglog.debug_content_enabled())
+                time.sleep(0.01)
+                yield f"tok{i} "
+        finally:
+            gate.append(debuglog.debug_content_enabled())
+            done.set()
+
+    engine = _engine()
+    engine.chat_stream.side_effect = _slow
+    app = create_app(engine)
+    body = json.dumps(_body("/v1/chat/completions", True)).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions", "query_string": b"", "root_path": "",
+        "headers": [(b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (SESSION_MODE_HEADER.lower().encode(), b"privacy")],
+        "client": ("127.0.0.1", 50000), "server": ("testserver", 80),
+    }
+    sent: list = []
+
+    async def _drive():
+        got = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            if got:
+                return got.pop()
+            await asyncio.sleep(3600)
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                sent.append(message.get("body", b""))
+                if b"tok" in b"".join(sent):
+                    raise OSError("connection closed by the client")
+
+        try:
+            await app(scope, receive, send)
+        except Exception:   # noqa: BLE001
+            pass
+
+    asyncio.run(_drive())
+    assert b"tok" in b"".join(sent), "the stream never started"
+    assert done.wait(30), "the generation thread never ended"
+    assert gate and not any(gate), "content was allowed while the thread generated"
+    deadline = time.monotonic() + 10
+    while audit.any_coder_session_is_privacy() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert audit.any_coder_session_is_privacy() is False
+    blob = _blob(full_mode_debug)
+    assert SECRET not in blob
+    assert "tok0" not in blob
