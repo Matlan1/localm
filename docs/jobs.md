@@ -133,7 +133,12 @@ A caller without the owner key or a `coder:full` key cannot choose a coder job's
 `cwd`: the job is stored with the instance's project root instead, and the
 response shows the `cwd` that will be used. `model` must be a registered model
 name, and a UNC or device-path `cwd` is refused. `collection` is required for a
-`rag` job and refused at creation if it is not a valid collection name.
+`rag` job and refused at creation if it is not a valid collection name. A key
+confined to RAG folders (`rag_roots`) gets `403` when it creates a `rag` job, or
+points one with an update, at an existing collection holding documents from
+outside those folders. At run time such a job re-syncs under its creating key's
+folders, and is not run (an error result is recorded) when they no longer cover
+the collection.
 
 ## Two things live under `/api/jobs`
 
