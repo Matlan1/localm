@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sys
 
-from localm import instances
+from localm import instances, procid
 from localm.model_manager import pull
 from localm.rag import collection_lock
 
 
 def _fresh(monkeypatch, **patches) -> str:
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
     for name, value in patches.items():
-        monkeypatch.setattr(instances, name, value)
+        monkeypatch.setattr(procid, name, value)
     return instances.pid_space_id()
 
 
@@ -44,7 +44,7 @@ def test_a_linux_machine_id_separates_two_hosts_with_one_name(monkeypatch):
 def test_the_linux_machine_id_is_read_from_etc_then_dbus(monkeypatch, tmp_path):
     etc, dbus = tmp_path / "etc-machine-id", tmp_path / "dbus-machine-id"
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(instances, "_LINUX_MACHINE_ID_FILES", (etc, dbus))
+    monkeypatch.setattr(procid, "_LINUX_MACHINE_ID_FILES", (etc, dbus))
     assert instances.linux_machine_id() == ""
     dbus.write_text("from-dbus\n", encoding="ascii")
     assert instances.linux_machine_id() == "from-dbus"
@@ -57,7 +57,7 @@ def test_the_linux_machine_id_is_read_from_etc_then_dbus(monkeypatch, tmp_path):
 def test_the_linux_machine_id_is_empty_off_linux(monkeypatch, tmp_path):
     f = tmp_path / "machine-id"
     f.write_text("present", encoding="ascii")
-    monkeypatch.setattr(instances, "_LINUX_MACHINE_ID_FILES", (f,))
+    monkeypatch.setattr(procid, "_LINUX_MACHINE_ID_FILES", (f,))
     monkeypatch.setattr(sys, "platform", "win32")
     assert instances.linux_machine_id() == ""
 

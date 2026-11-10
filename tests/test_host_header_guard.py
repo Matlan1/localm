@@ -15,7 +15,7 @@ import pytest
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from localm import bindhost
 from localm.inference import http_server
@@ -23,6 +23,14 @@ from localm.inference.app_assembly import security
 from localm.inference.http_server import create_app
 
 _PORT = 8737
+
+
+@pytest.fixture(autouse=True)
+def _restore_engine():
+    from localm.inference import http_server as _hs
+    saved = _hs._engine
+    yield
+    _hs._engine = saved
 
 
 @pytest.fixture
@@ -46,6 +54,9 @@ def _write_config(home, **values):
 
 def _app(bind_host="127.0.0.1", *, guard=True, api_landing=False):
     app = create_app(None, api_landing=api_landing)
+    from types import SimpleNamespace
+    from localm.inference import http_server as _hs
+    _hs._engine = SimpleNamespace(display_name="m", loaded=True)
     app.state.bind_host = bind_host
     if guard:
         app.state.host_header_guard = True
@@ -172,7 +183,7 @@ def test_a_websocket_from_a_foreign_host_is_closed_before_accept(home):
     accepted = []
 
     @app.websocket("/ws-probe")
-    async def _ws(websocket):
+    async def _ws(websocket: WebSocket):
         accepted.append(True)
         await websocket.accept()
         await websocket.send_text("hello")

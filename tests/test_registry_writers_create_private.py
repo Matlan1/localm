@@ -44,6 +44,8 @@ import subprocess
 
 import pytest
 
+import localm.storekit as storekit
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -99,9 +101,8 @@ def _install_spies(monkeypatch):
     this region in ``except OSError``, so an OSError-shaped complaint raised
     here would be swallowed by the code under test.
     """
-    import localm.config as cfg
     events = []
-    real_restrict = cfg.restrict_file_perms
+    real_restrict = storekit.restrict_file_perms
     real_replace = os.replace
 
     def _capture(path):
@@ -119,7 +120,7 @@ def _install_spies(monkeypatch):
         events.append(("replace", str(src), *_capture(src), str(dst)))
         return real_replace(src, dst, *a, **kw)
 
-    monkeypatch.setattr(cfg, "restrict_file_perms", spy_restrict)
+    monkeypatch.setattr(storekit, "restrict_file_perms", spy_restrict)
     monkeypatch.setattr(os, "replace", spy_replace)
     return events
 
@@ -209,13 +210,12 @@ def test_every_sibling_writer_restricts_its_temp_before_the_rename(
     Guards a future reordering (restricting the destination instead of the
     temp).
     """
-    import localm.config as cfg
 
     # What "restricted" looks like in THIS directory on THIS box, produced by
     # the real helper before any spy is installed.
     reference = home / "reference.txt"
     reference.write_text("x", encoding="utf-8")
-    assert cfg.restrict_file_perms(reference) is True
+    assert storekit.restrict_file_perms(reference) is True
     restricted = _perm_fingerprint(reference)
 
     events = _install_spies(monkeypatch)
@@ -250,14 +250,13 @@ def test_a_failed_restriction_still_persists_the_entry_and_never_raises(
     session being minted or an instance registering, and it must fall back to
     retrying the destination rather than leaving the tightening to a call that
     already reported failure."""
-    import localm.config as cfg
     calls = []
 
     def always_fails(path, **kwargs):
         calls.append(str(path))
         return False
 
-    monkeypatch.setattr(cfg, "restrict_file_perms", always_fails)
+    monkeypatch.setattr(storekit, "restrict_file_perms", always_fails)
     expected = _drive_every_sibling_writer(home)
 
     for tmp_path_str in expected:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for image generation robustness fixes (comfy.py + coder tool)."""
 
+import pytest
 import struct
 import zlib
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,12 @@ from localm.image_gen import comfy
 # (generate_image still calls _localm_unload as a bare global in the image
 # module, so that patch stays on comfy.)
 from localm.media import comfy_client
+
+
+@pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
 
 
 def _minimal_png(width: int, height: int) -> bytes:

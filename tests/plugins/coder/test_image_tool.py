@@ -9,6 +9,12 @@ import urllib.error
 # Import the tool function and class
 from localm.plugins.coder.tools import tool_generate_image
 
+@pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 def _no_comfy_lifecycle(fn):
     """Run *fn* with ComfyUI's start-up check and VRAM release stubbed, so a test
     that fakes only the generator does not reach a ComfyUI server."""

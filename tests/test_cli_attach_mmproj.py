@@ -165,7 +165,8 @@ def test_pull_of_a_local_file_with_a_remote_mmproj_spec_fails(home, tmp_path):
 def test_speech_model_resolves_once_a_projector_is_attached(home, tmp_path):
     from localm.inference import speech
     model = _model(tmp_path / "tts.gguf")
-    proj = _projector(tmp_path / "mmproj.gguf")
+    (tmp_path / "projectors").mkdir()
+    proj = _projector(tmp_path / "projectors" / "mmproj.gguf")
     _register(home, "tts", model)
     with pytest.raises(speech.SpeechModelError) as e:
         speech.resolve_speech_model("tts")

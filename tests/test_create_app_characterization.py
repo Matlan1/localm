@@ -554,8 +554,10 @@ def _shell_auth(app) -> dict:
 
 def test_exception_handler_registry():
     handlers = create_app(None).exception_handlers
+    from localm.inference.load_lease import LoadBusyError
     assert set(handlers) == {Exception, ConfigLockTimeout, StarletteHTTPException,
-                             RequestValidationError, WebSocketRequestValidationError}
+                             RequestValidationError, WebSocketRequestValidationError,
+                             LoadBusyError}
     assert handlers[WebSocketRequestValidationError] is (
         websocket_request_validation_exception_handler)
     for exc_type in (Exception, StarletteHTTPException, RequestValidationError):

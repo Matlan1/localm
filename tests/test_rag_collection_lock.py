@@ -37,7 +37,7 @@ import types
 import pytest
 
 import localm.rag.collection_lock as cl
-from localm import instances
+from localm import instances, procid
 from localm.rag import Collection, CollectionLockedError, collection_names
 from localm.rag.collection_lock import collection_write_lock, lock_path_for
 from tests._process_identity import (
@@ -93,10 +93,10 @@ _HOLDER = '''
     import os, sys
     from pathlib import Path
     import localm.rag.collection_lock as cl
-    from localm import instances
+    from localm import procid
     cl.HEARTBEAT_INTERVAL = float(sys.argv[2])
     if sys.argv[3] != "-":
-        instances._PID_SPACE = sys.argv[3]
+        procid._PID_SPACE = sys.argv[3]
     with cl.collection_write_lock(Path(sys.argv[1]), collection="kb",
                                   op="a long index", timeout=30):
         print("HELD", os.getpid(), flush=True)
@@ -312,10 +312,10 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
 
     # The hold is recorded under another pid space, so the waiter below cannot
     # check its liveness and only the heartbeat keeps it.
-    monkeypatch.setattr(instances, "_PID_SPACE", "another-pid-space")
+    monkeypatch.setattr(procid, "_PID_SPACE", "another-pid-space")
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
-        monkeypatch.setattr(instances, "_PID_SPACE", None)
+        monkeypatch.setattr(procid, "_PID_SPACE", None)
         # TWO windows, not four, to bound how long this test occupies heavy_slot,
         # which is box-wide across xdist workers. Crossing the staleness
         # threshold twice proves the same property: a REFRESHED record survives
@@ -420,9 +420,9 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_taken_over(
     _release(other)
 
     with monkeypatch.context() as m:
-        m.setattr(instances, "_PID_SPACE", None)
-        m.setattr(instances, "machine_guid", lambda: "another-machine")
-        m.setattr(instances, "linux_machine_id", lambda: "another-machine")
+        m.setattr(procid, "_PID_SPACE", None)
+        m.setattr(procid, "machine_guid", lambda: "another-machine")
+        m.setattr(procid, "linux_machine_id", lambda: "another-machine")
         remote_space = cl._machine_id()
     assert remote_space != cl._machine_id(), "the other machine got this id"
 
@@ -449,10 +449,10 @@ def test_a_record_from_another_machine_with_this_host_name_is_never_taken_over(
 def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
     """The id must not be the hostname alone, or WSL and Windows on one box
     (same hostname, unrelated pid tables) would trust each other's pids."""
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
     monkeypatch.setattr(cl.sys, "platform", "win32")
     win = cl._machine_id()
-    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(procid, "_PID_SPACE", None)
     monkeypatch.setattr(cl.sys, "platform", "linux")
     lin = cl._machine_id()
     assert win != lin, "one hostname on two platforms produced one machine id"

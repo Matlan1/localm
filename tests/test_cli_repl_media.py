@@ -13,6 +13,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _media_plugins_available(monkeypatch):
+    """The media plugins count as installed and enabled, as in a normal install."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 def _run_repl_media(command: str, generate_target: str, *, mode, api_url,
                     home_dir, engine=None):
     """Drive cli._handle_command(command) with the generator patched, returning
