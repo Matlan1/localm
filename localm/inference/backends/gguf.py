@@ -1444,6 +1444,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         return not self.is_diffusion and not getattr(self, "_grammar_unsupported", False)
 
     @property
+    def supports_raw_prompt(self) -> bool:
+        """True: every GGUF model takes a raw prompt."""
+        return True
+
+    @property
     def supports_logprobs(self) -> bool:
         """True for every model except a diffusion language model, which writes
         its reply all at once and has no per-token distribution to report."""
@@ -1627,6 +1632,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
         # Image and audio input: with an mmproj loaded they flow through to
         # create_chat_completion's media path. A model without the encoder
@@ -1680,6 +1686,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["logprobs"] = logprobs
         if not cache_prompt:
             kwargs["cache_prompt"] = False
+        if raw_prompt is not None:
+            kwargs["raw_prompt"] = raw_prompt
         kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated

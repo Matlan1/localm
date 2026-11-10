@@ -476,6 +476,24 @@ async def chat_extract(req: AttachmentExtractRequest):
 _NUDGE_CAPACITY_FRACTION = 0.10
 
 
+OWN_CHAT_SURFACE = "chat"
+
+
+def _own_chat_surface(ctx) -> bool:
+    """True when the request came from localm's own chat (the GUI chat or
+    ``localm run``), which send ``X-Client-Id: chat`` (``ctx.state["client_id"]``).
+    False for every other caller, an API client with no such header included."""
+    state = getattr(ctx, "state", None) or {}
+    client_id = state.get("client_id") or ""
+    return isinstance(client_id, str) and client_id.strip().lower() == OWN_CHAT_SURFACE
+
+
+def _style_note_enabled() -> bool:
+    """The ``chat_style_note`` setting (default on)."""
+    from localm.config import load_config
+    return bool(load_config().get("chat_style_note", True))
+
+
 def _nudge_fits_capacity(instruction: str, ctx) -> bool:
     """True when appending *instruction* is safe for the model's known
     context capacity: ``ctx.state["capacity"]``, an int token ceiling, or
@@ -502,7 +520,8 @@ _THINK_INSTRUCTION = (
 def _thinking_inlet(messages, ctx):
     """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
 
-    Injects only for thinking-family models, and never twice: skips when a system
+    Injects only on localm's own chat surface (see _own_chat_surface), only for
+    thinking-family models, and never twice: skips when a system
     message already steers <think> (a coder session, whose system prompt already
     carries the instruction, or a persona that already does it), and skips when
     the model's known context capacity is too small to absorb the instruction
@@ -511,6 +530,8 @@ def _thinking_inlet(messages, ctx):
     kernel pipeline isolates any exception this raises."""
     from localm.inference.model_family import is_thinking_model
 
+    if not _own_chat_surface(ctx):
+        return None
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):
         return None
     if not _nudge_fits_capacity(_THINK_INSTRUCTION, ctx):
@@ -544,11 +565,15 @@ def _role_word_inlet(messages, ctx):
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
-    Skips when a system message already mentions third-person self-reference,
+    Applies only on localm's own chat surface (see _own_chat_surface) while the
+    ``chat_style_note`` setting is on. Skips when a system message already
+    mentions third-person self-reference,
     and when the model's known context capacity is too small to absorb the
     instruction (see _nudge_fits_capacity). Appends the instruction to the
     first system message, or inserts one when none exists. Exceptions raised
     here are isolated by the chat pipeline."""
+    if not _own_chat_surface(ctx) or not _style_note_enabled():
+        return None
     if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
         return None
     for m in messages:

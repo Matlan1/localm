@@ -1052,6 +1052,9 @@ DEFAULT_CONFIG: dict = {
     # before it stops looking things up and answers from what it found. 0 = no
     # ceiling. Repeated and no-progress lookups end the loop sooner either way.
     "chat_web_max_lookups": 20,
+    # The GUI chat and `localm run` add a short style note to the system prompt
+    # (answer directly, speak of yourself as "I"). API callers never get it.
+    "chat_style_note": True,
     # Chat avatars: an emoji or a small data:image URI, never a URL. See
     # settings_schema.py's _validate_avatar_value / _AVATAR_DATA_URI_RE.
     "user_avatar": "",
@@ -1913,8 +1916,17 @@ def _apply_config_migrations(stored: dict) -> None:
 
 
 def _config_needs_migration(stored) -> bool:
-    return (isinstance(stored, dict) and bool(stored)
-            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION)
+    """True when a migration step would change *stored*'s settings. A file that
+    only lacks the version stamp is not rewritten on load; the stamp is written
+    with the next save."""
+    if not (isinstance(stored, dict) and stored
+            and _stored_config_version(stored) < CURRENT_CONFIG_VERSION):
+        return False
+    migrated = copy.deepcopy(stored)
+    _apply_config_migrations(migrated)
+    migrated.pop(CONFIG_VERSION_KEY, None)
+    original = {k: v for k, v in stored.items() if k != CONFIG_VERSION_KEY}
+    return migrated != original
 
 
 def _warn_unknown_stored_keys(stored: dict) -> None:
