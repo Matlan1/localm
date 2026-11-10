@@ -4053,6 +4053,24 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # The Authorization-header path (CLI / SDK / coder) cannot be forged cross-site and
 # is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
+
+
+def session_cookie_name(request) -> str:
+    """Per-instance session cookie name. Browsers share cookies across ports of
+    one host, so the name carries the port the request arrived on; a request
+    with no explicit port uses the legacy ``SESSION_COOKIE``."""
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    return f"{SESSION_COOKIE}_{port}" if port else SESSION_COOKIE
+
+
+def session_cookie_value(request) -> str:
+    """The session id presented by *request*: the instance-specific cookie, else
+    the legacy unsuffixed one left by an older build."""
+    jar = request.cookies
+    return (jar.get(session_cookie_name(request)) or jar.get(SESSION_COOKIE) or "").strip()
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
@@ -4279,7 +4297,7 @@ def _request_token(request) -> tuple[Optional[str], str]:
     header = _bearer_token(request) or (request.headers.get("x-api-key") or "").strip()
     if header:
         return header, "header"
-    cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    cookie = session_cookie_value(request)
     if cookie:
         return cookie, "cookie"
     return None, "none"
@@ -4493,7 +4511,7 @@ def _csrf_ok(request) -> bool:
     header; SameSite=Strict and the same-origin guard remain in force."""
     from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
-    sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    sid = session_cookie_value(request)
     if not header or not sid:
         return False
     # ct_equal, not compare_digest: the header is caller-supplied and latin-1

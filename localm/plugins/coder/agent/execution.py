@@ -6,6 +6,7 @@ confirm prompt, scope resolution, and the per-write project map update. Mixed in
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -51,6 +52,14 @@ from .scope import _scope_pattern
 
 # Held while an agent's _session_allowed set is changed or copied.
 _SESSION_ALLOWED_LOCK = threading.Lock()
+_CALL_CONTEXT = threading.local()
+_CALL_SEQUENCE = itertools.count(1)
+
+
+def current_call_id() -> Optional[str]:
+    """Id of the tool call the calling thread is executing, else None."""
+    return getattr(_CALL_CONTEXT, "call_id", None)
+
 
 # Shown with each hook-run approval.
 _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each "
@@ -429,6 +438,14 @@ class _ExecutionMixin:
             return "localm's data folder (the check could not run)"
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
+        previous = getattr(_CALL_CONTEXT, "call_id", None)
+        _CALL_CONTEXT.call_id = f"c{next(_CALL_SEQUENCE)}"
+        try:
+            return self._execute_tool_body(call, interactive)
+        finally:
+            _CALL_CONTEXT.call_id = previous
+
+    def _execute_tool_body(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # A cancelled run executes nothing, whatever the model emits.
         if self.cancelled:

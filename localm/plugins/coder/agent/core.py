@@ -1138,6 +1138,11 @@ class Agent(
         """Send a structured event to the registered sink. Never raises."""
         if self.on_event is None:
             return
+        if event_type in ("tool_call", "tool_result") and "call_id" not in data:
+            from .execution import current_call_id
+            call_id = current_call_id()
+            if call_id is not None:
+                data["call_id"] = call_id
         try:
             self.on_event({"type": event_type, **data})
         except Exception as e:

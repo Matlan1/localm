@@ -130,7 +130,7 @@ def register(app: FastAPI, ctx) -> None:
                                         key_hash=auth._hash_key(owner), fs_access="host",
                                         owner_key_minted=auth._is_owner_key(owner)))
             secure = request.url.scheme == "https"
-            response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
+            response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
             # CSRF is derived from the session (client fetches it from
