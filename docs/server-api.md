@@ -79,7 +79,7 @@ object) and `POST /v1/responses` (OpenAI's error object).
 
 ### `POST /v1/chat/completions`
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 Streaming and non-streaming chat. Standard OpenAI request body (see
 [OpenAI request fields](#openai-request-fields) for what each field does here),
@@ -517,7 +517,7 @@ covered.
 
 ### `POST /v1/completions`
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 Raw text completion (streaming and non-streaming). The model continues
 `prompt` exactly as sent: no chat template, no system prompt and no chat
@@ -546,7 +546,7 @@ and `suffix` are each a 400 naming the field.
 
 ### `POST /v1/messages` (Anthropic Messages API)
 
-Scope: any valid key (no specific scope required once auth is enabled). Anthropic clients
+Scope: `chat`. Anthropic clients
 authenticate with `x-api-key`, which the API routes accept as well as `Authorization: Bearer`
 (the bearer token wins when both are sent; the GUI login takes only the bearer form); the
 `anthropic-version` and `anthropic-beta` headers are accepted and not needed.
@@ -589,7 +589,7 @@ another instance serves is counted there). The model is loaded if it is not alre
 
 ### `POST /v1/responses` (OpenAI Responses API)
 
-Scope: any valid key (no specific scope required once auth is enabled).
+Scope: `chat`.
 
 An OpenAI SDK or agent tool that speaks the Responses API can use localm by pointing its base URL
 at the server (`OPENAI_BASE_URL=http://127.0.0.1:8642/v1`) and naming a localm model. The request
@@ -1273,7 +1273,7 @@ Scope: `keys:admin`.
 | `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
-`POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
+`POST /api/auth/key/clear` (owner key, scope `admin`; CSRF-protected for
 cookie-authenticated callers) deletes the server-side owner key and signs out
 every session - the HTTP sibling of `localm key clear` and the GUI's clear
 button (403 when a cookie-authenticated caller sends no valid CSRF token). It
