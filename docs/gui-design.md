@@ -33,7 +33,7 @@ Color carries meaning in two independent registers, and they must not be mixed:
   via `.nav-ic[data-icon=...]` or a `.cat-ic.cat-*` class. Chrome only.
 - CONTENT-TYPE hue = what kind of thing a row is (a model, a doc, a video, a track,
   a plugin). Applied to a row's leading icon via `.ic-model/-folder/-doc/-media/-audio/
-  -video/-code/-plugin`. Content only. A data-table name cell leads with one inside
+  -video/-code/-plugin/-job`. Content only. A data-table name cell leads with one inside
   `.name-cell`; a `.disc-repo` history row leads with one in its head.
 
 ## 2. Every interactive row has hover + an inset accent bar when active

@@ -59,18 +59,27 @@ binaries also ships their license text:
 | llama.cpp | MIT (c) 2023-2024 The ggml authors |
 | ggml | MIT (c) 2023-2024 The ggml authors |
 | AMD ROCm runtime libraries (GPU builds) | Permissive (MIT / BSD-style); see AMD's distribution |
+| libgomp (GCC's OpenMP runtime, Linux; from Debian's `libgomp1` package) | GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1; `setup-llama` writes the notice beside it as `LICENSE.libgomp` |
+
+Two more native runtimes are downloaded from their upstream releases at the
+user's request and are not redistributed by this repository:
+stable-diffusion.cpp (MIT; `localm setup-sdcpp`, loaded into a localm worker
+process) and KoboldCpp (AGPL-3.0; `localm setup-music`, run as a separate
+program, see the arm's-length section below).
 
 ## Python dependencies (installed from PyPI, not redistributed here)
 
 localm declares its Python dependencies in `pyproject.toml`. They are installed
 from PyPI by pip or uv and are NOT redistributed inside this repository, so no
 license text is reproduced here. The great majority of declared dependencies are
-permissive (MIT / BSD / Apache-2.0 / HPND / ISC / PSF), with three exceptions:
+permissive (MIT / BSD / Apache-2.0 / HPND / ISC / PSF / OLDAP-2.8), with these exceptions:
 
-- **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle) and `tqdm`
-  (dual-licensed MPL-2.0 / MIT).
-- **LGPL-2.1-or-later**, in `zeroconf` (the mDNS / DNS-SD service-discovery
-  library behind `localm.local` network naming).
+- **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle), `hypothesis`
+  (the `dev` extra, tests only) and, transitively, `tqdm` (dual-licensed
+  MPL-2.0 / MIT).
+- **LGPL**, in `zeroconf` (LGPL-2.1-or-later; the mDNS / DNS-SD service-discovery
+  library behind `localm.local` network naming) and, under the optional `gpu`
+  and `hf` extras, `num2words` (LGPL) and `easydict` (LGPL-3.0).
 - **GPL-3.0-only**, in `PyQt6` and `PyQt6-WebEngine`, pulled in transitively by
   `pywebview[qt]` under the optional `desktop` extra on Linux only (see
   `pyproject.toml`'s `desktop` extra and `localm/appface.py`'s Linux
@@ -81,7 +90,7 @@ permissive (MIT / BSD / Apache-2.0 / HPND / ISC / PSF), with three exceptions:
   absent or fails to start), and not installed by either `setup.sh` or
   `setup.bat` by default.
 
-MPL-2.0 and LGPL-2.1-or-later are both weak copyleft: each library above is
+MPL-2.0 and the LGPL are both weak copyleft: each library above is
 imported unmodified as a separate package installed from PyPI, at arm's length,
 and imposes no obligation on localm beyond preserving the upstream license
 notices. GPL-3.0-only is strong copyleft and works differently: whether it is
@@ -101,7 +110,9 @@ should check AMD's ROCm distribution terms directly rather than this notice.
 ## Arm's-length tools (not bundled, linked, or redistributed)
 
 localm interoperates with some external programs by invoking them over HTTP or as
-separate subprocesses, for example ComfyUI (image / music / video generation).
-These independent programs the user installs are not bundled, statically or
+separate subprocesses, for example ComfyUI (GPL-3.0; image / music / video generation), the
+ComfyUI-GGUF node (Apache-2.0) and KoboldCpp (AGPL-3.0; native music).
+These independent programs, which the user installs or localm downloads
+unmodified from upstream on request, are not bundled, statically or
 dynamically linked, or redistributed by localm, so their licenses (including
 GPL / AGPL) do not extend to localm or its users.
