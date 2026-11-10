@@ -25,6 +25,7 @@ import localm.plugins.coder.agent as _agent
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
 from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
+from ..patch_overlay import PatchOverlay
 from ..tools import SAFE_RESTRICTED_TOOLS
 from ..audit import AuditLogT, SessionMode, register_coder_session_mode
 from .constants import expand_shell_disable
@@ -191,6 +192,7 @@ class Agent(
         # checks truthiness of its own option, not this flag).
         self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
+        self._patch_overlay = PatchOverlay(self.cwd)
         self.parent         = parent
         # Set when a tool result put untrusted content into this context; while
         # set (and taint_rearms_confirm), destructive, network and code-running
