@@ -1650,8 +1650,8 @@ requires-dist = [
     { name = "torchaudio", marker = "python_full_version != '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", specifier = "==2.11.0+rocm7.13.0" },
     { name = "torchvision", marker = "python_full_version == '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.26.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" },
     { name = "torchvision", marker = "python_full_version != '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", specifier = "==0.26.0+rocm7.13.0" },
-    { name = "transformers", extras = ["kernels"], marker = "extra == 'gpu'", specifier = "~=5.20.2" },
-    { name = "transformers", extras = ["kernels"], marker = "extra == 'hf'", specifier = "~=5.20.2" },
+    { name = "transformers", extras = ["kernels"], marker = "extra == 'gpu'", specifier = "~=5.22.2" },
+    { name = "transformers", extras = ["kernels"], marker = "extra == 'hf'", specifier = "~=5.22.2" },
     { name = "triton-windows", marker = "sys_platform == 'win32' and extra == 'grammar'", specifier = ">=3.7" },
     { name = "uv", specifier = ">=0.13.6" },
     { name = "uvicorn", specifier = ">=0.52.4" },
@@ -3567,7 +3567,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.20.2"
+version = "5.22.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -3580,9 +3580,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/4e/3cd6f08cc84ee612d40f3cdb1649475e7c997f2d5cbd95ade8780708af62/transformers-5.20.2.tar.gz", hash = "sha256:080871e061546d720be57f5846fce426f46b44d61574907cc7404c2cba49d180", size = 10225379, upload-time = "2026-10-19T17:46:03.092Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/54/b040ac523bad74f303d032505e3464cf4794f9d51defc8981ec66001936e/transformers-5.22.2.tar.gz", hash = "sha256:55f57e5cbd7c0b500b7a706daa0ecd76567b56ca139e6e02ef0bba0437e3a763", size = 10383941, upload-time = "2026-11-06T15:42:57.587Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/b6/724faefed06913dd3e42e0476fe2c42448675c42f687a12bf810aa098005/transformers-5.20.2-py3-none-any.whl", hash = "sha256:7ae75dbc1fb3922aff1b6c97b9e5479d6cf26fd86a8866bfb71324190479f807", size = 12844921, upload-time = "2026-10-19T17:45:59.293Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/bb/cc0b27a3000ddcf4903d3a26983c8b4c9a36050bbaf05675f353e8bcb08c/transformers-5.22.2-py3-none-any.whl", hash = "sha256:829c2820aff91730b8ec45a4b8ff4be07f586a140b68a9073998b36fa35297dc", size = 13053178, upload-time = "2026-11-06T15:42:54.257Z" },
 ]
 
 [package.optional-dependencies]
