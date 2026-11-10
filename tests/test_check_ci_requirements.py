@@ -42,6 +42,57 @@ def test_the_committed_sets_pin_what_the_readme_commands_name():
     assert mod.pins((mod.REQUIREMENTS / "mutmut.txt").read_text(encoding="utf-8"))["mutmut"]
     build = mod.pins((mod.REQUIREMENTS / "build.txt").read_text(encoding="utf-8"))
     assert all(build[name] for name in mod._BUILD_ROOTS)
+    editable = mod.pins((mod.REQUIREMENTS / "editable.txt").read_text(encoding="utf-8"))
+    assert all(editable[name] for name in mod._EDITABLE_ROOTS)
+
+
+def test_the_editable_set_builds_with_the_same_hatchling_as_the_release_build():
+    build = mod.pins((mod.REQUIREMENTS / "build.txt").read_text(encoding="utf-8"))
+    editable = mod.pins((mod.REQUIREMENTS / "editable.txt").read_text(encoding="utf-8"))
+    assert editable["hatchling"] == build["hatchling"]
+
+
+def test_regenerate_feeds_the_editable_compile_its_committed_pins_against_the_lock(
+        monkeypatch, tmp_path):
+    compiles = []
+
+    def fake_run(cmd, *, cwd, stdin=None):
+        if cmd[1:3] == ["pip", "compile"] and "editable.txt" in cmd:
+            compiles.append((cmd, stdin))
+        for name in mod.SETS:
+            (tmp_path / name).write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    mod.regenerate(tmp_path)
+    committed = mod.pins((mod.REQUIREMENTS / "editable.txt").read_text(encoding="utf-8"))
+    [(cmd, stdin)] = compiles
+    assert cmd[cmd.index("-c") + 1] == "editable-constraints.txt"
+    assert stdin == "".join(f"{n}=={committed[n]}\n" for n in mod._EDITABLE_ROOTS)
+
+
+_HASHED_WORKFLOWS = ("ci.yml", "docs.yml", "fuzz.yml", "pin-currency.yml")
+_EDITABLE_SET = "pip install --require-hashes --no-deps -r .github/requirements/editable.txt"
+
+
+def _run_blocks():
+    for name in _HASHED_WORKFLOWS:
+        doc = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+        for job_id, job in doc["jobs"].items():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "pip install" in run and "requirements.txt" in run:
+                    yield f"{name}:{job_id}:{step.get('name')}", run.splitlines()
+
+
+def test_every_project_install_builds_from_the_hashed_toolset_without_isolation():
+    blocks = list(_run_blocks())
+    assert len(blocks) >= 12
+    for where, lines in blocks:
+        pips = [ln.strip() for ln in lines if ln.strip().startswith("pip install")]
+        assert pips[0] == _EDITABLE_SET, where
+        for line in pips[1:]:
+            if "requirements.txt" in line or " -e ." in line:
+                assert "--no-build-isolation" in line, (where, line)
 
 
 def test_regenerate_feeds_the_torch_compile_both_committed_torch_pins(monkeypatch, tmp_path):

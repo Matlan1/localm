@@ -2168,7 +2168,7 @@
   "settings.field.media.nativeModel.label": "Natives Modell",
   "settings.field.media.nativeModel.help": "Registrierter Name oder Dateipfad: ein voller Checkpoint oder ein Diffusionsmodell (Encoder und VAE aus den nativen Feldern, sonst aus Ihren registrierten Modellen). Leer verwendet das empfohlene Modell, sobald es heruntergeladen ist.",
   "settings.field.media.nativeRuntime.label": "Native Laufzeit",
-  "settings.field.media.nativeRuntime.help": "Zu verwendender stable-diffusion.cpp-Build. auto nutzt den besten installierten Build und installiert den empfohlenen nur, wenn keiner installiert ist.",
+  "settings.field.media.nativeRuntime.help": "Zu verwendender stable-diffusion.cpp-Build. auto installiert den für diesen Rechner empfohlenen Build, behält einen installierten GPU-Build und nutzt den CPU-Build nur, wenn sich kein GPU-Build installieren oder laden lässt.",
   "settings.field.music.nativeRuntime.help": "Compute-Backend für native Musik. auto wählt das beste für diesen Rechner und fällt auf Vulkan, dann auf die CPU zurück.",
   "settings.field.media.nativeSteps.label": "Native Sampling-Schritte",
   "settings.field.media.nativeSteps.help": "Leer verwendet die empfohlenen Schritte des Modells (oder 20).",

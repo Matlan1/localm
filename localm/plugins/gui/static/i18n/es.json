@@ -2230,7 +2230,7 @@
   "settings.field.media.nativeLm.label": "Planificador nativo",
   "settings.field.media.nativeModel.help": "Nombre registrado o ruta de archivo: un checkpoint completo o un modelo de difusión (codificadores y VAE de los campos nativos o, si no, de tus modelos registrados). En blanco usa el modelo recomendado una vez descargado.",
   "settings.field.media.nativeModel.label": "Modelo nativo",
-  "settings.field.media.nativeRuntime.help": "Compilación de stable-diffusion.cpp que usar. auto usa la mejor compilación instalada e instala la recomendada solo cuando no hay ninguna.",
+  "settings.field.media.nativeRuntime.help": "Compilación de stable-diffusion.cpp que usar. auto instala la compilación recomendada para este equipo, conserva una compilación de GPU instalada y usa la de CPU solo cuando ninguna de GPU se puede instalar o cargar.",
   "settings.field.media.nativeRuntime.label": "Runtime nativo",
   "settings.field.media.nativeSampleMethod.help": "p. ej. euler, euler_a, dpm++2m, lcm. En blanco usa el predeterminado del modelo.",
   "settings.field.media.nativeSampleMethod.label": "Sampler nativo",
