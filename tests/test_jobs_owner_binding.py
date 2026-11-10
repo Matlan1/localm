@@ -65,7 +65,7 @@ def _shell_job(owner=None):
 
 class TestPerJobOwnerIsolation:
     def test_a_jobs_key_cannot_touch_another_keys_job(self, jobs_app):
-        a, b = _mk_keys(["jobs"], ["jobs"])     # two distinct jobs-scoped keys
+        a, b = _mk_keys(["jobs", "chat"], ["jobs", "chat"])     # two distinct jobs-scoped keys
         with TestClient(jobs_app) as c:
             jid = c.post("/api/jobs", headers=_h(a),
                          json={"name": "j", "prompt": "hi", "schedule": 120}).json()["id"]
@@ -84,7 +84,7 @@ class TestPerJobOwnerIsolation:
             assert got.status_code == 200 and "owner" not in got.json()
 
     def test_owner_admin_sees_every_job(self, jobs_app, monkeypatch):
-        (a,) = _mk_keys(["jobs"])
+        (a,) = _mk_keys(["jobs", "chat"])
         with TestClient(jobs_app) as c:
             jid = c.post("/api/jobs", headers=_h(a),
                          json={"name": "j", "prompt": "hi", "schedule": 120}).json()["id"]
@@ -99,7 +99,7 @@ class TestCrownJewelShellGate:
         """The HIGH chain via owner-binding: an owner's NEW shell-opt-in coder job is
         owner-bound, so another jobs key cannot see, edit, or run it (404)."""
         monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
-        (b,) = _mk_keys(["jobs"])
+        (b,) = _mk_keys(["jobs", "chat"])
         with TestClient(jobs_app) as c:
             jid = c.post("/api/jobs", headers=_h("ownersecret"),
                          json={"name": "shelljob", "task_kind": "coder", "prompt": "p",
@@ -112,7 +112,7 @@ class TestCrownJewelShellGate:
         """Defense in depth: an unowned (legacy) opt-in job (owner=None, so the owner
         gate passes) still cannot be RUN on demand by a plain jobs key - the run-time
         caller capability re-check returns 403, blocking the RCE. The owner can run it."""
-        (b,) = _mk_keys(["jobs"])
+        (b,) = _mk_keys(["jobs", "chat"])
         _shell_job(owner=None)
         with TestClient(jobs_app) as c:
             jid = c.get("/api/jobs", headers=_h(b)).json()["jobs"][0]["id"]
@@ -121,7 +121,7 @@ class TestCrownJewelShellGate:
             assert c.post(f"/api/jobs/{jid}/run", headers=_h("ownersecret")).status_code == 200
 
     def test_plain_jobs_key_cannot_create_an_opt_in_job(self, jobs_app):
-        (b,) = _mk_keys(["jobs"])
+        (b,) = _mk_keys(["jobs", "chat"])
         with TestClient(jobs_app) as c:
             r = c.post("/api/jobs", headers=_h(b),
                        json={"name": "x", "task_kind": "coder", "prompt": "p",
@@ -133,7 +133,7 @@ class TestCrownJewelShellGate:
         is set. A plain jobs key must NOT be able to edit (poison the prompt of) an
         unowned/legacy opt-in job - otherwise the autonomous scheduler would later
         run the attacker's prompt with shell, bypassing the on-demand run_now gate."""
-        (b,) = _mk_keys(["jobs"])
+        (b,) = _mk_keys(["jobs", "chat"])
         _shell_job(owner=None)
         with TestClient(jobs_app) as c:
             jid = c.get("/api/jobs", headers=_h(b)).json()["jobs"][0]["id"]
