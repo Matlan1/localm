@@ -220,7 +220,7 @@ def list_hold_markers(home: Path) -> list[dict]:
                 living = pid_alive(int(entry.get("pid", -1) or -1))
             except (TypeError, ValueError):
                 living = False
-        if not living:
+        if entry is None or not living:
             unregister_instance(f)
             continue
         entry["alive"] = True
