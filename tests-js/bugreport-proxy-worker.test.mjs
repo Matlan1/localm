@@ -12,10 +12,13 @@ import { dirname, join } from "node:path";
 const WORKER = join(dirname(fileURLToPath(import.meta.url)),
   "..", "tools", "bugreport-proxy", "worker.js");
 
-// tools/bugreport-proxy has no package.json, so the source is loaded through a
-// data: URL to have it evaluated as ESM rather than CommonJS.
+// tools/bugreport-proxy has no package.json, so the source and the module it
+// imports are loaded through data: URLs to have them evaluated as ESM.
 async function loadWorker() {
-  const src = readFileSync(WORKER, "utf8");
+  const order = readFileSync(join(dirname(WORKER), "versionorder.js"), "utf8");
+  const orderUrl = "data:text/javascript;base64," + Buffer.from(order).toString("base64");
+  const src = readFileSync(WORKER, "utf8").replace('from "./versionorder.js"', `from "${orderUrl}"`);
+  assert.ok(src.includes(orderUrl), "worker.js no longer imports ./versionorder.js");
   const url = "data:text/javascript;base64," + Buffer.from(src).toString("base64");
   return (await import(url)).default;
 }
