@@ -58,8 +58,17 @@ localm config net_mode allow   # no confirmation
 | `allow` | runs without asking | works |
 
 The `LOCALM_NET_MODE` env var overrides the config (like `LOCALM_MODE` for
-privacy). In the coder, sessions started with auto-approve also auto-approve
-network requests in `ask` mode.
+privacy). In the coder, `ask` asks before each network tool call (`fetch_url`,
+`web_search`, the browser tools, `git_push`) even with auto-approve on. A run
+nobody can answer (`localm coder "TASK"`, the MCP `run_coder_task` tool, a
+scheduled job) denies them, unless the `coder_unattended_network` setting is
+`allow` or the run was started with `localm coder --allow-network`; then they
+run without asking. `off` refuses them either way.
+
+```bash
+localm config coder_unattended_network allow   # unattended coder runs may use the network
+localm config coder_unattended_network deny    # default - unattended runs deny network tools
+```
 
 `ask`'s approval prompt is enforced by the front end (the GUI modal, the
 coder's terminal y/N), not the server. A direct API or MCP caller

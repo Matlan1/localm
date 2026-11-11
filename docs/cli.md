@@ -920,6 +920,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
 - `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
 - `--output-format jsonl` writes each agent event (`tool_call`, `tool_result`, `token`, `turn`, `info`, ...) to stdout as one JSON object per line as it happens, then a closing `{"type": "final", "success", "response", "turns", "total_tokens", "denied"}` line; everything else the CLI prints goes to stderr, and so it does for `--output-format json`, whose stdout is exactly the one result document. `jsonl` needs a TASK.
@@ -1011,8 +1012,10 @@ Six things the table cannot express, and each of them matters:
 
 - **`fetch_url`, `web_search`, and `browser_navigate`/`browser_click`/`browser_fill`
   follow the network policy, not this column.** They confirm when `net_mode` is
-  `ask` (the default) and run without asking when it is `allow`. `git_push` is
-  refused when `net_mode` is `off`, and it refuses a remote or branch that begins
+  `ask` (the default), auto-approve included, and run without asking when it is
+  `allow`. An unattended run, which cannot confirm, denies them under `ask` unless
+  `--allow-network` or the `coder_unattended_network` setting allows them (`git_push`
+  too). `git_push` is refused when `net_mode` is `off`, and it refuses a remote or branch that begins
   with `-`. See [network.md](network.md).
 - **Tools that run code ask even when writes do not.** `run_shell`,
   `run_shell_background`, `run_tests` and an untrusted MCP server's tools run code

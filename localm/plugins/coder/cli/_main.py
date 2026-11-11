@@ -132,6 +132,10 @@ def _complete_model(ctx, param, incomplete):
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
               help="Auto-approve all destructive tool calls.")
+@click.option("--allow-network", "allow_network", is_flag=True,
+              help="For this unattended run only: let fetch_url, web_search, the "
+                   "browser tools and git_push run without asking while "
+                   "net_mode is ask. net_mode off still refuses them.")
 @click.option("--interactive-confirm", "interactive_confirm", is_flag=True,
               help="Auto-approve file writes but still prompt before shell commands.")
 @click.option("--dry-run",          is_flag=True,
@@ -241,7 +245,7 @@ def _complete_model(ctx, param, incomplete):
 def main(
     task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
-    verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
+    verbose, yes, allow_network, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, system_instructions,
     show_episodes, forget_episodes, forget_episode_id, show_archive,
     restore_episode_id, consolidate_episodes,
@@ -386,7 +390,9 @@ def main(
             "code and the web tools egress data. Tools that run code now require "
             "--yes (else they are denied this run), and so does any file write, "
             "push or network call after the run has read untrusted content; "
-            "network tools still obey net_mode (off/ask/allow). Pass --yes to "
+            "network tools obey net_mode (off/ask/allow), and under ask they "
+            "are denied unless --allow-network or the coder_unattended_network "
+            "setting allows them. Pass --yes to "
             "auto-approve, or run interactively to confirm each call.",
             to_stderr=True)
 
@@ -413,6 +419,7 @@ def main(
         browser_enabled=_browser_enabled(),
         max_tokens_explicit=max_tokens_explicit,
         on_event=events,
+        allow_network=allow_network,
     )
     if events is not None:
         # The close-time reflection runs synchronously, so a one-shot process

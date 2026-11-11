@@ -2009,6 +2009,8 @@ export const I18N_EN = {
   "settings.field.coderEpisodicMemory.help": "Recall lessons from past sessions on a project and distil each finished session into a new one (one extra model call if it changed files or failed). Applies to new sessions.",
   "settings.field.coderUntrustedProvenance.label": "Tag untrusted external content",
   "settings.field.coderUntrustedProvenance.help": "Marks coder tool results from the web, web search and external MCP servers as untrusted data, so a fetched page cannot inject commands. Leave on unless you have a reason. Applies to new sessions.",
+  "settings.field.coderUnattendedNetwork.label": "Network tools in unattended coder runs",
+  "settings.field.coderUnattendedNetwork.help": "With Network access on ask: may coder runs nobody watches (a task, MCP run_coder_task, a scheduled job) use the web, browser and git_push tools without asking? Off still refuses them.",
   "settings.field.coderReview.label": "Review changes before finishing",
   "settings.field.coderReview.help": "Before the coder declares a task done, a reviewer model reads the diff and feeds blocking issues back for one more fix pass. Adds a model round-trip per task that changed files. Off by default.",
   "settings.field.coderReviewer.label": "Reviewer model target",

@@ -1943,6 +1943,8 @@
   "settings.field.coderReviewerModel.label": "Reviewer-Modellname",
   "settings.field.coderToolGrammar.help": "Sobald das Modell einen <tool_call> beginnt, wird gültiges Tool-Call-JSON erzwungen (nur lokale grammatikfähige Backends). Antwortet das Modell weiter ohne Aufruf, erlaubt ein weiterer Versuch nur Denken und einen Aufruf.",
   "settings.field.coderToolGrammar.label": "Coder-Tool-Aufrufe grammatikbeschränken",
+  "settings.field.coderUnattendedNetwork.help": "Bei Netzwerkzugriff ask: Dürfen unbeobachtete Coder-Läufe (Aufgabe, MCP run_coder_task, geplanter Job) Web-, Browser- und git_push-Tools ohne Nachfrage nutzen? Bei off weiterhin abgelehnt.",
+  "settings.field.coderUnattendedNetwork.label": "Netzwerk-Tools in unbeaufsichtigten Coder-Läufen",
   "settings.field.coderUntrustedProvenance.help": "Markiert Coder-Tool-Ergebnisse aus dem Web, der Websuche und externen MCP-Servern als nicht vertrauenswürdige Daten, sodass eine abgerufene Seite keine Befehle unterschieben kann. Nur mit Grund ausschalten. Gilt für neue Sitzungen.",
   "settings.field.coderUntrustedProvenance.label": "Nicht vertrauenswürdige externe Inhalte kennzeichnen",
   "settings.field.comfyApiUrl.help": "Wo ComfyUI lauscht. Leer verwendet FLUX_API_URL, sonst http://127.0.0.1:8188. Nicht verwendet, solange Zu verwendendes ComfyUI auf own steht und localms eigenes ComfyUI installiert ist.",
