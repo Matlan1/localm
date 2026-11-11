@@ -432,11 +432,11 @@ def _atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> N
     credential files.
 
     *retrying* is passed straight through - see ``storekit.atomic_write_private``.
-    Only the keystore writer (``_save_keystore``) passes True: it is the one
-    caller in this module whose writers are all serialized by a cross-process
-    lock across their whole read-modify-write (see ``create_key``/
-    ``revoke_key``/``_mark_record_alg``/``_touch_last_used``), so the bounded
-    retry there only ever rides out a concurrent reader, never another writer.
+    Two callers in this module pass True, each while holding the cross-process
+    ``store_lock`` on the file it writes: the owner key writer
+    (``set_api_key``, auth.key) and the keystore writer (``_save_keystore``,
+    auth.json, under ``create_key``/``revoke_key``/``_mark_record_alg``/
+    ``_touch_last_used``). The owner-KDF writer passes False.
 
     Kept as a name here because it is referenced throughout this module. The bool
     the shared writer returns is dropped: no caller in this module logs a
