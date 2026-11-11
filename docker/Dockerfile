@@ -47,7 +47,7 @@ RUN curl -fsSL -o /tmp/uv.tar.gz \
  && echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c - \
  && tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 uv-x86_64-unknown-linux-gnu/uv \
  && rm /tmp/uv.tar.gz \
- && mkdir -p /usr/share/doc/uv \
+ && mkdir -p -m 0755 /usr/share/doc/uv /usr/share/doc/localm \
  && curl -fsSL -o /usr/share/doc/uv/LICENSE-MIT \
       "https://raw.githubusercontent.com/astral-sh/uv/${UV_VERSION}/LICENSE-MIT" \
  && curl -fsSL -o /usr/share/doc/uv/LICENSE-APACHE \

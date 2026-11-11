@@ -432,6 +432,11 @@ class TestImageLicenseTexts:
         assert re.search(r"^COPY [^\n]*\bLICENSE THIRD-PARTY-NOTICES\.md /usr/share/doc/localm/$",
                          self.dockerfile, re.M)
 
+    def test_the_license_directory_exists_before_the_copy(self):
+        made = re.search(r"mkdir -p -m 0755 [^\n]*/usr/share/doc/localm\b", self.dockerfile)
+        copy = re.search(r"^COPY [^\n]*/usr/share/doc/localm/$", self.dockerfile, re.M)
+        assert made and copy and made.start() < copy.start()
+
     def test_the_build_context_lets_both_files_in(self):
         assert "!LICENSE" in self.ignore
         assert "!THIRD-PARTY-NOTICES.md" in self.ignore
