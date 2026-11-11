@@ -709,11 +709,199 @@ def test_tls_on_the_plain_port_is_noticed_once_with_the_port_then_counted(monkey
     assert notices[0].startswith(
         f"A client tried to use HTTPS on the plain-HTTP port {port}. ")
     assert f"Open http://127.0.0.1:{port} explicitly" in notices[0]
+    assert notices[0].endswith(
+        "(Further occurrences this run are logged at debug level.)")
+    assert debug[0] == ("%s", notices[0])
     again = [args for args in debug if args[0].startswith("TLS handshake")]
     assert again == [
         ("TLS handshake on the plain-HTTP port %d again (count=%d)", port, 2),
         ("TLS handshake on the plain-HTTP port %d again (count=%d)", port, 3),
     ]
+
+
+# --------------------------------------------------------------------------- #
+#  _redirect_to_https / _handle_conn / stopping: driven directly
+# --------------------------------------------------------------------------- #
+
+class _RecordingWriter:
+    """A stand-in for asyncio.StreamWriter that keeps what is written."""
+
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data):
+        self.data += data
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def can_write_eof(self):
+        return False
+
+
+def _reader_with(data: bytes, eof: bool = True) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    reader.feed_data(data)
+    if eof:
+        reader.feed_eof()
+    return reader
+
+
+def _redirect(request: bytes, public_port: int = 8443) -> bytes:
+    """The reply _redirect_to_https writes for *request* on *public_port*."""
+    async def go():
+        writer = _RecordingWriter()
+        await portmux._redirect_to_https(request[:1], _reader_with(request[1:]),
+                                         writer, public_port)
+        return bytes(writer.data)
+    return asyncio.run(go())
+
+
+def _parse(reply: bytes):
+    head, body = reply.split(b"\r\n\r\n", 1)
+    status, *lines = head.decode("latin-1").split("\r\n")
+    headers = dict(line.split(": ", 1) for line in lines)
+    return status, headers, body
+
+
+def test_the_redirect_is_a_308_with_a_page_that_links_the_https_location():
+    status, headers, body = _parse(
+        _redirect(b"GET /page HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+    location = "https://example.test:8443/page"
+    assert status == "HTTP/1.1 308 Permanent Redirect"
+    assert headers == {"Location": location,
+                       "Content-Type": "text/html; charset=utf-8",
+                       "Content-Length": str(len(body)),
+                       "Connection": "close"}
+    assert body.startswith(
+        b'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        b'<meta http-equiv="refresh" content="0;url=' + location.encode() + b'">')
+    assert f'href="{location}">{location}</a>'.encode() in body
+
+
+@pytest.mark.parametrize("host_line, authority", [
+    ("Host: example.test:9000", "example.test:9000"),
+    ("Host:example.test", "example.test:8443"),
+    ("Host: [::1]", "[::1]:8443"),
+    ("Host: [::1]:9000", "[::1]:9000"),
+])
+def test_the_redirect_keeps_the_hosts_port_and_adds_the_listening_port_when_missing(
+        host_line, authority):
+    request = f"GET /p HTTP/1.1\r\n{host_line}\r\n\r\n".encode()
+    _status, headers, _body = _parse(_redirect(request))
+    assert headers["Location"] == f"https://{authority}/p"
+
+
+@pytest.mark.parametrize("request_line, path", [
+    ("GET /p", "/p"),
+    ("GET  /p HTTP/1.1", "/"),
+    ("GET", "/"),
+])
+def test_the_redirect_keeps_only_a_path_in_the_second_space_separated_field(
+        request_line, path):
+    request = f"{request_line}\r\nHost: example.test\r\n\r\n".encode()
+    _status, headers, _body = _parse(_redirect(request))
+    assert headers["Location"] == f"https://example.test:8443{path}"
+
+
+def test_the_redirect_page_escapes_quotes_in_the_location():
+    _status, headers, body = _parse(
+        _redirect(b"GET /a\"b'c HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+    assert headers["Location"] == "https://example.test:8443/a\"b'c"
+    assert b'href="https://example.test:8443/a&quot;b&#x27;c"' in body
+
+
+@pytest.mark.parametrize("raw", [
+    b"GET / HTTP/1.0\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: not a host\r\n\r\n",
+])
+def test_a_request_without_a_usable_host_gets_a_400_explaining_https(raw):
+    status, headers, body = _parse(_redirect(raw))
+    assert status == "HTTP/1.1 400 Bad Request"
+    assert "Location" not in headers
+    assert headers["Content-Length"] == str(len(body))
+    assert b"Reopen this address with <b>https://</b> in front." in body
+
+
+def test_a_client_that_stops_sending_headers_is_answered_after_five_seconds(monkeypatch):
+    timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def wait_for(aw, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(aw, timeout=0.05)
+    monkeypatch.setattr(portmux, "asyncio", _ModuleView(asyncio, wait_for=wait_for))
+
+    async def go():
+        writer = _RecordingWriter()
+        reader = _reader_with(b"ET / HTTP/1.1\r\nHost: example.test\r\n", eof=False)
+        await real_wait_for(
+            portmux._redirect_to_https(b"G", reader, writer, 8443), timeout=10)
+        return bytes(writer.data)
+    status, _headers, _body = _parse(asyncio.run(go()))
+    assert timeouts == [5]
+    assert status == "HTTP/1.1 400 Bad Request"
+
+
+def test_a_single_plain_byte_on_the_tls_port_still_gets_an_answer():
+    async def go():
+        writer = _RecordingWriter()
+        await portmux._handle_conn(_reader_with(b"G"), writer, 1, 8443)
+        return writer
+    writer = asyncio.run(go())
+    assert bytes(writer.data).startswith(b"HTTP/1.1 400 Bad Request\r\n")
+    assert writer.closed
+
+
+def test_the_redirect_works_in_python_development_mode():
+    import os
+    import subprocess
+    from pathlib import Path
+    code = (
+        "import asyncio\n"
+        "from localm import portmux\n"
+        "class W:\n"
+        "    data = b''\n"
+        "    def write(self, d): self.data += d\n"
+        "    async def drain(self): pass\n"
+        "async def go():\n"
+        "    r = asyncio.StreamReader()\n"
+        "    r.feed_data(b'ET /\\xff HTTP/1.1\\r\\nHost: example.test\\r\\n\\r\\n')\n"
+        "    r.feed_eof()\n"
+        "    w = W()\n"
+        "    await portmux._redirect_to_https(b'G', r, w, 8443)\n"
+        "    print(w.data.split(b'\\r\\n')[0].decode())\n"
+        "asyncio.run(go())\n"
+    )
+    env = dict(os.environ)
+    root = str(Path(portmux.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (root, env.get("PYTHONPATH")) if p)
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    done = subprocess.run([sys.executable, "-X", "dev", "-c", code], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=120, **kwargs)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "HTTP/1.1 308 Permanent Redirect", done.stdout
+
+
+def test_stopping_reads_a_server_without_a_should_exit_flag_as_not_stopping(monkeypatch):
+    monkeypatch.setattr(portmux, "_servers", weakref.WeakSet())
+
+    class _Bare:
+        pass
+
+    class _Exiting:
+        should_exit = True
+    bare = portmux._register_server(_Bare())
+    assert portmux.stopping() is False
+    exiting = portmux._register_server(_Exiting())
+    assert portmux.stopping() is True
+    assert bare in portmux._servers and exiting in portmux._servers
 
 
 # --------------------------------------------------------------------------- #
