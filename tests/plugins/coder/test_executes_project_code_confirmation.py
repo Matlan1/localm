@@ -385,6 +385,22 @@ def test_git_push_still_pushes_an_ordinary_remote(push_repo):
     assert res.ok, res.output
 
 
+def test_git_push_passes_remote_and_branch_after_the_separator(push_repo, monkeypatch):
+    from localm.plugins.coder.tools import git as git_tools
+
+    real_git = git_tools._git
+    seen: list[tuple[str, ...]] = []
+
+    def spy(cwd, *args, **kw):
+        seen.append(args)
+        return real_git(cwd, *args, **kw)
+
+    monkeypatch.setattr(git_tools, "_git", spy)
+    res = tool_git_push(push_repo, remote="origin", branch="HEAD")
+    assert res.ok, res.output
+    assert seen == [("push", "--", "origin", "HEAD")]
+
+
 def test_git_push_is_governed_by_net_mode(tmp_path, monkeypatch):
     assert "git_push" in _NETWORK_TOOLS
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
@@ -422,9 +438,18 @@ def test_child_kwargs_carry_patch_mode():
 
 
 @pytest.mark.parametrize("tool", ["spawn_agent", "spawn_agent_background", "dispatch_parallel"])
-def test_the_spawn_family_is_refused_in_patch_mode(tmp_path, tool):
+def test_the_spawn_family_is_refused_in_patch_mode(tmp_path, tool, monkeypatch):
+    from localm.plugins.coder import roles
     from localm.plugins.coder.tools.agents import tool_spawn_agent, tool_spawn_agent_background
     from localm.plugins.coder.tools.parallel import tool_dispatch_parallel
+
+    reached_child_setup: list[object] = []
+
+    def _child_setup(role):
+        reached_child_setup.append(role)
+        raise ValueError("child setup reached")
+
+    monkeypatch.setattr(roles, "resolve_role", _child_setup)
 
     class _P:
         patch_mode = True
@@ -439,3 +464,4 @@ def test_the_spawn_family_is_refused_in_patch_mode(tmp_path, tool):
         res = tool_dispatch_parallel(tmp_path, tasks=[{"task": "t"}], _parent_agent=_P())
     assert not res.ok
     assert "patch mode" in res.output
+    assert reached_child_setup == []

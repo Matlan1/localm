@@ -125,17 +125,40 @@ def test_system_line_ending_config_still_applies(tmp_path):
     assert hardened.stdout == ""
 
 
-def test_bare_layout_at_project_root_runs_nothing(tmp_path):
+def _bare_project_root(tmp_path: Path) -> Path:
+    src = tmp_path / "src"
+    src.mkdir()
+    _run(src, "init", "-q")
+    (src / "a.txt").write_text("one\n", encoding="utf-8")
+    _run(src, "add", "-A")
+    _run(src, "commit", "-q", "-m", "first")
+    (src / "a.txt").write_text("two\n", encoding="utf-8")
+    _run(src, "commit", "-q", "-am", "second")
     root = tmp_path / "proj"
-    for sub in ("objects", "refs"):
-        (root / sub).mkdir(parents=True)
-    (root / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
-    (root / "config").write_text(
-        '[core]\n\tbare = false\n\tworktree = .\n\tfsmonitor = "touch MARK; echo"\n',
-        encoding="utf-8")
-    git_tools.tool_git_status(root)
-    git_tools.tool_git_diff(root)
-    git_tools.tool_git_log(root)
-    git_tools._git(root, "log", "-p")
-    git_tools._git(root, "diff")
+    _run(tmp_path, "clone", "-q", "--bare", str(src), str(root))
+    with open(root / "config", "a", encoding="utf-8") as fh:
+        fh.write(_CONFIGS["textconv"])
+    (root / "info").mkdir(exist_ok=True)
+    (root / "info" / "attributes").write_text("*.txt diff=evil\n", encoding="utf-8")
+    return root
+
+
+def test_unhardened_git_would_have_used_the_bare_layout(tmp_path):
+    root = _bare_project_root(tmp_path)
+    out = subprocess.run(["git", "log", "-p"], cwd=root, capture_output=True, text=True,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert out.returncode == 0 and "second" in out.stdout
+    assert (root / "MARK").exists()
+
+
+def test_bare_layout_at_project_root_runs_nothing(tmp_path):
+    root = _bare_project_root(tmp_path)
+    for result in (git_tools.tool_git_status(root), git_tools.tool_git_diff(root),
+                   git_tools.tool_git_log(root)):
+        assert result.ok is False
+        assert "second" not in result.output
+    for args in (("log", "-p"), ("show",), ("cat-file", "-p", "HEAD")):
+        out, ok = git_tools._git(root, *args)
+        assert ok is False, (args, out)
+        assert "bare repository" in out, (args, out)
     assert not (root / "MARK").exists()
