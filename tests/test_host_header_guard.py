@@ -139,6 +139,7 @@ def test_a_cors_preflight_from_a_rebound_page_gets_no_cors_grant(home):
         headers={"host": host, "origin": f"http://{host}",
                  "access-control-request-method": "POST"})
     assert r.status_code == 400
+    assert r.headers["content-type"] == "application/json", r.text
     body = r.json()
     assert body == {"detail": security.host_refused_detail("evil.example"),
                     "error": security.host_refused_detail("evil.example")}
