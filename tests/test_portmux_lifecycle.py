@@ -825,6 +825,16 @@ def test_a_request_without_a_usable_host_gets_a_400_explaining_https(raw):
     assert "Location" not in headers
     assert headers["Content-Length"] == str(len(body))
     assert b"Reopen this address with <b>https://</b> in front." in body
+    assert body.startswith(
+        b'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        b"<title>localm - secure connection</title></head>")
+
+
+def test_headers_cut_short_by_the_client_still_redirect_on_what_arrived():
+    status, headers, _ = _parse(
+        _redirect(b"GET /p HTTP/1.1\r\nHost: example.test\r\n"))
+    assert status == "HTTP/1.1 308 Permanent Redirect"
+    assert headers["Location"] == "https://example.test:8443/p"
 
 
 def test_a_client_that_stops_sending_headers_is_answered_after_five_seconds(monkeypatch):
