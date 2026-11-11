@@ -84,9 +84,10 @@ def _prerelease_suffix(v: str):
     it: a non-numeric remainder in an EARLIER segment is dropped from the release
     tuple by ``_parse`` and is not picked up here as a suffix either.
 
-    Not a full PEP 440/SemVer implementation (no epoch, build metadata, dev/post
+    Not a full PEP 440/SemVer implementation (no epoch, build metadata or post
     releases) - it covers this project's scheme, ``MAJOR.MINOR.PATCH`` with an
-    optional ``-TAG[N]`` suffix. ``packaging`` is only pulled in by the optional
+    optional ``-TAG[N]`` suffix. The tag is returned lowercased and unaliased
+    (``"alpha"`` stays ``"alpha"``); :func:`_prerelease_key` orders it. ``packaging`` is only pulled in by the optional
     GPU/dev extras, so it is not available to a core-install module."""
     parts = normalize(v).split(".")
     if not parts:
@@ -116,6 +117,21 @@ def _prerelease_suffix(v: str):
         else:
             break
     return (tag.lower(), int(tail_num) if tail_num else 0)
+
+
+# Prerelease kinds in PEP 440 order: dev < a (alpha) < b (beta) < rc.
+_PRERELEASE_RANK = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2, "rc": 3}
+_PRERELEASE_CANONICAL = {"alpha": "a", "beta": "b"}
+
+
+def _prerelease_key(suffix: tuple) -> tuple:
+    """Sort key for a ``(tag, number)`` pair from :func:`_prerelease_suffix`:
+    ``(rank, canonical tag, number)``. The rank follows PEP 440 (dev 0, a/alpha
+    1, b/beta 2, rc 3), ``alpha``/``beta`` share the key of ``a``/``b``, and the
+    number compares as an integer (``dev10`` above ``dev9``). A tag of any other
+    kind ranks -1, below ``dev``, and is ordered among its own kind by name."""
+    tag, num = suffix
+    return (_PRERELEASE_RANK.get(tag, -1), _PRERELEASE_CANONICAL.get(tag, tag), num)
 
 
 def _leading_digit(v: str) -> bool:
@@ -162,9 +178,13 @@ def is_newer(candidate: str, current: str) -> bool:
     release always outranks any prerelease of the SAME numeric version (so
     ``"0.1.4"`` is newer than ``"0.1.4-rc1"``, and updating FROM an rc TO the
     matching final release is offered), and between two prereleases of the
-    same numeric version, a higher (tag, number) wins (so ``"0.1.4-rc2"`` is
-    newer than ``"0.1.4-rc1"``). An exact tie (identical suffix, or both bare)
-    is NOT newer, matching a plain re-offer of the same build.
+    same numeric version, the higher :func:`_prerelease_key` wins: kinds in
+    PEP 440 order dev < a = alpha < b = beta < rc, case-insensitive, numbers
+    compared as integers (so ``"0.1.4-rc2"`` is newer than ``"0.1.4-rc1"``,
+    ``"0.1.4-Dev10"`` newer than ``"0.1.4-dev9"`` and ``"0.1.4a1"`` newer than
+    ``"0.1.4.dev3"``). An exact tie (the same key, such as ``a1`` and
+    ``alpha1``, or both bare) is NOT newer, matching a plain re-offer of the
+    same build.
 
     This function GATES anti-rollback (see ``updater._refuse_downgrade``) as
     well as whether an update is OFFERED, so it must never become MORE
@@ -190,10 +210,10 @@ def is_newer(candidate: str, current: str) -> bool:
         return ct > ut
     cand_pre = _prerelease_suffix(cand)
     cur_pre = _prerelease_suffix(cur)
-    if cand_pre == cur_pre:
+    if cand_pre is None and cur_pre is None:
         return False
     if cand_pre is None:
         return True     # candidate is the final release of a prerelease current is on
     if cur_pre is None:
         return False    # candidate is a prerelease; current is already the final release
-    return cand_pre > cur_pre
+    return _prerelease_key(cand_pre) > _prerelease_key(cur_pre)

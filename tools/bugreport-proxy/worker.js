@@ -16,6 +16,7 @@
 // routes and is MANDATORY for the update routes (they serve release builds).
 //
 // Deploy + secrets: see README.md.
+import { clientOlderThan, isPrereleaseTag, tagAtMost } from "./versionorder.js";
 
 export default {
   async fetch(request, env) {
@@ -427,7 +428,8 @@ async function oneAppRelease(request, env, url) {
   if (gh.status === 404) return json({ ok: true, found: false, version: null });
   if (!gh.ok) return json({ error: "release lookup failed", status: 502 }, 502);
   const rel = await gh.json();
-  if (!rel || rel.draft === true || (!wantsPrerelease && rel.prerelease === true)
+  if (!rel || rel.draft === true
+      || (!wantsPrerelease && (rel.prerelease === true || isPrereleaseTag(rel.tag_name)))
       || !APP_TAG_RE.test(String(rel.tag_name || ""))) {
     return json({ ok: true, found: false, version: null });
   }
@@ -460,39 +462,6 @@ const LEGACY_CLIENT_CEILING = "v0.3.2";
 // work; later releases need not. The release tooling checks the deployed value.
 const OLD_CLIENT_CEILING = "v0.3.3";
 
-// A prerelease suffix: rc, a, b, alpha or beta, then a number with no separator
-// (rc1, b2, alpha3); a dotted number (rc.1) is not one.
-const PRERELEASE_SUFFIX_RE = /^(rc|a|b|alpha|beta)\d+$/i;
-
-// [major, minor, patch, final (1) or prerelease (0), prerelease suffix] for an app
-// tag, or null when the tag does not start with vX.Y.Z or its suffix is neither
-// empty nor a prerelease suffix (v0.3.2.1, v0.3.2-hotfix, v0.3.2+b, v0.3.2a,
-// v0.3.2-rc.1).
-function tagKey(tag) {
-  const m = /^v(\d+)\.(\d+)\.(\d+)(.*)$/.exec(String(tag || ""));
-  if (!m) return null;
-  const suffix = m[4].replace(/^[-.]/, "");
-  if (suffix && !PRERELEASE_SUFFIX_RE.test(suffix)) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3]), suffix ? 0 : 1, suffix.toLowerCase()];
-}
-
-// True when app tag *a* orders at or below app tag *b*.
-function tagAtMost(a, b) {
-  const ka = tagKey(a), kb = tagKey(b);
-  if (!ka || !kb) return false;
-  for (let i = 0; i < 4; i++) {
-    if (ka[i] !== kb[i]) return ka[i] < kb[i];
-  }
-  return ka[4] <= kb[4];
-}
-
-// True when *client*, a version with or without the leading "v", orders below app tag
-// *tag*. A value that is not a version is not older.
-function clientOlderThan(client, tag) {
-  const c = "v" + String(client).replace(/^v/, "");
-  return tagAtMost(c, tag) && !tagAtMost(tag, c);
-}
-
 // The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
 // including prereleases. Returns the release object, null (no qualifying
 // release - the /update route reports this the same as a 404), or undefined
@@ -522,7 +491,7 @@ async function latestAppRelease(env, includePrerelease, maxTag = null) {
     if (byTag.ok) {
       const r = await byTag.json();
       if (r && !Array.isArray(r) && r.tag_name === maxTag && r.draft !== true
-          && (includePrerelease || r.prerelease !== true)) return r;
+          && (includePrerelease || (r.prerelease !== true && !isPrereleaseTag(r.tag_name)))) return r;
     } else if (byTag.status !== 404) {
       return undefined;
     }
@@ -555,7 +524,7 @@ async function appReleases(env, includePrerelease, pages = 1, maxTag = null) {
   return all
     .filter((r) => !seen.has(r.id ?? r.tag_name) && seen.add(r.id ?? r.tag_name))
     .filter((r) => r.draft !== true)
-    .filter((r) => includePrerelease || r.prerelease !== true)
+    .filter((r) => includePrerelease || (r.prerelease !== true && !isPrereleaseTag(r.tag_name)))
     .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))
     .filter((r) => maxTag === null || tagAtMost(r.tag_name, maxTag))
     .map((r, i) => ({ r, i, t: when(r) }))

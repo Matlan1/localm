@@ -6,6 +6,8 @@ so the running version MUST come from the VERSION file at runtime, not metadata.
 import sys
 import types
 
+import pytest
+
 from localm import _version
 
 
@@ -251,6 +253,54 @@ def test_prerelease_suffix_shipped_tag_shape():
     assert _version._prerelease_suffix("0.1.5") is None
 
 
+_PEP440_ORDER = ["0.3.3", "0.3.4-dev1", "0.3.4-dev2", "0.3.4-dev9", "0.3.4-dev10",
+                 "0.3.4-alpha1", "0.3.4a2", "0.3.4-beta1", "0.3.4b2", "0.3.4-rc1",
+                 "0.3.4rc2", "0.3.4"]
+
+
+@pytest.mark.parametrize("i", range(len(_PEP440_ORDER) - 1))
+def test_is_newer_orders_prerelease_kinds_by_pep440_rank(i):
+    lo, hi = _PEP440_ORDER[i], _PEP440_ORDER[i + 1]
+    assert _version.is_newer(hi, lo) is True, (hi, lo)
+    assert _version.is_newer(lo, hi) is False, (lo, hi)
+
+
+def test_is_newer_orders_every_kind_against_every_other_kind():
+    ranked = ["0.3.4-dev5", "0.3.4a1", "0.3.4b1", "0.3.4rc1", "0.3.4"]
+    for i, lo in enumerate(ranked):
+        for hi in ranked[i + 1:]:
+            assert _version.is_newer(hi, lo) is True, (hi, lo)
+            assert _version.is_newer(lo, hi) is False, (lo, hi)
+
+
+def test_is_newer_treats_alpha_and_beta_as_a_and_b():
+    for short, long in (("0.3.4a1", "0.3.4alpha1"), ("0.3.4b1", "0.3.4beta1"),
+                        ("0.3.4-a3", "0.3.4-ALPHA3")):
+        assert _version.is_newer(short, long) is False, (short, long)
+        assert _version.is_newer(long, short) is False, (long, short)
+
+
+def test_is_newer_prerelease_kind_is_case_insensitive():
+    assert _version.is_newer("0.3.4-Dev10", "0.3.4-Dev9") is True
+    assert _version.is_newer("0.3.4-Dev9", "0.3.4-dev10") is False
+    assert _version.is_newer("0.3.4-DEV1", "0.3.4-dev1") is False
+    assert _version.is_newer("0.3.4-dev1", "0.3.4-DEV1") is False
+    assert _version.is_newer("0.3.4RC1", "0.3.4-Beta2") is True
+    assert _version.is_newer("v0.3.4-Dev1", "0.3.3") is True
+    assert _version.is_newer("0.3.4", "0.3.4-Dev2") is True
+
+
+@pytest.mark.parametrize("sep", ["", "-", "_", "."])
+@pytest.mark.parametrize("kind", ["rc", "a", "b", "alpha", "beta", "RC", "Alpha", "dev"])
+def test_every_accepted_prerelease_form_still_orders_below_its_final(sep, kind):
+    tag = f"0.3.4{sep}{kind}1"
+    assert _version._prerelease_suffix(tag) == (kind.lower(), 1)
+    assert _version.is_newer("0.3.4", tag) is True
+    assert _version.is_newer(tag, "0.3.4") is False
+    assert _version.is_newer(tag, "0.3.3") is True
+    assert _version.is_newer(f"0.3.4{sep}{kind}2", tag) is True
+
+
 # --------------------------------------------------------------------------- #
 #  Every hardcoded version literal must agree with the VERSION file            #
 #                                                                              #
@@ -271,7 +321,6 @@ def test_prerelease_suffix_shipped_tag_shape():
 import re                       # noqa: E402
 from pathlib import Path        # noqa: E402
 
-import pytest                   # noqa: E402
 
 _REPO = Path(__file__).resolve().parent.parent
 
