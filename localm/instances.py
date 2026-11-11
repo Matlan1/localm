@@ -11,6 +11,9 @@ Registry: one JSON file per instance under ``<LOCALM_HOME>/run/<instance_id>.jso
 
     {instance_id, pid, port, host, root_dir, mode, version, started, token}
 
+plus ``launch_tag`` when the process was started with ``LOCALM_LAUNCH_TAG`` set
+(see :data:`LAUNCH_TAG_ENV`); readers treat a missing key as "no tag".
+
 Liveness is ultimately a ``GET /whoami`` returning ``app == "localm"``; the
 reaper here falls back to process liveness and ownership. ``mode`` is the
 SURFACE mode (``api`` = bare OpenAI API, ``full`` = API + GUI), distinct from the
@@ -55,6 +58,12 @@ APP_NAME = "localm"
 # Markers that identify a project root, walked up from cwd. Mirrors the coder's
 # .localcoder model; .git covers most repos.
 _ROOT_MARKERS = (".git", ".localcoder")
+
+#: Environment variable a launcher sets on the server it spawns. ``advertise``
+#: removes it from the environment and records its value as the entry's
+#: ``launch_tag``, so the launcher can find exactly the server it started.
+LAUNCH_TAG_ENV = "LOCALM_LAUNCH_TAG"
+_LAUNCH_TAG_RE = re.compile(r"[0-9a-f]{16,64}")
 
 def _version() -> str:
     """The running version, advertised in the registry and served by /whoami.
@@ -104,6 +113,25 @@ def registry_path(home: Path, instance_id: str) -> Path:
 def new_instance_id() -> str:
     """A random per-process instance id (not the PID - PIDs get reused)."""
     return secrets.token_hex(8)
+
+
+def new_launch_tag() -> str:
+    """A random tag for :data:`LAUNCH_TAG_ENV`."""
+    return secrets.token_hex(16)
+
+
+def take_launch_tag() -> Optional[str]:
+    """Remove :data:`LAUNCH_TAG_ENV` from ``os.environ`` and return its value,
+    or None when it is unset or not 16 to 64 lowercase hex characters (a
+    malformed value is logged at debug and dropped). Child processes started
+    after this call do not inherit it."""
+    raw = os.environ.pop(LAUNCH_TAG_ENV, None)
+    if raw is None:
+        return None
+    if _LAUNCH_TAG_RE.fullmatch(raw):
+        return raw
+    logger.debug("ignoring malformed %s (%d chars)", LAUNCH_TAG_ENV, len(raw))
+    return None
 
 
 def new_token() -> str:
@@ -162,7 +190,8 @@ def _lock_down_dir(path: Path) -> None:
 def register_instance(home: Path, *, instance_id: str, port: int, host: str,
                       root_dir: str, mode: str, token: str,
                       scheme: str = "http",
-                      started: Optional[str] = None) -> Path:
+                      started: Optional[str] = None,
+                      launch_tag: Optional[str] = None) -> Path:
     """Write this process's registry entry atomically; return its path. The file
     is owner-only where the OS supports it (it carries the attach token).
     ``scheme`` (http|https) records whether this instance serves TLS, so a
@@ -171,7 +200,10 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     The entry also carries ``pid_space`` (:func:`pid_space_id`) and
     ``start_identity`` (:func:`process_start_identity` of this process, or
     None when it cannot be read), which :func:`entry_process_state` compares
-    with the live process before anything ends that pid."""
+    with the live process before anything ends that pid.
+
+    ``launch_tag``, when given, is written as the entry's ``launch_tag`` key;
+    when None the key is omitted."""
     d = run_dir(home)
     _lock_down_dir(d)
     entry = {
@@ -188,6 +220,8 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
         "pid_space": pid_space_id(),
         "start_identity": process_start_identity(os.getpid()),
     }
+    if launch_tag:
+        entry["launch_tag"] = launch_tag
     path = registry_path(home, instance_id)
     # The entry carries the per-instance attach token, so it is restricted the
     # same Windows-aware way as auth.key. atomic_write_private restricts the temp
@@ -713,11 +747,14 @@ def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
 
 def find_attachable(home: Path, root_dir: str,
                     probe: Optional[Callable[[dict], bool]] = None,
-                    *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
+                    *, exclude_ids: Collection[str] = (),
+                    launch_tag: Optional[str] = None) -> Optional[dict]:
     """The live, identity-verified instance serving *root_dir*, or None.
 
     Entries whose ``instance_id`` is in *exclude_ids* are skipped (neither
-    probed nor reaped).
+    probed nor reaped). When *launch_tag* is given, every entry whose
+    ``launch_tag`` is not exactly that value is skipped the same way, including
+    entries without the key.
 
     Attaches ONLY on a verified /whoami handshake (app==localm + matching
     instance_id), so an impostor on a reused port is never attached to. A same-dir
@@ -732,6 +769,8 @@ def find_attachable(home: Path, root_dir: str,
         if _canon(entry.get("root_dir", "")) != target:
             continue
         if exclude_ids and entry.get("instance_id") in exclude_ids:
+            continue
+        if launch_tag is not None and entry.get("launch_tag") != launch_tag:
             continue
         try:
             alive = probe(entry)
@@ -760,14 +799,16 @@ def attach_url(entry: dict) -> str:
 
 def attach_target(home: Path, root_dir: str,
                   probe: Optional[Callable[[dict], bool]] = None,
-                  *, exclude_ids: Collection[str] = ()) -> Optional[dict]:
+                  *, exclude_ids: Collection[str] = (),
+                  launch_tag: Optional[str] = None) -> Optional[dict]:
     """The thin-client attach point for the instance serving *root_dir*, or None.
 
     A CLI chat / coder client uses this to talk to the running instance's ``/v1``
     (with its registry ``token``) instead of starting its own server + model.
     Returns ``{base_url, token, port, scheme, mode}`` (loopback - same
-    machine). *exclude_ids* as for find_attachable."""
-    entry = find_attachable(home, root_dir, probe=probe, exclude_ids=exclude_ids)
+    machine). *exclude_ids* and *launch_tag* as for find_attachable."""
+    entry = find_attachable(home, root_dir, probe=probe, exclude_ids=exclude_ids,
+                            launch_tag=launch_tag)
     if not entry:
         return None
     from localm.bindhost import self_connect_host, url_host
@@ -893,12 +934,14 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     Resolves the instance id + root dir + token and sets them on ``app.state``
     (so ``GET /whoami`` reports them). Unless *isolated*, it reaps stale entries,
     writes this instance's registry file on enter, and removes ONLY that file on
-    exit. ``--isolated`` (test safety) sets *isolated* so the server is invisible
+    exit. :data:`LAUNCH_TAG_ENV` is removed from the environment in both cases
+    and, when not isolated, recorded as the entry's ``launch_tag``. ``--isolated`` (test safety) sets *isolated* so the server is invisible
     to discovery: nothing attaches to it and it is never attached to.
     """
     instance_id = new_instance_id()
     root_dir = resolve_root_dir(override=project)
     token = new_token()
+    launch_tag = take_launch_tag()
 
     app.state.instance_id = instance_id
     app.state.root_dir = root_dir
@@ -919,6 +962,7 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
         path = register_instance(
             home, instance_id=instance_id, port=port, host=host,
             root_dir=root_dir, mode=mode, token=token, scheme=scheme,
+            launch_tag=launch_tag,
         )
         _OWN_PATHS[instance_id] = path
     else:

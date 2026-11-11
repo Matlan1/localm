@@ -1062,14 +1062,18 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 if port:
                     cmd.extend(["-p", str(port)])
                 # --new: the child starts its own server even while another one
-                # serves this project, and the wait below skips every instance
-                # that was registered before the spawn.
+                # serves this project. The child records launch_tag in its
+                # registry entry, and the wait below attaches only to the entry
+                # carrying that tag (and never to one registered before the spawn).
                 preexisting_ids: frozenset = frozenset()
+                launch_tag = None
                 if force_new:
                     cmd.append("--new")
                     preexisting_ids = frozenset(
                         e.get("instance_id") for e in instances.list_entries(home_dir())
                         if e.get("instance_id"))
+                    launch_tag = instances.new_launch_tag()
+                tag_kw = {"launch_tag": launch_tag} if launch_tag else {}
 
                 import os
                 kwargs = {}
@@ -1082,6 +1086,9 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 kwargs["cwd"] = str(work_dir)
                 env = os.environ.copy()
                 env["LOCALM_OWN_CONSOLE"] = "1"
+                env.pop(instances.LAUNCH_TAG_ENV, None)
+                if launch_tag:
+                    env[instances.LAUNCH_TAG_ENV] = launch_tag
                 kwargs["env"] = env
                 # A HEADLESS caller (stdin is not a TTY) has no desktop for a new
                 # console window, so the child's output goes to a LOG FILE: a PIPE
@@ -1144,7 +1151,8 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
                             _tgt = instances.attach_target(
-                                home_dir(), _root, exclude_ids=preexisting_ids)
+                                home_dir(), _root, exclude_ids=preexisting_ids,
+                                **tag_kw)
                             if _tgt:
                                 break
                     if _tgt:

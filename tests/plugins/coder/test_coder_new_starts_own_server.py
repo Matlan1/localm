@@ -32,7 +32,7 @@ def _stub_world(monkeypatch, tmp_path):
     monkeypatch.setattr("time.sleep", lambda s: None)
     lookups = []
 
-    def attach_target(home, root, probe=None, *, exclude_ids=()):
+    def attach_target(home, root, probe=None, *, exclude_ids=(), launch_tag=None):
         lookups.append(frozenset(exclude_ids))
         if "old" not in exclude_ids:
             return OLD
