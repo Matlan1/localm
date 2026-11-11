@@ -100,10 +100,10 @@ class TestCheckFloors:
             "localm/bindhost.py": 100.0,
             "localm/scopes.py": 100.0,
             "localm/pathsafe.py": 93.1034,
-            "localm/netpolicy.py": 91.5865,
+            "localm/netpolicy.py": 97.0068,
             "localm/auth.py": 91.0112,
             "localm/tls.py": 88.3041,
-            "localm/config.py": 84.9315,
+            "localm/config.py": 95.1878,
             "localm/portmux.py": 97.8022,
         }
         report = {"files": {m: _entry(p) for m, p in baseline.items()}}
@@ -122,10 +122,10 @@ class TestCheckFloors:
             "localm/bindhost.py": 100.0,
             "localm/scopes.py": 100.0,
             "localm/pathsafe.py": 93.1034,
-            "localm/netpolicy.py": 91.5865,
+            "localm/netpolicy.py": 97.0068,
             "localm/auth.py": 91.0112,
             "localm/tls.py": 88.3041,
-            "localm/config.py": 84.9315,
+            "localm/config.py": 95.1878,
             "localm/portmux.py": 97.8022,
         }
         assert set(baseline) == set(ccf._MODULE_FLOORS), (
