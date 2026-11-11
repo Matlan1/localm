@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **The debug log now lists requests the server refuses before they reach a route.** A request turned away by the open-mode management check, the cross-origin check, the no-key network check, the Host header check, the request size limit, the API docs check or a CORS preflight left no line in the debug log. Every request now gets one line with its method, path and status, and a refused one also says which check refused it. The line never carries a key, token, header value or request content, and debug mode does not change the response.
+
 ## [0.3.4b1] - 2026-11-11
 
 ### Added

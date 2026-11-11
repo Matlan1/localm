@@ -81,19 +81,20 @@ def test_effective_middleware_chain(monkeypatch, debug):
         monkeypatch.setenv("LOCALM_DEBUG", "1")
     else:
         monkeypatch.delenv("LOCALM_DEBUG", raising=False)
-    expected = _EFFECTIVE_CHAIN + (
-        (("BaseHTTPMiddleware", "_log_requests"),) if debug else ()) + _INNERMOST
+    expected = (
+        (("RequestLogMiddleware", None),) if debug else ()) + _EFFECTIVE_CHAIN + _INNERMOST
     assert _effective_chain(create_app(None)) == expected
 
 
-def test_transport_middleware_is_the_outermost_three():
+def test_transport_middleware_is_the_outermost_three(monkeypatch):
     """The three pure-ASGI layers wrap every BaseHTTPMiddleware handler, in
     this order: request progress outermost (a request wedged in any inner
     layer still counts as in flight), then the disconnect signal (bound to the
     raw receive, which BaseHTTPMiddleware would mask), then the body cap (sees
     the raw body stream before anything buffers it). The Host header guard,
     also pure ASGI, sits right inside them and outside every BaseHTTPMiddleware
-    handler."""
+    handler. Debug mode adds the request log outside them."""
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     chain = _effective_chain(create_app(None))
     first_base_http = next(i for i, (cls, _) in enumerate(chain)
                            if cls == "BaseHTTPMiddleware")
@@ -195,9 +196,9 @@ def test_security_headers_wrap_the_origin_guard_and_cors():
     assert "access-control-allow-origin" not in refused.headers
 
 
-def test_request_log_is_innermost(monkeypatch, caplog):
-    """In debug mode the request log sits inside the origin guard: a request
-    the guard refuses never reaches it, a served one is logged."""
+def test_request_log_is_outermost(monkeypatch, caplog):
+    """In debug mode the request log sits outside the origin guard: a request
+    the guard refuses is logged once with its status, a served one too."""
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     caplog.set_level(logging.DEBUG, logger="localm")
     client = TestClient(create_app(None))
@@ -206,7 +207,7 @@ def test_request_log_is_innermost(monkeypatch, caplog):
     request_line = re.compile(r"^([A-Z]+ \S+ -> \d{3}) \(\d+ ms, loop_lag=")
     logged = [m.group(1) for r in caplog.records
               if (m := request_line.match(r.getMessage()))]
-    assert logged == ["GET /v1/models -> 200"]
+    assert logged == ["POST /api/plugins/refresh -> 403", "GET /v1/models -> 200"]
 
 
 # --------------------------------------------------------------------------- #

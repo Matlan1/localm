@@ -458,10 +458,10 @@ def test_middleware_stack_order(monkeypatch, api_landing):
         _MIDDLEWARE_STACK + _INNERMOST)
 
 
-def test_debug_mode_adds_request_logging_inside_the_other_handlers(monkeypatch):
+def test_debug_mode_adds_request_logging_outside_every_other_layer(monkeypatch):
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     assert _middleware_stack(create_app(None)) == (
-        _MIDDLEWARE_STACK + (("BaseHTTPMiddleware", "_log_requests"),) + _INNERMOST)
+        (("RequestLogMiddleware", None),) + _MIDDLEWARE_STACK + _INNERMOST)
 
 
 def test_origin_guard_refusal_carries_security_headers_and_no_cors_grant():
