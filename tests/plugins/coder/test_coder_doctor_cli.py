@@ -5,6 +5,7 @@ a scripted backend."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import subprocess
@@ -39,6 +40,20 @@ def proj(tmp_path, monkeypatch):
 
 def _invoke(*args):
     return CliRunner().invoke(_main.main, list(args))
+
+
+@contextlib.contextmanager
+def _dead_port():
+    """A loopback port held bound but not listening for the block, so a
+    connection to it is refused and no other socket can take it meanwhile."""
+    s = socket.socket()
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        s.bind(("127.0.0.1", 0))
+        yield s.getsockname()[1]
+    finally:
+        s.close()
 
 
 # ---------------------------------------------------------------- doctor
@@ -80,11 +95,9 @@ def test_doctor_text_is_the_default_format(proj, models_server):
 
 
 def test_doctor_exits_one_when_the_server_is_unreachable(proj):
-    dead = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
-    port = dead.server_address[1]
-    dead.server_close()
-    res = _invoke("doctor", "-m", "m1", "-u", f"http://127.0.0.1:{port}/v1",
-                  "--cwd", str(proj))
+    with _dead_port() as port:
+        res = _invoke("doctor", "-m", "m1", "-u", f"http://127.0.0.1:{port}/v1",
+                      "--cwd", str(proj))
     assert res.exit_code == 1
     assert "[FAIL] model" in res.stdout
 
@@ -99,11 +112,9 @@ def test_doctor_never_starts_a_model_server(proj, monkeypatch):
             super().__init__(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", Spy)
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        free_port = s.getsockname()[1]
-    res = _invoke("doctor", "-m", "m1", "--cwd", str(proj), "--port", str(free_port),
-                  "--output-format", "json")
+    with _dead_port() as free_port:
+        res = _invoke("doctor", "-m", "m1", "--cwd", str(proj), "--port", str(free_port),
+                      "--output-format", "json")
     assert res.exit_code == 1, res.output
     assert json.loads(res.stdout)["checks"][0]["status"] == "fail"
     assert spawned, "the spawn spy saw nothing, so it proves nothing"

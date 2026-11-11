@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
 import subprocess
 import sys
 import threading
@@ -18,6 +20,20 @@ from localm.plugins.coder.backends.http import (
     make_openai_backend,
 )
 from localm.plugins.coder.doctor import FAIL, INFO, OK, SKIP, WARN, Check
+
+
+@contextlib.contextmanager
+def _dead_port():
+    """A loopback port held bound but not listening for the block, so a
+    connection to it is refused and no other socket can take it meanwhile."""
+    s = socket.socket()
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        s.bind(("127.0.0.1", 0))
+        yield s.getsockname()[1]
+    finally:
+        s.close()
 
 
 @pytest.fixture
@@ -110,10 +126,8 @@ def test_model_missing_models_endpoint_warns_not_fails(serve):
 
 
 def test_model_unreachable_fails():
-    srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
-    port = srv.server_address[1]
-    srv.server_close()
-    c = doctor.check_model(HTTPBackend(f"http://127.0.0.1:{port}/v1", "m1"))
+    with _dead_port() as port:
+        c = doctor.check_model(HTTPBackend(f"http://127.0.0.1:{port}/v1", "m1"))
     assert c.status == FAIL and "not reachable" in c.detail
 
 

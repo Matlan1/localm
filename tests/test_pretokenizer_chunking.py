@@ -609,7 +609,8 @@ class TestChunkedTokensEqualWholeTokens:
     pre-type the guard bounds that a model can be loaded with."""
 
     @pytest.fixture(scope="class")
-    def result(self, tmp_path_factory):
+    @classmethod
+    def result(cls, tmp_path_factory):
         from tests._real_gguf import require_native_runtime
         require_native_runtime()
         directory = tmp_path_factory.mktemp("minivocab")
