@@ -350,6 +350,9 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # gui_preview_* decide whether a reply's own HTML is rendered at all
         # and who it is rendered for.
         | {"gui_preview_enabled", "gui_preview_owner_only"}
+        # canvas_allow_navigation decides whether a reply's artifact may load
+        # another page.
+        | {"canvas_allow_navigation"}
         | METRICS_OWNER_KEYS)
 
 

@@ -1344,6 +1344,12 @@ CORE_FIELDS: list = [
                  "Offers the canvas button only to the owner, not to other "
                  "API keys. The reply text itself is unchanged either way.",
                  group="Chat", tier=Tier.OWNER),
+    SettingField("canvas_allow_navigation", Widget.TOGGLE,
+                 "Let canvas artifacts open other pages",
+                 "Off by default: the canvas closes when an artifact tries to load "
+                 "another page. On lets it load any web page in the canvas, and "
+                 "that page's address can carry data out.",
+                 group="Chat", tier=Tier.OWNER),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
                  "Whisper model size for the microphone button. Larger is more "

@@ -109,3 +109,49 @@ test("enhanceCodeBlock adds copy always and canvas only for renderable blocks", 
   assert.equal(htmlPre.querySelectorAll(".copy-btn").length, 1);
   assert.equal(htmlPre.querySelectorAll(".canvas-btn").length, 1);
 });
+
+test("with canvas navigation allowed a second load keeps the frame", () => {
+  const { window: win } = loadApp();
+  win.setCanvasNavigationAllowed(true);
+  const pane = win.document.getElementById("artifact-pane");
+  win.openArtifact("<p>x</p>", "html");
+  const frame = pane.querySelector("iframe.artifact-frame");
+  frame.dispatchEvent(new win.Event("load"));
+  frame.dispatchEvent(new win.Event("load"));
+  frame.dispatchEvent(new win.Event("load"));
+  assert.equal(pane.querySelector("iframe.artifact-frame"), frame,
+    "the frame stays after it loads another page");
+  assert.equal(pane.querySelector(".artifact-navigated"), null);
+  assert.equal(frame.getAttribute("sandbox"), "allow-scripts");
+  assert.match(frame.srcdoc, /default-src 'none'/);
+});
+
+test("the frame is credentialless when navigation is allowed", () => {
+  const { window: win } = loadApp();
+  const pane = win.document.getElementById("artifact-pane");
+  win.openArtifact("<p>x</p>", "html");
+  assert.equal(pane.querySelector("iframe.artifact-frame").hasAttribute("credentialless"), false);
+  win.setCanvasNavigationAllowed(true);
+  win.openArtifact("<p>x</p>", "html");
+  assert.equal(pane.querySelector("iframe.artifact-frame").hasAttribute("credentialless"), true);
+});
+
+test("canvas navigation follows the capabilities answer", async () => {
+  const json = (body) => Promise.resolve(new Response(JSON.stringify(body),
+    { status: 200, headers: { "Content-Type": "application/json" } }));
+  for (const [answer, kept] of [[true, true], [false, false], [undefined, false]]) {
+    const caps = { plugins: [], preview: true };
+    if (answer !== undefined) caps.canvas_navigation = answer;
+    const { window: win } = loadApp({
+      fetchImpl: (url) => (String(url) === "/api/capabilities" ? json(caps) : json({})),
+    });
+    await win.refreshPluginCommands();
+    const pane = win.document.getElementById("artifact-pane");
+    win.openArtifact("<p>x</p>", "html");
+    const frame = pane.querySelector("iframe.artifact-frame");
+    frame.dispatchEvent(new win.Event("load"));
+    frame.dispatchEvent(new win.Event("load"));
+    assert.equal(!!pane.querySelector("iframe.artifact-frame"), kept,
+      `canvas_navigation=${answer}`);
+  }
+});

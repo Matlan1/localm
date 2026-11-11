@@ -1959,6 +1959,8 @@ export const I18N_EN = {
   "settings.field.guiPreviewEnabled.help": "Adds a canvas button to a self-contained HTML or SVG block in a reply, rendering it in a sandboxed frame with no network access and no access to this app. On by default.",
   "settings.field.guiPreviewOwnerOnly.label": "Restrict the preview canvas to owner sessions",
   "settings.field.guiPreviewOwnerOnly.help": "Offers the canvas button only to the owner, not to other API keys. The reply text itself is unchanged either way.",
+  "settings.field.canvasAllowNavigation.label": "Let canvas artifacts open other pages",
+  "settings.field.canvasAllowNavigation.help": "Off by default: the canvas closes when an artifact tries to load another page. On lets it load any web page in the canvas, and that page's address can carry data out.",
 
   // Settings > schema fields: Server
   "settings.field.port.label": "Server port",
