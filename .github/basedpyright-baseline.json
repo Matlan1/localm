@@ -6300,14 +6300,6 @@
                     "endColumn": 49,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 29,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/plugins/coder/cli/repl.py": [
