@@ -1073,7 +1073,6 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                         e.get("instance_id") for e in instances.list_entries(home_dir())
                         if e.get("instance_id"))
                     launch_tag = instances.new_launch_tag()
-                tag_kw = {"launch_tag": launch_tag} if launch_tag else {}
 
                 import os
                 kwargs = {}
@@ -1150,9 +1149,13 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             if proc.poll() is not None:
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
-                            _tgt = instances.attach_target(
-                                home_dir(), _root, exclude_ids=preexisting_ids,
-                                **tag_kw)
+                            if launch_tag:
+                                _tgt = instances.attach_target(
+                                    home_dir(), _root, exclude_ids=preexisting_ids,
+                                    launch_tag=launch_tag)
+                            else:
+                                _tgt = instances.attach_target(
+                                    home_dir(), _root, exclude_ids=preexisting_ids)
                             if _tgt:
                                 break
                     if _tgt:
