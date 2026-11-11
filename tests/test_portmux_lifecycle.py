@@ -622,7 +622,9 @@ def test_the_public_socket_is_bound_to_the_requested_host(use_tls, tmp_path, mon
         port = _free_port()
         task = _start_serve(use_tls, tmp_path, port)
         try:
-            await _wait_connectable(port)
+            deadline = asyncio.get_running_loop().time() + 10
+            while not bound and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
             assert bound == [("127.0.0.1", port)]
         finally:
             await _shutdown(task)
