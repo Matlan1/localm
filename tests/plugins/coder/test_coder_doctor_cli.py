@@ -109,6 +109,32 @@ def test_doctor_never_starts_a_model_server(proj, monkeypatch):
     assert not [a for a in spawned if "gui" in map(str, a)]
 
 
+@pytest.mark.parametrize("output_format", ["json", "text"])
+def test_doctor_reports_on_the_server_already_running_for_the_project(
+        proj, models_server, monkeypatch, output_format):
+    """Doctor attaches to the project's running localm and checks that server;
+    machine-readable output carries only the report."""
+    from localm import instances
+    asked = []
+
+    def target(home, root, *a, **k):
+        asked.append(root)
+        return {"base_url": models_server, "port": 1, "mode": "full", "token": ""}
+
+    monkeypatch.setattr(instances, "attach_target", target)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    res = _invoke("doctor", "-m", "m1", "--cwd", str(proj), "--port", str(free_port),
+                  "--output-format", output_format)
+    assert asked, "doctor never looked for the project's running server"
+    assert res.exit_code == 0, res.output
+    if output_format == "json":
+        assert json.loads(res.stdout)["ok"] is True
+    else:
+        assert "Using the localm already running" in res.stdout
+
+
 def test_doctor_runs_no_agent(proj, models_server, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("doctor built an agent")

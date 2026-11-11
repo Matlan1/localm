@@ -570,8 +570,9 @@ def _run_doctor(work_dir: Path, model, url, api_key, native_tools, port,
         # The doctor's own "config" check reports an unreadable project config.
         pass
     backend = _build_backend(
-        provider, url, model or "localm", api_key, native_tools, port, True,
-        False, work_dir, False, probe_only=True)
+        provider, url, model or "localm", api_key, native_tools, port, False,
+        False, work_dir, False, probe_only=True,
+        machine_output=(output_format or "text").lower() in ("json", "jsonl"))
     checks = run_doctor(work_dir, backend, verify_cmd=verify_cmd)
     click.echo(render(checks, output_format))
     if not report_ok(checks):
@@ -1019,10 +1020,11 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 attached = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
                                        native_tools=native_tools,
                                        localm_server=True)   # discovered localm instance
-                console.print(
-                    f"[dim]Using the localm already running for[/dim] "
-                    f"[cyan]{_root}[/cyan] [dim](port {_tgt['port']}, "
-                    f"mode {_tgt.get('mode')}) - sharing its loaded model.[/dim]")
+                if not machine_output:
+                    console.print(
+                        f"[dim]Using the localm already running for[/dim] "
+                        f"[cyan]{_root}[/cyan] [dim](port {_tgt['port']}, "
+                        f"mode {_tgt.get('mode')}) - sharing its loaded model.[/dim]")
 
         if attached is not None:
             backend = attached
