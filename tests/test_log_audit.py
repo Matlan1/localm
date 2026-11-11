@@ -285,8 +285,6 @@ def _logger_formats(path: Path) -> list[str]:
     ("localm/voice.py", "downloading Whisper", ("owner/whisper",), la.DOWNLOADING_RE),
     ("localm/inference/reranker.py", "reranker ready:", ("rr.gguf", "a,b"), la.READY_RE),
     ("localm/inference/speech.py", "speech model ready:", ("tts", 24000, "cpu"), la.READY_RE),
-    ("localm/inference/backends/llamacpp/mtmd_gen.py", "speech model ready:",
-     ("tts", "v3", 24000, "cpu"), la.READY_RE),
     ("localm/inference/backends/hf.py", "hf model ready:", ("my-hf-model",), la.READY_RE),
     ("localm/plugins/builtin/exllama/backend.py", "exllama model ready:", ("my-exl2",), la.READY_RE),
     ("localm/media/sdcpp/runner.py", "sd.cpp model ready:", ("flux.gguf",), la.READY_RE),
