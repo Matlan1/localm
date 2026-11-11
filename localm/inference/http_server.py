@@ -158,6 +158,9 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 # load-progress callback reads (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
+# Model names a switch_engine call is making resident right now (making room
+# included), with the number of calls for each. Read by /health.
+_loads_in_flight: dict[str, int] = {}
 _switch_cancel: Optional[threading.Event] = None
 
 # Cross-install GPU/VRAM coordination (multi-instance, see localm.gpu_registry).
@@ -763,6 +766,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     the ``_switch_*`` helpers below perform the effects.
     """
     lease = _SwitchLease(name)
+    _loads_in_flight[name] = _loads_in_flight.get(name, 0) + 1
     try:
         return await _switch_engine_leased(
             name, make_engine, lease, on_active=on_active, preempt=preempt,
@@ -770,7 +774,19 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             on_status=on_status, allow_embedding=allow_embedding,
             reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
     finally:
+        left = _loads_in_flight.get(name, 1) - 1
+        if left > 0:
+            _loads_in_flight[name] = left
+        else:
+            _loads_in_flight.pop(name, None)
         await lease.drop(asyncio.get_running_loop())
+
+
+def loading_model_name() -> Optional[str]:
+    """A model a ``switch_engine`` call is making resident right now, the most
+    recently started one, or None."""
+    names = list(_loads_in_flight)
+    return names[-1] if names else None
 
 
 class _SwitchLease:
