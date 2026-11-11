@@ -1021,3 +1021,127 @@ test("update: a cached signature is fetched again after ten minutes", async () =
     assert.deepEqual(calls, [9401, 9401], "fetched again once the ten minutes have passed");
   } finally { Date.now = realNow; restore(); }
 });
+
+// ------------------- prerelease order (dev < a < b < rc < final) -------------------
+
+// tagKey, tagAtMost and clientOlderThan, evaluated from worker.js's own source text.
+function tagFunctions() {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "worker.js"), "utf8");
+  const start = src.indexOf("const PRERELEASE_SUFFIX_RE");
+  const fnAt = src.indexOf("function clientOlderThan");
+  const close = /\r?\n\}\r?\n/.exec(src.slice(fnAt));
+  assert.ok(start >= 0 && fnAt > start && close, "tag functions not found in worker.js");
+  const end = fnAt + close.index + close[0].length;
+  return new Function(`${src.slice(start, end)}; return { tagKey, tagAtMost, clientOlderThan };`)();
+}
+
+const ORDERED_TAGS = ["v0.3.3", "v0.3.4-dev1", "v0.3.4-Dev2", "v0.3.4-dev9", "v0.3.4-DEV10",
+  "v0.3.4a1", "v0.3.4-alpha2", "v0.3.4b1", "v0.3.4-BETA2", "v0.3.4rc1", "v0.3.4-rc9",
+  "v0.3.4-RC10", "v0.3.4"];
+
+test("tags order dev < a = alpha < b = beta < rc < final, any case, numbers as integers", () => {
+  const { tagKey, tagAtMost } = tagFunctions();
+  for (const t of ORDERED_TAGS) assert.notEqual(tagKey(t), null, t);
+  for (let i = 0; i < ORDERED_TAGS.length; i++) {
+    for (let j = 0; j < ORDERED_TAGS.length; j++) {
+      const a = ORDERED_TAGS[i], b = ORDERED_TAGS[j];
+      assert.equal(tagAtMost(a, b), i <= j, `tagAtMost(${a}, ${b})`);
+    }
+  }
+  for (const [s, l] of [["v0.3.4a1", "v0.3.4alpha1"], ["v0.3.4b1", "v0.3.4-Beta1"],
+                        ["v0.3.4-dev1", "v0.3.4.DEV1"]]) {
+    assert.ok(tagAtMost(s, l) && tagAtMost(l, s), `${s} ranks equal to ${l}`);
+  }
+});
+
+test("a dev client is older than a ceiling of its own final release or later, never of an earlier one", () => {
+  const { clientOlderThan } = tagFunctions();
+  for (const c of ["0.3.3-dev1", "v0.3.3-Dev10", "0.3.3rc1", "0.3.2-dev1", "0.3.2"]) {
+    assert.equal(clientOlderThan(c, "v0.3.3"), true, c);
+  }
+  for (const c of ["0.3.3", "0.3.4-dev1", "v0.3.4-DEV2", "0.3.4", "unknown", "0.3.3-hotfix"]) {
+    assert.equal(clientOlderThan(c, "v0.3.3"), false, c);
+  }
+  assert.equal(clientOlderThan("0.3.2-dev3", "v0.3.2"), true);
+  assert.equal(clientOlderThan("0.3.2", "v0.3.2"), false);
+});
+
+// A fetch stub serving *list* as the release list and each entry by tag.
+function listFetch(list) {
+  const rel = (tag, published, prerelease, id) => ({ tag_name: tag, name: tag, draft: false,
+    prerelease, published_at: published,
+    assets: [{ id, name: `localm-${tag}.zip`, size: 1 }, { id: id + 1, name: `localm-${tag}.zip.sig`, size: 9 }] });
+  const rels = list.map(([tag, published, prerelease], i) => rel(tag, published, prerelease, 100 + 10 * i));
+  return async (url) => {
+    const u = String(url);
+    if (u.includes("/releases?")) return new Response(JSON.stringify(rels), { status: 200 });
+    const byTag = u.match(/\/releases\/tags\/([^/]+)$/);
+    if (byTag) {
+      const r = rels.find((x) => x.tag_name === decodeURIComponent(byTag[1]));
+      return r ? new Response(JSON.stringify(r), { status: 200 }) : new Response("{}", { status: 404 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+}
+
+async function updateFor(list, query) {
+  const restore = stubFetch(listFetch(list));
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: `/update${query}`, headers: UP_HDR }), ENV_UP);
+    return await r.json();
+  } finally { restore(); }
+}
+
+const DEV_LIST = [["v0.3.4-dev1", "2026-11-10T00:00:00Z", true], ["v0.3.3", "2026-11-01T00:00:00Z", false]];
+
+test("update: a dev tag is offered on the prerelease channel and never on the default channel", async () => {
+  assert.equal((await updateFor(DEV_LIST, "?client=0.3.3&channel=prerelease")).version, "v0.3.4-dev1");
+  assert.equal((await updateFor(DEV_LIST, "?client=0.3.3")).version, "v0.3.3");
+  const unflagged = [["v0.3.4-Dev1", "2026-11-10T00:00:00Z", false], ["v0.3.3", "2026-11-01T00:00:00Z", false]];
+  assert.equal((await updateFor(unflagged, "?client=0.3.3")).version, "v0.3.3",
+    "a dev tag published without the prerelease flag is still not a stable release");
+  assert.equal((await updateFor(unflagged, "?client=0.3.3&channel=prerelease")).version, "v0.3.4-Dev1");
+});
+
+test("update/releases and update/release: a dev tag is listed and found only on the prerelease channel", async () => {
+  for (const flagged of [true, false]) {
+    const list = [["v0.3.4-dev1", "2026-11-10T00:00:00Z", flagged], ["v0.3.3", "2026-11-01T00:00:00Z", false]];
+    const restore = stubFetch(listFetch(list));
+    try {
+      const get = async (path) => (await worker.fetch(
+        req(undefined, { method: "GET", path, headers: UP_HDR }), ENV_UP)).json();
+      assert.deepEqual((await get("/update/releases")).releases.map((x) => x.version), ["v0.3.3"]);
+      assert.deepEqual((await get("/update/releases?channel=prerelease")).releases.map((x) => x.version),
+        ["v0.3.4-dev1", "v0.3.3"]);
+      assert.equal((await get("/update/release?version=0.3.4-dev1")).found, false);
+      assert.equal((await get("/update/release?version=0.3.4-dev1&channel=prerelease")).found, true);
+    } finally { restore(); }
+  }
+});
+
+test("update: a dev client below a ceiling is held to that ceiling; at or above it, it is not", async () => {
+  const list = [["v0.3.5-dev1", "2026-11-12T00:00:00Z", true], ["v0.3.4", "2026-11-11T00:00:00Z", false],
+    ["v0.3.4-dev1", "2026-11-10T00:00:00Z", true], ["v0.3.3", "2026-11-01T00:00:00Z", false],
+    ["v0.3.3-dev1", "2026-10-30T00:00:00Z", true], ["v0.3.2-dev1", "2026-10-20T00:00:00Z", true],
+    ["v0.3.1", "2026-10-10T00:00:00Z", false]];
+  for (const client of ["0.3.3-dev1", "0.3.3-Dev2", "0.3.3a1", "0.3.2-dev1"]) {
+    for (const ch of ["", "&channel=prerelease"]) {
+      const out = await updateFor(list, `?client=${client}${ch}`);
+      assert.equal(out.client_ceiling, "v0.3.3", client + ch);
+      assert.equal(out.version, "v0.3.3", client + ch);
+    }
+  }
+  for (const client of ["0.3.4-dev1", "0.3.3"]) {
+    const out = await updateFor(list, `?client=${client}`);
+    assert.equal(out.client_ceiling, undefined, client);
+    assert.equal(out.version, "v0.3.4", client);
+    assert.equal((await updateFor(list, `?client=${client}&channel=prerelease`)).version, "v0.3.5-dev1");
+  }
+  const legacyList = [["v0.3.3", "2026-11-01T00:00:00Z", false],
+    ["v0.3.2-dev1", "2026-10-20T00:00:00Z", true], ["v0.3.1", "2026-10-10T00:00:00Z", false]];
+  const legacy = await updateFor(legacyList, "?channel=prerelease");
+  assert.equal(legacy.legacy_ceiling, "v0.3.2");
+  assert.equal(legacy.version, "v0.3.2-dev1", "a dev build of the legacy ceiling is at or below it");
+  assert.equal((await updateFor(legacyList, "")).version, "v0.3.1");
+});

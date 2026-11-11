@@ -35,15 +35,31 @@ def _ceiling() -> str:
     return m.group(1)
 
 
+def _js_rank() -> dict[str, int]:
+    m = re.search(r"const PRERELEASE_RANK = \{([^}]*)\};", _worker_source())
+    assert m, "PRERELEASE_RANK not found in worker.js"
+    return {k: int(v) for k, v in re.findall(r"(\w+):\s*(\d+)", m.group(1))}
+
+
+def _js_final_rank() -> int:
+    m = re.search(r"const FINAL_RANK = (\d+);", _worker_source())
+    assert m, "FINAL_RANK not found in worker.js"
+    return int(m.group(1))
+
+
 def _tag_key(tag: str):
     """worker.js tagKey."""
     m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(.*)$", tag)
     if not m:
         return None
+    head = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     suffix = re.sub(r"^[-.]", "", m.group(4))
-    if suffix and not _js_regex("PRERELEASE_SUFFIX_RE").match(suffix):
+    if not suffix:
+        return (*head, _js_final_rank(), 0)
+    p = _js_regex("PRERELEASE_SUFFIX_RE").match(suffix)
+    if not p:
         return None
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if suffix else 1, suffix.lower())
+    return (*head, _js_rank()[p.group(1).lower()], int(p.group(2)))
 
 
 def _proxy_offers_legacy(tag: str, ceiling: str) -> bool:
@@ -51,9 +67,7 @@ def _proxy_offers_legacy(tag: str, ceiling: str) -> bool:
     ka, kb = _tag_key(tag), _tag_key(ceiling)
     if ka is None or kb is None:
         return False
-    if ka[:4] != kb[:4]:
-        return ka[:4] < kb[:4]
-    return ka[4] <= kb[4]
+    return ka <= kb
 
 
 def _candidate_tags(ceiling: str) -> list[str]:
@@ -102,3 +116,20 @@ def test_the_dotted_prerelease_is_not_offered_to_old_clients():
     ceiling = _ceiling()
     for tag in (f"{ceiling}-rc.1", f"{ceiling}rc.1", f"{ceiling}b.2", f"{ceiling}alpha.3"):
         assert not _proxy_offers_legacy(tag, ceiling), tag
+
+
+_ORDERED_TAGS = ["v0.3.3", "v0.3.4-dev1", "v0.3.4-Dev2", "v0.3.4-dev9", "v0.3.4-DEV10",
+                 "v0.3.4a1", "v0.3.4-alpha2", "v0.3.4b1", "v0.3.4-BETA2", "v0.3.4rc1",
+                 "v0.3.4-RC10", "v0.3.4"]
+
+
+@pytest.mark.parametrize("i", range(len(_ORDERED_TAGS) - 1))
+def test_the_proxy_and_localm_order_dev_and_prerelease_tags_the_same_way(i):
+    lo, hi = _ORDERED_TAGS[i], _ORDERED_TAGS[i + 1]
+    assert _proxy_offers_legacy(lo, hi) and not _proxy_offers_legacy(hi, lo), (lo, hi)
+    assert _version.is_newer(hi, lo) and not _version.is_newer(lo, hi), (lo, hi)
+
+
+def test_the_proxy_ranks_an_alias_like_its_short_form():
+    for short, long in (("v0.3.4a1", "v0.3.4alpha1"), ("v0.3.4b1", "v0.3.4beta1")):
+        assert _proxy_offers_legacy(short, long) and _proxy_offers_legacy(long, short)

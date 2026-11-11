@@ -427,7 +427,8 @@ async function oneAppRelease(request, env, url) {
   if (gh.status === 404) return json({ ok: true, found: false, version: null });
   if (!gh.ok) return json({ error: "release lookup failed", status: 502 }, 502);
   const rel = await gh.json();
-  if (!rel || rel.draft === true || (!wantsPrerelease && rel.prerelease === true)
+  if (!rel || rel.draft === true
+      || (!wantsPrerelease && (rel.prerelease === true || isPrereleaseTag(rel.tag_name)))
       || !APP_TAG_RE.test(String(rel.tag_name || ""))) {
     return json({ ok: true, found: false, version: null });
   }
@@ -460,30 +461,44 @@ const LEGACY_CLIENT_CEILING = "v0.3.2";
 // work; later releases need not. The release tooling checks the deployed value.
 const OLD_CLIENT_CEILING = "v0.3.3";
 
-// A prerelease suffix: rc, a, b, alpha or beta, then a number with no separator
-// (rc1, b2, alpha3); a dotted number (rc.1) is not one.
-const PRERELEASE_SUFFIX_RE = /^(rc|a|b|alpha|beta)\d+$/i;
+// A prerelease suffix: dev, a, alpha, b, beta or rc, then a number with no
+// separator (dev1, rc1, b2, alpha3), in any case; a dotted number (rc.1) is not one.
+const PRERELEASE_SUFFIX_RE = /^(dev|rc|a|b|alpha|beta)(\d+)$/i;
 
-// [major, minor, patch, final (1) or prerelease (0), prerelease suffix] for an app
-// tag, or null when the tag does not start with vX.Y.Z or its suffix is neither
-// empty nor a prerelease suffix (v0.3.2.1, v0.3.2-hotfix, v0.3.2+b, v0.3.2a,
-// v0.3.2-rc.1).
+// Rank of each prerelease kind, in PEP 440 order: dev < a = alpha < b = beta < rc.
+// A final release ranks above every kind.
+const PRERELEASE_RANK = { dev: 0, a: 1, alpha: 1, b: 2, beta: 2, rc: 3 };
+const FINAL_RANK = 4;
+
+// [major, minor, patch, kind rank, prerelease number] for an app tag, or null when
+// the tag does not start with vX.Y.Z or its suffix is neither empty nor a prerelease
+// suffix (v0.3.2.1, v0.3.2-hotfix, v0.3.2+b, v0.3.2a, v0.3.2-rc.1). A final release
+// has rank FINAL_RANK and number 0.
 function tagKey(tag) {
   const m = /^v(\d+)\.(\d+)\.(\d+)(.*)$/.exec(String(tag || ""));
   if (!m) return null;
   const suffix = m[4].replace(/^[-.]/, "");
-  if (suffix && !PRERELEASE_SUFFIX_RE.test(suffix)) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3]), suffix ? 0 : 1, suffix.toLowerCase()];
+  if (!suffix) return [Number(m[1]), Number(m[2]), Number(m[3]), FINAL_RANK, 0];
+  const p = PRERELEASE_SUFFIX_RE.exec(suffix);
+  if (!p) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3]),
+    PRERELEASE_RANK[p[1].toLowerCase()], Number(p[2])];
 }
 
 // True when app tag *a* orders at or below app tag *b*.
 function tagAtMost(a, b) {
   const ka = tagKey(a), kb = tagKey(b);
   if (!ka || !kb) return false;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 5; i++) {
     if (ka[i] !== kb[i]) return ka[i] < kb[i];
   }
-  return ka[4] <= kb[4];
+  return true;
+}
+
+// True when *tag* is an app tag with a prerelease suffix (v0.3.4-dev1, v0.3.4rc1).
+function isPrereleaseTag(tag) {
+  const k = tagKey(tag);
+  return k !== null && k[3] !== FINAL_RANK;
 }
 
 // True when *client*, a version with or without the leading "v", orders below app tag
@@ -522,7 +537,7 @@ async function latestAppRelease(env, includePrerelease, maxTag = null) {
     if (byTag.ok) {
       const r = await byTag.json();
       if (r && !Array.isArray(r) && r.tag_name === maxTag && r.draft !== true
-          && (includePrerelease || r.prerelease !== true)) return r;
+          && (includePrerelease || (r.prerelease !== true && !isPrereleaseTag(r.tag_name)))) return r;
     } else if (byTag.status !== 404) {
       return undefined;
     }
@@ -555,7 +570,7 @@ async function appReleases(env, includePrerelease, pages = 1, maxTag = null) {
   return all
     .filter((r) => !seen.has(r.id ?? r.tag_name) && seen.add(r.id ?? r.tag_name))
     .filter((r) => r.draft !== true)
-    .filter((r) => includePrerelease || r.prerelease !== true)
+    .filter((r) => includePrerelease || (r.prerelease !== true && !isPrereleaseTag(r.tag_name)))
     .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))
     .filter((r) => maxTag === null || tagAtMost(r.tag_name, maxTag))
     .map((r, i) => ({ r, i, t: when(r) }))
