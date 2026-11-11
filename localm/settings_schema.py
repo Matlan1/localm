@@ -996,11 +996,9 @@ CORE_FIELDS: list = [
                  group="Coder", owner="coder", tier=Tier.OWNER),
     SettingField("coder_unattended_network", Widget.SELECT,
                  "Network tools in unattended coder runs",
-                 "Whether a coder run nobody watches (localm coder with a task, the "
-                 "MCP run_coder_task tool, a scheduled job) may use fetch_url, "
-                 "web_search, the browser tools and git_push while Network access is "
-                 "ask. deny = they are refused; allow = they run without asking. "
-                 "Network access off still refuses them. Runs you watch still ask.",
+                 "With Network access on ask: may coder runs nobody watches (a task, "
+                 "MCP run_coder_task, a scheduled job) use the web, browser and "
+                 "git_push tools without asking? Off still refuses them.",
                  group="Coder", owner="coder", options=["deny", "allow"],
                  tier=Tier.OWNER),
     SettingField("coder_review", Widget.TOGGLE,

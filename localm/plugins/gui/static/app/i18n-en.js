@@ -2010,7 +2010,7 @@ export const I18N_EN = {
   "settings.field.coderUntrustedProvenance.label": "Tag untrusted external content",
   "settings.field.coderUntrustedProvenance.help": "Marks coder tool results from the web, web search and external MCP servers as untrusted data, so a fetched page cannot inject commands. Leave on unless you have a reason. Applies to new sessions.",
   "settings.field.coderUnattendedNetwork.label": "Network tools in unattended coder runs",
-  "settings.field.coderUnattendedNetwork.help": "Whether a coder run nobody watches (localm coder with a task, the MCP run_coder_task tool, a scheduled job) may use fetch_url, web_search, the browser tools and git_push while Network access is ask. deny = they are refused; allow = they run without asking. Network access off still refuses them. Runs you watch still ask.",
+  "settings.field.coderUnattendedNetwork.help": "With Network access on ask: may coder runs nobody watches (a task, MCP run_coder_task, a scheduled job) use the web, browser and git_push tools without asking? Off still refuses them.",
   "settings.field.coderReview.label": "Review changes before finishing",
   "settings.field.coderReview.help": "Before the coder declares a task done, a reviewer model reads the diff and feeds blocking issues back for one more fix pass. Adds a model round-trip per task that changed files. Off by default.",
   "settings.field.coderReviewer.label": "Reviewer model target",
