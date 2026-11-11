@@ -234,6 +234,7 @@ export async function refreshEmbeddingPanel() {
     for (const m of (md.models || [])) {
       if ((st.internal || []).includes(m.name)) continue;   // already listed
       if (m.model_type !== "embedding") continue;   // only embedding models can embed
+      if (m.reranker === true) continue;            // a reranker scores pairs, it does not embed
       opts.push([m.name, t("knowledge.embed.optionFromModels", { name: m.name })]);
     }
   } catch { /* model list is optional for the picker */ }

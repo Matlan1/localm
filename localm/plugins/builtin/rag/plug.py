@@ -1400,6 +1400,13 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "
             "The rag scope alone is not enough.")
+    # Refuses a reranker (a registered one, or a reranker GGUF path) on both
+    # the dry run and the confirmed switch.
+    from localm.inference.embedder import reranker_as_embedding_model
+    reranker_why = await asyncio.get_running_loop().run_in_executor(
+        get_plugin_executor(), reranker_as_embedding_model, model)
+    if reranker_why:
+        raise HTTPException(400, reranker_why)
 
     if not req.confirm:
         from localm.config import load_config

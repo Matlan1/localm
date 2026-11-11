@@ -313,6 +313,33 @@ def _nonlocal_spec_reason(spec: str) -> Optional[str]:
     return None
 
 
+def reranker_as_embedding_model(spec: str) -> str:
+    """Why *spec* (a registered model name or a local GGUF path) names a
+    reranker and so cannot be the embedding model; an empty string when it does
+    not, or when that cannot be told without loading it.
+
+    Reads the registry and, for a registered embedding entry without a stored
+    ``reranker`` flag or for a local GGUF path, the model file's header (see
+    ``entry_is_reranker`` and ``gguf_reranker_state``). A UNC/device path or a
+    URL is never opened."""
+    from localm.config import load_registry
+    from localm.model_manager.registry import entry_is_reranker, gguf_reranker_state
+
+    entry = load_registry().get(spec)
+    if isinstance(entry, dict) and entry_is_reranker(spec, entry):
+        return (f"'{spec}' is a reranker: it scores query and document pairs "
+                "(localm rerank), it does not produce embeddings. Choose an "
+                "embedding model.")
+    if _nonlocal_spec_reason(spec):
+        return ""
+    path = Path(spec).expanduser()
+    if path.is_file() and gguf_reranker_state(path) is True:
+        return (f"'{path.name}' is a reranker GGUF: it scores query and document "
+                "pairs (localm rerank), it does not produce embeddings. Choose an "
+                "embedding model.")
+    return ""
+
+
 def _set_resolve_outcome(spec: str, reason: Optional[str]) -> None:
     """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never
     assigned directly anywhere else in this module below this point. Every

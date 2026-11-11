@@ -84,6 +84,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager import capabilities as _caps
         from localm.inference.backends.hf import uses_transformers_classes as _uses_transformers_classes
         from localm.model_manager import model_packages as _mpk
+        from localm.model_manager.registry import entry_is_reranker as _entry_is_reranker
         registry = load_registry()
         current = active_model()
         # Rows whose folder ships code that does not run: the load uses transformers' classes.
@@ -144,6 +145,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # Packages a Hugging Face folder's own code needs that this install
             # lacks, per NAME; only rows that need some are present.
             packages: dict = {}
+            # Names of the embedding-type rows that are rerankers.
+            rerankers: set = set()
             # The per-row resolve() has exactly one consumer, the resident-model
             # identity comparison below, so it is skipped entirely when neither an
             # embedder nor a reranker is loaded.
@@ -165,6 +168,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                                    dir_cache=vision_dirs)
                 context_len[_n] = _caps.model_context_length(_n, reg=registry)
                 tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
+                if _m == "embedding" and _entry_is_reranker(_n, _e):
+                    rerankers.add(_n)
                 if p.is_dir():
                     if _uses_transformers_classes(str(p)):
                         own_code_off.add(_n)
@@ -193,10 +198,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 except (OSError, ValueError):
                     resolved[ep] = None
             return (sizes, mtimes, missing, resolved, resident_resolved, vision,
-                    context_len, tool_use, audio, packages)
+                    context_len, tool_use, audio, packages, rerankers)
 
         (sizes, mtimes, missing_flags, resolved_paths, resident_resolved, vision_caps,
-         context_lens, tool_caps, audio_caps, package_needs) = await loop.run_in_executor(
+         context_lens, tool_caps, audio_caps, package_needs,
+         reranker_names) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
         adapter_info, attached_to, resident = await loop.run_in_executor(
@@ -238,6 +244,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             }
             if entry.get("part_of"):
                 row_out["part_of"] = str(entry["part_of"])
+            # Present only on a reranker row.
+            if name in reranker_names:
+                row_out["reranker"] = True
             # Vision capability as true / false / KEY ABSENT. It is measured from the
             # model's own files on every request, so a model on an unmounted drive or
             # a dead UNC share yields no evidence and the key is omitted. A client

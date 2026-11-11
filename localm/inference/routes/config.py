@@ -212,6 +212,13 @@ def register(app: FastAPI, ctx) -> None:
         # than a report naming collections. Gated on an actual value change and on
         # there being collections at risk, so an ordinary settings save needs no
         # extra confirm round trip.
+        # A reranker is refused as the embedding model, confirmed or not.
+        if "embedding_model" in body and str(body["embedding_model"] or "").strip():
+            from localm.inference.embedder import reranker_as_embedding_model
+            reranker_why = await run_in_threadpool(
+                reranker_as_embedding_model, str(body["embedding_model"]).strip())
+            if reranker_why:
+                raise HTTPException(400, reranker_why)
         if "embedding_model" in body and not confirm:
             from localm.config import load_config
             new_model = str(body["embedding_model"]).strip()

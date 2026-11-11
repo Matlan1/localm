@@ -106,31 +106,6 @@ from ..media.koboldcpp.cli import main as _setup_music_main  # noqa: E402
 main.add_command(_setup_music_main, name="setup-music")
 
 
-def _reranker_as_embedding_model(spec: str) -> str:
-    """Why *spec* (a registered model name or a local GGUF path) names a
-    reranker and so cannot be the embedding model; an empty string when it does
-    not, or when that cannot be told without loading it."""
-    from pathlib import Path
-
-    from localm.config import load_registry
-    from ..inference.embedder import _nonlocal_spec_reason
-    from ..model_manager.registry import entry_is_reranker, gguf_reranker_state
-
-    entry = load_registry().get(spec)
-    if isinstance(entry, dict) and entry_is_reranker(spec, entry):
-        return (f"'{spec}' is a reranker: it scores query and document pairs "
-                "(localm rerank), it does not produce embeddings. Choose an "
-                "embedding model.")
-    if _nonlocal_spec_reason(spec):
-        return ""
-    path = Path(spec).expanduser()
-    if path.is_file() and gguf_reranker_state(path) is True:
-        return (f"'{path.name}' is a reranker GGUF: it scores query and document "
-                "pairs (localm rerank), it does not produce embeddings. Choose an "
-                "embedding model.")
-    return ""
-
-
 @main.command("setup-embeddings")
 @click.option("--model", "model", default=None,
               help="Embedding model to install (a known key, a registered model "
@@ -156,13 +131,14 @@ def setup_embeddings(model, yes=False):
     from ..config import load_config, update_config
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
+                                      reranker_as_embedding_model,
                                       resolve_embedding_model_path)
     # Whether the ready banner below prints its "existing collections stay
     # lexical" reminder. See
     # TestSetupEmbeddingsPreSwitchConfirm.test_switch_to_model_matching_existing_collection_skips_reembed_note.
     reembed_hint = True
     if model:
-        reranker_why = _reranker_as_embedding_model(model)
+        reranker_why = reranker_as_embedding_model(model)
         if reranker_why:
             console.print(f"[red]Not switching the embedding model:[/red] {escape(reranker_why)}")
             sys.exit(1)
