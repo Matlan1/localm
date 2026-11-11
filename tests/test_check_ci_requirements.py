@@ -67,7 +67,8 @@ def test_regenerate_feeds_the_editable_compile_its_committed_pins_against_the_lo
     committed = mod.pins((mod.REQUIREMENTS / "editable.txt").read_text(encoding="utf-8"))
     [(cmd, stdin)] = compiles
     assert cmd[cmd.index("-c") + 1] == "editable-constraints.txt"
-    assert stdin == "".join(f"{n}=={committed[n]}\n" for n in mod._EDITABLE_ROOTS)
+    roots = ("editables", "hatchling", "setuptools")
+    assert stdin == "".join(f"{n}=={committed[n]}\n" for n in roots)
 
 
 _HASHED_WORKFLOWS = ("ci.yml", "docs.yml", "fuzz.yml", "pin-currency.yml")

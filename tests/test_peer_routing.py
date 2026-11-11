@@ -447,12 +447,15 @@ class TestAcceptPeerRouteEndpoint:
         assert "peer-key" not in str(e.value)
         assert peer.auth_seen == []
 
-    def test_peer_recording_mode_refuses_such_a_key_without_sending(self, tmp_path):
+    @pytest.mark.parametrize("bad", ["peer-key\nX: y", "peer-key with space",
+                                     "peer-k\u00e9y"])
+    def test_peer_recording_mode_refuses_such_a_key_without_sending(self, tmp_path, bad):
         peer = _FakePeerServer(key="peer-key")
         target = _write_peer(tmp_path / "reg", "peer-m", peer.port, model="shared-model")
         with pytest.raises(peer_routing.PeerUnreachable) as e:
-            peer_routing.peer_recording_mode(target, "peer-key\nX: y", "privacy")
-        assert "peer-key" not in str(e.value)
+            peer_routing.peer_recording_mode(target, bad, "privacy")
+        assert str(e.value) == "its API key contains a character an API key cannot hold"
+        assert "peer-k" not in str(e.value)
         assert peer.auth_seen == []
 
     def test_stale_offer_is_rejected(self, tmp_path, monkeypatch):
