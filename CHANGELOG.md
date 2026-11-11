@@ -154,6 +154,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Relocating a moved model moves its aliases too.** An alias of the model used to keep pointing at the old location.
 - **A runtime build that does not load is not kept.** When a llama.cpp runtime update installs a build that does not load on this machine, the runtime installed before it is put back, with its pin, instead of the failing build staying installed.
 - **A GPU split that cannot be matched keeps llama.cpp's default split.** On a multi-GPU machine whose GPUs cannot be matched to llama.cpp's device list, a configured split is no longer applied with the wrong GPU numbering; the load uses llama.cpp's default split, as the warning says.
+- A Docker image built from the repository with a recent Docker (for example Docker Desktop) now lets the server read the license texts under `/usr/share/doc/localm/`; the folder was created without the permission to open it.
 
 ## [0.3.3] - 2026-11-05
 
