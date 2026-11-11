@@ -227,6 +227,27 @@ def test_install_and_uninstall_each_write_one_plugin_event(home):
     assert (evs[1]["plugin"], evs[1]["version_from"]) == ("p1", "2.5.0")
 
 
+def test_external_install_writes_one_plugin_event(home):
+    import textwrap
+    mgr = _plugin_manager(home)
+    src = home / "third_party" / "ext1"
+    src.mkdir(parents=True)
+    (src / "plugin.toml").write_text(
+        '[plugin]\nname = "ext1"\nscope = "ext1"\nversion = "0.7.1"\nregister = "plug"\n',
+        encoding="utf-8")
+    (src / "plug.py").write_text(textwrap.dedent('''
+        def register(host):
+            pass
+
+        def unregister():
+            pass
+    '''), encoding="utf-8")
+    spec = mgr.install_external(src)
+    assert spec.name == "ext1" and mgr.is_installed("ext1")
+    (ev,) = _plugin_events(home)
+    assert (ev["kind"], ev["plugin"], ev["version_to"]) == ("plugin_installed", "ext1", "0.7.1")
+
+
 def test_uninstall_of_an_unknown_plugin_writes_nothing(home):
     mgr = _plugin_manager(home)
     with pytest.raises(KeyError):
@@ -239,3 +260,29 @@ def test_plugin_install_succeeds_when_the_log_cannot_be_written(home):
     (home / "logs").write_text("blocker")
     mgr.install("p1")
     assert mgr.is_installed("p1")
+
+
+def test_plugin_install_and_uninstall_succeed_when_the_recorder_raises(
+        home, monkeypatch, caplog):
+    calls = []
+    real_record = mgmt_events.record
+
+    def _raising_record(kind, **kwargs):
+        if not kind.startswith("plugin_"):
+            return real_record(kind, **kwargs)
+        calls.append(kind)
+        raise RuntimeError("recorder exploded")
+
+    mgr = _plugin_manager(home)
+    monkeypatch.setattr(mgmt_events, "record", _raising_record)
+    with caplog.at_level("WARNING", logger="localm.plugins"):
+        mgr.install("p1")
+        assert mgr.is_installed("p1")
+        assert mgr.uninstall("p1") is True
+    assert not mgr.is_installed("p1")
+    assert calls == ["plugin_installed", "plugin_uninstalled"]
+    msgs = [r.getMessage() for r in caplog.records if r.name == "localm.plugins"]
+    for kind in ("plugin_installed", "plugin_uninstalled"):
+        assert any(f"could not record the {kind} event for plugin p1" in m
+                   and "recorder exploded" in m for m in msgs), msgs
+    assert _plugin_events(home) == []

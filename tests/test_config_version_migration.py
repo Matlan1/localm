@@ -157,6 +157,22 @@ def test_newer_version_is_read_without_migrating_and_not_rewritten(
     assert len(newer) == 1
 
 
+def test_newer_version_and_its_unknown_keys_survive_an_ordinary_save(
+        config_file, warnings):
+    newer = cfg.CURRENT_CONFIG_VERSION + 5
+    _write(config_file, {"config_version": newer, "temperature": 0.5,
+                         "setting_from_the_future": {"a": 1}})
+
+    cfg.load_config()
+    cfg.update_config(lambda c: c.update({"port": 9123}))
+
+    on_disk = _stored(config_file)
+    assert on_disk["port"] == 9123
+    assert on_disk["config_version"] == newer
+    assert on_disk["setting_from_the_future"] == {"a": 1}
+    assert on_disk["temperature"] == 0.5
+
+
 def test_current_version_file_is_not_rewritten_on_load(config_file):
     _write(config_file, {"config_version": cfg.CURRENT_CONFIG_VERSION,
                          "temperature": 0.5})
