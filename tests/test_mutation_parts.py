@@ -95,6 +95,15 @@ def _part(root: Path, module: str, part: int, codes: dict, hashes=None, stats=Tr
 A1, A2, A3 = (f"localm.auth.x_verify__mutmut_{i}" for i in (1, 5, 8))
 
 
+
+def _source(tmp_path: Path, module: str, function: str) -> Path:
+    """A source root holding localm/<module>.py that defines *function*."""
+    root = tmp_path / "src"
+    (root / "localm").mkdir(parents=True, exist_ok=True)
+    (root / "localm" / f"{module}.py").write_text(f"def {function}():\n    return 1\n", encoding="utf-8")
+    return root
+
+
 N = mp.PARTS["auth"]
 OWN = {1: {A1: 1}, 2: {A2: 0}, N: {A3: -24}}
 
@@ -124,7 +133,8 @@ class TestMerge:
     def test_the_gate_reads_the_merged_result(self, tmp_path):
         out = tmp_path / "mutants" / "localm"
         assert mp.merge(self._all(tmp_path), out) == []
-        results, problems = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"])
+        results, problems = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"],
+                                              _source(tmp_path, "auth", "verify"))
         assert problems == []
         assert results["localm/auth.py"]["mutants"] == {A1: "killed", A2: "survived", A3: "timeout"}
 
@@ -133,7 +143,8 @@ class TestMerge:
         parts = self._all(tmp_path, skip=(2,))
         out = tmp_path / "mutants" / "localm"
         assert mp.merge(parts, out) == [f"auth: part(s) 2 of {N} have no results"]
-        results, _ = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"])
+        results, _ = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"],
+                                       _source(tmp_path, "auth", "verify"))
         assert results["localm/auth.py"]["mutants"][A2] == "not checked"
 
     def test_one_exit_code_in_two_parts_is_a_problem(self, tmp_path):
@@ -168,7 +179,8 @@ class TestMerge:
               flat=True)
         out = tmp_path / "mutants" / "localm"
         assert mp.merge(parts, out) == []
-        results, problems = cmf.load_results(tmp_path / "mutants", ["localm/portmux.py"])
+        results, problems = cmf.load_results(tmp_path / "mutants", ["localm/portmux.py"],
+                                              _source(tmp_path, "portmux", "f"))
         assert problems == [] and results["localm/portmux.py"]["mutants"] == {
             "localm.portmux.x_f__mutmut_1": "killed"}
 
