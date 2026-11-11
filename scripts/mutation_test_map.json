@@ -57,8 +57,10 @@
       "localm/config.py"
     ],
     "tests/test_coder_resume.py": [
+      "localm/bindhost.py",
       "localm/scopes.py",
       "localm/pathsafe.py",
+      "localm/netpolicy.py",
       "localm/auth.py",
       "localm/config.py",
       "localm/tls.py"
