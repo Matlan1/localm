@@ -35,7 +35,23 @@ MOD = "localm/scopes.py"
 M1 = "localm.scopes.x_grants__mutmut_1"
 M2 = "localm.scopes.x_grants__mutmut_2"
 M3 = "localm.scopes.x_normalize__mutmut_1"
-HASHES = {"x_grants": "aaaaaaaaaaaa", "x_normalize": "bbbbbbbbbbbb"}
+SOURCE = '''
+def grants(held, required):
+    """Whether *held* grants *required*."""
+    return required in held
+
+
+def normalize(scope):
+    return scope.strip().lower()
+'''
+HASHES = cmf.source_function_hashes(SOURCE)
+
+
+def _write_source(root: Path, text: str = SOURCE, module: str = MOD) -> Path:
+    path = root / module
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return root
 
 
 def _mutant_hash(mutant: str) -> str:
@@ -65,7 +81,7 @@ def _baseline(mutants: dict, floor: float = 100.0, hashes: dict | None = None,
     if mutant_hashes:
         entry["mutant_hashes"] = dict(mutant_hashes)
     return {
-        "schema": 1,
+        "schema": cmf.SCHEMA_VERSION,
         "mutmut": "3.7.0",
         "modules": {module: entry},
         "controls": dict(controls or {}),
@@ -116,10 +132,29 @@ class TestParsing:
 
     def test_load_results_maps_exit_codes_to_statuses(self, tmp_path):
         _write_meta(tmp_path, MOD, {M1: 1, M2: 0, M3: None})
-        results, problems = cmf.load_results(tmp_path, [MOD])
+        results, problems = cmf.load_results(tmp_path, [MOD], _write_source(tmp_path / "src"))
         assert problems == []
         assert results[MOD]["mutants"] == {M1: "killed", M2: "survived", M3: "not checked"}
         assert results[MOD]["function_hashes"] == HASHES
+
+    def test_load_results_hashes_the_source_not_the_meta_values(self, tmp_path):
+        _write_meta(tmp_path, MOD, {M1: 1}, hashes={"x_grants": "mutmut-value"})
+        results, problems = cmf.load_results(tmp_path, [MOD], _write_source(tmp_path / "src"))
+        assert problems == []
+        assert results[MOD]["function_hashes"] == {"x_grants": HASHES["x_grants"]}
+
+    def test_load_results_reports_a_missing_source_module(self, tmp_path):
+        _write_meta(tmp_path, MOD, {M1: 1})
+        results, problems = cmf.load_results(tmp_path, [MOD], tmp_path / "nowhere")
+        assert results == {}
+        assert len(problems) == 1 and MOD in problems[0] and "could not hash" in problems[0]
+
+    def test_load_results_reports_a_mutated_function_the_source_lacks(self, tmp_path):
+        _write_meta(tmp_path, MOD, {M1: 1}, hashes={**HASHES, "x_revoked": "x"})
+        results, problems = cmf.load_results(tmp_path, [MOD], _write_source(tmp_path / "src"))
+        assert results == {}
+        assert len(problems) == 1 and "x_revoked" in problems[0]
+        assert "not the source mutmut ran on" in problems[0]
 
     def test_load_results_reports_a_module_with_no_meta_file(self, tmp_path):
         results, problems = cmf.load_results(tmp_path, [MOD])
@@ -209,7 +244,7 @@ class TestCheck:
         """A function whose source hash moved gets fresh mutant numbering, so
         its recorded dispositions no longer describe the same mutations."""
         res = _results({M1: "killed", M2: "killed", M3: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: "killed", M3: "killed"}, floor=100.0)
         problems, _, _ = cmf.check(res, base, [MOD])
         assert len(problems) == 1
@@ -354,12 +389,14 @@ class TestCheck:
         assert problems == []
         assert any("localm/gone.py" in w and "stale" in w for w in warnings)
 
-    def test_wrong_schema_fails(self):
+    @pytest.mark.parametrize("schema", [1, 3, None])
+    def test_wrong_schema_fails_and_says_to_regenerate(self, schema):
         res = _results({M1: "killed"})
         base = _baseline({M1: "killed"})
-        base["schema"] = 2
+        base["schema"] = schema
         problems, _, _ = cmf.check(res, base, [MOD])
-        assert len(problems) == 1 and "schema" in problems[0]
+        assert len(problems) == 1 and f"schema is {schema!r}" in problems[0]
+        assert "Regenerate both tables" in problems[0]
 
     def test_non_numeric_floor_fails(self):
         res = _results({M1: "killed"})
@@ -389,7 +426,7 @@ class TestControls:
 
     def test_control_whose_function_changed_must_be_repinned(self):
         res = _results({M1: "killed", M2: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: "killed"}, controls=self.CTL)
         problems, _, _ = cmf.check(res, base, [MOD])
         assert any("scope-check-weakened" in p and "re-pin" in p for p in problems)
@@ -468,7 +505,7 @@ class TestUnstable:
 
     def test_unstable_entry_of_a_changed_function_is_stale(self):
         res = _results({M2: "survived", M3: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M2: {"unstable": self.REASON}, M3: "killed"}, floor=50.0)
         problems, _, rows = cmf.check(res, base, [MOD])
         assert len(problems) == 1, problems
@@ -487,7 +524,7 @@ class TestUnstable:
 
     def test_update_re_evaluates_an_unstable_entry_of_a_changed_function(self):
         res = _results({M1: "killed", M2: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: {"unstable": self.REASON}})
         prop = cmf.propose_baseline(res, base, [MOD])
         assert prop["modules"][MOD]["mutants"][M2] == "killed"
@@ -631,12 +668,24 @@ class TestMutatedSourceHashes:
         assert after["localm.scopes.x_grants__mutmut_2"] == before["localm.scopes.x_grants__mutmut_1"]
 
     def test_the_hash_is_the_same_value_on_every_python(self, tmp_path):
-        """Golden values taken from Python 3.12 and 3.13: an ``ast.dump``-based
-        hash gives different values on the two (3.13 omits empty lists)."""
+        """Golden values, the same on Python 3.12 and 3.14."""
         self._write(tmp_path, PORTABLE_SOURCE)
         assert cmf.mutated_source_hashes(tmp_path, MOD) == {
-            "localm.scopes.x_check_plain_name__mutmut_6": "234ea09af4b2",
+            "localm.scopes.x_check_plain_name__mutmut_6": "87cef853a987",
             "localm.scopes.x_fetch__mutmut_1": "80f6d43ae7ff"}
+        assert HASHES == {"x_grants": "b5b14a46f0c8", "x_normalize": "ccc888368514"}
+
+    def test_a_docstring_or_comment_edit_keeps_the_mutant_hash(self, tmp_path):
+        documented = MUTATED_SOURCE.replace(
+            "def x_grants__mutmut_1(a, b):\n",
+            'def x_grants__mutmut_1(a, b):\n    """Sum of a and b."""  # what it returns\n')
+        self._write(tmp_path)
+        before = cmf.mutated_source_hashes(tmp_path, MOD)
+        self._write(tmp_path, documented)
+        assert cmf.mutated_source_hashes(tmp_path, MOD) == before
+        self._write(tmp_path, documented.replace("return a - b", "return a - b - 0"))
+        after = cmf.mutated_source_hashes(tmp_path, MOD)
+        assert after["localm.scopes.x_grants__mutmut_1"] != before["localm.scopes.x_grants__mutmut_1"]
 
     def test_a_missing_or_unparsable_mutated_module_gives_no_hashes(self, tmp_path):
         assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
@@ -653,19 +702,150 @@ class TestMutatedSourceHashes:
         for name in (MOD, MOD + ".meta"):
             (gate / name).parent.mkdir(parents=True, exist_ok=True)
             (gate / name).write_bytes((shard / name).read_bytes())
-        results, _ = cmf.load_results(gate, [MOD])
+        src = _write_source(tmp_path / "src")
+        results, _ = cmf.load_results(gate, [MOD], src)
         assert {M1, M2} <= set(results[MOD]["mutant_hashes"])
         (gate / MOD).unlink()
-        results, _ = cmf.load_results(gate, [MOD])
+        results, _ = cmf.load_results(gate, [MOD], src)
         assert results[MOD]["mutant_hashes"] == {}
 
     def test_load_results_carries_the_hashes_of_the_mutated_module(self, tmp_path):
         _write_meta(tmp_path, MOD, {M1: 1, M2: 0})
         self._write(tmp_path)
-        results, problems = cmf.load_results(tmp_path, [MOD])
+        results, problems = cmf.load_results(tmp_path, [MOD], _write_source(tmp_path / "src"))
         assert problems == []
         assert results[MOD]["mutant_hashes"] == cmf.mutated_source_hashes(tmp_path, MOD)
         assert M1 in results[MOD]["mutant_hashes"]
+
+
+DOCUMENTED = '''
+def grants(held, required):
+    """Whether *held* grants *required*."""
+    def inner(x):
+        """Inner docstring."""
+        return x
+
+    class Local:
+        """Local class docstring."""
+        def method(self):
+            """Method docstring."""
+            return 1
+
+    return inner(required) in held and Local().method()
+
+
+def plain(scope):
+    return scope.strip()
+
+
+def only_doc():
+    """Nothing else."""
+
+
+class Store:
+    """Store docstring."""
+
+    def verify(self, token):
+        """Verify docstring."""
+        return token == "x"
+
+    class Inner:
+        def deep(self):
+            """Deep docstring."""
+            return 2
+'''
+
+REDOCUMENTED = '''
+def grants(held, required):
+    """Reworded: whether *held* grants *required*.
+
+    With a second paragraph.
+    """
+    def inner(x):
+        """Inner docstring, reworded."""
+        return x  # a comment
+
+    class Local:
+        """Reworded."""
+        def method(self):
+            """Reworded."""
+            return 1
+
+    # Another comment.
+    return inner(required) in held and Local().method()
+
+
+def plain(scope):
+    """A docstring the function did not have."""
+    return scope.strip()
+
+
+def only_doc():
+    """Something else entirely."""
+
+
+class Store:
+    """Reworded."""
+
+    def verify(self, token):
+        """Reworded."""
+        return token == "x"
+
+    class Inner:
+        def deep(self):
+            return 2
+'''
+
+
+class TestFunctionHashes:
+    """``source_function_hashes``: a docstring, comment or formatting edit keeps a
+    function's hash, any other edit changes it."""
+
+    def test_keys_follow_mutmuts_mangling(self):
+        assert sorted(cmf.source_function_hashes(DOCUMENTED)) == sorted([
+            "x_grants", "x_plain", "x_only_doc", "xǁStoreǁverify",
+            "xǁStore.Innerǁdeep"])
+
+    def test_a_docstring_only_edit_keeps_every_hash(self):
+        assert cmf.source_function_hashes(REDOCUMENTED) == cmf.source_function_hashes(DOCUMENTED)
+
+    def test_nested_function_and_class_docstrings_do_not_count(self):
+        edited = DOCUMENTED.replace('"""Inner docstring."""', '"""Changed."""') \
+            .replace('"""Local class docstring."""', '"""Changed."""') \
+            .replace('"""Method docstring."""', '"""Changed."""')
+        assert edited != DOCUMENTED
+        assert cmf.source_function_hashes(edited)["x_grants"] \
+            == cmf.source_function_hashes(DOCUMENTED)["x_grants"]
+
+    @pytest.mark.parametrize("old,new,function", [
+        ("return x\n", "return y\n", "x_grants"),
+        ("return 1\n", "return 2\n", "x_grants"),
+        ('token == "x"', 'token != "x"', "xǁStoreǁverify"),
+        ("return 2\n", "return 3\n", "xǁStore.Innerǁdeep"),
+        ("scope.strip()", "scope.rstrip()", "x_plain"),
+    ])
+    def test_a_one_character_code_change_changes_only_that_functions_hash(self, old, new, function):
+        before = cmf.source_function_hashes(DOCUMENTED)
+        assert DOCUMENTED.count(old) == 1
+        after = cmf.source_function_hashes(DOCUMENTED.replace(old, new))
+        assert {fn for fn in before if before[fn] != after[fn]} == {function}
+
+    @pytest.mark.parametrize("first", ["return 1", "1", "...", "print('a')"])
+    def test_a_function_without_a_docstring_keeps_its_first_statement(self, first):
+        """Only a string constant is a docstring; any other first statement is code."""
+        def hashed(stmt):
+            return cmf.source_function_hashes(f"def f():\n    {stmt}\n    return 0\n")["x_f"]
+        assert hashed(first) != hashed("pass")
+        assert hashed("'a docstring'") == hashed("'another'")
+
+    def test_a_docstring_only_function_differs_from_one_with_code(self):
+        before = cmf.source_function_hashes(DOCUMENTED)["x_only_doc"]
+        edited = DOCUMENTED.replace('    """Nothing else."""\n', "    return None\n")
+        assert cmf.source_function_hashes(edited)["x_only_doc"] != before
+
+    def test_a_module_that_does_not_parse_raises(self):
+        with pytest.raises(SyntaxError):
+            cmf.source_function_hashes("def broken(:\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -697,7 +877,7 @@ class TestProposeBaseline:
 
     def test_equivalent_on_a_changed_function_is_re_evaluated(self):
         res = _results({M1: "killed", M2: "survived"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: {"equivalent": "was true before the edit"}})
         prop = cmf.propose_baseline(res, base, [MOD])
         assert prop["modules"][MOD]["mutants"][M2] == "survived"
@@ -787,7 +967,9 @@ class TestMain:
         base = tmp_path / "baseline.json"
         if baseline is not None:
             base.write_text(json.dumps(baseline), encoding="utf-8")
-        return ["--mutants", str(mutants), "--baseline", str(base), "--pyproject", str(pyproject)]
+        src = _write_source(tmp_path / "src")
+        return ["--mutants", str(mutants), "--baseline", str(base), "--pyproject", str(pyproject),
+                "--source", str(src)]
 
     def test_passing_run_exits_zero_and_prints_the_table(self, tmp_path, capsys):
         argv = self._setup(tmp_path, {M1: 1, M2: 0}, _baseline({M1: "killed", M2: "survived"}, floor=50.0))
@@ -861,10 +1043,41 @@ class TestMain:
         assert "BELOW its floor" not in err
         # An edited function: its mutants carry no valid disposition until the
         # committed baseline is updated by hand.
-        _write_meta(tmp_path / "mutants", MOD, {M1: 1, M2: 0, M3: 1},
-                    hashes={"x_grants": "edited000000", "x_normalize": HASHES["x_normalize"]})
+        _write_meta(tmp_path / "mutants", MOD, {M1: 1, M2: 0, M3: 1})
+        _write_source(tmp_path / "src", SOURCE.replace("required in held", "required in set(held)"))
         assert cmf.main(argv + ["--update", "--out", str(out)]) == 1
         assert "no disposition" in capsys.readouterr().err
+
+    def test_a_docstring_only_edit_keeps_every_disposition(self, tmp_path, capsys):
+        base = _baseline({M1: "killed", M2: "survived", M3: "killed"}, floor=66.66)
+        argv = self._setup(tmp_path, {M1: 1, M2: 0, M3: 1}, base)
+        assert cmf.main(argv) == 0
+        _write_source(tmp_path / "src", SOURCE.replace(
+            '"""Whether *held* grants *required*."""',
+            '"""Reworded.\n\n    Over two paragraphs.\n    """  # and a comment'))
+        assert cmf.main(argv) == 0, capsys.readouterr().err
+        assert "passed" in capsys.readouterr().out
+
+    def test_a_one_character_code_edit_makes_its_dispositions_stale(self, tmp_path, capsys):
+        base = _baseline({M1: "killed", M2: "survived", M3: "killed"}, floor=66.66)
+        argv = self._setup(tmp_path, {M1: 1, M2: 0, M3: 1}, base)
+        _write_source(tmp_path / "src", SOURCE.replace("scope.strip()", "scope.rstrip()"))
+        assert cmf.main(argv) == 1
+        err = capsys.readouterr().err
+        assert "1 mutant(s) have no disposition" in err and "x_normalize" in err
+        assert M3 in err and M1 not in err
+
+    @pytest.mark.parametrize("update", [False, True])
+    def test_an_old_schema_baseline_is_refused_with_how_to_regenerate(self, tmp_path, capsys, update):
+        base = _baseline({M1: "killed"})
+        base["schema"] = 1
+        argv = self._setup(tmp_path, {M1: 1}, base)
+        out = tmp_path / "proposed.json"
+        assert cmf.main(argv + (["--update", "--out", str(out)] if update else [])) == 1
+        err = capsys.readouterr().err
+        assert "schema is 1, this script reads 2" in err and "Regenerate both tables" in err
+        assert not out.exists()
+        assert json.loads(Path(argv[3]).read_text(encoding="utf-8")) == base
 
     def test_step_summary_is_appended_when_github_env_is_set(self, tmp_path, capsys, monkeypatch):
         summary = tmp_path / "summary.md"

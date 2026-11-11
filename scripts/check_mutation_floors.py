@@ -6,15 +6,17 @@ eight scripts/check_coverage_floors.py holds line-coverage floors for.
 
 WHAT THIS GATES. A mutmut run (see .github/workflows/ci.yml, the mutation-test
 job) writes one ``mutants/<module path>.meta`` file per mutated module with
-every generated mutant's exit code and a hash of every mutated function's
-source. This script compares those results against the committed baseline
+every generated mutant's exit code and the name of every mutated function.
+This script hashes each of those functions' code from the source module
+(``--source``, default the repo), leaving out docstrings, comments and
+formatting, compares the results against the committed baseline
 ``scripts/mutation_baseline.json`` and exits 1 when any of these holds:
 
 * a module's mutation score is below its ``score_floor``;
 * a mutant the baseline records as ``killed`` is no longer killed (a test
   that used to catch it was weakened or removed, or the mutant's outcome is
   nondeterministic);
-* a mutant has no disposition: it is new, or the source of its function
+* a mutant has no disposition: it is new, or the code of its function
   changed since the baseline, or its function gained mutants the baseline does
   not list (mutant ids are numbered per function in source order over the
   covered lines, so either change renumbers them and the function's
@@ -30,8 +32,9 @@ source. This script compares those results against the committed baseline
 * a control mutant (the ``controls`` section: concrete mutants, at least one
   per security-decision class, that must stay killed) is missing, stale,
   recorded as unstable or not killed;
-* the run is incomplete (a mutant with no outcome), the baseline is missing
-  or malformed, or a module of the run has no results or no baseline.
+* the run is incomplete (a mutant with no outcome), the baseline is missing,
+  malformed or of another ``schema``, a module of the run has no results or no
+  baseline, or its source does not define a function mutmut mutated.
 
 A run mutates every ``only_mutate`` module unless ``--modules`` names a subset
 (the shards a pull request needs, see scripts/mutation_scope.py): only those
@@ -80,6 +83,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
 import math
@@ -94,7 +98,7 @@ if str(SCRIPTS) not in sys.path:
 import ci_runner_files  # noqa: E402
 DEFAULT_BASELINE = REPO / "scripts" / "mutation_baseline.json"
 DEFAULT_MUTANTS_DIR = REPO / "mutants"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # mutmut 3.7.0's status_by_exit_code (mutmut/__main__.py). Any exit code not
 # listed is "suspicious", as in mutmut.
@@ -180,10 +184,18 @@ def only_mutate_modules(pyproject_text: str) -> list[str]:
     return [str(m).replace("\\", "/") for m in modules]
 
 
-def load_results(mutants_dir: Path, modules: list[str]) -> tuple[dict, list[str]]:
-    """``{module: {"mutants": {id: status}, "function_hashes": {...}}}`` read
-    from each module's ``.meta`` file, plus the problems found on the way (a
-    module with no results is a problem, not an empty entry)."""
+def load_results(mutants_dir: Path, modules: list[str],
+                 source_root: Path = REPO) -> tuple[dict, list[str]]:
+    """``{module: {"mutants": {id: status}, "function_hashes": {...},
+    "mutant_hashes": {...}}}`` read from each module's ``.meta`` file, plus the
+    problems found on the way (a module with no results is a problem, not an
+    empty entry).
+
+    ``function_hashes`` has one entry per function the ``.meta`` file lists as
+    mutated, with that function's ``code_hash`` taken from
+    ``source_root / module``; mutmut's own hash values are not used. A module
+    whose source is missing, does not parse, or does not define a function the
+    ``.meta`` file lists is a problem and gets no entry."""
     results: dict[str, dict] = {}
     problems: list[str] = []
     for module in modules:
@@ -207,9 +219,79 @@ def load_results(mutants_dir: Path, modules: list[str]) -> tuple[dict, list[str]
             problems.append(
                 f"{module}: could not read {meta_path.name}: {type(e).__name__}: {e}")
             continue
-        results[module] = {"mutants": mutants, "function_hashes": dict(hashes),
+        source_path = source_root / module
+        try:
+            source_hashes = source_function_hashes(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as e:
+            problems.append(
+                f"{module}: could not hash the mutated functions from {source_path}: "
+                f"{type(e).__name__}: {e}")
+            continue
+        missing = sorted(fn for fn in hashes if fn not in source_hashes)
+        if missing:
+            problems.append(
+                f"{module}: {source_path} does not define {len(missing)} function(s) "
+                f"mutmut mutated (e.g. {missing[0]}) - the source checked here is not "
+                "the source mutmut ran on")
+            continue
+        results[module] = {"mutants": mutants,
+                           "function_hashes": {fn: source_hashes[fn] for fn in hashes},
                            "mutant_hashes": mutated_source_hashes(mutants_dir, module)}
     return results, problems
+
+
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _strip_docstrings(node: ast.AST) -> None:
+    """Removes, in place, the leading string-constant statement (the docstring)
+    from the body of *node* and of every function and class nested in it. A
+    body left empty gets a single ``pass``."""
+    for sub in list(ast.walk(node)):
+        if not isinstance(sub, (*_FUNCTION_NODES, ast.ClassDef)):
+            continue
+        body = sub.body
+        if body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            del body[0]
+            if not body:
+                body.append(ast.Pass())
+
+
+def code_hash(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str | None = None) -> str:
+    """Short sha256 of a function's code: ``ast.unparse`` of a copy of *node*
+    with every docstring removed (``_strip_docstrings``) and, when *name* is
+    given, the function renamed to it. Comments, formatting and docstrings do
+    not change the value; any other edit to the function does. *node* is not
+    modified."""
+    node = copy.deepcopy(node)
+    _strip_docstrings(node)
+    if name is not None:
+        node.name = name
+    return hashlib.sha256(ast.unparse(node).encode("utf-8")).hexdigest()[:12]
+
+
+def source_function_hashes(source: str) -> dict[str, str]:
+    """``{mangled name: code_hash}`` for every function mutmut can mutate in
+    *source*: module-level functions (``x_<name>``) and methods of classes at
+    any depth (``xǁ<Class>ǁ<name>``, nested classes joined with ``.``), keyed
+    the way mutmut's ``.meta`` files key them. Functions nested in a function
+    are part of that function's hash. Raises ``SyntaxError`` or ``ValueError``
+    when *source* does not parse."""
+    hashes: dict[str, str] = {}
+
+    def visit(stmts: list[ast.stmt], class_name: str) -> None:
+        for node in stmts:
+            if isinstance(node, _FUNCTION_NODES):
+                key = (f"xǁ{class_name}ǁ{node.name}" if class_name
+                       else f"x_{node.name}")
+                hashes[key] = code_hash(node)
+            elif isinstance(node, ast.ClassDef):
+                visit(node.body, f"{class_name}.{node.name}" if class_name else node.name)
+
+    visit(ast.parse(source).body, "")
+    return hashes
 
 
 EXCLUDED_KINDS = frozenset({"equivalent", "unstable"})
@@ -218,35 +300,20 @@ _MUTANT_FUNCTION = re.compile(r"^x.*__mutmut_\d+$")
 
 
 def mutated_source_hashes(mutants_dir: Path, module: str) -> dict[str, str]:
-    """``{mutant id: short sha256}`` of the body of every mutant function in the
-    mutated module mutmut wrote for *module* (``mutants/<module>``, beside its
-    ``.meta``). The hash covers the function's signature and body, not its name
-    or position, so it changes only when the mutation itself does. An empty dict
-    when the file is missing or does not parse."""
+    """``{mutant id: code_hash}`` of every mutant function in the mutated module
+    mutmut wrote for *module* (``mutants/<module>``, beside its ``.meta``),
+    each hashed under the name ``_``. The hash covers the function's signature
+    and code, not its name, position, docstrings or comments, so it changes
+    only when the mutated code does. An empty dict when the file is missing or
+    does not parse."""
     try:
-        source = (mutants_dir / module).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        tree = ast.parse((mutants_dir / module).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
         return {}
     dotted = module.removesuffix(".py").replace("/", ".")
-    hashes: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and _MUTANT_FUNCTION.match(node.name):
-            segment = ast.get_source_segment(source, node)
-            if segment is None:
-                return {}
-            hashes[f"{dotted}.{node.name}"] = _segment_hash(segment, node.name)
-    return hashes
-
-
-def _segment_hash(segment: str, name: str) -> str:
-    """Short sha256 of a mutant function's source text with its name replaced
-    by ``_``. The text is the same on every Python version, unlike an ``ast.dump``
-    of it, which differs between interpreters (3.13 omits empty lists)."""
-    text = "\n".join(line.rstrip() for line in segment.splitlines())
-    text = re.sub(rf"^((?:async\s+)?def\s+){re.escape(name)}\b", r"\1_", text, count=1)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return {f"{dotted}.{node.name}": code_hash(node, "_")
+            for node in ast.walk(tree)
+            if isinstance(node, _FUNCTION_NODES) and _MUTANT_FUNCTION.match(node.name)}
 
 
 def _disposition(value) -> tuple[str, str | None]:
@@ -289,6 +356,21 @@ def grown_functions(statuses: dict, base_mutants: dict) -> set[str]:
             if m not in base_mutants and function_of(m) in listed}
 
 
+def baseline_schema_problem(baseline: dict) -> str | None:
+    """A problem line when *baseline* is not of ``SCHEMA_VERSION``, else None."""
+    schema = baseline.get("schema")
+    if schema == SCHEMA_VERSION:
+        return None
+    return (f"baseline schema is {schema!r}, this script reads {SCHEMA_VERSION}: its "
+            "function_hashes and mutant_hashes were computed another way, so every "
+            "function would read as changed and every disposition as stale. "
+            "Regenerate both tables with this script's hashing "
+            "(source_function_hashes from the source modules, mutated_source_hashes "
+            "from the mutated modules) and set \"schema\" to "
+            f"{SCHEMA_VERSION}; never --update from it, which would drop every "
+            "equivalent and unstable classification")
+
+
 def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str], list[str], list[dict]]:
     """Pure check of parsed results against a parsed baseline. Returns
     ``(problems, warnings, rows)``: a non-empty ``problems`` is a failure;
@@ -298,10 +380,9 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
     warnings: list[str] = []
     rows: list[dict] = []
 
-    if baseline.get("schema") != SCHEMA_VERSION:
-        problems.append(
-            f"baseline schema is {baseline.get('schema')!r}, this script reads "
-            f"{SCHEMA_VERSION}")
+    schema_problem = baseline_schema_problem(baseline)
+    if schema_problem:
+        problems.append(schema_problem)
         return problems, warnings, rows
     base_modules = baseline.get("modules")
     if not isinstance(base_modules, dict):
@@ -654,6 +735,9 @@ def main(argv: list[str]) -> int:
                     help="baseline JSON (default: scripts/mutation_baseline.json)")
     ap.add_argument("--pyproject", type=Path, default=REPO / "pyproject.toml",
                     help=argparse.SUPPRESS)
+    ap.add_argument("--source", type=Path, default=REPO,
+                    help="directory the only_mutate paths are read from to hash the "
+                         "mutated functions (default: the repo)")
     ap.add_argument("--update", action="store_true",
                     help="write a baseline from the current results, then check it")
     ap.add_argument("--out", type=Path, default=None,
@@ -692,7 +776,7 @@ def main(argv: list[str]) -> int:
             return 1
         selected = [m for m in modules if Path(m).stem in stems]
 
-    results, problems = load_results(args.mutants, selected)
+    results, problems = load_results(args.mutants, selected, args.source)
     if not results:
         problems.append(
             f"no mutation results under {args.mutants} at all - run "
@@ -710,6 +794,15 @@ def main(argv: list[str]) -> int:
             print(f"Mutation floor check could not run: {err}. Generate one with "
                   "--update and classify every survivor in it.", file=sys.stderr)
             return 1
+
+    schema_problem = baseline_schema_problem(baseline)
+    if schema_problem:
+        problems.append(f"{args.baseline}: {schema_problem}")
+        print("Mutation floor check could not run:", file=sys.stderr)
+        for p in problems:
+            print("  " + p, file=sys.stderr)
+        _publish(render_summary([], problems, []))
+        return 1
 
     if args.update:
         proposed = propose_baseline(results, baseline, modules)

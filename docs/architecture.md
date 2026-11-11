@@ -189,7 +189,8 @@ plain HTTP), that must stay killed. The gate fails on
 a score below its floor, a mutant recorded as killed that now survives (a
 weakened test or a nondeterministic outcome; the message names the re-run
 that tells them apart), a mutant with no disposition
-(new, or in a function whose source hash changed), a control not killed or
+(new, or in a function whose code changed; a docstring, comment or formatting
+edit does not count), a control not killed or
 recorded as unstable, an incomplete run, or a test-file edge mutmut's stats
 recorded that `scripts/mutation_test_map.json` lacks. Modules that did not
 run keep their committed baseline. The job uploads a proposed baseline and
