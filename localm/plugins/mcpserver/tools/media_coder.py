@@ -10,7 +10,6 @@ binds.
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import secrets
 import threading
@@ -382,6 +381,10 @@ def build(engines: EngineCache, coder_shell: bool = False,
                 max_turns = int(max_turns)
             except (TypeError, ValueError):
                 return _text_result("'max_turns' must be an integer", is_error=True)
+        # Shell approval is the operator's launch decision (--coder-shell):
+        # without it `yes` is not honoured, an unattended run ignores the
+        # project's auto_approve, and file writes still happen while run_shell
+        # is denied.
         try:
             cfg = coder_runner.resolve_task_config(
                 work_dir, model=args.get("model") or None, max_turns=max_turns,
@@ -438,11 +441,6 @@ def build(engines: EngineCache, coder_shell: bool = False,
                 engine, model_name, lock=engines.generation_lock(engine),
                 still_resident=lambda: engines.is_resident(model_name, engine))
 
-        # Shell approval is the operator's launch decision (--coder-shell):
-        # without it neither `yes` nor a project's auto_approve is honoured, and
-        # file writes still happen while run_shell is denied.
-        if not coder_shell and cfg.auto_approve:
-            cfg = dataclasses.replace(cfg, auto_approve=False)
         if coder_runner.unattended_shell_gated(task, cfg.auto_approve):
             _srv._log("coder task: run_shell is denied for this run "
                       + ("(no 'yes')" if coder_shell
