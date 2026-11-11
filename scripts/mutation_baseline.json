@@ -601,7 +601,9 @@
         "localm.netpolicy.x__canonical_host__mutmut_2": "killed",
         "localm.netpolicy.x__canonical_host__mutmut_3": "killed",
         "localm.netpolicy.x__canonical_host__mutmut_4": "killed",
-        "localm.netpolicy.x__canonical_host__mutmut_5": "killed",
+        "localm.netpolicy.x__canonical_host__mutmut_5": {
+          "equivalent": "the host is lowercased before rstrip, so it holds no X; rstrip('XX.XX') strips the same trailing dots as rstrip('.')"
+        },
         "localm.netpolicy.x__canonical_host__mutmut_6": "killed",
         "localm.netpolicy.x__canonical_host__mutmut_7": "killed",
         "localm.netpolicy.x__canonical_host__mutmut_8": "killed",
@@ -1565,6 +1567,7 @@
         "localm.netpolicy.x__body_chunks__mutmut_22": "905d2610064e",
         "localm.netpolicy.x__body_chunks__mutmut_24": "5f0ef6e45c88",
         "localm.netpolicy.x__canonical_host__mutmut_14": "3789caa95761",
+        "localm.netpolicy.x__canonical_host__mutmut_5": "93faf4072bb8",
         "localm.netpolicy.x__domain_list__mutmut_10": "fc7ae06f3608",
         "localm.netpolicy.x__is_blocked_ip__mutmut_6": "5af8e677747e",
         "localm.netpolicy.x__is_blocked_ip__mutmut_7": "581713106927",
