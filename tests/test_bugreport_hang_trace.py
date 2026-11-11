@@ -160,10 +160,14 @@ def test_saved_report_carries_the_loop_thread_first_and_every_thread(tmp_path, m
     the event loop thread first with its blocking frame, every other thread
     after it, and no absolute path."""
     import threading
+    from pathlib import Path
 
     from localm.inference import http_server as hs
+    real_home = str(Path.home())
     home = tmp_path / ".localm"
     monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    model = home / "models" / "stalled-model.gguf"
     release, written = threading.Event(), threading.Event()
     loop = threading.Thread(target=_the_blocking_call_in_this_test,
                             args=(release, written), name="report-loop", daemon=True)
@@ -171,7 +175,8 @@ def test_saved_report_carries_the_loop_thread_first_and_every_thread(tmp_path, m
                              daemon=True)
     loop.start()
     other.start()
-    trace = _seed_hang(home, body="===== LOCALM HANG WATCHDOG: event loop stalled 12.0s =====\n")
+    trace = _seed_hang(home, body="===== LOCALM HANG WATCHDOG: event loop stalled 12.0s =====\n"
+                                  f"while reading {model}\n")
     try:
         expected = {t.ident for t in threading.enumerate()} - {threading.get_ident()}
         with open(trace, "a", encoding="utf-8") as fh:
@@ -185,7 +190,7 @@ def test_saved_report_carries_the_loop_thread_first_and_every_thread(tmp_path, m
         other.join(5)
     assert path is not None
     text = path.read_text(encoding="utf-8")
-    section = text.split("## Server hang trace", 1)[1]
+    section = text.split("## Server hang trace", 1)[1].split("\n## ", 1)[0]
     assert "event loop thread is listed first" in section
     headers = [ln for ln in section.splitlines() if ln.startswith("Thread 0x")]
     assert headers[0].startswith(f"Thread 0x{loop.ident:08x} "), headers[:2]
@@ -196,7 +201,10 @@ def test_saved_report_carries_the_loop_thread_first_and_every_thread(tmp_path, m
     assert "the event loop thread was in" in section
     assert "test_bugreport_hang_trace.py:" in section
     assert "in _the_blocking_call_in_this_test" in section.split(headers[1], 1)[0]
-    assert str(tmp_path) not in section and 'File "' not in section
+    assert 'File "' not in section
+    assert str(Path("~") / model.relative_to(tmp_path)) in section
+    for absolute in (str(tmp_path), real_home):
+        assert absolute.lower() not in text.lower(), absolute
 
 
 def test_saved_report_attaches_the_stall_watch_stacks_without_a_trace_file(
