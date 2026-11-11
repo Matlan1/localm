@@ -6,9 +6,9 @@ A line holds the time, the event kind, and only these optional fields:
 the config keys a save changed, never their values), ``plugin``,
 ``version_from``, ``version_to`` and ``loopback`` (a failed login's client
 only). No conversation content and no secret is ever written. In privacy mode
-(the default) nothing is written: the mode is ``LOCALM_MODE`` when set, else the
-``mode`` key of ``<data dir>/config.json``, else privacy; a config that cannot be
-read counts as privacy.
+(the default) nothing is written: the gate ``localm.audit`` installs with
+:func:`set_write_gate` (``automatic_write_allowed("server")``) decides, and with no
+gate installed nothing is written.
 
 The file is capped at ``MAX_BYTES``; at the cap it is renamed to
 ``management.jsonl.1`` (replacing the previous rotation) and a new file starts.
@@ -49,24 +49,27 @@ def log_path(home) -> Path:
     return Path(home) / "logs" / FILE_NAME
 
 
-_MODES = ("privacy", "log", "full")
+_write_gate = None
 
 
-def _privacy_mode(home) -> bool:
-    """True when the session mode for the data directory *home* is privacy."""
-    env = os.environ.get("LOCALM_MODE", "").strip().lower()
-    if env in _MODES:
-        return env == "privacy"
+def set_write_gate(gate) -> None:
+    """Install *gate*, a no-argument callable that is True when automatic writes
+    are allowed. ``localm.audit`` installs ``automatic_write_allowed("server")``
+    when it is imported."""
+    global _write_gate
+    _write_gate = gate
+
+
+def _write_allowed() -> bool:
+    """True when the installed gate allows the write; False with no gate, when the
+    gate says no, or when it raises."""
+    gate = _write_gate
+    if gate is None:
+        return False
     try:
-        cfg = json.loads((Path(home) / "config.json").read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return True
+        return bool(gate())
     except Exception:
-        return True
-    mode = cfg.get("mode") if isinstance(cfg, dict) else None
-    if isinstance(mode, str) and mode.strip().lower() in _MODES:
-        return mode.strip().lower() == "privacy"
-    return True
+        return False
 
 
 def _text(value) -> str:
@@ -86,7 +89,7 @@ def record(kind: str, *, home, principal: Optional[str] = None,
     """
     if kind not in KINDS:
         raise ValueError(f"unknown management event kind: {kind!r}")
-    if _privacy_mode(home):
+    if not _write_allowed():
         return False
     event: dict = {"ts": time.time(), "kind": kind}
     if principal is not None:

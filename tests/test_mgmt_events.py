@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import localm.audit  # noqa: F401  (installs the management log's write gate)
 import localm.config as cfg
 from localm import mgmt_events
 
@@ -309,3 +310,17 @@ def test_plugin_install_and_uninstall_succeed_when_the_recorder_raises(
         assert any(f"could not record the {kind} event for plugin p1" in m
                    and "recorder exploded" in m for m in msgs), msgs
     assert _plugin_events(home) == []
+
+
+def test_nothing_is_written_without_a_gate(home, monkeypatch):
+    monkeypatch.setattr(mgmt_events, "_write_gate", None)
+    assert mgmt_events.record("update_applied", home=home, version_to="9") is False
+    assert not (home / "logs").exists()
+
+
+def test_a_gate_that_raises_writes_nothing(home, monkeypatch):
+    def boom():
+        raise RuntimeError("x")
+    monkeypatch.setattr(mgmt_events, "_write_gate", boom)
+    assert mgmt_events.record("update_applied", home=home, version_to="9") is False
+    assert not (home / "logs").exists()
