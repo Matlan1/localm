@@ -86,7 +86,7 @@ SECRET_KEY=<redacted> key=visible monkey=visible
 ```
 
 ## Server hang trace (event-loop stall)
-The hang watchdog captured every thread's stack when the server froze (the top of the main thread is the blocking call):
+The hang watchdog captured every thread's stack when the server froze. The event loop thread is listed first; its top frame is what the server's event loop was blocked in:
 ```
 Thread 0x0001 (most recent call first):
   File "~/models/private-model.gguf", line 5 in wait

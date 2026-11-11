@@ -1050,7 +1050,7 @@ def test_live_server_hang_trace(world, tmp_path):
     trace = bugreport.live_server_hang_trace(home)
     assert trace == (
         "Thread 0x000a (most recent call first):\n"
-        '  File "C:\\Users\\<redacted>\\Documents\\localm\\notes.txt", line 40 in _run_once\n'
+        "  localm/notes.txt:40 in _run_once\n"
         "  Authorization: <redacted>")
     world.live_pids.clear()
     assert bugreport.live_server_hang_trace(home) == ""

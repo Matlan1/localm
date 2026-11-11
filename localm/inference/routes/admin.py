@@ -138,9 +138,11 @@ def register(app: FastAPI, ctx) -> None:
         # Off the event loop and bounded: a synchronous log read, scrub and file write
         # on the loop stalls every concurrent request. See _BUG_REPORT_SAVE_TIMEOUT_S.
         def _save():
+            from localm.inference._stall_watch import recent_stall_stacks
             return bugreport.save_user_report(
                 description, what_i_expected=what_i_expected, what_happened=what_happened,
                 include_log=bool(body.get("include_log")), client=client,
+                stall_stacks=recent_stall_stacks(),
                 scrub=None if show is str else show)
 
         try:

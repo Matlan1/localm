@@ -226,3 +226,146 @@ def test_parse_dump_reads_threads_and_frames():
     assert sw.describe([("/x/lib/python3.12/json/encoder.py", 258, "iterencode"),
                         ("/x/localm/rag/f.py", 320, "_write")]) == (
         "json/encoder.py:258 in iterencode, called from localm/rag/f.py:320 in _write")
+
+
+def _loop_stand_in(stop: threading.Event) -> None:
+    while not stop.is_set():
+        time.sleep(0.01)
+
+
+def test_a_gil_stall_names_the_loop_thread_first_not_the_busiest_guess(watch_factory):
+    """The loop thread is known: ``where`` and ``frames`` are the loop thread's,
+    the CPU-proven holder is added after it, and the record and the trace sink
+    carry every thread's stack, the loop thread first."""
+    stop = threading.Event()
+    loop = threading.Thread(target=_loop_stand_in, args=(stop,), name="loop-stand-in",
+                            daemon=True)
+    loop.start()
+    got = []
+    try:
+        w = watch_factory(loop_thread=loop.ident, trace_sink=got.append)
+        t = threading.Thread(target=_hold_gil_in_json_dumps, name="gil-holder")
+        t.start()
+        t.join()
+        assert _wait_for(lambda: w.records())
+    finally:
+        stop.set()
+        loop.join(5)
+    rec = w.records(with_threads=True)[0]
+    assert rec["kind"] == "gil"
+    assert "in _loop_stand_in on the event loop thread" in rec["where"], rec["where"]
+    assert "in _loop_stand_in" in rec["frames"][0], rec["frames"]
+    holder = rec["where"].split("; ", 1)[1]
+    assert "json/encoder.py" in holder and "_hold_gil_in_json_dumps" in holder, holder
+    assert rec["threads"][0]["loop"] and rec["threads"][0]["ident"] == loop.ident
+    assert rec["threads"][0]["name"] == "loop-stand-in"
+    assert any(e["ident"] == t.ident and any("_hold_gil_in_json_dumps" in f for f in e["frames"])
+               for e in rec["threads"]), rec["threads"]
+    assert all(":\\" not in f and not f.startswith("/")
+               for e in rec["threads"] for f in e["frames"])
+    assert "threads" not in w.records()[0]
+    first = next(ln for ln in got[0].splitlines() if ln.startswith("Thread 0x"))
+    assert first.startswith(f"Thread 0x{loop.ident:08x} "), first
+    assert "[event loop thread]" in first, first
+    lines = got[0].splitlines()
+    assert lines[0].startswith("Timeout"), lines[:2]
+    assert lines[1].startswith("the event loop thread was in "), lines[:2]
+    assert "in _loop_stand_in" in lines[1], lines[:2]
+
+
+def test_a_blocked_loop_record_carries_every_thread_loop_first(watch_factory):
+    loop = asyncio.new_event_loop()
+    beat = {"t": None}
+    release = threading.Event()
+    bystander = threading.Thread(target=release.wait, name="sw-bystander", daemon=True)
+    bystander.start()
+
+    async def heartbeat():
+        while True:
+            beat["t"] = time.monotonic()
+            await asyncio.sleep(0.05)
+
+    def run():
+        asyncio.set_event_loop(loop)
+        loop.create_task(heartbeat())
+        loop.run_forever()
+
+    lt = threading.Thread(target=run, name="sw-loop", daemon=True)
+    lt.start()
+    assert _wait_for(lambda: beat["t"] is not None)
+
+    def _blocking_call_on_the_loop():
+        time.sleep(2.0)
+
+    try:
+        w = watch_factory(heartbeat_gap=lambda: time.monotonic() - beat["t"],
+                          loop_thread=lt.ident)
+        sw.set_active(w)
+        loop.call_soon_threadsafe(_blocking_call_on_the_loop)
+        assert _wait_for(lambda: w.records(), 5)
+        rec = w.records(with_threads=True)[0]
+        text = sw.recent_stall_stacks()
+    finally:
+        sw.set_active(None)
+        loop.call_soon_threadsafe(loop.stop)
+        lt.join(5)
+        loop.close()
+        release.set()
+        bystander.join(5)
+    assert rec["kind"] == "loop"
+    assert rec["threads"][0]["loop"] and rec["threads"][0]["name"] == "sw-loop"
+    assert "in _blocking_call_on_the_loop" in rec["threads"][0]["frames"][0]
+    assert {"sw-bystander", "MainThread"} <= {e["name"] for e in rec["threads"]}
+    headers = [ln for ln in text.splitlines() if ln.startswith("Thread 0x")]
+    assert "[event loop thread]" in headers[0] and '"sw-loop"' in headers[0], headers
+    assert any('"sw-bystander" daemon=True' in h for h in headers), headers
+    assert "in _blocking_call_on_the_loop" in text.splitlines()[1], text
+
+
+_RUNNER_WAITING_DUMP = (
+    "Timeout (0:00:10)!\n"
+    "Thread 0x0000202c (most recent call first):\n"
+    '  File "D:\\x\\Lib\\multiprocessing\\connection.py", line 1016 in _exhaustive_wait\n'
+    '  File "D:\\x\\Lib\\multiprocessing\\connection.py", line 1084 in wait\n'
+    '  File "D:\\x\\Lib\\multiprocessing\\queues.py", line 113 in get\n'
+    '  File "D:\\x\\localm\\inference\\backends\\llamacpp\\_runner.py", line 1030 in _poll\n'
+    '  File "D:\\x\\localm\\inference\\backends\\llamacpp\\_runner.py", line 1103 '
+    "in spawn_and_load\n\n"
+    "Thread 0x00001111 (most recent call first):\n"
+    '  File "D:\\x\\localm\\inference\\routes\\models.py", line 72 in _blocking_route\n'
+    '  File "D:\\x\\Lib\\asyncio\\events.py", line 88 in _run\n')
+
+
+def test_a_gil_stall_with_a_runner_waiting_names_the_loop_thread_not_the_runner():
+    """The issue-2840 shape: a runner thread waiting on its worker
+    (``_exhaustive_wait`` under ``_poll``) is listed before the loop thread.
+    The record names the loop thread's frame, never the waiting runner."""
+    w = sw.StallWatch(threshold=10.0, heartbeat_gap=lambda: None, loop_thread=0x1111)
+    got = []
+    w._trace_sink = got.append
+    w._gil_stall(_RUNNER_WAITING_DUMP, 12.5, {})
+    rec = w.records(with_threads=True)[0]
+    assert rec["where"].startswith(
+        "localm/inference/routes/models.py:72 in _blocking_route on the event loop thread"), \
+        rec["where"]
+    assert "_poll" not in rec["where"] and "other running" not in rec["where"], rec["where"]
+    assert [e["ident"] for e in rec["threads"]] == [0x1111, 0x202c]
+    assert rec["threads"][1]["frames"][3] == \
+        "localm/inference/backends/llamacpp/_runner.py:1030 in _poll"
+    headers = [ln for ln in got[0].splitlines() if ln.startswith("Thread 0x")]
+    assert headers[0].startswith("Thread 0x00001111 ") and "[event loop thread]" in headers[0]
+
+
+def test_compact_stack_text_shortens_frame_lines_linearly():
+    from localm.pathscrub import compact_stack_text
+    text = ('Thread 0x00000001 "x" daemon=False (most recent call first):\n'
+            '  File "C:\\Users\\someone\\app\\localm\\a.py", line 3 in f\n'
+            '  File "/home/someone/lib/python3.12/queue.py", line 171, in get\n'
+            "    source line kept\n")
+    assert compact_stack_text(text).splitlines() == [
+        'Thread 0x00000001 "x" daemon=False (most recent call first):',
+        "  localm/a.py:3 in f", "  queue.py:171 in get", "    source line kept"]
+    hostile = 'File "' + '", line 1 in a' * 8000
+    t0 = time.perf_counter()
+    compact_stack_text(hostile)
+    assert time.perf_counter() - t0 < 0.5
