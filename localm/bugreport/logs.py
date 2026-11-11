@@ -6,6 +6,7 @@ event-loop hang traces matched to a run.
 from __future__ import annotations
 
 import localm.bugreport as _br
+from localm.pathscrub import compact_stack_text
 
 
 # Outer safety cap on how much of the raw log FILE is even read before digesting -
@@ -143,8 +144,9 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
     (``<logs>/hang_<date>_<pid>.log``), if the always-on stall watchdog captured
     one - every thread's stack at the moment the server froze, which is exactly
     what diagnoses an intermittent "it hung" report. Kept HEAD-first (the first
-    snapshot names where the loop first stuck). Home paths are scrubbed. Empty
-    when that run captured no freeze. Never raises.
+    snapshot names where the loop first stuck). Frame lines are shortened by
+    pathscrub.compact_stack_text, then home paths are scrubbed. Empty when
+    that run captured no freeze. Never raises.
 
     Matched to *pid* - the run this report is about - the same way
     _recent_log_tail already matches its log, and additionally bounded by
@@ -182,7 +184,7 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
         text = traces[0].read_text(encoding="utf-8", errors="replace").strip()
         if not text:
             return ""
-        scrubbed = _br._scrub_secrets(text)
+        scrubbed = _br._scrub_secrets(compact_stack_text(text))
         if len(scrubbed) > max_chars:
             scrubbed = scrubbed[:max_chars] + \
                 "\n... (trace truncated - full stacks in the hang_*.log file)"

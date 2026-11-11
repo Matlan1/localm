@@ -68,7 +68,7 @@ localm run D:\hf-models\gemma-3-4b-it
 ### GUI
 
 ```bash
-localm gui                       # picks the first registered model, opens browser
+localm gui                       # picks the first registered model, opens browser (or the app window with the desktop extra, see native-app.md)
 localm gui mymodel               # or name one
 localm gui --no-model            # open model-less, straight to the Models page
 localm gui --no-browser          # start the server, open the URL yourself
@@ -270,9 +270,9 @@ localm rename mymodel newname                # rename it outright (unlike alias,
 
 `add` takes a model file, a HuggingFace model directory, or a folder of models (every GGUF and safetensors model inside is registered). It also reads where other tools keep models: the Hugging Face hub cache, an Ollama model store, Jan's data folder, GPT4All's download folder (finished GGUF files only), and a `.llamafile` (its model is unpacked into `<data dir>/models`). `--type` takes the values listed under [Model type](#model-type) (default `auto`).
 
-`localm rename` also updates, best effort, the references to the old name inside the data directory (config, jobs, Knowledge collections); a per-project `.localcoder/config.toml` `model` setting is not touched. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
+`localm rename` changes the name you see and type, and nothing else: the file stays where it is, and settings, jobs, pinned chats, Knowledge collections, adapters and media workflows keep pointing at the same model, because each model has an ID that never changes. Only an empty name or one another model has is refused. The old name stops working where a name is typed or sent (`localm run`, the API). A `model` setting in a project's `.localcoder/config.toml` is a name you typed, so it has to name the model as it is called now; `localm coder` says so plainly when it does not. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
 
-Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type, and the same holds for `localm pull --type` with no terminal, such as a script.
+Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`). With no terminal to ask at, `ask` skips the file (exit 1), unless you gave a `--type` that differs from the type detected for the file or from a type it is already registered with: then the new name becomes an alias of the registered file with that type (a name already registered for the file just takes the type), and the same holds for `localm pull --type` with no terminal, such as a script.
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
@@ -282,6 +282,15 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 ```
 
 `--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `<data dir>/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
+
+To pair a model with a projector (mmproj) GGUF that is already on disk, such as the speech stages file of a text-to-speech model or a vision projector in a folder that holds several, name it when adding the model or attach it to a model that is already registered:
+
+```bash
+localm add D:\models\tts-model.gguf --mmproj D:\models\mmproj-tts-model.gguf
+localm attach-mmproj mymodel D:\models\mmproj-model-f16.gguf
+```
+
+`attach-mmproj` records the projector without loading the model and replaces any projector recorded before. It applies only to a single-file GGUF chat or speech model, and the projector must be a local GGUF whose own metadata marks it as a projector; otherwise nothing is written and it exits 1.
 
 ### Packages a model's own code needs
 
@@ -397,7 +406,7 @@ base model; they are not supported for HuggingFace-format models.
 localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
-localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
+localm relocate MODEL NEW_PATH  # re-point a moved model and its aliases to the new file
 localm unload [MODEL] [--force] # free VRAM on the running server: all models, or just one
 ```
 
@@ -551,7 +560,7 @@ localm job add NAME --memory --every 21600         # synthesise memory facts, no
 localm job add NAME --rag --collection COLL --cron "0 3 * * *"   # keep a Knowledge collection current
 localm job list                  # id, name, schedule, state, last status
 localm job show JOB_ID           # full definition: schedule, prompt, cwd/scope, allow_shell
-localm job run JOB_ID            # run once now, record the result
+localm job run JOB_ID            # run once now, record the result (in the running server if there is one)
 localm job results JOB_ID [--limit N] [--offset N]  # past run results, newest first
 localm job enable JOB_ID
 localm job disable JOB_ID
@@ -607,7 +616,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default), de, es or fr
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed: requests are then refused whenever no key is configured, for example after the last key is removed (`localm config require_auth true` is itself refused while no key exists, since that would lock you out; the environment variable is not); `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default); `allowed_hosts` (or `LOCALM_ALLOWED_HOSTS`, comma-separated) adds host names the server answers to, for a reverse proxy or your own DNS name (by default only its own names and addresses; `"*"` turns the DNS-rebinding check off). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -911,6 +920,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
 - `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
 - `--output-format jsonl` writes each agent event (`tool_call`, `tool_result`, `token`, `turn`, `info`, ...) to stdout as one JSON object per line as it happens, then a closing `{"type": "final", "success", "response", "turns", "total_tokens", "denied"}` line; everything else the CLI prints goes to stderr, and so it does for `--output-format json`, whose stdout is exactly the one result document. `jsonl` needs a TASK.
@@ -972,7 +982,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `dispatch_parallel` | Run up to 2 sub-tasks at once, each in its own git worktree | yes | no |
 | `fetch_url` | Fetch a URL and return its text, HTML stripped | see below | no |
 | `web_search` | Search the web, returning titles, URLs and snippets | see below | no |
-| `generate_image` | Generate or refine an image with the local pipeline | no | no |
+| `generate_image` | Generate or refine an image with the local pipeline (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
 | `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
 | `browser_navigate` | Open a URL in the automated browser (browser plugin) | see below | no |
@@ -1002,15 +1012,17 @@ Six things the table cannot express, and each of them matters:
 
 - **`fetch_url`, `web_search`, and `browser_navigate`/`browser_click`/`browser_fill`
   follow the network policy, not this column.** They confirm when `net_mode` is
-  `ask` (the default) and run without asking when it is `allow`. `git_push` is
-  refused when `net_mode` is `off`, and it refuses a remote or branch that begins
+  `ask` (the default), auto-approve included, and run without asking when it is
+  `allow`. An unattended run, which cannot confirm, denies them under `ask` unless
+  `--allow-network` or the `coder_unattended_network` setting allows them (`git_push`
+  too). `git_push` is refused when `net_mode` is `off`, and it refuses a remote or branch that begins
   with `-`. See [network.md](network.md).
 - **Tools that run code ask even when writes do not.** `run_shell`,
   `run_shell_background`, `run_tests` and an untrusted MCP server's tools run code
   the project controls (a test suite runs the project's own test files). A one-shot
   `localm coder "TASK"` without `--yes` denies them, `--interactive-confirm` asks
   before each, and an untrusted MCP server's tools ask before every call even under
-  `--yes`. `generate_image` still has real side effects and does not ask.
+  `--yes`. `generate_image` writes a file and asks exactly like `write_file`.
 - **Untrusted content re-arms confirmation.** Once the session has read a web page,
   a search result, an MCP tool's output or a skill, every destructive, network or
   code-running tool asks again until your next message, even with writes

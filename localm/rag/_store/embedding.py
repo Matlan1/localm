@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from localm.rag import store as _st
+
 from .cache import _files_changing
 from .types import EmbedFn, ProgressFn
 
@@ -15,7 +17,7 @@ class _CollectionEmbedding:
 
     def embedding_model(self) -> Optional[str]:
         """The model NAME this collection's vectors were built with, if recorded."""
-        v = self._meta.get("embedding_model")
+        v = _st.current_embedding_label(self._meta)
         return str(v) if v else None
 
     def embedding_model_mixed(self) -> bool:

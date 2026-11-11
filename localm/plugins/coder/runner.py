@@ -196,7 +196,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
                 custom_instructions: Optional[str] = None, verify_cmd=None,
                 browser_enabled: bool = False, on_event=None,
                 max_tokens_explicit: bool = False,
-                server_side: bool = False) -> Agent:
+                server_side: bool = False,
+                allow_network: bool = False) -> Agent:
     """Construct the Agent for a session the way the CLI does.
 
     A one-shot task auto-approves file writes; without ``auto_approve``
@@ -212,7 +213,13 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
 
     ``server_side`` marks an agent that runs inside the server (the MCP
     ``run_coder_task`` tool): a backend 401 fails the turn instead of asking for
-    a key on the server's console."""
+    a key on the server's console.
+
+    ``allow_network`` (``localm coder --allow-network``) lets network tools run
+    without asking under net_mode "ask" when nobody can be asked. The agent's
+    ``unattended_network`` is that flag OR the ``coder_unattended_network``
+    setting being "allow" (:func:`unattended_network_setting`). net_mode "off"
+    still refuses them, and a run that can ask still asks."""
     always_confirm = set(always_confirm or ())
     if unattended_shell_gated(task, auto_approve):
         always_confirm = set(always_confirm) | {EXECUTES_PROJECT_CODE}
@@ -238,7 +245,23 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         **(gen_kw or {}),
     )
     agent.taint_rearms_confirm = not auto_approve
+    agent.unattended_network = bool(allow_network) or unattended_network_setting()
     return agent
+
+
+def unattended_network_setting() -> bool:
+    """True when the ``coder_unattended_network`` setting is "allow".
+
+    Any other value, or a config that cannot be read, is False (deny)."""
+    try:
+        from localm.config import load_config
+        value = load_config().get("coder_unattended_network", "deny")
+    except Exception as e:                                  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("coder_unattended_network could not be read, network "
+                       "tools stay denied for unattended runs: %r", e)
+        return False
+    return str(value).strip().lower() == "allow"
 
 
 def warn_unfinished_background(agent) -> None:

@@ -60,6 +60,9 @@ def _register(home, name, *, model_type="tts", mmproj=True):
     reg = json.loads(reg_file.read_text(encoding="utf-8")) if reg_file.exists() else {}
     reg[name] = entry
     reg_file.write_text(json.dumps(reg), encoding="utf-8")
+    # Gives the entry its ID now, so a test's file listing starts after that write.
+    from localm.config import load_registry
+    load_registry()
     return entry
 
 

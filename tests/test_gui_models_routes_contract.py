@@ -27,6 +27,14 @@ from localm.inference import http_server as _hs
 from localm.plugins.gui.routes import models as models_routes
 from tests.conftest import probe_double
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 _GB = 1024 ** 3
 
 # (method, path) -> the scope its Depends(require_scope(...)) must carry.
@@ -78,7 +86,7 @@ _REGISTRY = {
     "m-b": {"path": "Z:/nonexistent/b.gguf", "source": "hf", "model_type": "llm"},
 }
 
-_ROW_KEYS = {"name", "source", "size_bytes", "mtime", "active", "loaded",
+_ROW_KEYS = {"name", "model_id", "former_names", "source", "size_bytes", "mtime", "active", "loaded",
              "model_type", "architecture", "expert_count"}
 
 

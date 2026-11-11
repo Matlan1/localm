@@ -28,7 +28,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from localm.inference.model_family import is_thinking_model
+from localm.inference.model_family import family_text, is_thinking_model
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ def detect_model_family(model_name: str) -> str:
 
     Tags: "gemma" | "thinking" | "small" | "default"
     """
-    n = model_name.lower()
+    n = family_text(model_name).lower()
 
     # Substring match, not startswith, so a resolved repo id such as
     # "hf:google/gemma-4-4b" is still classified correctly.

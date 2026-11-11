@@ -165,7 +165,7 @@ _KERNEL_ROUTES = {
     ("api", "GET", "/api/session"): (),
     ("api", "POST", "/api/session"): (),
     ("api", "POST", "/api/session/logout"): (),
-    ("api", "POST", "/api/auth/key/clear"): ("scope:config:write",),
+    ("api", "POST", "/api/auth/key/clear"): ("scope:admin",),
     ("api", "POST", "/api/auth/key/rotate"): ("scope:admin",),
     # routes/config.py
     ("api", "GET", "/v1/config"): ("scope:config:read",),
@@ -196,6 +196,7 @@ _KERNEL_ROUTES = {
     # routes/admin.py
     ("api", "POST", "/v1/server/shutdown"): ("scope:config:write",),
     ("api", "POST", "/v1/server/restart"): ("scope:config:write",),
+    ("api", "GET", "/v1/server/stall-stacks"): ("scope:admin",),
     ("api", "POST", "/api/bug-report"): ("scope:config:write",),
     ("api", "POST", "/api/bug-report/send"): ("scope:config:write",),
     ("api", "GET", "/api/issues"): ("scope:config:read",),
@@ -208,17 +209,17 @@ _KERNEL_ROUTES = {
     ("api", "GET", "/api/update/rollback"): ("scope:config:read",),
     ("api", "POST", "/api/update/rollback"): ("scope:config:write",),
     # routes/chat.py
-    ("api", "POST", "/v1/chat/completions"): ("auth",),
+    ("api", "POST", "/v1/chat/completions"): ("scope:chat",),
     ("api", "POST", "/v1/embeddings"): ("auth",),
     ("api", "POST", "/v1/rerank"): ("auth",),
-    ("api", "POST", "/v1/completions"): ("auth",),
+    ("api", "POST", "/v1/completions"): ("scope:chat",),
     # routes/ollama.py
     ("api", "GET", "/api/version"): ("auth",),
     ("api", "GET", "/api/tags"): ("scope:models:read",),
     ("api", "GET", "/api/ps"): ("scope:models:read",),
     ("api", "POST", "/api/show"): ("scope:models:read",),
-    ("api", "POST", "/api/chat"): ("auth",),
-    ("api", "POST", "/api/generate"): ("auth",),
+    ("api", "POST", "/api/chat"): ("scope:chat",),
+    ("api", "POST", "/api/generate"): ("scope:chat",),
     ("api", "POST", "/api/embed"): ("auth",),
     ("api", "POST", "/api/embeddings"): ("auth",),
     ("api", "POST", "/api/copy"): ("scope:models:write",),
@@ -229,10 +230,10 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/api/blobs/{digest}"): ("scope:models:write",),
     ("api", "HEAD", "/api/blobs/{digest}"): ("scope:models:write",),
     # routes/anthropic.py
-    ("api", "POST", "/v1/messages"): ("auth",),
-    ("api", "POST", "/v1/messages/count_tokens"): ("auth",),
+    ("api", "POST", "/v1/messages"): ("scope:chat",),
+    ("api", "POST", "/v1/messages/count_tokens"): ("scope:chat",),
     # routes/responses.py
-    ("api", "POST", "/v1/responses"): ("auth",),
+    ("api", "POST", "/v1/responses"): ("scope:chat",),
 }
 
 # attach_engine(): plugin management, plugin dependency install, background jobs.
@@ -433,6 +434,7 @@ _MIDDLEWARE_STACK = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
     ("BaseHTTPMiddleware", "_keyless_network_gate"),
@@ -553,8 +555,10 @@ def _shell_auth(app) -> dict:
 
 def test_exception_handler_registry():
     handlers = create_app(None).exception_handlers
+    from localm.inference.load_lease import LoadBusyError
     assert set(handlers) == {Exception, ConfigLockTimeout, StarletteHTTPException,
-                             RequestValidationError, WebSocketRequestValidationError}
+                             RequestValidationError, WebSocketRequestValidationError,
+                             LoadBusyError}
     assert handlers[WebSocketRequestValidationError] is (
         websocket_request_validation_exception_handler)
     for exc_type in (Exception, StarletteHTTPException, RequestValidationError):

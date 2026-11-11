@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm.debuglog import logger
 from localm.executor import get_plugin_executor
@@ -85,7 +85,7 @@ class RagAddRequest(BaseModel):
 
 class RagQueryRequest(BaseModel):
     query: str
-    k: int = 4
+    k: int = Field(4, ge=1)
     # Drop hits below the collection's absolute relevance floor
     # (Collection.query relevant_only).
     relevant_only: bool = False
@@ -1445,13 +1445,19 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "internal default (bge-small-en-v1.5).")
             return False
         # Load and probe via the shared embedder, so it stays loaded for real use.
-        # get_embedder records the load error rather than raising it; it is surfaced
-        # verbatim below.
+        # get_embedder records a load error rather than raising it (surfaced
+        # verbatim below) and raises LoadBusyError while another load holds the GPU.
         line("Loading and testing the model…")
         # on_progress=line forwards get_embedder's stage announcements to the job,
         # since this call can run for minutes. _emit_stage swallows anything the
         # sink raises, so a push failure cannot fail a working load.
-        emb = get_embedder(on_progress=line)
+        from localm.inference.load_lease import LoadBusyError
+        try:
+            emb = get_embedder(on_progress=line)
+        except LoadBusyError as e:
+            line(f"error: '{model}' is selected but not loaded yet: {e} Run the "
+                 "setup again once the other load has finished.")
+            return False
         if emb is None:
             why = last_error() or "the model could not be loaded"
             line(f"error: '{model}' could not produce embeddings ({why}). It may "
@@ -1505,8 +1511,8 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
     from localm.inference.http_server import principal_id
     # Refuse a second concurrent setup instead of queueing it behind the first:
-    # get_embedder's `with _LOAD_LOCK:` / `with _LOCK:` are bare acquires with no
-    # timeout, so the loser would wait silently for as long as the winner takes.
+    # the loser would wait in get_embedder for the winner's load, up to
+    # load_lease.LOAD_WAIT_TIMEOUT_S, with no progress of its own.
     #
     # This check-then-act is atomic only because it sits in an `async def` on the
     # single event loop with no `await` between the check and start_fn below.

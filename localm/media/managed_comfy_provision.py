@@ -218,7 +218,7 @@ def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = Non
     from localm import pyinstall
     if pyinstall.is_install_command(cmd):
         try:
-            pyinstall.check_command(cmd)
+            pyinstall.check_command(cmd, cwd)
         except pyinstall.InstallRefused as e:
             _emit(on_progress, str(e))
             return False, str(e)

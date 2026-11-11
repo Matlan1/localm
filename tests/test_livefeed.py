@@ -12,6 +12,7 @@ sampler exists once however many tabs are open and not at all when none is.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 import types
@@ -325,6 +326,7 @@ def test_loading_an_engine_kicks_the_feed_after_the_load_ends_either_way(recorde
             if fail:
                 raise RuntimeError("load failed")
         e._load_locked = _load_locked
+        e._load_guard = contextlib.nullcontext
         return e
 
     Engine.load(fake(False))

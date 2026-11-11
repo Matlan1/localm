@@ -6,6 +6,8 @@ confirm prompt, scope resolution, and the per-write project map update. Mixed in
 
 from __future__ import annotations
 
+import itertools
+import difflib
 import json
 import os
 import re
@@ -24,8 +26,8 @@ from ..display import (
     tool_call_text,
 )
 from ..diffutil import (
-    compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
-    read_old_content, read_old_content_checked, resolve_new_content,
+    compute_multifile_diff,
+    read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
 from .. import data_guard, shell_guard
@@ -37,7 +39,8 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS,
+    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PATCH_MODE_REFUSED_TOOLS,
+    _PATCH_OVERLAY_READ_TOOLS, _PROJECT_MAP_TOOLS,
     _RESTRICTED_PATH_WRITE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
@@ -51,6 +54,14 @@ from .scope import _scope_pattern
 
 # Held while an agent's _session_allowed set is changed or copied.
 _SESSION_ALLOWED_LOCK = threading.Lock()
+_CALL_CONTEXT = threading.local()
+_CALL_SEQUENCE = itertools.count(1)
+
+
+def current_call_id() -> Optional[str]:
+    """Id of the tool call the calling thread is executing, else None."""
+    return getattr(_CALL_CONTEXT, "call_id", None)
+
 
 # Shown with each hook-run approval.
 _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each "
@@ -58,6 +69,8 @@ _HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each
 
 if TYPE_CHECKING:
     from localm.audit import AuditLogT
+
+    from ..patch_overlay import PatchOverlay
 
 
 def _executed_forms(tool: str, command: str) -> list[str]:
@@ -125,6 +138,9 @@ class _ExecutionMixin:
         always_confirm: set
         confirm_handler: Any
         _project_map: Any
+        patch_mode: bool
+        _patch_overlay: PatchOverlay
+        _patch_chunks: list[str]
 
         @property
         def auto_approve(self) -> bool: ...
@@ -429,6 +445,14 @@ class _ExecutionMixin:
             return "localm's data folder (the check could not run)"
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
+        previous = getattr(_CALL_CONTEXT, "call_id", None)
+        _CALL_CONTEXT.call_id = f"c{next(_CALL_SEQUENCE)}"
+        try:
+            return self._execute_tool_body(call, interactive)
+        finally:
+            _CALL_CONTEXT.call_id = previous
+
+    def _execute_tool_body(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # A cancelled run executes nothing, whatever the model emits.
         if self.cancelled:
@@ -547,6 +571,28 @@ class _ExecutionMixin:
                                summary="refused: protected .localcoder/.git target")
                     return result
 
+        # Scope check - reject file operations that fall outside the active glob.
+        # Runs ahead of the patch-mode intercept, so an out-of-scope write is not
+        # captured as a diff either.
+        # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
+        # confines those dynamically-registered file tools too: built-in file tools
+        # are default-denied at authoring time (_SCOPED_TOOLS), while the dynamic
+        # families are not in the registry then and are gated here by prefix.
+        if self.scope and (call.name in _SCOPED_TOOLS
+                           or call.name.startswith(("mcp_", "plugin_"))):
+            offending = self._scope_violation(call)
+            if offending is not None:
+                result = ToolResult.error(
+                    f"'{offending}' is outside the active scope '{self.scope}'. "
+                    "Only files matching this glob pattern can be accessed."
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                # No duration_s: never reached tool_def.fn.
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary=f"outside scope '{self.scope}'")
+                return result
+
         # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.
         # A write tool the interceptor cannot express as a diff must NOT fall
         # through to a real disk write. search_replace is eligible too
@@ -557,7 +603,6 @@ class _ExecutionMixin:
             chunk = self._patch_mode_intercept(call)
             duration_s = time.monotonic() - t_start
             if chunk is not None:
-                self._patch_chunks.append(chunk)
                 # Name the files the DIFF covers, not every path the call
                 # mentioned: a file whose edit produced no change is not captured.
                 # search_replace has no pre-known targets (its files are discovered
@@ -591,25 +636,16 @@ class _ExecutionMixin:
                        duration_s=duration_s)
             return result
 
-        # Scope check - reject file operations that fall outside the active glob.
-        # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
-        # confines those dynamically-registered file tools too: built-in file tools
-        # are default-denied at authoring time (_SCOPED_TOOLS), while the dynamic
-        # families are not in the registry then and are gated here by prefix.
-        if self.scope and (call.name in _SCOPED_TOOLS
-                           or call.name.startswith(("mcp_", "plugin_"))):
-            offending = self._scope_violation(call)
-            if offending is not None:
-                result = ToolResult.error(
-                    f"'{offending}' is outside the active scope '{self.scope}'. "
-                    "Only files matching this glob pattern can be accessed."
-                )
-                if interactive:
-                    print_tool_error(call.name, result.output)
-                # No duration_s: never reached tool_def.fn.
-                self._emit("tool_result", tool=call.name, ok=False,
-                           summary=f"outside scope '{self.scope}'")
-                return result
+        if getattr(self, "patch_mode", False) is True and call.name in _PATCH_MODE_REFUSED_TOOLS:
+            result = ToolResult.error(
+                f"[patch-mode] {call.name} writes a file that cannot be captured as "
+                "a diff - skipped. Turn patch mode off to run it.")
+            if interactive:
+                console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            # No duration_s: never reached tool_def.fn.
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary=f"[patch-mode] {call.name} skipped")
+            return result
 
         # The shell tools are NOT in _SCOPED_TOOLS: a path-arg check cannot confine
         # a process. Flag the gap at runtime instead - a warning, never a block.
@@ -696,8 +732,14 @@ class _ExecutionMixin:
         # confirmation for every such double. Only a genuine ToolCall's lenient
         # field (dataclass default False) is trusted; anything else counts as
         # non-lenient.
+        # An unattended run (no handler, not interactive) whose user allowed
+        # network tools treats net_mode "ask" like "allow" for this call.
+        can_ask = interactive or getattr(self, "confirm_handler", None) is not None
+        net_waived = (net_mode == "ask" and not can_ask
+                      and getattr(self, "unattended_network", False) is True)
+        net_gated = net_mode == "ask" and not net_waived
         executes_code = getattr(tool_def, "executes_project_code", False) is True
-        gated = (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
+        gated = (tool_def.destructive or net_gated or tool_def.ask_by_default
                  or executes_code)
         lenient_call = isinstance(call, ToolCall) and call.lenient
         # Confirmation always_confirm requires, which a session allow never waives.
@@ -728,14 +770,16 @@ class _ExecutionMixin:
             and getattr(self, "taint_rearms_confirm", True) is True
             and (tool_def.destructive or call.name in _NETWORK_TOOLS or executes_code)
         )
-        needs_confirm = shell_unchecked or data_hit is not None or tainted or (
+        # net_mode "ask" asks under auto_approve too, unless waived above.
+        net_ask = net_gated
+        needs_confirm = shell_unchecked or data_hit is not None or tainted or net_ask or (
             gated and (not self.auto_approve or forced or lenient_call)
         )
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
         lenient_only = (
             lenient_call and gated and not shell_unchecked and data_hit is None
-            and not tainted and self.auto_approve and not forced
+            and not tainted and not net_ask and self.auto_approve and not forced
         )
         # A session allow ("a" at an interactive prompt) never waives a
         # shell-guard verdict, a lenient call or a configured always_confirm.
@@ -749,7 +793,6 @@ class _ExecutionMixin:
         # call and always_confirm, which the read-only shortcut honours too.
         # Only where someone could have been asked: a run with no way to ask
         # still denies, as before.
-        can_ask = interactive or getattr(self, "confirm_handler", None) is not None
         if (needs_confirm and can_ask and session_allowable and call.name == "run_shell"
                 and self._read_only_shell(call)):
             needs_confirm = False
@@ -757,6 +800,11 @@ class _ExecutionMixin:
             if interactive:
                 print_info(f"  ({note})")
             self._emit("info", text=f"{call.name}: {note}")
+        if net_waived and not needs_confirm:
+            note = (f"{call.name}: ran without asking, this unattended run may "
+                    "use network tools")
+            self._emit("info", text=note)
+            self._audit.notice("unattended_network_allowed", note)
         session_allowed = getattr(self, "_session_allowed", None)
         if session_allowed is None:
             session_allowed = self._session_allowed = set()
@@ -773,10 +821,13 @@ class _ExecutionMixin:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
                 # reached through confirm_handler) offers "a" only for a call
-                # that can be session-allowed. A GUI handler never sets the
-                # answer flags, so consuming them there reads False and "".
+                # that can be session-allowed, and a call that cannot is asked
+                # as an exact approval, so a handler's own allow-list (the GUI's
+                # "always allow") neither answers nor records it. A GUI handler
+                # never sets the answer flags, so consuming them there reads
+                # False and "".
                 with offering_session_allow(session_allowable), \
-                        requiring_exact_approval(data_hit is not None or tainted):
+                        requiring_exact_approval(not session_allowable):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())
@@ -800,7 +851,8 @@ class _ExecutionMixin:
                         "needs an explicit approval of this exact call, and this "
                         "run is non-interactive with no approval handler - denied.")
                     reason = "localm-data"
-                elif tainted and not (gated and (not self.auto_approve or forced)):
+                elif tainted and not net_ask and not (
+                        gated and (not self.auto_approve or forced)):
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: this run has read "
                         "untrusted content (a web page, search result, MCP or "
@@ -901,6 +953,10 @@ class _ExecutionMixin:
         # cannot win.
         if call.name == "search_replace" or call.name in DIAGNOSED_TOOLS:
             args["_restricted"] = self.restricted
+        # In patch mode the read tools see the session's captured writes; outside
+        # it they get None.
+        if call.name in _PATCH_OVERLAY_READ_TOOLS:
+            args["_overlay"] = self._patch_overlay if self.patch_mode else None
         # The interaction tools prompt this session's user (tools/interact.py).
         # Injected after the copy, so a model-supplied "_session" or
         # "_interactive" cannot win.
@@ -1295,28 +1351,86 @@ class _ExecutionMixin:
 
     def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
         """
-        Compute a unified diff for a write/edit/patch call without touching disk.
+        Capture a write/edit/patch call into the session overlay without
+        touching disk.
 
-        Returns the diff string, or None if the diff cannot be computed.
+        Returns the diff this call alone contributed (used to name the files it
+        covered), or None when the call changes nothing or cannot be captured.
+        The patch handed to the user is built from the overlay, one diff per
+        file, so repeated edits of one file stay applicable.
         """
-        # edit_files spans several files, so it has no single old_content: without
-        # this branch compute_tool_diff returns None and the intercept reports
-        # "cannot be captured".
+        overlay = self._patch_overlay
         if call.name == "edit_files":
-            return compute_multifile_diff(self.cwd, call.args.get("edits"))
-        # search_replace's targets are a glob + regex sweep, not a `path` arg, so
-        # there is no old_content to read ahead of time. It gets its own helper,
-        # which runs the real sweep via dry_run rather than touching disk.
+            return self._capture_edit_files(call.args.get("edits"))
         if call.name == "search_replace":
-            return compute_search_replace_diff(
+            from ..tools.files import tool_search_replace
+            result = tool_search_replace(
                 self.cwd, call.args.get("pattern", ""),
                 call.args.get("replacement", ""),
                 call.args.get("glob", "**/*"),
-                restricted=self.restricted,
-            )
+                dry_run=True, _restricted=self.restricted, _overlay=overlay)
+            if not result.ok or not result.changes:
+                return None
+            return self._capture_changes(
+                [(rel, new_text) for rel, _old, new_text in result.changes])
         path_arg = call.args.get("path", "")
-        old_text = read_old_content(self.cwd, path_arg)
-        return compute_tool_diff(call.name, call.args, old_text)
+        old_text = overlay.read(path_arg)
+        if call.name == "patch_file":
+            diff = call.args.get("diff", "")
+            if not diff:
+                return None
+            from .._patch import apply_diff, PatchError
+            try:
+                new_text = apply_diff(old_text, diff)
+            except PatchError:
+                self._patch_chunks.append(diff)
+                return diff
+        else:
+            new_text = resolve_new_content(call.name, call.args, old_text)
+        if new_text is None or new_text == old_text:
+            return None
+        return self._capture_changes([(path_arg, new_text)])
+
+    def _capture_edit_files(self, edits: object) -> Optional[str]:
+        """Capture an ``edit_files`` batch: every edit composes onto the overlay
+        content of its file, and one unmatched edit rejects the whole batch,
+        like the real tool."""
+        if not isinstance(edits, list) or not edits:
+            return None
+        texts: dict[str, str] = {}
+        paths: dict[str, str] = {}
+        for item in edits:
+            if not isinstance(item, dict):
+                return None
+            path_arg = str(item.get("path") or "")
+            old_str = str(item.get("old") or "")
+            new_str = str(item.get("new") or "")
+            if not path_arg or not old_str:
+                return None
+            key = str((self.cwd / path_arg).resolve())
+            if key not in texts:
+                texts[key] = self._patch_overlay.read(path_arg)
+                paths[key] = path_arg
+            if old_str not in texts[key]:
+                return None
+            texts[key] = texts[key].replace(old_str, new_str, 1)
+        return self._capture_changes([(paths[k], t) for k, t in texts.items()])
+
+    def _capture_changes(self, changes: list) -> Optional[str]:
+        """Record ``(path, new_text)`` pairs in the overlay. Returns the diff
+        this call added, or None when no file differs from what a tool sees now."""
+        overlay = self._patch_overlay
+        chunks = []
+        for path_arg, new_text in changes:
+            path_arg = str(path_arg)
+            current = overlay.read(path_arg)
+            if current == new_text:
+                continue
+            chunks.append("".join(difflib.unified_diff(
+                current.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                fromfile=f"a/{path_arg}", tofile=f"b/{path_arg}")))
+            overlay.record(path_arg, new_text)
+        return "".join(chunks) or None
 
     def current_patch(self) -> str:
         """The accumulated unified diff so far, WITHOUT clearing the buffer.
@@ -1324,7 +1438,8 @@ class _ExecutionMixin:
         For readers that only want to LOOK: a GUI "show me the patch" request, a
         status poll, a preview. :meth:`flush_patch` clears the buffer.
         """
-        return "\n".join(c for c in self._patch_chunks if c)
+        return self._patch_overlay.diff() + "\n".join(
+            c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
         """Is there anything in the patch buffer? Cheap, and exactly equivalent
@@ -1333,7 +1448,7 @@ class _ExecutionMixin:
         ``CoderSession.info()`` needs only the boolean and is called once per
         session by the session-list route.
         """
-        return any(c for c in self._patch_chunks)
+        return self._patch_overlay.has_changes() or any(c for c in self._patch_chunks)
 
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
         """
@@ -1343,6 +1458,7 @@ class _ExecutionMixin:
         """
         content = self.current_patch()
         self._patch_chunks.clear()
+        self._patch_overlay.clear()
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(content, encoding="utf-8")

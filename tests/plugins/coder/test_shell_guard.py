@@ -501,6 +501,7 @@ def test_an_ordinary_git_push_tool_call_still_runs(workdir, monkeypatch):
     stub = dataclasses.replace(
         real, fn=lambda cwd, **kw: (invoked.append(kw), ToolResult.success("pushed"))[1])
     monkeypatch.setitem(_agent.TOOL_REGISTRY, "git_push", stub)
+    monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
 
     agent = Agent(_StubBackend(), cwd=workdir, auto_approve=True)
     call = ToolCall(name="git_push", args={"remote": "origin", "branch": "feature/x"},

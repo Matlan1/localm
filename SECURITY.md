@@ -88,6 +88,26 @@ cannot be forced open the way a CLI bind can. It degrades LOUDLY to loopback
 instead of exiting: a browser-only user with no terminal would otherwise be
 locked out of a server that refuses to start, with no way back in.
 
+### Host header check (DNS rebinding)
+
+A running server answers only to its own names. Every request, WebSocket
+upgrades included, must carry a `Host` header naming `localhost`, a `*.localhost` name or
+a loopback address; on a network bind also any IP address, this machine's own
+host name (short and fully qualified, and `<hostname>.local`), the mDNS name,
+its Tailscale names and the names in the TLS certificate. Names listed in the
+owner-only `allowed_hosts` setting or the comma-separated `LOCALM_ALLOWED_HOSTS`
+environment variable are accepted on every bind (`*.example.com` covers one
+label, `"*"` turns the check off). Anything else, and a missing, repeated or
+malformed `Host`, gets `400` (a WebSocket upgrade `403`) before any route, CORS
+reply or static file. The port is not compared. When a request names a host the
+current list refuses and the list is at least 30 seconds old, the list is built
+again (settings, environment and `tailscale status` re-read), so a Tailscale
+name that comes up after localm started is accepted without a restart. The name
+`host.docker.internal` is never accepted unless it is listed. This stops DNS rebinding: a page on an attacker's
+domain whose DNS answer is switched to `127.0.0.1` is same-origin to the browser,
+so without this check it would also pass the same-origin checks below and, with
+no key set, the keyless inference API.
+
 ### State-changing endpoints
 
 Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) is **same-origin
@@ -299,7 +319,10 @@ project notes, and a skill whose file or folder is a link is refused.
   alternate-data-stream), matches an 8.3 short-name alias for an unrelated
   file you already have, names a reserved Windows device, or ends in a dot or
   space (which Windows silently strips). This applies to `localm pull`, the
-  same-repo vision-projector auto-attach, and `--mmproj`.
+  same-repo vision-projector auto-attach, and `--mmproj`. A full-repository
+  pull checks every file name (each folder in it too) against the
+  repository's file list, read at the commit it then downloads, before
+  anything is downloaded, and is refused when that list cannot be read.
 - **Routing a chat request to a model loaded on another localm instance on
   this machine** verifies the target before forwarding anything: accepting a
   peer offer (Models page, when another running instance already has the
@@ -307,8 +330,12 @@ project notes, and a skill whose file or folder is a link is refused.
   key for an instance that has none, before anything is stored, and every request
   after that is only ever forwarded to a target confirmed to resolve to
   loopback over plain HTTP or HTTPS - a forged or LAN-facing offer cannot
-  redirect your requests off this machine. The peer's key lives in this
-  process's memory only; it is never written to disk or logged.
+  redirect your requests off this machine. A redirect answer from the peer is
+  never followed, for a forwarded request, a check of the peer, a routed job
+  or the MCP server using a model another instance has loaded. A key holding
+  anything but printable ASCII without spaces is refused without being sent or
+  echoed. The peer's key lives in this process's memory only; it is never
+  written to disk or logged.
 
 ## Outbound network policy
 
@@ -327,9 +354,12 @@ this section states the security properties and, more importantly, their edges.
 - **What it does not cover.** Several outbound paths deliberately do not use
   it, including bug-report upload and requests to your ComfyUI instance.
   ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
-  that targets a link-local / cloud-metadata address is refused
-  (CHK-COMFY-APIURL), and the connection itself refuses any HTTP redirect
-  outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
+  (or a media plugin's own `comfy.api_url`, the model scan included) that
+  targets a link-local / cloud-metadata address is refused
+  (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, fd00:ec2::/32, and a
+  link-local IPv4 address in IPv4-mapped, IPv4-compatible, NAT64
+  (64:ff9b::/96, 64:ff9b:1::/48) or 6to4 form, which the search backend refuses too. The
+  connection itself refuses any HTTP redirect outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
   steer the request elsewhere. Loopback and LAN are both
   normal, unchecked ComfyUI deployments - treat the policy as governing the
   paths named above, not as a blanket statement about every socket localm
@@ -441,9 +471,10 @@ and search snippets are untrusted input to the model, and
   name or address, nears expiry (about 30 days before), or no longer chains to
   the CA on disk.
 - **Key file permissions.** The CA and leaf private keys are written 0600 from
-  the moment they exist, then restricted to the current user: `chmod` on
-  POSIX, `icacls` (an explicit, sole full-control ACE, inherited entries
-  dropped) on Windows. Both are best-effort - a failure is logged as a
+  the moment they exist (on Windows, where a file mode sets no ACL, they are
+  created inside the already-restricted `tls` folder), then restricted to the current user: `chmod` on
+  POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
+  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
   applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
@@ -517,7 +548,8 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   installed with a warning that it is unverified (pass `--sha256` to pin one). The
   stable-diffusion.cpp, KoboldCpp and uv downloads and the embedding models are checked
   against pinned SHA-256 values.
-- **Your data is never in the swap.** The updater never touches the venv, `.git`,
+- **Your data is never in the swap.** The file swap never touches the venv (an
+  update that changes dependencies reinstalls the packages there afterwards), `.git`,
   your data directory (models, config, sessions), or `.localcoder`; provisioned
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
   up first and rolls back on failure rather than leaving a half-applied tree.
@@ -559,6 +591,10 @@ the same signing keys described above, and/or a plain SHA256 digest - useful if
 you obtained the zip some other way than the recommended `git clone` install. The
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.
+
+## Management log
+
+`logs/management.jsonl` in the data folder is an append-only record of management events, written in every session mode including privacy mode: key created or revoked (key id only), refused login (loopback or not), update applied (versions), settings saved (setting names only) and plugin installed or removed. It carries no key, setting value or conversation content. It is capped at 1 MB with one rotated file, and a failed write is logged as a warning without failing the operation recorded.
 
 ## Verifying a release
 

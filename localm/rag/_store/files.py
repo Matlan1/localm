@@ -331,7 +331,7 @@ class _CollectionFiles:
 
     def _write_files(self, on_progress: Optional[ProgressFn] = None) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        self._atomic_write("meta.json", _st.meta_json(self._meta))
         # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
         # would otherwise emit raw (U+0085/U+2028/U+2029), so a record cannot be
         # split in half by a line-oriented reader.
@@ -395,7 +395,7 @@ class _CollectionFiles:
         # A second, small atomic write: the meta.json write at the top of this
         # method happens BEFORE vector_degrade_reason is finalised above.
         self._meta[_STATS_CACHE_KEY] = self._stats_cache_block()
-        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+        self._atomic_write("meta.json", _st.meta_json(self._meta))
 
     def _stats_cache_block(self) -> dict:
         """The ``_stats_cache`` block for meta.json, computed from THIS
@@ -435,7 +435,7 @@ class _CollectionFiles:
         stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         with _files_changing(self.dir):
-            self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+            self._atomic_write("meta.json", _st.meta_json(self._meta))
         self._snapshot_ref = None
 
     def _atomic_write(self, filename: str, content: str | Iterable[str]) -> None:

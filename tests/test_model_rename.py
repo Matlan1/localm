@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for rename_model: registry MOVE (not copy, unlike alias_model), sibling
-aliases left untouched, and best-effort migration of the config/jobs/RAG
-references that name the old model. Mirrors the sibling
-alias_model/registry-RMW test patterns.
+aliases left untouched, and the config/jobs/RAG references that name the model
+following it. Mirrors the sibling alias_model/registry-RMW test patterns.
 """
 
 import json
@@ -142,16 +141,12 @@ class TestRenameModelWithNotes:
     this instead, or the honest "here is what could not be migrated" report
     never leaves the server log."""
 
-    def test_successful_rename_always_reports_the_unreachable_localcoder_note(
-            self, fake_registry, tmp_path):
-        store, _ = fake_registry
+    def test_successful_rename_has_nothing_to_report(self, real_home, tmp_path):
         f = _file(tmp_path, "m.gguf")
-        store["orig"] = {"path": str(f), "source": "local"}
+        mm.add_local(str(f), "orig", on_duplicate="register")
         ok, notes = mm.rename_model_with_notes("orig", "renamed")
         assert ok is True
-        assert any(".localcoder" in n for n in notes), (
-            "the caller-facing notes must always carry this caveat, not just "
-            "the server console rename_model_with_notes also prints to")
+        assert notes == []
 
     def test_failure_returns_no_notes(self, fake_registry):
         store, _ = fake_registry
@@ -276,13 +271,6 @@ class TestRenameModelMigratesReferences:
         assert mm.rename_model("orig", "renamed") is True
         assert load_config()["pinned_models"] == ["someone-else"]
 
-    def test_migrate_references_reports_the_unreachable_localcoder_case(self, real_home):
-        from localm.model_manager import registry as reg_mod
-        notes = reg_mod._migrate_model_references("orig", "renamed")
-        assert any(".localcoder" in n for n in notes), (
-            "a rename must say plainly that a per-project .localcoder/config.toml "
-            "cannot be reached, never silently drop it")
-
 
 # ---------------------------------------------------------------------------
 #  `localm rename` CLI command, driven end to end through conftest.py's
@@ -378,12 +366,12 @@ class TestRenameMigratesEveryStoredName:
         assert plugins["music"]["native"] == {"dit": "renamed", "lm": "other"}
 
     def test_every_registered_name_media_field_is_migrated(self):
-        from localm.model_manager import registry as reg_mod
+        from localm import model_ids
         from localm.settings_schema import MEDIA_PLUGIN_FIELDS
         named = {f.block_path[1] for f in MEDIA_PLUGIN_FIELDS
                  if f.block_path[0] == "native" and "registered name" in f.help.lower()}
         assert named, "the schema no longer marks any native field as a registered name"
-        assert named <= set(reg_mod._NATIVE_MODEL_KEYS)
+        assert named <= set(model_ids.NATIVE_NAME_KEYS)
 
     def test_saved_chats_pinned_to_it_follow(self, real_home, tmp_path):
         _register(tmp_path, "orig")

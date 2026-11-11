@@ -147,22 +147,39 @@ def delete_collection(name: str, base: Optional[Path] = None,
     return True
 
 
-def relabel_embedding_model(old_name: str, new_name: str,
-                            base: Optional[Path] = None) -> tuple[list, list]:
-    """Rewrite the recorded embedding-model label *old_name* to *new_name* in
-    every collection that carries it.
+def current_embedding_label(meta: Any) -> Optional[str]:
+    """The current name of the embedding model a collection's *meta* records, or
+    None when it records none."""
+    from localm.config import model_index
+    from localm.model_ids import REFS_KEY, stored_to_current
+    return stored_to_current(meta.get("embedding_model"), meta.get(REFS_KEY), model_index())
 
-    Only meta.json is read and rewritten, under the same two locks every
-    writer takes, each waited on for at most ``wait_budget()``. A collection
-    whose meta.json cannot be parsed has no readable label and is left alone.
-    Returns ``(relabelled, busy)``: the collection names rewritten, and the ones
-    skipped because another write held them past the wait budget."""
+
+def meta_json(meta: Any) -> str:
+    """*meta* as the text of meta.json, its embedding model label current and its
+    ``model_refs`` rebuilt. Updates *meta* in place."""
+    from localm.config import model_index
+    from localm.model_ids import attach_refs
+    label = current_embedding_label(meta)
+    if label:
+        meta["embedding_model"] = label
+    attach_refs(meta, (label,), model_index())
+    return json.dumps(meta, indent=2)
+
+
+def record_embedding_model_refs(base: Optional[Path] = None) -> list:
+    """Rewrite meta.json of every collection that records an embedding model, so
+    it carries ``model_refs``.
+
+    Only meta.json is read and rewritten, under the same two locks every writer
+    takes, each waited on for at most ``wait_budget()``. A collection whose
+    meta.json cannot be parsed has no readable label and is left alone. Returns the
+    collections skipped because another write held them past the wait budget."""
     base = base or rag_dir()
-    relabelled: list = []
     busy: list = []
     for name in collection_names(base):
         found = Collection._peek_meta(name, base)
-        if found is None or found[2].get("embedding_model") != old_name:
+        if found is None or not found[2].get("embedding_model"):
             continue
         coll_dir = found[1]
         local = _collection_lock(name)
@@ -171,21 +188,17 @@ def relabel_embedding_model(old_name: str, new_name: str,
             continue
         try:
             with collection_write_lock(lock_path_for(coll_dir), collection=name,
-                                       op="a model rename"):
+                                       op="recording a model ID"):
                 found = Collection._peek_meta(name, base)
-                if found is None or found[2].get("embedding_model") != old_name:
+                if found is None or not found[2].get("embedding_model"):
                     continue
-                meta = found[2]
-                meta["embedding_model"] = new_name
                 with _files_changing(coll_dir):
-                    _storekit_atomic_write(coll_dir / "meta.json",
-                                           json.dumps(meta, indent=2))
-                relabelled.append(name)
+                    _storekit_atomic_write(coll_dir / "meta.json", meta_json(found[2]))
         except CollectionLockedError:
             busy.append(name)
         finally:
             local.release()
-    return relabelled, busy
+    return busy
 
 
 # Per-collection-NAME locks: concurrent writes to one collection serialise
@@ -455,18 +468,38 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                 embed_fn=embed_fn, model_name=model_name,
                 on_progress=on_progress, batch=batch)
 
+    def _stored_doc_key(self, source: str) -> Optional[str]:
+        """The key under which *source* is indexed, or None. Accepts the stored
+        spelling, the path resolved the way ``add_paths`` stores it, or a
+        spelling that differs only in separators and (on Windows) case."""
+        docs = self._meta.get("docs", {})
+        if source in docs:
+            return source
+        try:
+            resolved = str(Path(source).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            resolved = source
+        if resolved in docs:
+            return resolved
+        wanted = os.path.normcase(os.path.normpath(resolved))
+        for key in docs:
+            if os.path.normcase(os.path.normpath(key)) == wanted:
+                return key
+        return None
+
     def remove_doc(self, source: str) -> bool:
         # Same per-collection lock and re-load as add_paths, and the same
         # cross-process lock.
         with _collection_lock(self.name), self._write_lock("a document removal"):
             self._load(use_cache=False)
-            if source not in self._meta.get("docs", {}):
+            key = self._stored_doc_key(source)
+            if key is None:
                 return False
             keep = [i for i, c in enumerate(self._chunks)
-                    if c.get("source") != source]
+                    if c.get("source") != key]
             self._chunks = [self._chunks[i] for i in keep]
             if self._vectors is not None:
                 self._vectors = [self._vectors[i] for i in keep]
-            del self._meta["docs"][source]
+            del self._meta["docs"][key]
             self._save()
             return True

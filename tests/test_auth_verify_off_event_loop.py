@@ -3,7 +3,7 @@
 
 ``verify()`` reads the keystore and, on a successful match, takes the keystore's
 CROSS-PROCESS lock to stamp ``last_used`` (and to mark a legacy row's hash
-algorithm). That lock waits up to ``config._CROSS_LOCK_TIMEOUT`` seconds for
+algorithm). That lock waits up to ``storekit._CROSS_LOCK_TIMEOUT`` seconds for
 another localm process, so a ``verify()`` call made directly from an ``async
 def`` route body freezes the whole server for that long: every other request,
 every SSE stream, every in-flight generation.

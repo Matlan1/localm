@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Privacy regression tests for `_strip_png_metadata`.
+"""Privacy regression tests for `strip_image_metadata`.
 
 ComfyUI PNGs embed the full prompt/workflow in tEXt/eXIf chunks, so localm strips
 them before the saved copy is treated as clean. The function's own docstring
@@ -23,7 +23,7 @@ from __future__ import annotations
 import struct
 import zlib
 
-from localm.image_gen import comfy
+from localm.media.output_metadata import strip_image_metadata
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 _SECRET = b"prompt\x00super secret prompt do not leak"
@@ -54,7 +54,7 @@ def test_non_png_file_warns_and_is_left_untouched(tmp_path):
     path = tmp_path / "generated.png"
     path.write_bytes(blob)
 
-    warning = comfy._strip_png_metadata(path)
+    warning = strip_image_metadata(path)
 
     assert warning, "non-PNG file must yield a non-empty warning, not silent success"
     assert "prompt" in warning.lower() or "exif" in warning.lower()
@@ -67,7 +67,7 @@ def test_real_png_strips_text_chunk_clean(tmp_path):
     path = tmp_path / "generated.png"
     path.write_bytes(_png_with_text_prompt())
 
-    warning = comfy._strip_png_metadata(path)
+    warning = strip_image_metadata(path)
 
     assert warning == "", f"clean PNG strip should return '', got {warning!r}"
     out = path.read_bytes()
@@ -80,6 +80,6 @@ def test_real_png_strips_text_chunk_clean(tmp_path):
 
 def test_missing_file_warns(tmp_path):
     """A missing output file still returns a warning (unchanged behavior)."""
-    warning = comfy._strip_png_metadata(tmp_path / "does_not_exist.png")
+    warning = strip_image_metadata(tmp_path / "does_not_exist.png")
 
     assert warning, "a missing file must return a warning, not silent success"

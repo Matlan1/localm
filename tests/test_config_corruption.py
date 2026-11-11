@@ -13,6 +13,7 @@ import os
 import pytest
 
 import localm.config as cfg
+import localm.storekit as storekit
 
 
 @pytest.fixture()
@@ -208,7 +209,7 @@ def test_config_route_answers_an_unreadable_config_with_409(
 # --------------------------------------------------------------------------- #
 
 class _OsAs:
-    """``config.os`` as seen on another platform: ``name`` replaced, the rest
+    """``storekit.os`` as seen on another platform: ``name`` replaced, the rest
     from the real module."""
 
     def __init__(self, name):
@@ -229,7 +230,7 @@ def _record_sleeps(monkeypatch):
     import time
     import types
     sleeps = []
-    monkeypatch.setattr(cfg, "time", types.SimpleNamespace(
+    monkeypatch.setattr(storekit, "time", types.SimpleNamespace(
         sleep=sleeps.append, time=time.time, monotonic=time.monotonic,
         strftime=time.strftime))
     return sleeps
@@ -244,13 +245,13 @@ def _deny_open(monkeypatch, path, winerror):
             calls.append(_denial(winerror))
             raise calls[-1]
         return builtins.open(file, *a, **k)
-    monkeypatch.setattr(cfg, "open", fake_open, raising=False)
+    monkeypatch.setattr(storekit, "open", fake_open, raising=False)
     return calls
 
 
 def test_atomic_write_private_uses_a_bare_replace_by_default(cfg_home, monkeypatch):
     retried = []
-    monkeypatch.setattr(cfg, "_replace_atomic", lambda src, dst: retried.append(dst))
+    monkeypatch.setattr(storekit, "replace_atomic", lambda src, dst: retried.append(dst))
     target = cfg_home / "secret.json"
     cfg.atomic_write_private(target, "x")
     assert retried == []
@@ -260,12 +261,12 @@ def test_atomic_write_private_uses_a_bare_replace_by_default(cfg_home, monkeypat
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file mode bits")
 def test_atomic_write_private_creates_its_temp_file_owner_only(cfg_home, monkeypatch):
     seen = []
-    real = cfg.restrict_file_perms
+    real = storekit.restrict_file_perms
 
     def spy(path, **kw):
         seen.append(os.stat(path).st_mode & 0o777)
         return real(path, **kw)
-    monkeypatch.setattr(cfg, "restrict_file_perms", spy)
+    monkeypatch.setattr(storekit, "restrict_file_perms", spy)
     cfg.atomic_write_private(cfg_home / "secret.json", "x")
     assert seen[0] == 0o600
 
@@ -281,7 +282,7 @@ def test_atomic_write_private_completes_a_short_write(cfg_home, monkeypatch):
         return os.write(fd, bytes(data[:3]))
     proxy = _OsAs(os.name)
     proxy.write = write
-    monkeypatch.setattr(cfg, "os", proxy)
+    monkeypatch.setattr(storekit, "os", proxy)
     target = cfg_home / "secret.json"
     cfg.atomic_write_private(target, text)
     assert target.read_bytes() == text.encode("utf-8")
@@ -342,7 +343,7 @@ def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys, caplog):
     import logging
     target = cfg_home / "x.json"
     target.write_text("{bad", encoding="utf-8")
-    cfg._warned_unreadable.clear()
+    storekit._warned_unreadable.clear()
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert cfg._read_json_checked(target, {}) == ({}, False)
     assert capsys.readouterr().err == ""
@@ -353,16 +354,16 @@ def test_read_json_checked_reports_a_corrupt_file(cfg_home, capsys, caplog):
 def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
         cfg_home, monkeypatch, capsys, caplog):
     import logging
-    cfg._warned_unreadable.clear()
+    storekit._warned_unreadable.clear()
     caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt"))
     sleeps = _record_sleeps(monkeypatch)
     calls = _deny_open(monkeypatch, target, 32)
     assert cfg._read_json_checked(target, {}) == ({}, False)
-    assert len(calls) == cfg._REPLACE_RETRIES
-    assert len(sleeps) == cfg._REPLACE_RETRIES - 1
+    assert len(calls) == storekit._REPLACE_RETRIES
+    assert len(sleeps) == storekit._REPLACE_RETRIES - 1
     assert capsys.readouterr().err == ""
     assert [r.getMessage() for r in caplog.records if "x.json" in r.getMessage()] == [
         f"x.json is unreadable ({calls[-1]})"]
@@ -371,11 +372,11 @@ def test_read_json_checked_on_windows_retries_a_transient_denial_then_reports(
 def test_read_json_checked_on_windows_does_not_retry_a_stable_denial(
         cfg_home, monkeypatch, capsys, caplog):
     import logging
-    cfg._warned_unreadable.clear()
+    storekit._warned_unreadable.clear()
     caplog.set_level(logging.WARNING, logger="localm")
     target = cfg_home / "x.json"
     target.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    monkeypatch.setattr(storekit, "os", _OsAs("nt"))
     sleeps = _record_sleeps(monkeypatch)
     calls = _deny_open(monkeypatch, target, 1314)
     assert cfg._read_json_checked(target, {}) == ({}, False)

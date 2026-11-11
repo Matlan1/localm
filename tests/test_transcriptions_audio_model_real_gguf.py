@@ -71,8 +71,8 @@ def client(engine, tmp_path, monkeypatch):
     for t in threading.enumerate():
         if t.name == voice.PREFETCH_THREAD_NAME:
             t.join(timeout=10)
-    plugin = sys.modules["_localm_plugin_voice.transcriptions"]
-    audio = sys.modules["_localm_plugin_voice.audio_model"]
+    plugin = sys.modules["localm.plugins.builtin.voice.transcriptions"]
+    audio = sys.modules["localm.plugins.builtin.voice.audio_model"]
     monkeypatch.setattr(plugin, "_whisper_installed", lambda: False)
     monkeypatch.setattr(audio, "audio_model_names", lambda: [NAME])
     asked = []

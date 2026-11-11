@@ -25,6 +25,7 @@ import localm.plugins.coder.agent as _agent
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
 from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
+from ..patch_overlay import PatchOverlay
 from ..tools import SAFE_RESTRICTED_TOOLS
 from ..audit import AuditLogT, SessionMode, register_coder_session_mode
 from .constants import expand_shell_disable
@@ -191,12 +192,16 @@ class Agent(
         # checks truthiness of its own option, not this flag).
         self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
+        self._patch_overlay = PatchOverlay(self.cwd)
         self.parent         = parent
         # Set when a tool result put untrusted content into this context; while
         # set (and taint_rearms_confirm), destructive, network and code-running
         # tools ask again. Cleared by the next user message.
         self._untrusted_in_context = False
         self.taint_rearms_confirm = True
+        # True lets network tools run without asking under net_mode "ask" when
+        # this run has no confirm handler and is not interactive.
+        self.unattended_network = False
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
         cap_backend_session_mode(backend, mode)
@@ -1181,6 +1186,11 @@ class Agent(
         """Send a structured event to the registered sink. Never raises."""
         if self.on_event is None:
             return
+        if event_type in ("tool_call", "tool_result") and "call_id" not in data:
+            from .execution import current_call_id
+            call_id = current_call_id()
+            if call_id is not None:
+                data["call_id"] = call_id
         try:
             self.on_event({"type": event_type, **data})
         except Exception as e:

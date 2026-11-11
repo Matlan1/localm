@@ -42,6 +42,12 @@ from localm.vram import evict_chat_for_embedder
 from localm.plugins.builtin.memory import plug
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stop_event(monkeypatch):
+    """A memory stop event no earlier unload in this process has set."""
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
+
+
 @pytest.fixture
 def semclean():
     """A fresh, unheld embedder semaphore for every test - it is lazily created

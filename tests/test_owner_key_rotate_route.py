@@ -5,9 +5,9 @@ Two properties carry the weight here, neither about the happy path:
 
 * **The gate is ADMIN, not config:write.** Setting a key the caller CHOOSES is a
   direct promotion to owner, so a merely ``config:write`` or ``keys:admin``
-  holder is refused. The sibling ``/api/auth/key/clear`` takes ``config:write``,
-  so there is an explicit test per non-owner scope rather than one generic
-  "unauthorised" case.
+  holder is refused, as it is on the sibling ``/api/auth/key/clear``. There is
+  an explicit test per non-owner scope rather than one generic "unauthorised"
+  case.
 * **A rotation that did not change the LIVE credential does not report success.**
   ``LOCALM_API_KEY`` outranks the file, so under it the key lands on disk and the
   server keeps accepting the old one.
@@ -114,17 +114,32 @@ class TestOnlyTheOwnerMayRotate:
             f"a {scope} key rotating the OWNER credential is privilege escalation")
         assert auth.get_api_key() == before, "and it must not have taken effect"
 
-    def test_config_write_may_still_clear(self):
-        """Control for the test above: the refusal is specific to ROTATE, not a
-        blanket lockout on the config:write scope."""
-        auth.regenerate_key()
-        made = auth.create_key("clearer", [scopes.CONFIG_WRITE],
-                               allow_privileged=True)
+
+
+class TestOnlyTheOwnerMayClear:
+    """Clearing the owner key drops the server to open mode, so a scoped key
+    reaching it would open the server to everyone."""
+
+    @pytest.mark.parametrize("scope", [scopes.CONFIG_WRITE, scopes.KEYS_ADMIN])
+    def test_non_owner_scoped_key_cannot_clear_the_owner_key(self, scope):
+        owner = auth.regenerate_key()
+        made = auth.create_key(f"device-{scope}", [scope], allow_privileged=True)
         c = _client()
 
         r = c.post("/api/auth/key/clear", headers=_owner(made["key"]))
 
+        assert r.status_code == 403, r.text
+        assert auth.get_api_key() == owner
+        assert auth.any_key_configured() is True
+
+    def test_owner_key_may_clear(self):
+        auth.regenerate_key()
+        c = _client()
+
+        r = c.post("/api/auth/key/clear", headers=_owner(auth.get_api_key()))
+
         assert r.status_code == 200, r.text
+        assert auth.get_api_key() is None
 
 
 class TestBadInputIsA400NotA500:

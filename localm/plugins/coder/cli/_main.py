@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
@@ -49,7 +50,7 @@ from ..privacy import (
     warn_external_provider,
     warn_external_url,
 )
-from ..project_config import ProjectConfigUnreadable
+from ..project_config import ProjectConfigUnreadable, load_project_config
 from ..runner import (
     InvalidSessionMode,
     browser_enabled as _browser_enabled,
@@ -131,6 +132,10 @@ def _complete_model(ctx, param, incomplete):
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
               help="Auto-approve all destructive tool calls.")
+@click.option("--allow-network", "allow_network", is_flag=True,
+              help="For this unattended run only: let fetch_url, web_search, the "
+                   "browser tools and git_push run without asking while "
+                   "net_mode is ask. net_mode off still refuses them.")
 @click.option("--interactive-confirm", "interactive_confirm", is_flag=True,
               help="Auto-approve file writes but still prompt before shell commands.")
 @click.option("--dry-run",          is_flag=True,
@@ -240,7 +245,7 @@ def _complete_model(ctx, param, incomplete):
 def main(
     task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
-    verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
+    verbose, yes, allow_network, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, system_instructions,
     show_episodes, forget_episodes, forget_episode_id, show_archive,
     restore_episode_id, consolidate_episodes,
@@ -385,7 +390,9 @@ def main(
             "code and the web tools egress data. Tools that run code now require "
             "--yes (else they are denied this run), and so does any file write, "
             "push or network call after the run has read untrusted content; "
-            "network tools still obey net_mode (off/ask/allow). Pass --yes to "
+            "network tools obey net_mode (off/ask/allow), and under ask they "
+            "are denied unless --allow-network or the coder_unattended_network "
+            "setting allows them. Pass --yes to "
             "auto-approve, or run interactively to confirm each call.",
             to_stderr=True)
 
@@ -412,6 +419,7 @@ def main(
         browser_enabled=_browser_enabled(),
         max_tokens_explicit=max_tokens_explicit,
         on_event=events,
+        allow_network=allow_network,
     )
     if events is not None:
         # The close-time reflection runs synchronously, so a one-shot process
@@ -531,7 +539,7 @@ def main(
         sys.exit(2 if ci else 1)
     finally:
         # Flush patch output before closing
-        if patch_mode and agent._patch_chunks:
+        if patch_mode and agent.has_patch():
             patch_content = agent.flush_patch()
             if patch_mode == "-":
                 sys.stdout.write(patch_content)
@@ -799,6 +807,95 @@ def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
     return platform != "win32" and (machine_output or not stdout_tty)
 
 
+def _unregistered_model_message(model: str, work_dir) -> Optional[str]:
+    """None when *model* is a registered name, else the message saying it is not
+    and, when *work_dir*'s ``.localcoder/config.toml`` is where it came from, that
+    the name is set there."""
+    from localm.model_manager import unregistered_model_error
+    refusal = unregistered_model_error(model)
+    if refusal is None:
+        return None
+    try:
+        from_project = load_project_config(Path(work_dir)).get("model") == model
+    except ProjectConfigUnreadable:
+        from_project = False
+    if from_project:
+        return f"{refusal} This name is set by 'model' in .localcoder/config.toml."
+    return refusal
+
+
+AUTOSTART_LOG_PREFIX = "localm-coder-autostart-"
+
+
+def _open_autostart_log():
+    """Create the temp file an auto-started server's output goes to.
+
+    Returns ``(file, path)``; *file* is open for writing and can be passed to
+    ``subprocess.Popen`` as stdout. On Windows the handle is opened with
+    ``FILE_SHARE_DELETE``, so :func:`_discard_autostart_log` can remove the
+    path while the child still holds the inherited handle, as unlink does on
+    POSIX."""
+    import os
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix=AUTOSTART_LOG_PREFIX, suffix=".log")
+    if sys.platform != "win32":
+        return os.fdopen(fd, "w", encoding="utf-8", errors="replace"), path
+    os.close(fd)
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                           ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                           wintypes.HANDLE]
+        create.restype = wintypes.HANDLE
+        generic_write = 0x40000000
+        share_all = 0x1 | 0x2 | 0x4
+        truncate_existing = 5
+        attribute_normal = 0x80
+        handle = create(path, generic_write, share_all, None, truncate_existing,
+                        attribute_normal, None)
+        if handle in (None, wintypes.HANDLE(-1).value):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            wfd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+        except Exception:
+            kernel32.CloseHandle(wintypes.HANDLE(handle))
+            raise
+        return os.fdopen(wfd, "w", encoding="utf-8", errors="replace"), path
+    except Exception:
+        _discard_autostart_log(path)
+        raise
+
+
+def _discard_autostart_log(path) -> bool:
+    """Remove an auto-start log. Returns True when the path is gone; on
+    failure prints a warning naming the file and returns False. Never raises."""
+    import os
+    if not path:
+        return True
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        click.echo(f"Warning: could not delete the auto-started server's output "
+                   f"log {path}: {exc}", err=True)
+        return False
+    return True
+
+
+def _keep_autostart_log_on_timeout(session_mode) -> bool:
+    """Whether a failed attach keeps the server's output log: outside privacy
+    mode, or when keep diagnostics is on."""
+    if session_mode != SessionMode.PRIVACY:
+        return True
+    from localm.config import keep_diagnostics_enabled
+    return keep_diagnostics_enabled()
+
+
 def _gate_mode(session_mode):
     """The off-machine gate's mode string for a resolved SessionMode, or None."""
     return getattr(session_mode, "value", session_mode)
@@ -891,6 +988,10 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 "Run `localm list` to see registered models."
             )
             sys.exit(2 if ci else 1)
+        refusal = _unregistered_model_message(model, work_dir)
+        if refusal:
+            print_error(refusal)
+            sys.exit(2 if ci else 1)
 
         # Attach to the localm already running for this project dir instead of
         # starting a second server that loads its own model. The credential
@@ -961,14 +1062,17 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 if port:
                     cmd.extend(["-p", str(port)])
                 # --new: the child starts its own server even while another one
-                # serves this project, and the wait below skips every instance
-                # that was registered before the spawn.
+                # serves this project. The child records launch_tag in its
+                # registry entry, and the wait below attaches only to the entry
+                # carrying that tag (and never to one registered before the spawn).
                 preexisting_ids: frozenset = frozenset()
+                launch_tag = None
                 if force_new:
                     cmd.append("--new")
                     preexisting_ids = frozenset(
                         e.get("instance_id") for e in instances.list_entries(home_dir())
                         if e.get("instance_id"))
+                    launch_tag = instances.new_launch_tag()
 
                 import os
                 kwargs = {}
@@ -981,6 +1085,9 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 kwargs["cwd"] = str(work_dir)
                 env = os.environ.copy()
                 env["LOCALM_OWN_CONSOLE"] = "1"
+                env.pop(instances.LAUNCH_TAG_ENV, None)
+                if launch_tag:
+                    env[instances.LAUNCH_TAG_ENV] = launch_tag
                 kwargs["env"] = env
                 # A HEADLESS caller (stdin is not a TTY) has no desktop for a new
                 # console window, so the child's output goes to a LOG FILE: a PIPE
@@ -993,11 +1100,7 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 child_log_path = None
                 child_log = None
                 if headless:
-                    import tempfile
-                    fd, child_log_path = tempfile.mkstemp(
-                        prefix="localm-coder-autostart-", suffix=".log")
-                    child_log = os.fdopen(fd, "w", encoding="utf-8",
-                                          errors="replace")
+                    child_log, child_log_path = _open_autostart_log()
                     kwargs["stdout"] = child_log
                     kwargs["stderr"] = subprocess.STDOUT
                     if sys.platform == "win32":
@@ -1030,12 +1133,14 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                         return ""
 
                 try:
-                    proc = subprocess.Popen(cmd, **kwargs)
-                    if child_log is not None:
-                        # The child holds its own handle from here; closing ours
-                        # flushes anything buffered before the early-exit read
-                        # below.
-                        child_log.close()
+                    try:
+                        proc = subprocess.Popen(cmd, **kwargs)
+                    finally:
+                        if child_log is not None:
+                            # The child holds its own handle from here; closing
+                            # ours flushes anything buffered before the
+                            # early-exit read below.
+                            child_log.close()
                     from ..display import ActivitySpinner
                     _tgt = None
                     with ActivitySpinner("Waiting for localm server to start..."):
@@ -1044,11 +1149,17 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             if proc.poll() is not None:
                                 break
                             _root = instances.resolve_root_dir(start=str(work_dir))
-                            _tgt = instances.attach_target(
-                                home_dir(), _root, exclude_ids=preexisting_ids)
+                            if launch_tag:
+                                _tgt = instances.attach_target(
+                                    home_dir(), _root, exclude_ids=preexisting_ids,
+                                    launch_tag=launch_tag)
+                            else:
+                                _tgt = instances.attach_target(
+                                    home_dir(), _root, exclude_ids=preexisting_ids)
                             if _tgt:
                                 break
                     if _tgt:
+                        _discard_autostart_log(child_log_path)
                         attach_key = api_key
                         if not _api_key_explicit:
                             from localm.auth import resolve_bearer_token
@@ -1062,6 +1173,7 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                                       f"{show_url(_tgt['base_url'])}[/dim]")
                     elif proc.poll() is not None:
                         tail = _child_log_tail()
+                        _discard_autostart_log(child_log_path)
                         if tail:
                             detail = f" Its output:\n{tail}"
                         elif headless:
@@ -1075,12 +1187,19 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                         )
                         sys.exit(2 if ci else 1)
                     else:
-                        hint = (f" Its output log: {child_log_path}"
-                                if child_log_path else "")
+                        hint = ""
+                        if child_log_path:
+                            if _keep_autostart_log_on_timeout(session_mode):
+                                hint = f" Its output log: {child_log_path}"
+                            elif _discard_autostart_log(child_log_path):
+                                hint = (" Its output log was not kept (privacy "
+                                        "mode; turn on keep diagnostics to "
+                                        "keep it).")
                         print_error(
                             f"Failed to attach to the auto-started server.{hint}")
                         sys.exit(2 if ci else 1)
                 except Exception as e:
+                    _discard_autostart_log(child_log_path)
                     print_error(f"Failed to start server: {e}")
                     sys.exit(2 if ci else 1)
 

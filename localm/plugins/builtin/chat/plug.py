@@ -39,6 +39,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from localm import model_ids
+from localm.config import model_index
 from localm.storekit import NamespaceLockRegistry, atomic_write
 
 _router = APIRouter()
@@ -94,6 +96,18 @@ def _home() -> Path:
     return home_dir()
 
 
+def _conv_with_current_pin(data: dict) -> dict:
+    """Saved conversation *data* with ``pinned_model`` holding the pinned model's
+    current name and without the stored ``model_refs``."""
+    if not isinstance(data, dict):
+        return data
+    refs = data.pop(model_ids.REFS_KEY, None)
+    if data.get("pinned_model"):
+        data["pinned_model"] = model_ids.stored_to_current(
+            data["pinned_model"], refs, model_index())
+    return data
+
+
 # Serialisation scope: writers inside this process (request handlers and the
 # executor thread running relabel_pinned_model) take one lock per target file.
 # The CLI and other processes are not covered; relabel_pinned_model re-checks
@@ -120,8 +134,8 @@ def _chats_root(principal: str | None) -> Path:
 
 def _persist_enabled() -> bool:
     """Chat persistence/writes are off in privacy mode (the default)."""
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("chat") != SessionMode.PRIVACY
+    from localm.audit import automatic_write_allowed
+    return automatic_write_allowed("chat")
 
 
 # ------------------------------------------------------------------ #
@@ -210,7 +224,7 @@ async def conversations_list(request: Request, meta: bool = False,
                 else:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
-                    rows.append(data)
+                    rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
             except Exception as e:
@@ -245,7 +259,7 @@ async def conversation_get(conv_id: str, request: Request):
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
-    return data
+    return _conv_with_current_pin(data)
 
 
 @_router.put("/api/conversations/{conv_id}")
@@ -256,14 +270,17 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert,
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
     path = _conv_path(conv_id, _principal_dir(request))
-    payload = json.dumps(
-        {"id": conv_id, "title": req.title,
-         "updated_at": req.updated_at,
-         "pinned": req.pinned, "folder": req.folder,
-         "pinned_model": req.pinned_model,
-         "branches": req.branches,
-         "messages": req.messages},
-        ensure_ascii=False)
+    record = {"id": conv_id, "title": req.title,
+              "updated_at": req.updated_at,
+              "pinned": req.pinned, "folder": req.folder,
+              "pinned_model": req.pinned_model,
+              "branches": req.branches,
+              "messages": req.messages}
+    if req.pinned_model:
+        index = model_index()
+        record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
+        model_ids.attach_refs(record, (record["pinned_model"],), index)
+    payload = json.dumps(record, ensure_ascii=False)
     if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
         raise HTTPException(413, "Conversation too large to persist")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,13 +327,15 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
     holding an older cached copy takes this one rather than uploading its own
     over it. Each file is rewritten under its per-file lock, and a file whose
     ``updated_at`` changed since it was read is left as it is and listed in
-    ``failed``. Returns ``(rewritten, failed)``: the ids rewritten, and the ids
+    ``failed``. A rewritten conversation's ``model_refs`` is set for *new_name*.
+    Returns ``(rewritten, failed)``: the ids rewritten, and the ids
     of files that name *old_name* but were not rewritten. A file that does not
     contain *old_name* is not parsed. Works in every session mode: it edits
     files that already exist and creates none."""
     import time
 
     needle = json.dumps(old_name, ensure_ascii=False)[1:-1]
+    index = model_index()
     rewritten: list = []
     failed: list = []
     for p in _all_chat_files():
@@ -330,6 +349,7 @@ def relabel_pinned_model(old_name: str, new_name: str) -> tuple[list, list]:
                     continue
                 read_stamp = data.get("updated_at")
                 data["pinned_model"] = new_name
+                model_ids.attach_refs(data, (new_name,), index)
                 data["updated_at"] = int(time.time() * 1000)
                 if _updated_at_of(p) != read_stamp:
                     failed.append(p.stem)
@@ -476,6 +496,24 @@ async def chat_extract(req: AttachmentExtractRequest):
 _NUDGE_CAPACITY_FRACTION = 0.10
 
 
+OWN_CHAT_SURFACE = "chat"
+
+
+def _own_chat_surface(ctx) -> bool:
+    """True when the request came from localm's own chat (the GUI chat or
+    ``localm run``), which send ``X-Client-Id: chat`` (``ctx.state["client_id"]``).
+    False for every other caller, an API client with no such header included."""
+    state = getattr(ctx, "state", None) or {}
+    client_id = state.get("client_id") or ""
+    return isinstance(client_id, str) and client_id.strip().lower() == OWN_CHAT_SURFACE
+
+
+def _style_note_enabled() -> bool:
+    """The ``chat_style_note`` setting (default on)."""
+    from localm.config import load_config
+    return bool(load_config().get("chat_style_note", True))
+
+
 def _nudge_fits_capacity(instruction: str, ctx) -> bool:
     """True when appending *instruction* is safe for the model's known
     context capacity: ``ctx.state["capacity"]``, an int token ceiling, or
@@ -502,7 +540,8 @@ _THINK_INSTRUCTION = (
 def _thinking_inlet(messages, ctx):
     """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
 
-    Injects only for thinking-family models, and never twice: skips when a system
+    Injects only on localm's own chat surface (see _own_chat_surface), only for
+    thinking-family models, and never twice: skips when a system
     message already steers <think> (a coder session, whose system prompt already
     carries the instruction, or a persona that already does it), and skips when
     the model's known context capacity is too small to absorb the instruction
@@ -511,6 +550,8 @@ def _thinking_inlet(messages, ctx):
     kernel pipeline isolates any exception this raises."""
     from localm.inference.model_family import is_thinking_model
 
+    if not _own_chat_surface(ctx):
+        return None
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):
         return None
     if not _nudge_fits_capacity(_THINK_INSTRUCTION, ctx):
@@ -544,11 +585,15 @@ def _role_word_inlet(messages, ctx):
     bare third-person role word ("Model", "the assistant") or an incorrect
     pronoun for itself.
 
-    Skips when a system message already mentions third-person self-reference,
+    Applies only on localm's own chat surface (see _own_chat_surface) while the
+    ``chat_style_note`` setting is on. Skips when a system message already
+    mentions third-person self-reference,
     and when the model's known context capacity is too small to absorb the
     instruction (see _nudge_fits_capacity). Appends the instruction to the
     first system message, or inserts one when none exists. Exceptions raised
     here are isolated by the chat pipeline."""
+    if not _own_chat_surface(ctx) or not _style_note_enabled():
+        return None
     if not _nudge_fits_capacity(_ROLE_WORD_INSTRUCTION, ctx):
         return None
     for m in messages:

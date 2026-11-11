@@ -2123,6 +2123,11 @@ async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
     return await _hooks_op(_forget)
 
 
+def _follow_model_rename(old_name: str, new_name: str) -> None:
+    from localm.plugins.coder.sessions import follow_model_rename
+    follow_model_rename(old_name, new_name)
+
+
 _router = APIRouter()
 _router.include_router(_safe_router)
 _router.include_router(_session_router)
@@ -2131,6 +2136,8 @@ _router.include_router(_owner_router)
 
 def register(host) -> None:
     host.mount_router(_router)
+    from localm import model_ids
+    model_ids.add_rename_listener(_follow_model_rename)
 
 
 def unregister() -> None:

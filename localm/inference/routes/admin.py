@@ -98,6 +98,21 @@ def register(app: FastAPI, ctx) -> None:
                          instance_id=getattr(app.state, "instance_id", None))
         return {"restarting": True}
 
+    @app.get("/v1/server/stall-stacks",
+             dependencies=[Depends(require_scope(scopes.ADMIN))])
+    async def server_stall_stacks_ep():
+        """This server's newest recorded stall with every thread's stack, as
+        ``{"stall_stacks": text}`` (``recent_stall_stacks``; empty text when no
+        such stall is recorded). For ``localm bug-report`` on the same machine:
+        the owner key (or open mode), and 403 unless the server is bound to
+        loopback (``app.state.bind_host``; unset counts as not loopback)."""
+        if not _hs._is_loopback_host(getattr(app.state, "bind_host", None) or ""):
+            raise HTTPException(
+                403, "Stall stacks are served only by a server bound to this "
+                     "machine (127.0.0.1 or ::1).")
+        from localm.inference._stall_watch import recent_stall_stacks
+        return {"stall_stacks": recent_stall_stacks()}
+
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def file_bug_report_ep(body: dict, request: Request):
@@ -138,9 +153,11 @@ def register(app: FastAPI, ctx) -> None:
         # Off the event loop and bounded: a synchronous log read, scrub and file write
         # on the loop stalls every concurrent request. See _BUG_REPORT_SAVE_TIMEOUT_S.
         def _save():
+            from localm.inference._stall_watch import recent_stall_stacks
             return bugreport.save_user_report(
                 description, what_i_expected=what_i_expected, what_happened=what_happened,
                 include_log=bool(body.get("include_log")), client=client,
+                stall_stacks=recent_stall_stacks(),
                 scrub=None if show is str else show)
 
         try:

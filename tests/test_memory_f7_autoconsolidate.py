@@ -29,6 +29,7 @@ def chat_home(tmp_path, monkeypatch):
     monkeypatch.setattr(plug, "_memory_root", lambda: tmp_path / "memory")
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
     # Reset module state between tests.
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
     plug._auto_running = False
     return tmp_path, plug
 

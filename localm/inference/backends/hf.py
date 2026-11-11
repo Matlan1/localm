@@ -357,6 +357,11 @@ class HFBackend(BaseBackend):
         return []
 
     @property
+    def supports_raw_prompt(self) -> bool:
+        """True: the text tokenizer takes a raw prompt."""
+        return True
+
+    @property
     def supports_grammar(self) -> bool:
         """True only when xgrammar (the optional ``[grammar]`` extra) is
         installed, because that package IS this backend's grammar support.
@@ -668,6 +673,7 @@ class HFBackend(BaseBackend):
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         cache_prompt: bool = True,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
         # This backend keeps no prompt cache, so cache_prompt changes nothing.
         # Checked before the loaded-state gate below and before touching
@@ -702,6 +708,8 @@ class HFBackend(BaseBackend):
                            ("frequency_penalty", frequency_penalty)):
             if value is not None:
                 extra[key] = value
+        if raw_prompt is not None:
+            extra["raw_prompt"] = raw_prompt
         try:
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),

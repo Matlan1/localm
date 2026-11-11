@@ -9,8 +9,9 @@ update is silently lost and interleaved meta/chunks/vectors can surface later
 as a degraded index. This module closes that, per collection, across processes.
 
 A hold here has NO wall-clock limit. Indexing a folder legitimately runs for
-minutes or hours, so a ``config._cross_process_lock``-style rule that reclaims
-ANY holder older than 30 s would reap a LIVE holder and let both write. The
+minutes or hours, so a rule that reclaims ANY holder older than 30 s would
+reap a LIVE holder and let both write, and ``storekit.store_lock``'s 10 s
+waiter budget is too short. The
 holder instead proves it is alive with a HEARTBEAT, and staleness is keyed on
 the age of that heartbeat (``STALE_AFTER``), not on how long the lock has been
 held.

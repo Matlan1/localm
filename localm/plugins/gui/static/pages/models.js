@@ -793,9 +793,7 @@ export async function refreshModelsPage() {
       // actually stored, not the raw text typed in.
       if (r.ok) {
         let msg = t("models.rename.toast", { name: data.new_name || name.trim() });
-        // The server's migration notes - what it updated, and what it could
-        // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
-        // to the user, not left in the server log alone.
+        // Notes the server returned are shown to the user.
         if (Array.isArray(data.notes) && data.notes.length) {
           msg += ". " + data.notes.map((n) => String(n).replace(/\.+$/, "")).join(". ") + ".";
         }
@@ -1891,8 +1889,12 @@ export async function refreshInstancesCard() {
               { method: "POST", headers: authHeaders() });
             const d = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(d.detail || resp.statusText);
-            toast(t("settings.instances.stoppedToast",
-              { name: inst.root_dir || inst.instance_id }));
+            if (d.status === "stale") {
+              toast(t("settings.instances.staleToast", { pid: d.pid ?? inst.pid }));
+            } else {
+              toast(t("settings.instances.stoppedToast",
+                { name: inst.root_dir || inst.instance_id }));
+            }
             refreshInstancesCard();
           } catch (e) {
             toast(t("settings.instances.stopFailed", { message: e.message }), true);

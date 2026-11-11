@@ -148,3 +148,94 @@ def test_bug_report_cli_bundles_live_server_hang_trace(cli_runner):
     text = reports[-1].read_text(encoding="utf-8")
     assert "Server hang trace" in text
     assert "CLI-E2E-MARKER" in text
+
+
+def _the_blocking_call_in_this_test(release, written):
+    written.wait(5)
+    release.wait(5)
+
+
+def test_saved_report_carries_the_loop_thread_first_and_every_thread(tmp_path, monkeypatch):
+    """The watchdog's own writer produces the trace; the saved report renders
+    the event loop thread first with its blocking frame, every other thread
+    after it, and no absolute path."""
+    import threading
+
+    from localm.inference import http_server as hs
+    home = tmp_path / ".localm"
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    release, written = threading.Event(), threading.Event()
+    loop = threading.Thread(target=_the_blocking_call_in_this_test,
+                            args=(release, written), name="report-loop", daemon=True)
+    other = threading.Thread(target=release.wait, args=(5,), name="report-other",
+                             daemon=True)
+    loop.start()
+    other.start()
+    trace = _seed_hang(home, body="===== LOCALM HANG WATCHDOG: event loop stalled 12.0s =====\n")
+    try:
+        expected = {t.ident for t in threading.enumerate()} - {threading.get_ident()}
+        with open(trace, "a", encoding="utf-8") as fh:
+            hs._write_thread_stacks(fh, loop.ident)
+        written.set()
+        path = bugreport.save_user_report("the app froze", include_log=False)
+    finally:
+        written.set()
+        release.set()
+        loop.join(5)
+        other.join(5)
+    assert path is not None
+    text = path.read_text(encoding="utf-8")
+    section = text.split("## Server hang trace", 1)[1]
+    assert "event loop thread is listed first" in section
+    headers = [ln for ln in section.splitlines() if ln.startswith("Thread 0x")]
+    assert headers[0].startswith(f"Thread 0x{loop.ident:08x} "), headers[:2]
+    assert '"report-loop"' in headers[0] and "[event loop thread]" in headers[0]
+    assert any('"report-other" daemon=True' in h for h in headers), headers
+    shown = {int(h.split()[1], 16) for h in headers}
+    assert expected <= shown, (expected - shown, headers)
+    assert "the event loop thread was in" in section
+    assert "test_bugreport_hang_trace.py:" in section
+    assert "in _the_blocking_call_in_this_test" in section.split(headers[1], 1)[0]
+    assert str(tmp_path) not in section and 'File "' not in section
+
+
+def test_saved_report_attaches_the_stall_watch_stacks_without_a_trace_file(
+        tmp_path, monkeypatch):
+    home = tmp_path / ".localm"
+    (home / "logs").mkdir(parents=True)
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    stacks = ("===== LOCALM STALL WATCH: loop stall of 13.0 s =====\n"
+              "STALL-STACKS-MARKER\n")
+    path = bugreport.save_user_report("froze", include_log=False, stall_stacks=stacks)
+    text = path.read_text(encoding="utf-8")
+    assert "Server hang trace" in text and "STALL-STACKS-MARKER" in text
+    _seed_hang(home, body="FILE-TRACE-MARKER\n")
+    text = bugreport.save_user_report("froze", include_log=False,
+                                      stall_stacks=stacks).read_text(encoding="utf-8")
+    assert "FILE-TRACE-MARKER" in text and "STALL-STACKS-MARKER" not in text
+
+
+def test_bug_report_route_passes_the_stall_watch_stacks(monkeypatch):
+    """POST /api/bug-report hands the active stall watch's newest stacks to
+    save_user_report."""
+    from fastapi.testclient import TestClient
+
+    from localm.inference import _stall_watch as sw
+    from localm.inference.http_server import create_app
+    seen = {}
+
+    def _fake_save(*a, **kw):
+        seen.update(kw)
+        return None
+
+    monkeypatch.setattr(bugreport, "save_user_report", _fake_save)
+    monkeypatch.setattr(sw, "recent_stall_stacks", lambda: "ROUTE-STACKS")
+    from unittest.mock import MagicMock
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    engine.loaded = True
+    app = create_app(engine)
+    c = TestClient(app)
+    r = c.post("/api/bug-report", json={"description": "froze"},
+               headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert seen.get("stall_stacks") == "ROUTE-STACKS", (r.status_code, r.text, seen)

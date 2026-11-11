@@ -329,7 +329,7 @@ def test_a_privacy_request_cannot_write_through_the_memory_routes(memory_app):
 def test_the_memory_outlet_runs_inside_the_request_scope(memory_app, monkeypatch):
     import sys
     app, _captured, _hdr = memory_app
-    plug = sys.modules["_localm_plugin_memory"]
+    plug = sys.modules["localm.plugins.builtin.memory.plug"]
     seen: list = []
     monkeypatch.setattr(plug, "_maybe_auto_consolidate",
                         lambda principal=None: seen.append(

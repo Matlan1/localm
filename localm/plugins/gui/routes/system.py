@@ -134,10 +134,12 @@ def register(app: FastAPI, ctx) -> None:
         mgr = getattr(app.state, "plugin_manager", None)
         plugins, suggest = [], True
         if mgr is not None:
-            mgr.load_enabled_pending()
+            await mgr.load_enabled_pending_off_loop()
+            from starlette.concurrency import run_in_threadpool
+
             from localm.plugins import catalog
             await catalog.check_hardware_off_loop()
-            state = mgr.api_state()
+            state = await run_in_threadpool(mgr.api_state)
             suggest = bool(state.get("suggest_plugins", True))
             # Only surface plugins this key's scopes grant; renderNav still filters
             # to active+tab, and the command-hint map keeps inactive-but-granted

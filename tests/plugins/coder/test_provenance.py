@@ -290,7 +290,8 @@ def _run_one(agent, name: str, result: ToolResult) -> str:
     tool_def.untrusted_output = False
     tool_def.fn = MagicMock(return_value=result)
     with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY",
-                    {name: tool_def}):
+                    {name: tool_def}), \
+         patch("localm.netpolicy.network_mode", return_value="allow"):
         blocks = agent._execute_tools([call], interactive=False)
     assert len(blocks) == 1
     return blocks[0]

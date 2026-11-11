@@ -433,3 +433,41 @@ def provision(choice: str = "auto", *, force: bool = False,
             say(f"The {b} runtime did not work here ({e}); trying the next one.")
     raise ProvisionError("no stable-diffusion.cpp runtime works on this machine: "
                          + "; ".join(errors))
+
+
+def ensure(choice: str = "auto", *, on_progress: Optional[Progress] = None,
+           probe: Optional[Callable[[Runtime], dict]] = None) -> Runtime:
+    """The runtime a generation uses for *choice*, installing one when needed.
+
+    An explicit backend returns its installed runtime, else :func:`provision`
+    installs it. ``auto`` with nothing installed calls :func:`provision`.
+    ``auto`` with an installed GPU runtime returns it. ``auto`` with only the
+    cpu runtime installed, on a machine whose recommended backend is a GPU one,
+    installs the recommended backend (then vulkan), skipping a backend whose
+    load test failed at this tag; when the download fails or is refused, or no
+    GPU runtime loads, it returns the cpu runtime and reports why through
+    *on_progress*. Raises :class:`ProvisionError` only when no runtime can be
+    used."""
+    say = on_progress or (lambda _m: None)
+    choice = (choice or "auto").strip().lower()
+    rt = resolve(choice)
+    if choice != "auto":
+        return rt if rt is not None else provision(choice, on_progress=say, probe=probe)
+    if rt is None:
+        return provision("auto", on_progress=say, probe=probe)
+    best = recommended_backend()
+    if rt.backend != "cpu" or best == "cpu":
+        return rt
+    plat = platform_key()
+    for b in dict.fromkeys([best, "vulkan"]):
+        if (plat, b) not in pins.ASSETS or load_test_failed(b):
+            continue
+        try:
+            return install(b, on_progress=say, probe=probe)
+        except DownloadError as e:
+            say(f"The {b} runtime could not be downloaded ({e}); using the installed "
+                "cpu runtime.")
+            return rt
+        except ProvisionError as e:
+            say(f"The {b} runtime did not work here ({e}); trying the next one.")
+    return rt

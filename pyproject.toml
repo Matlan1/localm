@@ -111,7 +111,7 @@ dependencies = [
     # gpu extra - so a GGUF-only install crashed on any attached image.
     "pillow>=12.3.0",
     # PDF text extraction for chat/coder attachments and Knowledge. Pure Python.
-    "pypdf>=6.16.1",
+    "pypdf>=6.21.4",
 ]
 
 [project.optional-dependencies]
@@ -170,14 +170,14 @@ browser = [
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
-    # Capped to the 5.20 line. The win32 ROCm torch below is built without
+    # Capped to the 5.22 line. The win32 ROCm torch below is built without
     # torch.distributed, and a transformers release that imports it on the
     # `from transformers import AutoTokenizer` path breaks every HF model load there.
     # Move the cap only to a release that imports, loads and generates on that torch
     # from a fresh install of the lock.
-    "transformers[kernels]~=5.20.2",
+    "transformers[kernels]~=5.22.2",
     # Pinned exactly so repeated setup runs resolve the same tokenizers; it must sit
-    # inside the range the capped transformers requires (5.20: >=0.23.1,<0.24).
+    # inside the range the capped transformers requires (5.22: >=0.23.1,<0.24).
     "tokenizers==0.23.3",
     "accelerate>=1.14.0",
     # hf.py's _cpu_budget() imports psutil directly to build the "cpu" entry of
@@ -239,7 +239,7 @@ gpu = [
 # see test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins.
 # Install with:  uv pip install -e ".[hf]"
 hf = [
-    "transformers[kernels]~=5.20.2",
+    "transformers[kernels]~=5.22.2",
     "tokenizers==0.23.3",
     "accelerate>=1.14.0",
     "psutil>=7.2.2",
@@ -288,7 +288,7 @@ audio = [
 # this extra remains so existing "localm[rag]" installs keep resolving.
 # Install with:  pip install "localm[rag]"
 rag = [
-    "pypdf>=6.16.1",
+    "pypdf>=6.21.4",
 ]
 # Speech-to-text for the GUI mic button (Whisper, CPU int8 - no torch).
 # Install with:  pip install "localm[voice]"
@@ -313,7 +313,7 @@ monitor = [
 # decoding needs no C compiler, Triton build or CUDA toolkit. On Windows this
 # extra also pulls triton-windows (upstream Triton ships no Windows wheels),
 # which the native FP8 path imports; grammar masking does not use it.
-# Install with:  pip install "localm[gpu,grammar]"
+# Install with:  uv pip install -e ".[gpu,grammar]"  (from a source checkout)
 # ExLlama runtimes for the exllama plugin (EXL2 and EXL3 models), Linux only.
 # They run on an NVIDIA GPU with CUDA and compile their extension on first
 # import, which needs the CUDA toolkit and a C++ compiler. The plugin also needs
@@ -357,7 +357,7 @@ dev = [
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
     # it here so the PDF path (incl. its hardening) is actually exercised in dev/CI.
-    "pypdf>=6.16.1",
+    "pypdf>=6.21.4",
     # Same rationale as pypdf, one step worse: these tests FAIL rather than skip
     # without it. tests/test_hf_device_map.py drives hf.py's _cpu_budget() and
     # tests/test_spawn_worker_dies_with_parent.py imports psutil at module scope, but

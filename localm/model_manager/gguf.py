@@ -876,12 +876,25 @@ def speech_route_available() -> bool:
         return False
 
 
-def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
+def gguf_chat_refusal(architecture: Optional[str],
+                      path: Optional[Path] = None) -> Optional[str]:
     """The reason a GGUF with this ``general.architecture`` cannot be chatted
     with, or None when it can (including an unknown or missing architecture,
-    which the native loader judges for itself)."""
+    which the native loader judges for itself). With *path*, a file whose own
+    header marks it as an embedding or reranker model (``gguf_embedding_signal``)
+    is refused too, which the architecture alone cannot tell for a decoder-based
+    embedding model."""
     what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
     if what is None:
+        if path is not None and gguf_embedding_signal(path):
+            if gguf_reranker_state(path):
+                return ("This model's header marks it as a reranker, which scores "
+                        "query and document pairs, not a chat model, so localm "
+                        "cannot chat with it. Use it with 'localm rerank' or "
+                        "POST /v1/rerank.")
+            return ("This model's header marks it as an embedding model, which "
+                    "turns text into vectors, not a chat model, so localm cannot "
+                    "chat with it. Use it with POST /v1/embeddings.")
         return None
     if architecture in GGUF_TTS_ARCHITECTURES:
         use = ("'localm speak' or POST /v1/audio/speech" if speech_route_available()

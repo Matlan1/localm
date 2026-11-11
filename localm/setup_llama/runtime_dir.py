@@ -566,6 +566,7 @@ def _replace_target(target: Path, fill):
     staging.mkdir(parents=True)
     try:
         result = fill(staging)
+        _move_into_backup(target)
         _sl._clear_target_or_refuse(target)
         target.mkdir(parents=True, exist_ok=True)
         for entry in sorted(staging.iterdir()):
@@ -576,6 +577,111 @@ def _replace_target(target: Path, fill):
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return result
+
+
+_ACTIVE_BACKUPS: dict = {}
+
+
+def _backup_path(target: Path) -> Path:
+    """Where :func:`keep_previous_runtime` holds the replaced runtime: a sibling
+    ``<target>.previous``, on the same volume so moving it is a rename."""
+    return target.parent / (target.name + ".previous")
+
+
+def _clearable_entries(target: Path) -> list[Path]:
+    """The entries of *target* that :func:`_clear_target` removes: files other
+    than _KEPT_ON_CLEAR, and the _BLAS_LIBRARY_DIRS subdirectories."""
+    out: list[Path] = []
+    for f in sorted(target.iterdir()):
+        if ((f.is_file() and f.name not in _KEPT_ON_CLEAR)
+                or (f.is_dir() and f.name in _BLAS_LIBRARY_DIRS)):
+            out.append(f)
+    return out
+
+
+def _move_into_backup(target: Path) -> None:
+    """When :func:`keep_previous_runtime` is active for *target* and nothing has
+    been kept yet, move the installed runtime into its backup folder. A file that
+    cannot be moved (in use) moves everything already moved back and raises
+    RuntimeInUseError with *target* as it was. No-op otherwise."""
+    state = _ACTIVE_BACKUPS.get(str(target))
+    if state is None or state["filled"] or not target.is_dir():
+        return
+    backup = state["dir"]
+    moved: list[tuple[Path, Path]] = []
+    for entry in _clearable_entries(target):
+        dest = backup / entry.name
+        try:
+            os.replace(entry, dest)
+        except OSError as e:
+            for src, dst in reversed(moved):
+                os.replace(dst, src)
+            raise RuntimeInUseError([entry], partial=False) from e
+        moved.append((entry, dest))
+    state["filled"] = True
+
+
+def _restore_backup(target: Path, backup: Path) -> bool:
+    """Clear *target* and move the kept runtime in *backup* back into it.
+    Returns False when a file could not be removed or moved back."""
+    if target.is_dir() and _locked_after_stopping_own_probes(
+            target, lambda: _sl._clear_target(target)):
+        return False
+    target.mkdir(parents=True, exist_ok=True)
+    ok = True
+    for entry in sorted(backup.iterdir()):
+        dest = target / entry.name
+        try:
+            if dest.is_dir() and entry.is_dir():
+                shutil.rmtree(dest)
+            os.replace(entry, dest)
+        except OSError as e:
+            logger.warning("could not restore %s into %s: %s", entry, target, e)
+            ok = False
+    return ok
+
+
+@contextlib.contextmanager
+def keep_previous_runtime(target: Path, on_failure=None):
+    """Keep the runtime that a provision inside this block replaces, and put it
+    back when the block fails.
+
+    The first :func:`_replace_target` on *target* inside the block moves the
+    installed files (the backend marker included) into ``<target>.previous``
+    instead of deleting them. When the block raises, or exits through
+    ``sys.exit`` with a non-zero code, the new files are cleared, the kept ones
+    are moved back and *on_failure* is called (also when nothing was replaced).
+    On success the kept runtime is deleted. When the restore itself fails, the
+    kept files stay in ``<target>.previous`` and the console says where. The
+    caller must hold the provisioning lock."""
+    backup = _backup_path(target)
+    if backup.exists():
+        shutil.rmtree(backup)
+    backup.mkdir(parents=True)
+    state = {"dir": backup, "filled": False}
+    _ACTIVE_BACKUPS[str(target)] = state
+    failed = True
+    try:
+        yield
+        failed = False
+    except SystemExit as e:
+        failed = e.code not in (0, None)
+        raise
+    finally:
+        _ACTIVE_BACKUPS.pop(str(target), None)
+        restored = True
+        if failed and state["filled"]:
+            restored = _restore_backup(target, backup)
+            if restored:
+                console.print("[yellow]The new build was not kept; the runtime that "
+                              "was installed before is back in place.[/yellow]")
+            else:
+                console.print(f"[red]The runtime that was installed before could not "
+                              f"be fully restored.[/red] Its files are in {backup}")
+        if failed and on_failure is not None:
+            on_failure()
+        if restored:
+            shutil.rmtree(backup, ignore_errors=True)
 
 
 def _exit_runtime_in_use(e: RuntimeInUseError) -> None:

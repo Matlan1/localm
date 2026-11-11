@@ -996,9 +996,8 @@ def _render_processor_prompt(processor, template_messages, *,
     with *chat_template* in place of the processor's own when given.
 
     Passes a non-empty ``processor_kwargs`` (unused while ``tokenize`` is False),
-    so SmolVLM's ``apply_chat_template`` does not put its default frame-sampling
-    arguments in ``**kwargs``, which makes transformers log a warning. See
-    test_render_logs_no_kwargs_warning."""
+    so SmolVLM's ``apply_chat_template`` keeps its default frame-sampling
+    arguments out of ``**kwargs``. See test_render_logs_no_kwargs_warning."""
     extra = {} if chat_template is None else {"chat_template": chat_template}
     return processor.apply_chat_template(
         template_messages, processor_kwargs={"add_special_tokens": False},
@@ -2386,7 +2385,11 @@ class HFWorker:
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        raw_prompt: Optional[str] = None,
     ) -> Iterator[str]:
+        # *raw_prompt*: the whole prompt, tokenised as given with the tokenizer's
+        # own special tokens and no chat template; *messages* and *thinking* are
+        # then not read.
         # xgrammar has no trigger/lazy mode, and a lazy request must not silently
         # become a STRICT constraint either (a strict grammar stalls thinking
         # models). Both remaining options - drop it, or enforce it strictly - give
@@ -2406,6 +2409,7 @@ class HFWorker:
         # text alone). Checked before importing transformers so it fails
         # fast and clearly.
         from .base import (
+            EMPTY_RAW_PROMPT_MESSAGE,
             UnsupportedInputError,
             image_unsupported_message,
             messages_contain_image,
@@ -2415,6 +2419,8 @@ class HFWorker:
                 image_unsupported_message(self.processor_error))
         if _messages_contain_audio(messages) and not self._supports_audio:
             raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
+        if raw_prompt is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
 
         tokenizer = self._tokenizer
         model = self._model
@@ -2472,7 +2478,11 @@ class HFWorker:
                 vision_cache.clear()
 
         # --- Tokenize / process ---
-        if self._processor and (images or audios):
+        if raw_prompt is not None:
+            inputs = tokenizer(raw_prompt, return_tensors="pt").to(model.device)
+            if int(inputs["input_ids"].shape[-1]) == 0:
+                raise UnsupportedInputError(EMPTY_RAW_PROMPT_MESSAGE)
+        elif self._processor and (images or audios):
             # Full multimodal path
             fallback_template = _processor_fallback_template(self._processor, tokenizer)
             try:

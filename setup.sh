@@ -57,8 +57,8 @@ uv_manual_hint() {  # the manual uv-install command; used from two call sites be
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
-UV_INSTALLER_VERSION="0.13.6"
-UV_INSTALLER_SHA256="f7a56e7afaec49a3bcbc3ac3cdbe917e7c6ce30e0d815308a12e531aa5ef23b7"
+UV_INSTALLER_VERSION="0.13.7"
+UV_INSTALLER_SHA256="d263ee68314cf5bea36b08e6bd9e2c4563240d7adb73756cf33af5c199b92db4"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -555,13 +555,14 @@ if [ "$uv_present" != 1 ]; then
   fi
   rm -rf "$UVTMP"
   rmdir ./.localm-setup-tmp 2>/dev/null || true
-  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
-  # was set above; the installer edits a shell profile, not this running shell, so
-  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
-  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
-  # treat that as the current directory).
+  # uv lands in UV_INSTALL_DIR when that was set above, else in ~/.local/bin
+  # (older builds used ~/.cargo/bin); the installer edits a shell profile, not
+  # this running shell, so add where it landed to PATH for the rest of setup.
+  # With UV_INSTALL_DIR set, ~/.local/bin is not added: the global-command step
+  # reads PATH to tell whether that directory still has to go into a shell
+  # profile. See test_portable_uv_install_leaves_local_bin_off_path.
   if [ -n "${UV_INSTALL_DIR:-}" ]; then
-    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    export PATH="$UV_INSTALL_DIR:$PATH"
   else
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   fi

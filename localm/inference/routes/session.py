@@ -47,10 +47,18 @@ def register(app: FastAPI, ctx) -> None:
                 "there is nothing to log into.")
         # verify() reads the keystore and can take the cross-process lock on it
         # (last-used stamping, legacy-row marking), so it runs off the event loop.
+        def _record_failed():
+            from localm import config, mgmt_events
+            host = request.client.host if request.client else ""
+            mgmt_events.record("login_failed", home=config.HOME_DIR,
+                               loopback=_is_loopback(host))
+
         if not presented:
+            await run_in_threadpool(_record_failed)
             raise HTTPException(401, "Invalid API key")
         held = await run_in_threadpool(verify, presented)
         if held is None:
+            await run_in_threadpool(_record_failed)
             raise HTTPException(401, "Invalid API key")
         # Mint an OPAQUE server-side session; the cookie carries the session id,
         # never the raw key. The scope/identity/fs-access snapshot is taken now, so
@@ -82,7 +90,7 @@ def register(app: FastAPI, ctx) -> None:
                                     fs_access=fs, rag_roots=rag_roots,
                                     owner_key_minted=owner_key_minted))
         secure = request.url.scheme == "https"
-        response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
+        response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                             secure=secure, samesite="strict", path="/",
                             max_age=_hs.SESSION_MAX_AGE)
         # CSRF token is DERIVED from the session (not a separate cookie that could
@@ -118,14 +126,15 @@ def register(app: FastAPI, ctx) -> None:
                 # its cause locally.
                 warnings.append(sessions.REVOKE_FAILURE_LABEL)
         secure = request.url.scheme == "https"
-        response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
+        for _name in {_hs.session_cookie_name(request), _hs.SESSION_COOKIE}:
+            response.delete_cookie(_name, path="/", httponly=True, secure=secure, samesite="strict")
         # "authed" stays False and is honest either way: this browser's cookie is
         # gone. The warning says the SERVER-side session was not dropped, which is
         # a different fact and the one a caller cannot otherwise discover.
         return {"authed": False, "warnings": warnings}
 
     @app.post("/api/auth/key/clear",
-              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))],
+              dependencies=[Depends(require_scope(scopes.ADMIN))],
               include_in_schema=False)
     async def clear_owner_key(request: Request, response: Response):
         """Delete the server-side owner key (auth.key) and immediately
@@ -136,6 +145,9 @@ def register(app: FastAPI, ctx) -> None:
         False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
         subsequent web UI requests that rely on the session cookie will fail auth and
         be redirected to the key gate by the client.
+
+        Requires the owner key (``scopes.ADMIN``): a scoped key, including one
+        holding ``config:write`` or ``keys:admin``, gets 403.
 
         Refused with 409 on a server that must hold a key
         (``network_bind_needs_key``) when the clear would leave none.
@@ -162,8 +174,9 @@ def register(app: FastAPI, ctx) -> None:
         # Invalidate the session cookie immediately so the browser is forced
         # back to the key gate on the next navigation (the old cookie value
         # no longer matches any key). Also clear the CSRF token.
-        response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True,
-                               secure=secure, samesite="strict")
+        for _name in {_hs.session_cookie_name(request), _hs.SESSION_COOKIE}:
+            response.delete_cookie(_name, path="/", httponly=True,
+                                   secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
         # A security step that failed must never report success. BOTH halves of
         # this route are such a step, and each can fail on its own: a surviving
@@ -213,11 +226,10 @@ def register(app: FastAPI, ctx) -> None:
 
         OWNER-GATED AND REMOTE-CAPABLE:
 
-        * Requires ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear
-          route takes, and NOT ``keys:admin``. Clearing REMOVES a credential;
-          setting INSTALLS one the caller chose, so a merely config:write or
-          keys:admin holder POSTing ``{"key": "<a value I know>"}`` would promote
-          itself to owner in a single call.
+        * Requires ``scopes.ADMIN`` (as the sibling clear route does), NOT
+          ``config:write`` and NOT ``keys:admin``: a config:write or keys:admin
+          holder POSTing ``{"key": "<a value I know>"}`` would promote itself to
+          owner in a single call.
         * NOT loopback-only. Reaching this route already requires the owner
           credential, so it grants no authority the caller does not already hold.
           The backstop against a stolen owner cookie rolling the key is
@@ -308,7 +320,7 @@ def register(app: FastAPI, ctx) -> None:
                                         key_hash=auth._hash_key(key), fs_access="host",
                                         owner_key_minted=auth._is_owner_key(key)))
             secure = request.url.scheme == "https"
-            response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
+            response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
 

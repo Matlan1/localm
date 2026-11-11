@@ -168,6 +168,7 @@ class TestStopCredentialSelection:
         monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
         monkeypatch.setattr(instances, "list_entries", lambda *a, **k: entries)
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         seen = []
 
         def fake_post(url, headers=None, **kw):
@@ -190,6 +191,7 @@ class TestStopCredentialSelection:
         monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
         monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
         captured = {}
 
         def fake_post(url, headers=None, **kw):
@@ -309,6 +311,7 @@ class TestStopRealHttp:
                             lambda **kw: shutdown_calls.append(kw))
         rs = _start_real_server()
         try:
+            rs.app.state.instance_id = "realsrv1"
             entry = _entry(iid="realsrv1", pid=999999999, port=rs.port,
                            token=rs.app.state.instance_token)
             monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
@@ -324,7 +327,7 @@ class TestStopRealHttp:
                                    "shutdown request must have been accepted")))
             res = CliRunner().invoke(main, ["stop", "realsrv1"])
             assert res.exit_code == 0, res.output
-            assert "declined an unauthenticated shutdown" not in res.output
+            assert "refused the shutdown request" not in res.output
             assert _wait_sync(lambda: len(shutdown_calls) == 1, True, 3.0), (
                 "the real /v1/server/shutdown route never actually invoked "
                 "its shutdown sequence - the auth gate may not have been "

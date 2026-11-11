@@ -25,6 +25,20 @@ from localm.plugins.builtin.jobs.store import Job
 from localm.plugins.builtin.memory import plug
 
 
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stop_event(monkeypatch):
+    """A memory stop event no earlier unload in this process has set."""
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
+
+
+
 class _FakeProc:
     exitcode = -11
 

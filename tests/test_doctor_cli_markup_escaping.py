@@ -161,6 +161,7 @@ class TestGpuDriverMarkupEscaping:
             if cmd and cmd[0] == "nvidia-smi":
                 return subprocess.CompletedProcess(cmd, 0, device_line, "")
             raise FileNotFoundError(cmd[0] if cmd else "?")
+        monkeypatch.setattr("localm.sysprog.find", lambda name: name)
         monkeypatch.setattr(subprocess, "run", _run)
 
         assert doctor_mod._check_gpu_driver() is True
@@ -177,6 +178,7 @@ class TestGpuDriverMarkupEscaping:
             if cmd and cmd[0] == "nvidia-smi":
                 return subprocess.CompletedProcess(cmd, 9, error_text, "")
             raise FileNotFoundError(cmd[0] if cmd else "?")
+        monkeypatch.setattr("localm.sysprog.find", lambda name: name)
         monkeypatch.setattr(subprocess, "run", _run)
 
         assert doctor_mod._check_gpu_driver() is False

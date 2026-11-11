@@ -54,7 +54,8 @@ from localm.inference.backends.base import (
     UnsupportedInputError,
     VisionInputError,
 )
-from localm.inference import residency, switch_admission
+from localm.inference import load_lease, residency, switch_admission
+from localm.inference.load_lease import LoadBusyError
 from localm.inference.compact import CompactionCache
 from localm.inference.engine import Engine
 from localm.inference.inference_gate import InferenceGate, exclusively, set_capacity
@@ -667,7 +668,7 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
             engine.load()
             return
         lock = engine_mod._LOAD_LOCK
-        with lock:
+        with load_lease.bounded(lock, what=f"loading {getattr(engine, 'display_name', 'a model')}"):
             fresh = getattr(lock, "generation", None) == reading.mark + 1
             discover.using_shared_gpu_reading(
                 reading.state if fresh else None, engine.load)
@@ -751,10 +752,84 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     backend fails to load it. ``LoadSkipped`` (a 503) is raised for
     *skip_if_latched*.
 
+    From its first VRAM reading until its load has returned or failed the call
+    holds the GPU load lease (``localm.inference.load_lease``), so another
+    localm process reads free VRAM only after this load allocated it; a lease
+    still held elsewhere after ``load_lease.LOAD_WAIT_TIMEOUT_S`` raises
+    ``LoadBusyError`` (a 503 with Retry-After).
+
     Loads of one model are serialized by its ``_inference_sems`` semaphore.
     The admission decisions come from ``localm.inference.switch_admission``;
     the ``_switch_*`` helpers below perform the effects.
     """
+    lease = _SwitchLease(name)
+    try:
+        return await _switch_engine_leased(
+            name, make_engine, lease, on_active=on_active, preempt=preempt,
+            force=force, activate=activate, skip_if_latched=skip_if_latched,
+            on_status=on_status, allow_embedding=allow_embedding,
+            reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
+    finally:
+        await lease.drop(asyncio.get_running_loop())
+
+
+class _SwitchLease:
+    """The GPU load lease one ``switch_engine`` call holds from its first VRAM
+    reading until its load has returned or failed."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.keys: Optional[tuple] = None
+
+    async def take(self, loop, *, timeout: Optional[float] = None) -> None:
+        """Take the lease of the current config's keys, once, waiting at most
+        *timeout* seconds (default ``load_lease.LOAD_WAIT_TIMEOUT_S``); raises
+        ``LoadBusyError`` past it. A take whose caller is cancelled while it
+        waits releases the lease once the wait ends."""
+        if self.keys is not None:
+            return
+        purpose = f"loading {self.name}"
+        fut = loop.run_in_executor(
+            None, lambda: load_lease.acquire(load_lease.lease_keys(), purpose=purpose,
+                                             timeout=timeout))
+        try:
+            self.keys = await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            fut.add_done_callback(_release_late_lease)
+            raise
+
+    async def try_take(self, loop) -> bool:
+        """``take`` with a single attempt; False when another process holds
+        the lease."""
+        try:
+            await self.take(loop, timeout=0)
+        except LoadBusyError:
+            return False
+        return True
+
+    async def drop(self, loop) -> None:
+        """Release the lease when it was taken."""
+        keys, self.keys = self.keys, None
+        if keys:
+            await loop.run_in_executor(None, load_lease.release, keys)
+
+
+def _release_late_lease(fut) -> None:
+    """Release the keys an abandoned ``_SwitchLease.take`` acquired."""
+    if fut.cancelled() or fut.exception() is not None:
+        return
+    load_lease.release(fut.result())
+
+
+async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
+                                on_active=None, preempt: bool = True,
+                                force: bool = False, activate: bool = True,
+                                skip_if_latched: bool = False,
+                                on_status: Optional[Callable[[str], None]] = None,
+                                allow_embedding: bool = False,
+                                reserve_ctx: Optional[int] = None,
+                                keep_others: bool = False, own_pins: int = 0) -> dict:
+    """``switch_engine``'s body; takes *lease* before its first VRAM reading."""
     global _engine_factory, _switch_desired
 
     await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
@@ -794,6 +869,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
             if heal_budget is not None:
+                try:
+                    await lease.take(loop)
+                except LoadBusyError:
+                    resident.reserve_context(previous_reserve)
+                    raise
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
             if (_engines.get(name) is resident and _is_reusable(resident)
@@ -819,6 +899,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
                     _postpone_placement_recheck(resident)
+            if heal_budget is not None and not await lease.try_take(loop):
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: not reloading '%s' for a better placement while "
+                          "another load holds the GPU, it is used as loaded", name)
+                _postpone_placement_recheck(resident)
+                heal_budget = None
             if heal_budget is not None:
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
@@ -852,6 +938,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if healing is not None:
             budget = heal_budget
         else:
+            await lease.take(loop)
             budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if budget is not None and (budget.check_split_fit or budget.plugin_backend):
                 sized = _engines.get(name)
@@ -1930,20 +2017,12 @@ def _shared_vram_holds() -> SharedVramHolds:
     media runtimes (``vram.native_media_runtime_states``). Takes their locks;
     must not run on the event loop thread."""
     from localm import vram as _vram
-    from localm.inference import embedder as _embedder_mod
-    from localm.inference import reranker as _reranker_mod
-    from localm.inference import speech as _speech_mod
     holds, unknown = [], []
-    for kind, mod in (("embedding model", _embedder_mod),
-                      ("reranker model", _reranker_mod),
-                      ("speech model", _speech_mod)):
-        loaded, hold = mod.resident_vram_hold()
-        if not loaded:
-            continue
-        if hold is None:
-            unknown.append(kind)
+    for resident in residency.shared_residents():
+        if resident.hold is None:
+            unknown.append(resident.kind)
         else:
-            holds.append(hold)
+            holds.append(resident.hold)
     busy = []
     for name, state in _vram.native_media_runtime_states().items():
         (busy if state == "busy" else unknown).append(name)
@@ -2180,6 +2259,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         return {"status": "cancelled", "model": name, "reason": str(e)}
+    except LoadBusyError:
+        raise
     except RuntimeError as exc:
         _routing_latch.record_failure(name, exc, fingerprint=fingerprint)
         raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
@@ -2568,6 +2649,36 @@ def plan_capability_route(model_name: str | None, messages: list,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
+def _forget_removed_model(name: str) -> bool:
+    """Drop this process's state for *name* when it left the registry and its
+    model file is gone (``localm rm`` ran in another process). A model that is
+    loaded, whose file still exists, or whose path is not an absolute file path
+    (a hub repo id) is kept. Returns whether anything was
+    dropped. Synchronous and in-memory only, like :func:`rekey_loaded_model`."""
+    global _active_model_name, _default_model_name, _last_active_model_name, _engine, _inference_sem
+    from pathlib import Path
+    engine = _engines.get(name)
+    if engine is not None and engine.loaded:
+        return False
+    path = getattr(engine, "model_path", None)
+    if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
+        return False
+    _engines.pop(name, None)
+    if name in _engines_lru:
+        _engines_lru.remove(name)
+    _inference_sems.pop(name, None)
+    _last_activity_per_model.pop(name, None)
+    if _active_model_name == name:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+    if _last_active_model_name == name:
+        _last_active_model_name = None
+    if _default_model_name == name:
+        _default_model_name = None
+    return True
+
+
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
                      on_status: Optional[Callable[[str], None]] = None,
@@ -2622,6 +2733,11 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             name = name or _default_model_name
             if name != _default_model_name and name not in _engines:
                 raise HTTPException(503, "No model loaded. Please load a model first.")
+
+    if registry:
+        unnamed = not (model_name or "").strip() or (model_name or "").strip() == "localm"
+        while name and name not in registry and _forget_removed_model(name):
+            name = _resolve_unnamed_model_name() if unnamed else name
 
     # Only enforce registration check if the registry is not empty
     if registry:
@@ -3473,8 +3589,8 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
 
 
 async def rename_registered_model(model: str, new_name_raw: str) -> dict:
-    """Move a registry entry to a new name AND re-key the live engine, in that
-    order, in ONE process. The single entry point every rename route uses.
+    """Change a model's display name AND re-key the live engine, in that order,
+    in ONE process. The single entry point every rename route uses.
 
     The re-key is not bookkeeping that can be added later by whoever remembers:
     until it runs, the registry holds the new name while the engine map is
@@ -3484,16 +3600,16 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     half at all, which is why ``localm rename`` asks a running server to call
     this rather than moving the registry entry behind its back.
 
-    Raises HTTPException (404 unregistered, 409 name taken, 400 rename failed)
-    so both the /v1 and the GUI route answer identically. Returns the response
-    body: status, the old name, the sanitized new name, and the migration
-    notes, which must reach the caller rather than only the server log - a user
-    has no other way to learn that e.g. a per-project coder config still names
-    the old model.
+    Raises HTTPException (404 unregistered, 400 no usable name or the write
+    failed, 409 name taken) so both the /v1 and the GUI route answer identically.
+    Returns the response body: status, the old name, the sanitized new name, and
+    notes (empty unless first-time reference recording could not finish).
     """
+    from localm import model_ids
     from localm.config import load_registry
     from localm.executor import get_plugin_executor
-    from localm.model_manager import _sanitize_name, rename_model_with_notes
+    from localm.model_manager import rename_model_with_notes
+    from localm.model_manager.registry import _sanitized_or_empty
 
     registry = load_registry()
     if model not in registry:
@@ -3502,7 +3618,9 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     # response must both speak the sanitized name, not the raw text the caller
     # sent: prechecking the raw name would let a collision through, and
     # answering with the raw name would name an entry that does not exist.
-    new_name = _sanitize_name(new_name_raw)
+    new_name = _sanitized_or_empty(new_name_raw)
+    if not new_name:
+        raise HTTPException(400, "A model name needs at least one letter or digit.")
     if new_name != model and new_name in registry:
         raise HTTPException(409, f"Name already taken: {new_name}")
     loop = asyncio.get_running_loop()
@@ -3521,6 +3639,8 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     # Synchronous, in-memory only (no await) - safe to call directly on the
     # event loop right after the executor call above returns.
     rekey_loaded_model(model, new_name)
+    if new_name != model:
+        model_ids.notify_renamed(model, new_name)
     return {"status": "renamed", "model": model, "new_name": new_name,
             "notes": notes}
 
@@ -3763,19 +3883,47 @@ def _stall_trace_writer(path_fn):
     return _write
 
 
-def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
+# The event loop thread's ident, set at lifespan startup; None before that and
+# after shutdown.
+_hang_loop_thread: Optional[int] = None
+
+
+def _write_thread_stacks(fh, loop_thread: Optional[int]) -> None:
+    """Write every thread's stack to *fh*: first a line naming what the event
+    loop thread (*loop_thread*, else ``_hang_loop_thread``) was in, then each
+    thread with its name, ident and daemon flag, the event loop thread first
+    (``_stall_watch.format_stacks``). Falls back to
+    ``faulthandler.dump_traceback`` when that fails."""
+    import faulthandler
+    try:
+        from localm.inference import _stall_watch as _sw
+        loop = loop_thread if loop_thread is not None else _hang_loop_thread
+        stacks = _sw.live_frames()
+        stacks.pop(threading.get_ident(), None)
+        entries = _sw.thread_entries(stacks, loop)
+        text = f"{_sw.loop_summary(entries)}\n{_sw.format_stacks(entries)}"
+    except Exception:
+        fh.write("(thread stack formatting failed; raw dump follows)\n")
+        faulthandler.dump_traceback(file=fh, all_threads=True)
+        return
+    fh.write(text)
+
+
+def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0,
+                         loop_thread: Optional[int] = None):
     """Start a plain (NON-async) daemon thread that watches the heartbeat. When
     the event loop has not ticked in `threshold`s it is blocked, so dump ALL
     thread stacks to `trace_path` via faulthandler - the only way to see what a
     fully-wedged loop is stuck in, because this thread runs OUTSIDE the loop.
     Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread)
-    for teardown; the thread OWNS its file and closes it on exit.
+    for teardown; the thread OWNS its file and closes it on exit. Each dump
+    names what the event loop thread (`loop_thread`, else `_hang_loop_thread`)
+    was in and lists that thread first (see _write_thread_stacks).
 
     The trace file is opened LAZILY, only when the first stall is detected, so a
     healthy run (the overwhelming common case, since this is on by default) never
     creates a file at all. Never blocks: it only waits on an Event, subtracts two
     numbers, and appends to a file."""
-    import faulthandler
     import traceback
 
     stop = threading.Event()
@@ -3823,7 +3971,7 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                         f"\n===== LOCALM HANG WATCHDOG: event loop stalled {lag:.1f}s "
                         f"(pid {os.getpid()}, {time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
                     try:
-                        faulthandler.dump_traceback(file=fh, all_threads=True)
+                        _write_thread_stacks(fh, loop_thread)
                     except Exception:
                         # Fallback: pure-Python walk of every thread's frames.
                         for tid, frame in sys._current_frames().items():
@@ -3902,8 +4050,8 @@ def _hang_dump(reason: str) -> None:
     calls this once per distinct incident; detection/surfacing themselves are
     NOT gated on this (they write nothing sensitive anywhere).
 
-    Two sections: every THREAD (faulthandler - where a wedged executor job is
-    visible), then every asyncio TASK with its await stack, because a
+    Two sections: every THREAD, the event loop thread first
+    (_write_thread_stacks - where a wedged executor job is visible), then every asyncio TASK with its await stack, because a
     purely-async wedge (a coroutine parked
     on an await that never completes) does not exist on any thread and is
     invisible to faulthandler. The task section is gathered ON the loop
@@ -3913,13 +4061,12 @@ def _hang_dump(reason: str) -> None:
     already shows the freeze itself."""
     if not _diagnostics_allowed():
         return
-    import faulthandler
     from localm.debuglog import hang_trace_path
     with open(hang_trace_path(), "a", encoding="utf-8",
               errors="backslashreplace") as fh:
         fh.write(f"\n===== LOCALM HANG ALARM: {reason} (pid {os.getpid()}, "
                  f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
-        faulthandler.dump_traceback(file=fh, all_threads=True)
+        _write_thread_stacks(fh, None)
         loop = _hang_dump_loop
         if loop is None or loop.is_closed():
             return
@@ -4053,6 +4200,24 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # The Authorization-header path (CLI / SDK / coder) cannot be forged cross-site and
 # is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
+
+
+def session_cookie_name(request) -> str:
+    """Per-instance session cookie name. Browsers share cookies across ports of
+    one host, so the name carries the port the request arrived on; a request
+    with no explicit port uses the legacy ``SESSION_COOKIE``."""
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    return f"{SESSION_COOKIE}_{port}" if port else SESSION_COOKIE
+
+
+def session_cookie_value(request) -> str:
+    """The session id presented by *request*: the instance-specific cookie, else
+    the legacy unsuffixed one left by an older build."""
+    jar = request.cookies
+    return (jar.get(session_cookie_name(request)) or jar.get(SESSION_COOKIE) or "").strip()
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
@@ -4279,7 +4444,7 @@ def _request_token(request) -> tuple[Optional[str], str]:
     header = _bearer_token(request) or (request.headers.get("x-api-key") or "").strip()
     if header:
         return header, "header"
-    cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    cookie = session_cookie_value(request)
     if cookie:
         return cookie, "cookie"
     return None, "none"
@@ -4493,7 +4658,7 @@ def _csrf_ok(request) -> bool:
     header; SameSite=Strict and the same-origin guard remain in force."""
     from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
-    sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    sid = session_cookie_value(request)
     if not header or not sid:
         return False
     # ct_equal, not compare_digest: the header is caller-supplied and latin-1
@@ -5769,7 +5934,7 @@ def _make_lifespan():
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _inference_sem, _inference_sems, _active_model_name, _server_loop
-        global _hang_dump_loop, _hang_alarm_instance
+        global _hang_dump_loop, _hang_alarm_instance, _hang_loop_thread
         # Publish the running loop so off-loop worker threads (the jobs runner) can
         # route a shared-engine unload back onto it via run_coroutine_threadsafe -
         # see unload_one_model and the _server_loop comment above.
@@ -5826,6 +5991,7 @@ def _make_lifespan():
         # privacy mode on default config), making _loop_lag_seconds() report a
         # permanent 0.00 indistinguishable from "healthy". Best-effort: a startup
         # failure must never block serving.
+        _hang_loop_thread = threading.get_ident()
         hb_task = None
         if "pytest" not in sys.modules:
             try:
@@ -5852,7 +6018,8 @@ def _make_lifespan():
                 and "pytest" not in sys.modules):
             try:
                 hang_path = _hw_path()
-                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), hang_path)
+                hang_stop, hang_thread = _start_hang_watchdog(
+                    _hw_secs(), hang_path, loop_thread=_hang_loop_thread)
                 if _hw_verbose():
                     # Explicit opt-in extras: asyncio debug logs any single callback
                     # that hogs the loop past the threshold (names the culprit at a
@@ -6048,6 +6215,8 @@ def _make_lifespan():
                 sat_stop.set()
                 if sat_thread is not None:
                     sat_thread.join(timeout=2)
+            if _hang_loop_thread == threading.get_ident():
+                _hang_loop_thread = None
             if stall_watch is not None:
                 from localm.inference import _stall_watch as _sw
                 _sw.set_active(None)
@@ -6124,6 +6293,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_keyless_network_gate(app)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
+    security.add_host_header_guard(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # outermost; only when enabled
 
@@ -6454,11 +6624,17 @@ def _debug_prompt_dump(messages: list) -> str:
     return "\n".join(lines)
 
 
-def _log_assembled_prompt(messages: list) -> None:
-    """Debug-log the messages about to reach the backend, content-gated on
-    debug_content_enabled(). See test_assembled_prompt_debug_capture.py."""
+def _log_assembled_prompt(messages: list, raw_prompt: Optional[str] = None) -> None:
+    """Debug-log the messages about to reach the backend, or with *raw_prompt*
+    that raw completion prompt, content-gated on debug_content_enabled(). See
+    test_assembled_prompt_debug_capture.py."""
     from localm.debuglog import debug_content_enabled, logger as _dbg
-    if debug_content_enabled():
+    if not debug_content_enabled():
+        return
+    if raw_prompt is not None:
+        _dbg.debug("raw completion prompt (%d character(s), no chat template):\n%s",
+                   len(raw_prompt), raw_prompt)
+    else:
         _dbg.debug("assembled chat prompt (%d message(s)):\n%s",
                     len(messages), _debug_prompt_dump(messages))
 
@@ -7291,11 +7467,13 @@ async def _stream_sse_completion_body(
         def __init__(self, records: list) -> None:
             self.records = records
 
+    call_outcome: dict = {}
+
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
         # orphan the consumer (see the fuller note in _stream_sse).
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         gen = None
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
@@ -7340,6 +7518,7 @@ async def _stream_sse_completion_body(
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing completion generation stream failed")
+            _snapshot_outcome(call_outcome, engine)
             # See _stream_sse: tolerate a gone loop when waking the consumer.
             try:
                 loop.call_soon_threadsafe(token_queue.put_nowait, None)
@@ -7469,14 +7648,18 @@ async def _stream_sse_completion_body(
     _log_chat_reply(reply, finish_reason=("error" if gen_error is not None else "stop"))
 
     completion_tokens = await _count_streamed_tokens(engine, streamed)
-    # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
-    # not "stop", so a client keying off finish_reason detects the failure even
-    # though the error text was already streamed as a visible chunk.
+    # A mid-stream error is "error", a stop sequence "stop", otherwise the
+    # backend's reason ("length" when max_tokens ran out).
+    if gen_error is not None:
+        finish_reason = "error"
+    elif stopped:
+        finish_reason = "stop"
+    else:
+        finish_reason = _outcome(call_outcome, "finish_reason", engine)
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
-        "choices": [{"text": "", "index": 0,
-                     "finish_reason": ("error" if gen_error is not None else "stop")}],
+        "choices": [{"text": "", "index": 0, "finish_reason": finish_reason}],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -7671,8 +7854,11 @@ async def grow_context_window(engine, tokens: int, *,
     ``context_grow_failed``, set here). When the reload raises, *engine* is
     registered again and loaded with its earlier window, and returned, the
     active model again when it was before the reload and no other model became
-    active meanwhile; the error is raised only when that fails too. Logs at
-    INFO (a failed reload at WARNING)."""
+    active meanwhile; the error is raised only when that fails too. A reload
+    refused with ``LoadBusyError`` (another load holds the GPU) does not set
+    ``context_grow_failed``; it is raised while *engine* is still loaded with
+    its earlier window, else *engine* is loaded again as above. Logs at INFO
+    (a failed reload at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or can() is not True:
@@ -7698,6 +7884,18 @@ async def grow_context_window(engine, tokens: int, *,
     try:
         await switch_engine(name, None, preempt=False, activate=False,
                             reserve_ctx=target, on_status=on_status, own_pins=1)
+    except LoadBusyError:
+        if _engines.get(name) is engine and engine.loaded:
+            raise
+        reserve = getattr(engine, "reserve_context", None)
+        if callable(reserve):
+            reserve(previous)
+        if _engines.get(name) is None:
+            engine.unloading = False
+            _engines[name] = engine
+        await switch_engine(name, None, preempt=False,
+                            activate=was_active and _active_model_name in (None, name),
+                            on_status=on_status)
     except Exception as exc:
         _dbg.warning("context: reloading '%s' with a %s-token window failed (%s: %s); "
                      "loading it again with its earlier window", name, target,
@@ -8020,7 +8218,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check
-        _log_assembled_prompt(messages)
+        _log_assembled_prompt(messages, gen_kwargs.get("raw_prompt"))
         extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
         gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []
@@ -8371,6 +8569,8 @@ async def _complete(
             text = await _generate_full(engine, messages, request,
                                         timing=timing, on_logprobs=lp_records.extend,
                                         **gen_kwargs)
+        except LoadBusyError:
+            raise
         except _BACKEND_ERROR_TYPES as e:
             # A backend refusal the CALLER can act on (an image this vision model
             # could not process, a grammar the deferred check finally rejected at
@@ -8637,6 +8837,10 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     from an instance whose GUI had been mounted live), the variable is removed
     from the environment and the GUI is mounted onto *app* once the instance is
     advertised, before serving starts.
+
+    Turns on the Host header guard (``app.state.host_header_guard``,
+    ``security.HostHeaderGuard``) and records *ssl_certfile* in
+    ``app.state.tls_certfile`` for it.
     """
     from localm import instances, portmux
     from localm.config import home_dir
@@ -8645,6 +8849,8 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     # watchdog inherits os.environ. See
     # test_run_advertised_removes_the_gui_mount_flag_before_serving.
     remount_gui = os.environ.pop(_GUI_MOUNTED_ENV, None) == "1"
+    app.state.host_header_guard = True
+    app.state.tls_certfile = ssl_certfile
     if log_level is None:
         from localm.debuglog import uvicorn_log_level
         log_level = uvicorn_log_level()

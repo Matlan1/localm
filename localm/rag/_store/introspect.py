@@ -311,7 +311,7 @@ class _CollectionIntrospection:
                 if coll.exists():
                     coll._meta[_STATS_CACHE_KEY] = coll._stats_cache_block()
                     with _files_changing(coll.dir):
-                        coll._atomic_write("meta.json", json.dumps(coll._meta, indent=2))
+                        coll._atomic_write("meta.json", _st.meta_json(coll._meta))
                 return coll
         except CollectionLockedError:
             # Busy: full load from disk, no stats-cache write.

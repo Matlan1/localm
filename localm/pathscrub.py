@@ -342,6 +342,41 @@ def map_strings(value, fn: Callable[[str], str]):
     return value
 
 
+def short_code_path(path: str) -> str:
+    """*path* without the part that names this machine: from the last
+    ``localm/``, ``plugins/``, ``site-packages/`` or standard-library
+    directory on, else the file name alone."""
+    p = path.replace("\\", "/")
+    best = None
+    for marker, keep in (("/site-packages/", False), ("/Lib/", False),
+                         ("/localm/", True), ("/plugins/", True)):
+        i = p.rfind(marker)
+        if i >= 0 and (best is None or i > best[0]):
+            best = (i, marker, keep)
+    m = re.search(r"/lib/python3[^/]*/", p)
+    if m and (best is None or m.start() > best[0]):
+        return p[m.end():]
+    if best is None:
+        return p.rsplit("/", 1)[-1]
+    i, marker, keep = best
+    return p[i + 1:] if keep else p[i + len(marker):]
+
+
+_FRAME_LINE = re.compile(r'^(\s*)File "([^"\n]*)", line (\d+),? in (\S+)\s*$')
+
+
+def compact_stack_text(text: str) -> str:
+    """*text* with every stack frame line (``File "<path>", line N in f`` or
+    ``File "<path>", line N, in f``) rewritten as ``<short path>:N in f``,
+    keeping its indent (``short_code_path``); other lines unchanged."""
+    out = []
+    for line in text.splitlines():
+        m = _FRAME_LINE.match(line)
+        out.append(f"{m.group(1)}{short_code_path(m.group(2))}:{m.group(3)} in {m.group(4)}"
+                   if m else line)
+    return "\n".join(out)
+
+
 def scrub_paths(text: str) -> str:
     """``scrub_user_paths`` plus the localm data dir, install root and env
     prefix. Other folders are kept: for a caller who is not the local operator,

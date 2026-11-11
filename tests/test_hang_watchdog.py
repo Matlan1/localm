@@ -547,6 +547,7 @@ def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch, clean_s
     app.state.bind_host = "127.0.0.1"
     with TestClient(app) as c:
         monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
+        hs._hb_stalls.clear()
         r = c.get("/debug/stacks",
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
@@ -619,3 +620,59 @@ def test_debug_stacks_requires_fs_host_key(tmp_path, monkeypatch):
     r = c.get("/debug/stacks", headers={"Authorization": "Bearer ownersecret"})
     assert r.status_code == 200, r.text
     assert "threads" in r.json()
+
+
+def _block_the_loop_for_real(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+@pytest.mark.anyio
+async def test_a_real_loop_block_dumps_the_loop_thread_first_with_every_thread(
+        tmp_path, monkeypatch):
+    """A synchronous call ON the running event loop: the trace names what the
+    loop thread was in, lists the loop thread FIRST with the blocking call as
+    its innermost frame, and attaches every other live thread's stack with its
+    name and daemon flag, not one busiest-thread guess."""
+    import threading
+
+    from localm.inference import _stall_watch as sw
+    from localm.inference import http_server as hs
+    trace = tmp_path / "hang.log"
+    loop_ident = threading.get_ident()
+    monkeypatch.setattr(hs, "_hang_loop_thread", loop_ident)
+    release = threading.Event()
+    bystander = threading.Thread(target=release.wait, name="hang-test-bystander",
+                                 daemon=True)
+    bystander.start()
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    stop, thread = hs._start_hang_watchdog(threshold=1.0, trace_path=trace, poll=0.1)
+    try:
+        await asyncio.sleep(0.3)
+        expected = {t.ident for t in threading.enumerate()} - {thread.ident}
+        _block_the_loop_for_real(1.8)
+        await asyncio.sleep(0.3)
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+        stop.set()
+        thread.join(timeout=2)
+        release.set()
+        bystander.join(timeout=2)
+    text = trace.read_text(encoding="utf-8", errors="replace")
+    snapshot = text.split("LOCALM HANG WATCHDOG", 1)[1]
+    headers = [ln for ln in snapshot.splitlines() if ln.startswith("Thread 0x")]
+    assert headers, text
+    assert headers[0].startswith(f"Thread 0x{loop_ident:08x} "), headers[0]
+    assert "[event loop thread]" in headers[0], headers[0]
+    summary = snapshot.split("Thread 0x", 1)[0]
+    assert "the event loop thread was in" in summary, summary
+    assert "in _block_the_loop_for_real" in summary, summary
+    stacks = sw.parse_dump(snapshot)
+    assert stacks[loop_ident][0][2] == "_block_the_loop_for_real", stacks[loop_ident][:3]
+    missing = {hex(i) for i in expected} - {hex(i) for i in stacks}
+    assert not missing, f"threads without a stack in the trace: {missing}\n{text}"
+    assert any('"hang-test-bystander" daemon=True' in h for h in headers), headers
+    assert sum("[event loop thread]" in h for h in headers) == 1

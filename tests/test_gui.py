@@ -22,6 +22,7 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 from tests.test_sysstats import VRAM_POLL_DEADLINE
 from tests._shared_model_guard import no_shared_model_left_resident  # noqa: F401
+from tests.media_bytes import flac_bytes, mp4_bytes, png_bytes
 
 
 # ------------------------------------------------------------------ #
@@ -2694,11 +2695,9 @@ class TestSessionExtras:
         EVERYONE - a scoped/restricted key must not trigger it, same rule as
         create_session's own optional model switch (plug.py:201-207)."""
         app, switched = coder_app
-        # The coder plugin is loaded under a synthetic sys.modules name, not
-        # localm.plugins.builtin.coder.plug (PluginManager._import_module) -
-        # patch THAT module object or the running route never sees it.
+        # The module the running route was loaded from.
         import sys
-        plug_mod = sys.modules["_localm_plugin_coder"]
+        plug_mod = sys.modules["localm.plugins.builtin.coder.plug"]
         monkeypatch.setattr(plug_mod, "_principal_from_request",
                             lambda request: (False, "scoped-principal"))
         monkeypatch.setattr("localm.inference.http_server.caller_grants",
@@ -5045,7 +5044,7 @@ class TestImageGeneration:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"\x89PNG fake")
+            Path(out_path).write_bytes(png_bytes())
             return True, f"Image saved to {out_path}"
         monkeypatch.setattr(comfy, "generate_image", fake_gen)
 
@@ -5373,7 +5372,7 @@ class TestMusicPlugin:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
-            Path(out_path).write_bytes(b"FLACfake")
+            Path(out_path).write_bytes(flac_bytes())
             return True, f"Track saved to {out_path}"
         monkeypatch.setattr(music_gen, "generate_music", fake_gen)
 
@@ -5547,7 +5546,7 @@ class TestVideoEndpoints:
         monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
-            Path(out_path).write_bytes(b"fake mp4")
+            Path(out_path).write_bytes(mp4_bytes())
             return True, f"Clip saved to {out_path}"
         monkeypatch.setattr(video_gen, "generate_video", fake_gen)
 
@@ -5799,13 +5798,9 @@ def test_rename_route_reports_the_name_it_actually_stored(gui_app, alias_env):
             "the route must report the name it actually created")
 
 
-def test_rename_route_surfaces_the_migration_notes_to_the_caller(gui_app, alias_env):
-    """rename_model_with_notes's honest report of what could NOT be migrated
-    (a per-project .localcoder/config.toml, unreachable from
-    <data dir>) must reach the HTTP caller, not just the server console -
-    otherwise a user renames a model, gets a bare 200, and only discovers
-    later (via a confusing coder error) that a project config still names
-    the old model, with no way to connect the two."""
+def test_rename_route_forwards_notes_only_when_there_is_something_to_say(gui_app, alias_env):
+    """A note from rename_model_with_notes reaches the HTTP caller, not just the
+    server console, and an ordinary rename has none."""
     from localm import model_manager as mm
     app, _ = gui_app
     _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
@@ -5814,11 +5809,13 @@ def test_rename_route_surfaces_the_migration_notes_to_the_caller(gui_app, alias_
         r = client.post("/api/models/rename",
                         json={"model": "gemma3-12b", "new_name": "daily-driver"})
         assert r.status_code == 200, r.text
-        notes = r.json().get("notes")
-        assert isinstance(notes, list) and notes, (
-            "the route must forward rename_model_with_notes's notes, not "
-            "just the bool success flag")
-        assert any(".localcoder" in n for n in notes)
+        assert r.json().get("notes") == []
+        with patch("localm.model_manager.rename_model_with_notes",
+                   return_value=(True, ["a note"])):
+            r = client.post("/api/models/rename",
+                            json={"model": "daily-driver", "new_name": "other"})
+        assert r.status_code == 200, r.text
+        assert r.json().get("notes") == ["a note"]
 
 
 def test_rename_route_refuses_a_sanitized_collision_instead_of_faking_success(gui_app, alias_env):

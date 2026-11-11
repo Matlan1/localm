@@ -27,7 +27,7 @@ one-time Whisper download) are consent by definition - but `net_mode off`
 still blocks them, with one exception: the admin-only
 `net_allow_model_downloads` setting (off by default) lets the downloads you
 trigger yourself (model pulls, HuggingFace search, the embedding-model and
-Whisper downloads) proceed under `off`. It never lifts `off` for anything a
+Whisper downloads, the native runtime downloads) proceed under `off`. It never lifts `off` for anything a
 model triggers. A one-time download like the last two
 is a single-call authorization, never written to config; it lets that one
 fetch through `ask`'s per-request friction, exactly like clicking "download
@@ -58,8 +58,17 @@ localm config net_mode allow   # no confirmation
 | `allow` | runs without asking | works |
 
 The `LOCALM_NET_MODE` env var overrides the config (like `LOCALM_MODE` for
-privacy). In the coder, sessions started with auto-approve also auto-approve
-network requests in `ask` mode.
+privacy). In the coder, `ask` asks before each network tool call (`fetch_url`,
+`web_search`, the browser tools, `git_push`) even with auto-approve on. A run
+nobody can answer (`localm coder "TASK"`, the MCP `run_coder_task` tool, a
+scheduled job) denies them, unless the `coder_unattended_network` setting is
+`allow` or the run was started with `localm coder --allow-network`; then they
+run without asking. `off` refuses them either way.
+
+```bash
+localm config coder_unattended_network allow   # unattended coder runs may use the network
+localm config coder_unattended_network deny    # default - unattended runs deny network tools
+```
 
 `ask`'s approval prompt is enforced by the front end (the GUI modal, the
 coder's terminal y/N), not the server. A direct API or MCP caller
@@ -229,6 +238,11 @@ coding agent's shell access, so you can grant one without the other.
 
 ## What the policy does NOT govern
 
+- **Requests coming in.** This policy covers what localm fetches. What reaches
+  localm is limited by the bind address, the API key and the Host check: the
+  server answers only to its own names and addresses (plus the `allowed_hosts`
+  setting) and refuses every other `Host` with `400`, which stops DNS-rebinding
+  pages. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md#host-header-check-dns-rebinding).
 - **Child processes.** `run_shell` commands like `pip install`, `npm install`,
   or `git clone` talk to the network themselves. The gate for those is the
   shell-command approval (and `always_confirm` for `run_shell`), not the
@@ -258,8 +272,11 @@ coding agent's shell access, so you can grant one without the other.
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists.
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
-  guards instead: a configured `comfy_api_url` that targets a link-local or
-  cloud-metadata address is refused, and the connection itself refuses any
+  guards instead: a configured `comfy_api_url` (or a media plugin's own
+  `comfy.api_url`, the model scan included) that targets a link-local or
+  cloud-metadata address is refused (169.254.0.0/16, fe80::/10,
+  fd00:ec2::/32, and a link-local IPv4 address in IPv4-mapped,
+  IPv4-compatible, NAT64 or 6to4 form), and the connection itself refuses any
   HTTP redirect outright. Loopback and LAN are both normal, unchecked ComfyUI
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`

@@ -241,23 +241,17 @@ class TestBulkPathsDoNotPopulateTheCache:
         assert all(r["built_with"] == "old-model" for r in report), report
         assert len(store._COLLECTION_CACHE) == 0
 
-    def test_model_rename_label_migration(self, tmp_path, monkeypatch):
+    def test_recording_model_ids_loads_no_collection(self, tmp_path, monkeypatch):
         base = _isolated_home(tmp_path, monkeypatch)
         for i in range(3):
             _build(base, f"kb{i}", n_chunks=20, seed=i, model="old-model")
-        _build(base, "other", n_chunks=20, seed=9, model="unrelated-model")
         store._COLLECTION_CACHE.clear()
-        from localm.model_manager.registry import _migrate_model_references
 
-        notes = _migrate_model_references("old-model", "new-model")
+        assert store.record_embedding_model_refs() == []
 
-        labels = {n: json.loads((base / n / "meta.json").read_text(encoding="utf-8"))
-                  .get("embedding_model") for n in ("kb0", "kb1", "kb2", "other")}
-        assert labels == {"kb0": "new-model", "kb1": "new-model",
-                          "kb2": "new-model", "other": "unrelated-model"}, notes
         assert len(store._COLLECTION_CACHE) == 0
 
-    def test_model_rename_leaves_a_collection_another_writer_holds(
+    def test_recording_model_ids_leaves_a_collection_another_writer_holds(
             self, tmp_path, monkeypatch):
         base = _isolated_home(tmp_path, monkeypatch)
         _build(base, "kb0", n_chunks=5, model="old-model")
@@ -272,17 +266,16 @@ class TestBulkPathsDoNotPopulateTheCache:
         holder = threading.Thread(target=hold)
         holder.start()
         assert held.wait(5), "the holder never took the lock"
-        from localm.model_manager.registry import _migrate_model_references
+        before = (base / "kb0" / "meta.json").read_bytes()
         try:
-            notes = _migrate_model_references("old-model", "new-model")
+            busy = store.record_embedding_model_refs()
         finally:
             release.set()
             holder.join(5)
 
-        meta = json.loads((base / "kb0" / "meta.json").read_text(encoding="utf-8"))
-        assert meta["embedding_model"] == "old-model", (
-            "the rename rewrote meta.json while another writer held the collection")
-        assert any("kb0" in n and "old-model" in n for n in notes), notes
+        assert (base / "kb0" / "meta.json").read_bytes() == before, (
+            "meta.json was rewritten while another writer held the collection")
+        assert busy == ["kb0"]
 
     def test_cli_rag_list(self, tmp_path, monkeypatch):
         base = _isolated_home(tmp_path, monkeypatch)

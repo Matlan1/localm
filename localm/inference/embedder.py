@@ -480,6 +480,11 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     repo, filename = known
     dest = _embeddings_dir() / filename
     damaged = None
+    if not dest.is_file():
+        registered = _registered_known_file(repo, filename, verify=allow_download is True)
+        if registered:
+            _record_resolve_success(spec)
+            return registered
     if dest.is_file():
         damaged = _pin_mismatch(dest, _EMBEDDING_PINS.get((repo, filename))) \
             if allow_download is True else None
@@ -520,6 +525,7 @@ def configured_model_path() -> Optional[str]:
         dest = _embeddings_dir() / known[1]
         if dest.is_file():
             return str(dest)
+        return _registered_known_file(known[0], known[1])
     return None
 
 
@@ -590,6 +596,45 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _registered_known_file(repo: str, filename: str,
+                           verify: bool = False) -> Optional[str]:
+    """The path of a registered model whose file has the name *filename* of a
+    known embedding model, or None. When the registry recorded a sha256 for the
+    entry it must equal the pinned one; with no recorded digest the file is
+    hashed against the pin only when *verify* is true (the same rule as a
+    present downloaded file). Never raises."""
+    pin = _EMBEDDING_PINS.get((repo, filename))
+    try:
+        from localm.config import load_registry
+        from localm.pathsafe import is_unc_or_device_path
+        reg = load_registry()
+        entries = list(reg.items()) if isinstance(reg, dict) else []
+    except Exception:
+        logger.debug("could not read the registry for %s", filename, exc_info=True)
+        return None
+    for _name, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("path")
+        if not isinstance(raw, str) or not raw or is_unc_or_device_path(raw):
+            continue
+        p = Path(raw)
+        try:
+            if p.name.lower() != filename.lower() or not p.is_file():
+                continue
+        except OSError:
+            continue
+        if pin is not None:
+            recorded = str(entry.get("sha256") or "").lower()
+            if recorded:
+                if recorded != pin[1].lower():
+                    continue
+            elif verify and _pin_mismatch(p, pin) is not None:
+                continue
+        return str(p)
+    return None
 
 
 def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:
@@ -1503,8 +1548,12 @@ class IsolatedEmbedder(VramSizingMixin):
     def _respawn_dead_worker(self) -> None:
         """Start the worker again under the engine's ``_LOAD_LOCK`` when it is
         not running. Must not be called with ``_rpc_lock`` held."""
+        from localm.inference import load_lease
         from localm.inference.engine import _LOAD_LOCK
-        with _LOAD_LOCK:
+        cpu = self.gpu_fallback_reason is not None or self.n_gpu_layers == 0
+        with load_lease.held(load_lease.lease_keys(n_gpu_layers=0 if cpu else None),
+                             purpose="restarting the embedding model"), \
+                load_lease.bounded(_LOAD_LOCK, what="restarting the embedding model"):
             runner = self._runner
             if runner is not None and runner.is_alive():
                 return
@@ -1638,6 +1687,9 @@ class IsolatedEmbedder(VramSizingMixin):
 # --------------------------------------------------------------------------- #
 
 # LOCK ORDER: engine._LOAD_LOCK (outer) -> _LOCK (inner), never the reverse.
+# The GPU load lease (localm.inference.load_lease) is outside both:
+# lease -> _LOAD_LOCK -> _LOCK. get_embedder takes the lease before its swap
+# check, outside _LOCK. See test_lock_order_lease_outer_load_lock_inner.
 # The engine's load path holds _LOAD_LOCK for a whole model load and calls
 # loaded_path() here from its ctx sizing, so acquiring _LOAD_LOCK - directly or
 # by starting a load - while holding _LOCK is an ABBA deadlock against every
@@ -1843,7 +1895,13 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
     ``threading.RLock`` and is not reentrant across threads, so holding it
     across that call is a cross-thread deadlock. It also runs before the
     engine's ``_LOAD_LOCK`` is taken, so an evictor registered with
-    ``vram.register_embedder_evictor`` runs holding neither lock."""
+    ``vram.register_embedder_evictor`` runs holding neither lock.
+
+    From the swap check until the load has returned it holds the GPU load
+    lease (``localm.inference.load_lease``). Raises
+    :class:`~localm.inference.load_lease.LoadBusyError`, latching nothing,
+    when the lease or ``_LOAD_LOCK`` is still held elsewhere after
+    ``load_lease.LOAD_WAIT_TIMEOUT_S``."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR
     cur_spec = None   # computed lazily, only once _EMBEDDER is confirmed unset;
                        # the "already loaded" path does no I/O.
@@ -1888,80 +1946,88 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
         explicit = _explicit_embedder_gpu_layers(_cfg)
         intent_ngl = explicit if explicit is not None else 99
 
-    # OUTSIDE _LOCK: this blocks on the cross-thread eviction round trip.
-    # Another thread may reach the same window and run its own swap check;
-    # evict_chat_for_embedder() and decide_embedder_swap() are idempotent, and
-    # the load below re-checks the singleton state.
-    _emit_stage(on_progress, "Checking VRAM (may evict a resident chat model)...")
-    swap_status = _maybe_swap_for_embedder(path, intent_ngl)
-    if swap_status in _SWAP_DEGRADED:
-        _emit_stage(on_progress, f"Could not free VRAM: {_SWAP_DEGRADED[swap_status]}.")
-    ngl, placement_reason = _choose_embedder_gpu_layers(path, _cfg)
-    if placement_reason is not None:
-        logger.warning("embedder placement: %s", placement_reason)
+    from localm.inference import load_lease
+    lease = load_lease.acquire(load_lease.lease_keys(n_gpu_layers=intent_ngl),
+                               purpose="loading the embedding model")
+    try:
+        # OUTSIDE _LOCK: this blocks on the cross-thread eviction round trip.
+        # Another thread may reach the same window and run its own swap check;
+        # evict_chat_for_embedder() and decide_embedder_swap() are idempotent, and
+        # the load below re-checks the singleton state.
+        _emit_stage(on_progress, "Checking VRAM (may evict a resident chat model)...")
+        swap_status = _maybe_swap_for_embedder(path, intent_ngl)
+        if swap_status in _SWAP_DEGRADED:
+            _emit_stage(on_progress, f"Could not free VRAM: {_SWAP_DEGRADED[swap_status]}.")
+        ngl, placement_reason = _choose_embedder_gpu_layers(path, _cfg)
+        if placement_reason is not None:
+            logger.warning("embedder placement: %s", placement_reason)
 
-    # LOCK ORDER: the engine's process-global load lock is acquired FIRST,
-    # strictly OUTSIDE _LOCK. Engine.load() holds _LOAD_LOCK across an entire
-    # model load, and its ctx sizing calls loaded_path(), which takes _LOCK, via
-    # _sizing.embedder_ctx_reservation_bytes. The only permitted nesting is
-    # _LOAD_LOCK (outer) -> _LOCK (inner); see both lock definitions. Waiting
-    # here for a running chat load therefore does not hold _LOCK.
-    from localm.inference.engine import _LOAD_LOCK
-    with _LOAD_LOCK:
-        with _LOCK:
-            # Re-check: another thread may have completed or failed the load
-            # while this thread was outside the lock running the swap check,
-            # including latching a NEW failure for whatever spec is current now,
-            # which is re-derived here rather than read from the local above.
-            if _EMBEDDER is not None:
-                return _EMBEDDER
-            if _LOAD_FAILED_SPEC is not None:
-                if cur_spec is None:
-                    cur_spec = _current_spec()
-                if _LOAD_FAILED_SPEC == cur_spec:
+        # LOCK ORDER: the engine's process-global load lock is acquired FIRST,
+        # strictly OUTSIDE _LOCK. Engine.load() holds _LOAD_LOCK across an entire
+        # model load, and its ctx sizing calls loaded_path(), which takes _LOCK, via
+        # _sizing.embedder_ctx_reservation_bytes. The only permitted nesting is
+        # _LOAD_LOCK (outer) -> _LOCK (inner); see both lock definitions. Waiting
+        # here for a running chat load therefore does not hold _LOCK.
+        from localm.inference.engine import _LOAD_LOCK
+        with load_lease.bounded(_LOAD_LOCK, what="loading the embedding model"):
+            with _LOCK:
+                # Re-check: another thread may have completed or failed the load
+                # while this thread was outside the lock running the swap check,
+                # including latching a NEW failure for whatever spec is current now,
+                # which is re-derived here rather than read from the local above.
+                if _EMBEDDER is not None:
+                    return _EMBEDDER
+                if _LOAD_FAILED_SPEC is not None:
+                    if cur_spec is None:
+                        cur_spec = _current_spec()
+                    if _LOAD_FAILED_SPEC == cur_spec:
+                        return None
+                    _LOAD_FAILED_SPEC = None
+                    _LAST_ERROR = None
+                try:
+                    # The stated bound is the deadline this stage runs under:
+                    # _embedder_runner.LOAD_TIMEOUT_DEFAULT (300s), since _reload's
+                    # spawn_and_load() passes no override.
+                    _emit_stage(on_progress,
+                               "Loading into memory (this can take up to five minutes)...")
+                    _EMBEDDER = IsolatedEmbedder(
+                        path, n_gpu_layers=ngl, pooling_type=pooling,
+                        gpu_fallback_reason=placement_reason)
+                    if getattr(_EMBEDDER, "effective_pooling", None) == _POOLING_RANK:
+                        rejected, _EMBEDDER = _EMBEDDER, None
+                        rejected.close()
+                        raise RuntimeError(
+                            f"{Path(path).name} is a reranker (rank pooling), not an "
+                            "embedding model: it scores query and document pairs "
+                            "(POST /v1/rerank). Choose an embedding model for "
+                            "embedding_model.")
+                    # getattr, not attribute access: this line runs inside the try,
+                    # so anything it raised would be caught as a LOAD failure.
+                    logger.info("embedding model ready: %s (dim=%d, pooling=%s)", path,
+                                _EMBEDDER.dim,
+                                pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
+                    _LAST_ERROR = None
+                    _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
+                    _livefeed.kick("embedding model loaded")
+                    return _EMBEDDER
+                except Exception as e:
+                    # Latch by SPEC: what just failed to load is whatever
+                    # embedding_model names right now, and a later call compares
+                    # against that identity.
+                    _LOAD_FAILED_SPEC = cur_spec if cur_spec is not None else _current_spec()
+                    _LAST_ERROR = str(e)
+                    logger.warning("could not load embedding model %s (%s); lexical-only",
+                                   path, e)
+                    _emit_stage(on_progress, f"Load failed: {e}")
                     return None
-                _LOAD_FAILED_SPEC = None
-                _LAST_ERROR = None
-            try:
-                # The stated bound is the deadline this stage runs under:
-                # _embedder_runner.LOAD_TIMEOUT_DEFAULT (300s), since _reload's
-                # spawn_and_load() passes no override.
-                _emit_stage(on_progress,
-                           "Loading into memory (this can take up to five minutes)...")
-                _EMBEDDER = IsolatedEmbedder(
-                    path, n_gpu_layers=ngl, pooling_type=pooling,
-                    gpu_fallback_reason=placement_reason)
-                if getattr(_EMBEDDER, "effective_pooling", None) == _POOLING_RANK:
-                    rejected, _EMBEDDER = _EMBEDDER, None
-                    rejected.close()
-                    raise RuntimeError(
-                        f"{Path(path).name} is a reranker (rank pooling), not an "
-                        "embedding model: it scores query and document pairs "
-                        "(POST /v1/rerank). Choose an embedding model for "
-                        "embedding_model.")
-                # getattr, not attribute access: this line runs inside the try,
-                # so anything it raised would be caught as a LOAD failure.
-                logger.info("embedding model ready: %s (dim=%d, pooling=%s)", path,
-                            _EMBEDDER.dim,
-                            pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
-                _LAST_ERROR = None
-                _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
-                _livefeed.kick("embedding model loaded")
-                return _EMBEDDER
-            except Exception as e:
-                # Latch by SPEC: what just failed to load is whatever
-                # embedding_model names right now, and a later call compares
-                # against that identity.
-                _LOAD_FAILED_SPEC = cur_spec if cur_spec is not None else _current_spec()
-                _LAST_ERROR = str(e)
-                logger.warning("could not load embedding model %s (%s); lexical-only",
-                               path, e)
-                _emit_stage(on_progress, f"Load failed: {e}")
-                return None
+    finally:
+        load_lease.release(lease)
 
 
 def embed_texts(texts: list[str]) -> Optional[list[list[float]]]:
-    """Embed *texts* with the shared embedder, or None when unavailable."""
+    """Embed *texts* with the shared embedder, or None when unavailable.
+    Raises :class:`~localm.inference.load_lease.LoadBusyError` as
+    :func:`get_embedder`."""
     emb = get_embedder()
     if emb is None:
         return None

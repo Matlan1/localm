@@ -291,9 +291,11 @@ class TestRenameModelMarkupEscaping:
 
         def _raise(*a, **k):
             raise RuntimeError(f"config write failed {BRACKET_DROP}")
-        # _migrate_model_references calls update_config directly (a module-
+        # record_stored_references calls update_config directly (a module-
         # level name in registry.py, not routed through `_mm.`).
         monkeypatch.setattr("localm.model_manager.registry.update_config", _raise)
+        from localm.config import home_dir
+        (home_dir() / "model_refs.migrated").unlink(missing_ok=True)
         ok, notes = mm.rename_model_with_notes("old", "new")
         assert ok is True
         out = capsys.readouterr().out

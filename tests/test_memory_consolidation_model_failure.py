@@ -24,6 +24,14 @@ from localm.plugins.builtin.jobs import runner
 from localm.plugins.builtin.jobs.store import Job
 from localm.plugins.builtin.memory import plug
 
+
+@pytest.fixture(autouse=True)
+def _first_party_plugins_available(monkeypatch):
+    """Every first-party plugin counts as installed and enabled, so code that
+    reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
+    monkeypatch.setattr("localm.plugins.lookup.is_available", lambda name: True)
+
+
 NOW = 1_800_000_000.0
 _SETTLED = 1_000_000.0
 
@@ -134,6 +142,7 @@ def memhome(tmp_path, monkeypatch):
     monkeypatch.setattr(plug, "_home", lambda: tmp_path)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
+    monkeypatch.setattr(plug, "_stop", plug._threading.Event())
     sdir = tmp_path / "sessions"
     sdir.mkdir()
     rows = [{"type": "user", "data": {"content":
