@@ -1090,11 +1090,7 @@ export function artifactLang(codeEl) {
  *  policy was only ever collateral damage. Artifact scripts were always meant to
  *  execute - that is the whole feature.
  *
- *  Deliberately a targeted rewrite of the <script> OPEN TAG rather than a
- *  DOMParser round trip: the caller's three shapes (bare SVG, full document,
- *  fragment) are spliced as strings, and re-serializing a full document through
- *  a parser would move nodes and could defeat the R41-D4 ordering guarantee
- *  below. A <script that is not a real tag is not valid HTML source anyway. */
+ *  A string rewrite of each <script> open tag; the markup is not re-parsed. */
 function stampArtifactNonce(code) {
   const n = window.__LOCALM_CSP_NONCE__;
   if (!n) return code;                       // no enforcing policy in play
@@ -1103,11 +1099,104 @@ function stampArtifactNonce(code) {
     '<script nonce="' + n + '"$1>');
 }
 
+/* Events whose handler attribute on <body> or <frameset> is attached to the
+ * window rather than to the element. */
+const ARTIFACT_WINDOW_EVENTS = new Set([
+  "afterprint", "beforeprint", "beforeunload", "blur", "error", "focus",
+  "hashchange", "languagechange", "load", "message", "messageerror", "offline",
+  "online", "pagehide", "pageshow", "popstate", "rejectionhandled", "resize",
+  "scroll", "storage", "unhandledrejection", "unload",
+]);
+
+/** The source of one classic script that attaches handler *code* for event
+ *  *type* with addEventListener, to `window` when *onWindow* is true, otherwise
+ *  to the element matching *selector*.
+ *
+ *  The code runs as the body of its own function with `this` bound to the
+ *  listener's target, `event` as its only parameter, and the document, the
+ *  element's form owner and the element itself on its scope chain, as an inline
+ *  handler does. A return value of exactly false cancels the event's default
+ *  action. Every "<script", "</script" and "<!--" in *code* has its "<" written
+ *  as the "\x3C" escape, so the text cannot end or re-open the script element. */
+function artifactHandlerScript(selector, type, onWindow, code) {
+  const body = String(code).replace(/<(?=\/?script|!--)/gi, "\\x3C");
+  const target = onWindow ? "window" : "document.querySelector('" + selector + "')";
+  return "(function (h) {\n"
+    + "  var t = " + target + ";\n"
+    + "  if (t) t.addEventListener(" + JSON.stringify(type) + ", function (event) {\n"
+    + "    if (h.call(this, event) === false) event.preventDefault();\n"
+    + "  });\n"
+    + "})(function (event) {\n"
+    + "with (document) with ((this instanceof Element && this.form) || {}) with (this) {\n"
+    + body
+    + "\n}\n});\n";
+}
+
+/** Rewrite every inline event handler attribute (onclick="...", onsubmit="...",
+ *  ...) in the artifact document *srcdoc* into a script that attaches the same
+ *  code with addEventListener, and return the re-serialized document.
+ *
+ *  Each element that carried a handler loses the attribute and gains a
+ *  `data-localm-on` marker; one script per handler is appended at the end of
+ *  <body>, in document order. A handler on <body> or <frameset> for an event in
+ *  ARTIFACT_WINDOW_EVENTS is attached to the window. Handlers inside <template>
+ *  content are not rewritten.
+ *
+ *  Returns *srcdoc* unchanged when no shell nonce is set or no element carries
+ *  a handler attribute. The generated scripts carry no nonce; the caller stamps
+ *  them with stampArtifactNonce. */
+function rewriteArtifactHandlers(srcdoc) {
+  if (!window.__LOCALM_CSP_NONCE__) return srcdoc;
+  if (!/\bon[a-z]+\s*=/i.test(srcdoc)) return srcdoc;
+  const doc = new DOMParser().parseFromString(srcdoc, "text/html");
+  const used = new Set();
+  doc.querySelectorAll("[data-localm-on]").forEach((e) => used.add(e.getAttribute("data-localm-on")));
+  let next = 0;
+  const sources = [];
+  for (const node of doc.querySelectorAll("*")) {
+    const handlers = [...node.attributes]
+      .map((a) => a.name)
+      .filter((name) => /^on[a-z]+$/i.test(name) && name.toLowerCase() in node);
+    if (!handlers.length) continue;
+    let selector = null;
+    const bodyLike = node === doc.body || node.localName === "frameset";
+    for (const name of handlers) {
+      const code = node.getAttribute(name);
+      node.removeAttribute(name);
+      const type = name.toLowerCase().slice(2);
+      const onWindow = bodyLike && ARTIFACT_WINDOW_EVENTS.has(type);
+      if (!onWindow && selector === null) {
+        while (used.has(String(next))) next += 1;
+        const id = String(next);
+        used.add(id);
+        node.setAttribute("data-localm-on", id);
+        selector = '[data-localm-on="' + id + '"]';
+      }
+      sources.push(artifactHandlerScript(selector, type, onWindow, code));
+    }
+  }
+  if (!sources.length) return srcdoc;
+  const host = doc.body || doc.documentElement;
+  for (const src of sources) {
+    const s = doc.createElement("script");
+    s.textContent = src;
+    host.appendChild(s);
+  }
+  return (doc.doctype ? "<!doctype html>" : "") + doc.documentElement.outerHTML;
+}
+
 /** Build the iframe srcdoc for an artifact, injecting a strict CSP that blocks
  *  network access. Inline script/style are allowed (the artifact runs), data:
- *  images are allowed, everything else is denied. */
+ *  images are allowed, everything else is denied. When a shell nonce is set,
+ *  inline event handler attributes are rewritten into nonce-stamped scripts
+ *  (rewriteArtifactHandlers) and every script is stamped (stampArtifactNonce). */
 export function artifactSrcdoc(code, lang) {
-  code = stampArtifactNonce(code);
+  return stampArtifactNonce(rewriteArtifactHandlers(artifactShell(code, lang)));
+}
+
+/** The artifact *code* spliced into a document whose <head> starts with the
+ *  network-blocking CSP meta, for the svg, full-document and fragment shapes. */
+function artifactShell(code, lang) {
   // form-action 'none' is NOT redundant with default-src 'none', and leaving it
   // out made this function's own "blocks ALL network" claim untrue. form-action
   // is a NAVIGATION directive: it has no default-src fallback, so an unset
