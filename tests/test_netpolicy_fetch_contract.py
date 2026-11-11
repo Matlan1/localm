@@ -1005,6 +1005,79 @@ class TestUnsetValuesFallBackToTheDefaults:
             netpolicy.check_url("https://example.com/")
 
 
+class TestEmbeddedIpv4:
+    @pytest.mark.parametrize("address, expected", [
+        ("::2", "0.0.0.2"),
+        ("::a9fe:a9fe", "169.254.169.254"),
+        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),
+        ("64:ff9b:1::a9fe:a9fe", "169.254.169.254"),
+        ("::ffff:169.254.169.254", "169.254.169.254"),
+        ("2002:a9fe:a9fe::", "169.254.169.254"),
+    ])
+    def test_the_embedded_ipv4_address_is_returned(self, address, expected):
+        assert netpolicy._embedded_ipv4(ipaddress.ip_address(address)) == \
+            ipaddress.IPv4Address(expected)
+
+    @pytest.mark.parametrize("address", [
+        "::", "::1", "2606:4700::1111", "fe80::1", "64:ff9a::a9fe:a9fe",
+        "1::a9fe:a9fe", "169.254.169.254",
+    ])
+    def test_an_address_without_an_embedded_ipv4_gives_none(self, address):
+        assert netpolicy._embedded_ipv4(ipaddress.ip_address(address)) is None
+
+
+class TestIsLinkLocalHostResolution:
+    def test_a_name_resolving_to_a_link_local_address_is_flagged(self, monkeypatch):
+        def resolve(host, port, *a, **k):
+            if host == "meta.example":
+                return [(10, 1, 6, "", ("fe80::1", 0, 0, 0))]
+            raise socket.gaierror("no such host")
+
+        monkeypatch.setattr("socket.getaddrinfo", resolve)
+        assert netpolicy.is_link_local_host("meta.example") is True
+        assert netpolicy.is_link_local_host("other.example") is False
+
+    def test_a_name_resolving_to_a_public_address_is_not_flagged(self, monkeypatch):
+        monkeypatch.setattr("socket.getaddrinfo", _addrinfo("93.184.216.34"))
+        assert netpolicy.is_link_local_host("public.example") is False
+
+
+class TestPinnedRequestPolicyCheck:
+    def _spy(self, monkeypatch):
+        checks = []
+        monkeypatch.setattr(netpolicy, "check_url",
+                            lambda url, **kw: checks.append((url, kw)))
+        monkeypatch.setattr(netpolicy, "_session_for",
+                            lambda *a, **k: _RecordingSession())
+        return checks
+
+    def test_the_default_policy_check_has_no_off_exemption_and_no_search_flag(
+            self, monkeypatch):
+        checks = self._spy(monkeypatch)
+        netpolicy.pinned_request("GET", "https://example.com/x")
+        assert checks == [("https://example.com/x",
+                           {"allow_when_off": False, "search_backend": False})]
+
+    def test_the_policy_check_gets_the_callers_flags(self, monkeypatch):
+        checks = self._spy(monkeypatch)
+        netpolicy.pinned_request("GET", "https://example.com/x",
+                                 allow_when_off=True, search_backend=True)
+        assert checks == [("https://example.com/x",
+                           {"allow_when_off": True, "search_backend": True})]
+
+    def test_off_mode_refuses_a_pinned_request_by_default(self, monkeypatch):
+        set_config(monkeypatch, lambda: {
+            "net_mode": "off", "net_allow_model_downloads": True})
+        sessions = []
+        monkeypatch.setattr(netpolicy, "_session_for",
+                            lambda *a, **k: sessions.append(a) or _RecordingSession())
+        with pytest.raises(NetworkPolicyError):
+            netpolicy.pinned_request("GET", "https://example.com/")
+        assert sessions == []
+        netpolicy.pinned_request("GET", "https://example.com/", allow_when_off=True)
+        assert sessions == [("https://example.com/",)]
+
+
 def _addrinfo(*addresses):
     return lambda host, port, *a, **k: [(2, 1, 6, "", (ip, 0)) for ip in addresses]
 

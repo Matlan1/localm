@@ -5,7 +5,15 @@ drift."""
 
 import pytest
 
-from localm.bindhost import is_loopback_host
+from localm.bindhost import is_loopback_host, normalise_host
+
+
+@pytest.mark.parametrize("host,expected", [
+    (None, ""), (127, ""), (b"localhost", ""),
+    ("localhost", "localhost"), (" ::1 ", " ::1 "), ("", ""),
+])
+def test_normalise_host_keeps_strings_and_maps_anything_else_to_empty(host, expected):
+    assert normalise_host(host) == expected
 
 
 @pytest.mark.parametrize("host,loop", [
