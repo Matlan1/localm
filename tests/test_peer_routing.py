@@ -33,7 +33,8 @@ def _isolated_state(tmp_path, monkeypatch):
     _write_peer as a namespace. Runs in full session mode, where a forward
     needs no session-mode confirmation from the peer (that is
     tests/test_peer_routing_session_mode.py). The fake peers' ports count as
-    held by this OS user, like the faked detection."""
+    held by this OS user, like the faked detection. Closes the session recorder
+    the test's app left open."""
     d = tmp_path / "gpu"
     _PEERS.clear()
     monkeypatch.setenv("LOCALM_MODE", "full")
@@ -50,6 +51,8 @@ def _isolated_state(tmp_path, monkeypatch):
     hs._gpu_coord = None
     peer_routing._ROUTES.clear()
     _PEERS.clear()
+    if hs._session_recorder is not None:
+        hs._session_recorder.close()
 
 
 def _write_peer(d, iid, port, model=None, pid=None, host="127.0.0.1",

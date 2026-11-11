@@ -5910,9 +5910,12 @@ def _init_session_audit():
     audit log and transcript follow later changes to the configured mode),
     publish it as the module global _session_recorder for _do_restart and the
     lifespan's shutdown to close, and return the AppContext create_app() hands
-    to the route groups."""
+    to the route groups. A recorder an earlier create_app() published is closed
+    first, so its audit log file is released."""
     global _session_recorder
     from localm.audit import SessionRecorder
+    if _session_recorder is not None:
+        _session_recorder.close()
     _session_recorder = SessionRecorder("server", label="server")
     from localm.inference.app_assembly.context import AppContext
     return AppContext(recorder=_session_recorder)

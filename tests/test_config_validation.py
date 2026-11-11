@@ -588,8 +588,11 @@ class TestPatchConfig:
         # Management routes need the loopback shell token in open mode; the
         # GUI carries it, so do these config-validation tests.
         app = create_app(None)
-        return TestClient(
+        yield TestClient(
             app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+        from localm.inference import http_server as hs
+        if hs._session_recorder is not None:
+            hs._session_recorder.close()
 
     def test_unknown_key_400(self, client):
         r = client.patch("/v1/config", json={"hax": 1})

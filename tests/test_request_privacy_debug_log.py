@@ -73,14 +73,18 @@ def _body(path: str, stream: bool) -> dict:
 
 @pytest.fixture
 def full_mode_debug(monkeypatch, caplog):
-    """The server is in full mode on every surface and the debug log is on."""
+    """The server is in full mode on every surface and the debug log is on.
+    Closes the session recorder the test's app left open."""
     monkeypatch.setenv("LOCALM_MODE", "full")
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     caplog.set_level(logging.DEBUG, logger="localm")
     assert debuglog.debug_content_enabled() is True
-    return caplog
+    yield caplog
+    from localm.inference import http_server as hs
+    if hs._session_recorder is not None:
+        hs._session_recorder.close()
 
 
 def _blob(caplog) -> str:
