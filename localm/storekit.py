@@ -175,16 +175,14 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     succeeded (see below).
 
     *retrying* selects the final replace: False (default) is a bare
-    ``os.replace`` (preserves the original behaviour for every caller that
-    predates this parameter - auth.key, the owner-KDF file, sessions.json, the
-    instance and GPU registry entries - some of which run on the asyncio event
-    loop and must not block on a multi-attempt retry); True uses
-    ``replace_atomic``'s bounded backoff over a transient Windows sharing
-    violation instead. Pass True only when the caller already serializes every
-    writer of *path* across processes (a cross-process lock held for the whole
-    read-modify-write), so the retry is bounded, rare, and never faces another
-    writer racing the same temp file - only a concurrent READER's open handle,
-    which is exactly what the retry rides out.
+    ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
+    backoff (up to ~1 s) over a transient Windows sharing violation, such as a
+    concurrent reader's open handle. Pass True only when the caller serializes
+    every writer of *path* across processes (a cross-process lock held for the
+    whole write or read-modify-write). The callers that pass True are
+    ``auth.set_api_key`` (auth.key), ``auth._save_keystore`` (auth.json) and
+    ``model_source_credentials._write_all`` (model_source_credentials.json);
+    every other caller uses the bare replace.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -202,7 +200,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
 
     Call sites: ``auth.key``, ``auth.json`` and the owner-KDF file in auth.py;
     ``model_source_credentials.json``; ``sessions.json``; the instance
-    registry entry from both ``register_instance`` and ``set_mode``.
+    registry entry from ``register_instance``, ``restore_own`` and
+    ``set_mode``, and the hold marker from ``register_hold_marker``; the issue
+    tracker's record; the job manager's activity store.
 
     The RETURN VALUE is the pre-rename ``ok``, so a caller that logs its own
     subsystem-named warning on failure keeps that signal.
@@ -215,10 +215,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
-    Uses a BARE ``os.replace``, not :func:`replace_atomic`. That helper's
-    transient-sharing-violation retry sleeps up to ~1 s, and two of these
+    With *retrying* False the replace is a bare ``os.replace``; some of those
     callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run ON THE ASYNCIO EVENT LOOP.
+    _gui_index) run on the asyncio event loop.
 
     ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
     TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
