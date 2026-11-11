@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./worker.js";
+import { clientOlderThan, tagAtMost, tagKey } from "./versionorder.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -1024,15 +1025,8 @@ test("update: a cached signature is fetched again after ten minutes", async () =
 
 // ------------------- prerelease order (dev < a < b < rc < final) -------------------
 
-// tagKey, tagAtMost and clientOlderThan, evaluated from worker.js's own source text.
 function tagFunctions() {
-  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "worker.js"), "utf8");
-  const start = src.indexOf("const PRERELEASE_SUFFIX_RE");
-  const fnAt = src.indexOf("function clientOlderThan");
-  const close = /\r?\n\}\r?\n/.exec(src.slice(fnAt));
-  assert.ok(start >= 0 && fnAt > start && close, "tag functions not found in worker.js");
-  const end = fnAt + close.index + close[0].length;
-  return new Function(`${src.slice(start, end)}; return { tagKey, tagAtMost, clientOlderThan };`)();
+  return { tagKey, tagAtMost, clientOlderThan };
 }
 
 const ORDERED_TAGS = ["v0.3.3", "v0.3.4-dev1", "v0.3.4-Dev2", "v0.3.4-dev9", "v0.3.4-DEV10",

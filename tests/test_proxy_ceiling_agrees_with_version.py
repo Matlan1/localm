@@ -17,33 +17,35 @@ import pytest
 from localm import _version
 
 WORKER = Path(__file__).resolve().parents[1] / "tools" / "bugreport-proxy" / "worker.js"
+VERSION_ORDER = WORKER.with_name("versionorder.js")
 
 
 def _worker_source() -> str:
-    return WORKER.read_text(encoding="utf-8")
+    return (WORKER.read_text(encoding="utf-8") + "\n"
+            + VERSION_ORDER.read_text(encoding="utf-8"))
 
 
 def _js_regex(name: str) -> re.Pattern[str]:
     m = re.search(rf"const {name} = /(.+)/(\w*);", _worker_source())
-    assert m, f"{name} not found in worker.js"
+    assert m, f"{name} not found in the proxy source"
     return re.compile(m.group(1), re.IGNORECASE if "i" in m.group(2) else 0)
 
 
 def _ceiling() -> str:
     m = re.search(r'const LEGACY_CLIENT_CEILING = "(v[^"]+)";', _worker_source())
-    assert m, "LEGACY_CLIENT_CEILING not found in worker.js"
+    assert m, "LEGACY_CLIENT_CEILING not found in the proxy source"
     return m.group(1)
 
 
 def _js_rank() -> dict[str, int]:
     m = re.search(r"const PRERELEASE_RANK = \{([^}]*)\};", _worker_source())
-    assert m, "PRERELEASE_RANK not found in worker.js"
+    assert m, "PRERELEASE_RANK not found in the proxy source"
     return {k: int(v) for k, v in re.findall(r"(\w+):\s*(\d+)", m.group(1))}
 
 
 def _js_final_rank() -> int:
     m = re.search(r"const FINAL_RANK = (\d+);", _worker_source())
-    assert m, "FINAL_RANK not found in worker.js"
+    assert m, "FINAL_RANK not found in the proxy source"
     return int(m.group(1))
 
 
@@ -81,7 +83,7 @@ def _candidate_tags(ceiling: str) -> list[str]:
 
 def _old_client_ceiling() -> str:
     m = re.search(r'const OLD_CLIENT_CEILING = "(v[^"]+)";', _worker_source())
-    assert m, "OLD_CLIENT_CEILING not found in worker.js"
+    assert m, "OLD_CLIENT_CEILING not found in the proxy source"
     return m.group(1)
 
 
