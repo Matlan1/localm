@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -27,6 +28,8 @@ from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<n
 from localm.storekit import read_json as _read_json
 from localm.storekit import read_json_checked as _read_json_checked
 from localm.storekit import read_json_state as _read_json_state
+from localm.storekit import (_REPLACE_RETRIES, _is_transient_permission_error,
+                             _transient_backoff)
 from localm.storekit import replace_atomic as _replace_atomic
 from localm.storekit import store_lock as _cross_process_lock
 
@@ -1387,11 +1390,39 @@ def _holds_unparseable_json(path: Path) -> bool:
     return False
 
 
+def _copy_to_backup(path: Path, bak: Path) -> None:
+    """Copy *path* over *bak* through a unique temp file in the same folder,
+    leaving *path* in place. A transient Windows sharing violation on the read
+    is retried like ``_replace_atomic``. Raises OSError when the copy fails;
+    the temp file is removed."""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=bak.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                shutil.copyfile(path, tmp)
+                break
+            except PermissionError as e:
+                if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
+                    raise
+                _transient_backoff(attempt)
+        _replace_atomic(tmp, bak)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _atomic_write_json(path: Path, data) -> None:
     """Write *data* as JSON to *path* atomically (temp file + os.replace).
 
     Keeps a one-step .bak of the previous good file so a corrupt read can
-    recover. os.replace is atomic on Windows and POSIX when src/dst share a
+    recover. The .bak is a copy, so *path* exists at every moment of the write
+    and a reader in another process never finds it missing. os.replace is atomic on Windows and POSIX when src/dst share a
     filesystem, which they do (same directory); _replace_atomic additionally
     rides out the transient Windows sharing violation a concurrent reader causes.
 
@@ -1425,7 +1456,7 @@ def _atomic_write_json(path: Path, data) -> None:
                     print(f"[localm] {path.name} could not be read; kept it as "
                           f"{kept.name} and left {bak.name} unchanged.", file=sys.stderr)
                 else:
-                    _replace_atomic(path, bak)
+                    _copy_to_backup(path, bak)
             except OSError as e:
                 # The .bak snapshot is best-effort: a failed one does NOT fail the
                 # primary write (which still proceeds below). _replace_atomic already
