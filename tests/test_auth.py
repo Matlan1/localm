@@ -1364,3 +1364,165 @@ def test_an_owner_kdf_file_stamped_newer_is_named_and_not_used(auth, monkeypatch
     assert str(auth.owner_kdf_file()) in caplog.text and "newer" in caplog.text
     auth._save_owner_kdf([{"x": 1}])
     assert auth._load_owner_kdf() == [{"x": 1}]
+
+
+# --------------------------------------------------------------------------- #
+#  Management events, session cleanup, legacy markers and store reads        #
+# --------------------------------------------------------------------------- #
+
+def _events(home):
+    import json
+    path = home / "logs" / "management.jsonl"
+    if not path.exists():
+        return []
+    return [(e["kind"], e.get("principal"))
+            for e in map(json.loads, path.read_text(encoding="utf-8").splitlines())]
+
+
+def test_key_operations_record_their_management_events(auth, tmp_path):
+    auth.set_api_key("owner-key-123")
+    assert _events(tmp_path) == [("key_minted", "owner")]
+    assert auth.clear_api_key() == []
+    assert _events(tmp_path)[1:] == [("key_revoked", "all")]
+    assert auth.clear_api_key() == []
+    assert len(_events(tmp_path)) == 2
+    made = auth.create_key("a", ["chat"])
+    assert auth.revoke_key(made["id"]) is True
+    assert auth.revoke_key(made["id"]) is False
+    assert auth.clear_api_key() == []
+    assert _events(tmp_path)[2:] == [("key_minted", made["id"]),
+                                     ("key_revoked", made["id"]),
+                                     ("key_revoked", "all")]
+
+
+def test_revoking_a_key_drops_only_its_own_browser_sessions(auth, caplog):
+    from localm import sessions
+    a = auth.create_key("a", ["chat"])
+    b = auth.create_key("b", ["chat"])
+    sid_a = sessions.create(scopes=["chat"], key_hash=_sha256_hex(a["key"]))
+    sid_b = sessions.create(scopes=["chat"], key_hash=_sha256_hex(b["key"]))
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth.revoke_key(a["id"]) is True
+    assert sessions.lookup(sid_a) is None
+    assert sessions.lookup(sid_b) is not None
+    assert [k["id"] for k in auth.list_keys()] == [b["id"]]
+    assert _logged(caplog, "browser sessions") == []
+
+
+def test_revoking_a_record_without_a_hash_skips_session_cleanup(auth, caplog):
+    _write_keystore(auth, [{"id": "nohash", "scopes": ["chat"]}])
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth.revoke_key("nohash") is True
+    assert _logged(caplog, "browser sessions") == []
+    assert auth.list_keys() == []
+
+
+def test_set_api_key_refusals_state_the_rule(auth):
+    with pytest.raises(ValueError) as short:
+        auth.set_api_key("short")
+    assert str(short.value) == "API key must be at least 8 characters long."
+    with pytest.raises(ValueError) as bad:
+        auth.set_api_key("key with spaces")
+    assert str(bad.value) == (
+        "API key must use only letters, numbers, '-' and '_' (the characters "
+        "'localm key generate' produces). Spaces, punctuation, and non-English "
+        "letters cannot be sent reliably in an HTTP Authorization header, so "
+        "most clients would fail to authenticate with such a key.")
+
+
+def test_set_api_key_writes_the_owner_key_through_the_retrying_writer(auth, monkeypatch):
+    seen = []
+    monkeypatch.setattr(auth, "_atomic_write_private",
+                        lambda path, text, **kw: seen.append((path, text, kw)))
+    auth.set_api_key("owner-key-123")
+    assert [(t, kw) for p, t, kw in seen if p == auth.key_file()] == [
+        ("owner-key-123\n", {"retrying": True})]
+
+
+def test_set_api_key_creates_a_nested_new_home(auth, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "a" / "b"))
+    auth.set_api_key("owner-key-123")
+    assert auth.key_file() == tmp_path / "a" / "b" / "auth.key"
+    assert auth.get_api_key() == "owner-key-123"
+
+
+def _raw_keystore(auth):
+    import json
+    return json.loads(auth.keystore_file().read_text(encoding="utf-8"))
+
+
+def test_alg_marker_lands_on_the_verified_legacy_record_only(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    _write_keystore(auth, [
+        {"id": "l1", "hash": _sha256_hex("legacy-token-one"), "scopes": ["chat"]},
+        {"id": "l2", "hash": _sha256_hex("legacy-token-two"), "scopes": ["chat"]}])
+    assert auth.verify("legacy-token-two") == {"chat"}
+    first, second = _raw_keystore(auth)
+    assert "alg" not in first
+    assert second["alg"] == auth._ALG_FAST
+
+
+def test_alg_marker_never_overwrites_a_declared_alg(auth):
+    _write_keystore(auth, [{"id": "k1", "hash": "x", "alg": auth._ALG_KDF}])
+    auth._mark_record_alg("k1", auth._ALG_FAST)
+    assert _raw_keystore(auth) == [{"id": "k1", "hash": "x", "alg": auth._ALG_KDF}]
+
+
+def test_a_failed_alg_marker_stamp_is_logged_not_raised(auth, caplog):
+    import localm.config as cfg
+    path = auth.keystore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{corrupt", encoding="utf-8")
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        auth._mark_record_alg("k1", auth._ALG_FAST)
+    [r] = _logged(caplog, "hash-alg marker")
+    assert r.msg == ("could not stamp the hash-alg marker on key %s (%s); it "
+                     "still verifies, the upgrade is retried next time")
+    assert len(r.args) == 2
+    assert r.args[0] == "k1"
+    assert isinstance(r.args[1], cfg.ConfigUnreadable)
+
+
+def test_an_owner_kdf_file_stamped_newer_is_reported_as_the_owner_record_file(auth, caplog):
+    import json
+    path = auth.owner_kdf_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"v": 2, "records": [{"x": 1}]}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth._load_owner_kdf() == []
+    [r] = _logged(caplog, "its records are not used")
+    assert r.msg == ("%s; its records are not used and a fresh derivation "
+                     "record is minted")
+    assert str(r.args[0]).startswith(
+        f"owner key record file {path} has format version 2,")
+
+
+def _non_utf8_locale(monkeypatch):
+    """Make a text read with no explicit encoding decode as latin-1, the way it
+    does under a non-UTF-8 locale."""
+    import io
+    real = io.text_encoding
+
+    def text_encoding(encoding, stacklevel=2):
+        return "latin-1" if encoding is None else real(encoding)
+    monkeypatch.setattr(io, "text_encoding", text_encoding)
+
+
+def test_a_utf8_keystore_reads_the_same_under_a_non_utf8_locale(auth, monkeypatch):
+    import json
+    path = auth.keystore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(json.dumps([{"id": "k1", "name": "café", "hash": "x"}],
+                                ensure_ascii=False).encode("utf-8"))
+    _non_utf8_locale(monkeypatch)
+    assert [k["name"] for k in auth.list_keys()] == ["café"]
+
+
+def test_a_utf8_owner_kdf_file_reads_the_same_under_a_non_utf8_locale(auth, monkeypatch):
+    import json
+    path = auth.owner_kdf_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(json.dumps({"v": 1, "records": [{"note": "café"}]},
+                                ensure_ascii=False).encode("utf-8"))
+    _non_utf8_locale(monkeypatch)
+    assert auth._load_owner_kdf() == [{"note": "café"}]

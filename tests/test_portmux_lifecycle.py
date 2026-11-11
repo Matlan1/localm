@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import signal
 import socket
 import ssl
@@ -26,6 +27,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 
 import pytest
 
@@ -484,6 +486,434 @@ def test_serve_async_tls_skips_the_wakeup_task_off_windows(tmp_path, monkeypatch
     asyncio.run(go())
 
 
+class _ModuleView(types.ModuleType):
+    """A stand-in for module *real* inside portmux: every attribute comes from
+    *real* except the ones given as *overrides*."""
+
+    def __init__(self, real, **overrides):
+        super().__init__(real.__name__)
+        self._real = real
+        self.__dict__.update(overrides)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _record_portmux_sleeps(monkeypatch, platform):
+    """Run portmux with sys.platform reading *platform* and every
+    asyncio.sleep it makes recorded. Returns the list of recorded delays."""
+    delays = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        delays.append(delay)
+        return await real_sleep(delay, *args, **kwargs)
+    monkeypatch.setattr(portmux, "asyncio", _ModuleView(asyncio, sleep=sleep))
+    monkeypatch.setattr(portmux, "sys", _ModuleView(sys, platform=platform))
+    return delays
+
+
+def _record_internal_servers(monkeypatch):
+    """Replace uvicorn.Server with a real subclass that records each instance.
+    Returns the list of instances."""
+    import uvicorn as uvicorn_mod
+    started = []
+
+    class _RecordingServer(uvicorn_mod.Server):
+        def __init__(self, config):
+            super().__init__(config)
+            started.append(self)
+
+    monkeypatch.setattr(uvicorn_mod, "Server", _RecordingServer)
+    return started
+
+
+@pytest.fixture
+def _uvicorn_log_levels():
+    """Restore the uvicorn loggers' levels after the test."""
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi")
+    saved = {name: logging.getLogger(name).level for name in names}
+    yield
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+
+
+def _start_serve(use_tls, tmp_path, port, log_level="warning"):
+    if use_tls:
+        cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+        coro = portmux._serve_async(_tiny_asgi_app, "127.0.0.1", port, cert, key, log_level)
+    else:
+        coro = portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, log_level)
+    return asyncio.ensure_future(coro)
+
+
+async def _request(port, use_tls, tmp_path, payload, timeout=10):
+    """Send *payload* to *port* (over TLS when *use_tls*) and return the whole
+    reply."""
+    kwargs = {}
+    if use_tls:
+        ctx = ssl.create_default_context(cafile=str(tls.ca_cert_path(tmp_path)))
+        kwargs = {"ssl": ctx, "server_hostname": "127.0.0.1"}
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, **kwargs)
+    try:
+        writer.write(payload)
+        await writer.drain()
+        return await asyncio.wait_for(reader.read(-1), timeout=timeout)
+    finally:
+        writer.close()
+
+
+_GET = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_the_internal_server_gets_an_ephemeral_port_the_log_level_and_a_bounded_stop(
+        use_tls, tmp_path, monkeypatch, _uvicorn_log_levels):
+    started = _record_internal_servers(monkeypatch)
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(use_tls, tmp_path, port, log_level="error")
+        try:
+            await _wait_connectable(port)
+            reply = await _request(port, use_tls, tmp_path, _GET)
+            assert reply.endswith(b"lifecycle-ok")
+            (server,) = started
+            config = server.config
+            assert config.port == 0
+            assert config.log_level == "error"
+            assert config.timeout_graceful_shutdown == portmux.GRACEFUL_SHUTDOWN_TIMEOUT
+            assert logging.getLogger("uvicorn.error").level == logging.ERROR
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_the_internal_server_is_told_to_exit_when_serving_ends(
+        use_tls, tmp_path, monkeypatch):
+    started = _record_internal_servers(monkeypatch)
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(use_tls, tmp_path, port)
+        await _wait_connectable(port)
+        await _request(port, use_tls, tmp_path, _GET)
+        (server,) = started
+        assert server.should_exit is False
+        await _shutdown(task)
+        assert task.done()
+        assert server.should_exit is True
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_the_public_socket_is_bound_to_the_requested_host(use_tls, tmp_path, monkeypatch):
+    bound = []
+    real_create = portmux.create_listen_socket
+
+    def recording_create(host, port):
+        sock = real_create(host, port)
+        bound.append(sock.getsockname()[:2])
+        return sock
+    monkeypatch.setattr(portmux, "create_listen_socket", recording_create)
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(use_tls, tmp_path, port)
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while not bound and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
+            assert bound == [("127.0.0.1", port)]
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_the_demux_polls_the_internal_server_startup_in_short_steps(
+        use_tls, tmp_path, monkeypatch):
+    delays = _record_portmux_sleeps(monkeypatch, "linux")
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(use_tls, tmp_path, port)
+        try:
+            await _wait_connectable(port)
+            reply = await _request(port, use_tls, tmp_path, _GET)
+            assert reply.endswith(b"lifecycle-ok")
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+    assert delays, "the demux never waited for the internal server to start"
+    assert max(delays) <= 0.05, delays
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+@pytest.mark.parametrize("use_tls", [False, True], ids=["plain", "tls"])
+def test_a_periodic_wakeup_runs_while_serving_on_windows_only(
+        use_tls, platform, tmp_path, monkeypatch):
+    delays = _record_portmux_sleeps(monkeypatch, platform)
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(use_tls, tmp_path, port)
+        try:
+            await _wait_connectable(port)
+            reply = await _request(port, use_tls, tmp_path, _GET)
+            assert reply.endswith(b"lifecycle-ok")
+            await asyncio.sleep(0.05)
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+    assert (0.5 in delays) is (platform == "win32"), delays
+
+
+def test_a_tls_server_redirects_plain_http_to_its_own_port_when_host_has_none(tmp_path):
+    async def go():
+        port = _free_port()
+        task = _start_serve(True, tmp_path, port)
+        try:
+            await _wait_connectable(port)
+            reply = await _request(
+                port, False, tmp_path,
+                b"GET /some/page HTTP/1.1\r\nHost: example.test\r\n\r\n")
+            assert reply.startswith(b"HTTP/1.1 308")
+            assert (f"\r\nLocation: https://example.test:{port}/some/page\r\n".encode()
+                    in reply), reply
+        finally:
+            await _shutdown(task)
+    asyncio.run(go())
+
+
+def test_tls_on_the_plain_port_is_noticed_once_with_the_port_then_counted(monkeypatch):
+    notices = []
+    debug = []
+    monkeypatch.setattr(portmux, "_safe_notice", notices.append)
+    monkeypatch.setattr(portmux, "_log",
+                        types.SimpleNamespace(debug=lambda *args: debug.append(args)))
+
+    async def go():
+        port = _free_port()
+        task = _start_serve(False, None, port)
+        try:
+            await _wait_connectable(port)
+            for _ in range(3):
+                assert await _request(port, False, None, b"\x16") == b""
+            return port
+        finally:
+            await _shutdown(task)
+    port = asyncio.run(go())
+    assert len(notices) == 1, notices
+    assert notices[0].startswith(
+        f"A client tried to use HTTPS on the plain-HTTP port {port}. ")
+    assert f"Open http://127.0.0.1:{port} explicitly" in notices[0]
+    assert notices[0].endswith(
+        "(Further occurrences this run are logged at debug level.)")
+    assert debug[0] == ("%s", notices[0])
+    again = [args for args in debug if args[0].startswith("TLS handshake")]
+    assert again == [
+        ("TLS handshake on the plain-HTTP port %d again (count=%d)", port, 2),
+        ("TLS handshake on the plain-HTTP port %d again (count=%d)", port, 3),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+#  _redirect_to_https / _handle_conn / stopping: driven directly
+# --------------------------------------------------------------------------- #
+
+class _RecordingWriter:
+    """A stand-in for asyncio.StreamWriter that keeps what is written."""
+
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data):
+        self.data += data
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def can_write_eof(self):
+        return False
+
+
+def _reader_with(data: bytes, eof: bool = True) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    reader.feed_data(data)
+    if eof:
+        reader.feed_eof()
+    return reader
+
+
+def _redirect(request: bytes, public_port: int = 8443) -> bytes:
+    """The reply _redirect_to_https writes for *request* on *public_port*."""
+    async def go():
+        writer = _RecordingWriter()
+        await portmux._redirect_to_https(request[:1], _reader_with(request[1:]),
+                                         writer, public_port)
+        return bytes(writer.data)
+    return asyncio.run(go())
+
+
+def _parse(reply: bytes):
+    head, body = reply.split(b"\r\n\r\n", 1)
+    status, *lines = head.decode("latin-1").split("\r\n")
+    headers = dict(line.split(": ", 1) for line in lines)
+    return status, headers, body
+
+
+def test_the_redirect_is_a_308_with_a_page_that_links_the_https_location():
+    status, headers, body = _parse(
+        _redirect(b"GET /page HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+    location = "https://example.test:8443/page"
+    assert status == "HTTP/1.1 308 Permanent Redirect"
+    assert headers == {"Location": location,
+                       "Content-Type": "text/html; charset=utf-8",
+                       "Content-Length": str(len(body)),
+                       "Connection": "close"}
+    assert body.startswith(
+        b'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        b'<meta http-equiv="refresh" content="0;url=' + location.encode() + b'">')
+    assert f'href="{location}">{location}</a>'.encode() in body
+
+
+@pytest.mark.parametrize("host_line, authority", [
+    ("Host: example.test:9000", "example.test:9000"),
+    ("Host:example.test", "example.test:8443"),
+    ("Host: [::1]", "[::1]:8443"),
+    ("Host: [::1]:9000", "[::1]:9000"),
+])
+def test_the_redirect_keeps_the_hosts_port_and_adds_the_listening_port_when_missing(
+        host_line, authority):
+    request = f"GET /p HTTP/1.1\r\n{host_line}\r\n\r\n".encode()
+    _status, headers, _body = _parse(_redirect(request))
+    assert headers["Location"] == f"https://{authority}/p"
+
+
+@pytest.mark.parametrize("request_line, path", [
+    ("GET /p", "/p"),
+    ("GET  /p HTTP/1.1", "/"),
+    ("GET", "/"),
+])
+def test_the_redirect_keeps_only_a_path_in_the_second_space_separated_field(
+        request_line, path):
+    request = f"{request_line}\r\nHost: example.test\r\n\r\n".encode()
+    _status, headers, _body = _parse(_redirect(request))
+    assert headers["Location"] == f"https://example.test:8443{path}"
+
+
+def test_the_redirect_page_escapes_quotes_in_the_location():
+    _status, headers, body = _parse(
+        _redirect(b"GET /a\"b'c HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+    assert headers["Location"] == "https://example.test:8443/a\"b'c"
+    assert b'href="https://example.test:8443/a&quot;b&#x27;c"' in body
+
+
+@pytest.mark.parametrize("raw", [
+    b"GET / HTTP/1.0\r\n\r\n",
+    b"GET / HTTP/1.1\r\nHost: not a host\r\n\r\n",
+])
+def test_a_request_without_a_usable_host_gets_a_400_explaining_https(raw):
+    status, headers, body = _parse(_redirect(raw))
+    assert status == "HTTP/1.1 400 Bad Request"
+    assert "Location" not in headers
+    assert headers["Content-Length"] == str(len(body))
+    assert b"Reopen this address with <b>https://</b> in front." in body
+    assert body.startswith(
+        b'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        b"<title>localm - secure connection</title></head>")
+
+
+def test_headers_cut_short_by_the_client_still_redirect_on_what_arrived():
+    status, headers, _ = _parse(
+        _redirect(b"GET /p HTTP/1.1\r\nHost: example.test\r\n"))
+    assert status == "HTTP/1.1 308 Permanent Redirect"
+    assert headers["Location"] == "https://example.test:8443/p"
+
+
+def test_a_client_that_stops_sending_headers_is_answered_after_five_seconds(monkeypatch):
+    timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def wait_for(aw, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(aw, timeout=0.05)
+    monkeypatch.setattr(portmux, "asyncio", _ModuleView(asyncio, wait_for=wait_for))
+
+    async def go():
+        writer = _RecordingWriter()
+        reader = _reader_with(b"ET / HTTP/1.1\r\nHost: example.test\r\n", eof=False)
+        await real_wait_for(
+            portmux._redirect_to_https(b"G", reader, writer, 8443), timeout=10)
+        return bytes(writer.data)
+    status, _headers, _body = _parse(asyncio.run(go()))
+    assert timeouts == [5]
+    assert status == "HTTP/1.1 400 Bad Request"
+
+
+def test_a_single_plain_byte_on_the_tls_port_still_gets_an_answer():
+    async def go():
+        writer = _RecordingWriter()
+        await portmux._handle_conn(_reader_with(b"G"), writer, 1, 8443)
+        return writer
+    writer = asyncio.run(go())
+    assert bytes(writer.data).startswith(b"HTTP/1.1 400 Bad Request\r\n")
+    assert writer.closed
+
+
+def test_the_redirect_works_in_python_development_mode():
+    import os
+    import subprocess
+    from pathlib import Path
+    code = (
+        "import asyncio\n"
+        "from localm import portmux\n"
+        "class W:\n"
+        "    data = b''\n"
+        "    def write(self, d): self.data += d\n"
+        "    async def drain(self): pass\n"
+        "async def go():\n"
+        "    r = asyncio.StreamReader()\n"
+        "    r.feed_data(b'ET /\\xff HTTP/1.1\\r\\nHost: example.test\\r\\n\\r\\n')\n"
+        "    r.feed_eof()\n"
+        "    w = W()\n"
+        "    await portmux._redirect_to_https(b'G', r, w, 8443)\n"
+        "    print(w.data.split(b'\\r\\n')[0].decode())\n"
+        "asyncio.run(go())\n"
+    )
+    env = dict(os.environ)
+    root = str(Path(portmux.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (root, env.get("PYTHONPATH")) if p)
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    done = subprocess.run([sys.executable, "-X", "dev", "-c", code], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=120, **kwargs)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "HTTP/1.1 308 Permanent Redirect", done.stdout
+
+
+def test_stopping_reads_a_server_without_a_should_exit_flag_as_not_stopping(monkeypatch):
+    monkeypatch.setattr(portmux, "_servers", weakref.WeakSet())
+
+    class _Bare:
+        pass
+
+    class _Exiting:
+        should_exit = True
+    bare = portmux._register_server(_Bare())
+    assert portmux.stopping() is False
+    exiting = portmux._register_server(_Exiting())
+    assert portmux.stopping() is True
+    assert bare in portmux._servers and exiting in portmux._servers
+
+
 # --------------------------------------------------------------------------- #
 #  run_server: crash-guard wiring, instance_id extraction, failure handling
 # --------------------------------------------------------------------------- #
@@ -732,6 +1162,31 @@ def test_the_prepared_socket_bind_applies_an_earlier_stop(_stop_state, monkeypat
             sock.close()
     assert fake.exits == [True], "a stop requested earlier in the run did not reach the server"
     assert portmux._stop_hooks == []
+
+
+def test_the_prepared_socket_bind_configures_the_requested_host_and_port(
+        _stop_state, monkeypatch):
+    sockets = []
+
+    def loopback_socket(host, port):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sockets.append((host, port, sock))
+        return sock
+    monkeypatch.setattr(portmux, "create_listen_socket", loopback_socket)
+    fake = _fake_uvicorn("started")
+
+    try:
+        portmux._run_uvicorn_on_socket(fake, _bare_app, "localhost", 9012,
+                                       log_level="warning")
+    finally:
+        for _host, _port, sock in sockets:
+            sock.close()
+
+    assert [(h, p) for h, p, _s in sockets] == [("localhost", 9012)]
+    ((kwargs, run_sockets),) = fake.runs
+    assert run_sockets == [sockets[0][2]]
+    assert (kwargs["host"], kwargs["port"]) == ("localhost", 9012)
 
 
 def test_a_stop_left_from_a_finished_run_does_not_stop_a_bind(_stop_state, monkeypatch):
@@ -1107,6 +1562,27 @@ def test_track_server_stops_that_server_until_its_serve_task_is_done(_stop_state
         assert portmux._stop_hooks == []
 
     asyncio.run(go())
+
+
+def test_a_tracked_server_no_longer_counts_as_stopping_once_its_serve_is_done(
+        _stop_state, monkeypatch):
+    monkeypatch.setattr(portmux, "_servers", weakref.WeakSet())
+
+    class _Server:
+        should_exit = False
+    server = portmux._register_server(_Server())
+
+    async def go():
+        serve_task = asyncio.get_running_loop().create_future()
+        portmux._track_server(server, serve_task)
+        portmux._stop_hooks[0]()
+        assert portmux.stopping() is True
+        serve_task.set_result(None)
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert server not in portmux._servers
+    assert portmux.stopping() is False, "a finished server still reads as stopping"
 
 
 def test_track_server_applies_a_stop_requested_earlier_in_the_run(

@@ -143,3 +143,226 @@ def test_loaded_config_does_not_alias_default_config(config_file):
     loaded = cfg.load_config()
     loaded["key_presets"].append({"name": "evil", "scopes": []})
     assert all(p.get("name") != "evil" for p in cfg.DEFAULT_CONFIG["key_presets"])
+
+
+# --------------------------------------------------------------------------- #
+#  Migration table, save log and model references                              #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setattr(cfg, "HOME_DIR", h)
+    monkeypatch.setattr(cfg, "MODELS_DIR", h / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", h / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
+    monkeypatch.setattr(cfg, "_warned_unknown_stored_keys", set())
+    monkeypatch.setattr(cfg, "_warned_newer_config_version", set())
+    return h
+
+
+def _write(path, data) -> None:
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _saved_events(home) -> list:
+    log = home / "logs" / "management.jsonl"
+    if not log.exists():
+        return []
+    events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    return [e for e in events if e["kind"] == "config_saved"]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (1, 1), (7, 7), (0, 0), (-1, 0), (True, 0), ("2", 0), (2.0, 0), (None, 0)])
+def test_stored_config_version_accepts_only_plain_non_negative_ints(raw, expected):
+    assert cfg._stored_config_version({cfg.CONFIG_VERSION_KEY: raw}) == expected
+
+
+def test_stored_config_version_is_zero_when_absent():
+    assert cfg._stored_config_version({"max_tokens": 5}) == 0
+
+
+def test_config_rename_builds_a_rename_step():
+    step = cfg._config_rename(("a",), ("b",))
+    assert step == {"kind": "rename", "old": ("a",), "new": ("b",), "value_map": None}
+
+
+def test_rename_step_moves_the_value_into_a_nested_path():
+    stored = {"x": 5, "keep": 1}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("a", "b", "c")))
+    assert stored == {"keep": 1, "a": {"b": {"c": 5}}}
+
+
+def test_rename_step_moves_a_nested_value_and_applies_its_value_map():
+    stored = {"p": {"q": 3}}
+    cfg._apply_config_step(
+        stored, cfg._config_rename(("p", "q"), ("p", "r"), lambda v: v * 10))
+    assert stored == {"p": {"r": 30}}
+
+
+def test_rename_step_without_value_map_keeps_the_value():
+    stored = {"x": [1, 2]}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("y",)))
+    assert stored == {"y": [1, 2]}
+
+
+def test_rename_step_never_overwrites_an_existing_target():
+    stored = {"x": 1, "y": 2}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("y",)))
+    assert stored == {"y": 2}
+
+
+def test_rename_step_with_absent_source_changes_nothing():
+    stored = {"y": 2, "p": "not a dict"}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("z",)))
+    cfg._apply_config_step(stored, cfg._config_rename(("p", "q"), ("z",)))
+    assert stored == {"y": 2, "p": "not a dict"}
+
+
+def test_remove_step_drops_the_key():
+    stored = {"gone": 1, "keep": 2}
+    cfg._apply_config_step(stored, cfg._config_remove(("gone",)))
+    assert stored == {"keep": 2}
+
+
+def test_rename_step_into_an_existing_block_keeps_its_other_keys():
+    stored = {"x": 5, "a": {"other": 1}}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("a", "new")))
+    assert stored == {"a": {"other": 1, "new": 5}}
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.warnings = []
+
+    def warning(self, fmt, *args):
+        self.warnings.append(fmt % args)
+
+
+def test_a_newer_config_version_warning_names_the_file_and_both_versions(
+        home, monkeypatch):
+    rec = _RecordingLogger()
+    monkeypatch.setattr(cfg, "_logger", lambda: rec)
+    newer = cfg.CURRENT_CONFIG_VERSION + 1
+    cfg._apply_config_migrations({"max_tokens": 5, cfg.CONFIG_VERSION_KEY: newer})
+    assert rec.warnings == [
+        f"config.json has config_version {newer}, newer than this build understands "
+        f"({cfg.CURRENT_CONFIG_VERSION}); it is read as is and not rewritten."]
+
+
+def test_an_unknown_stored_key_warning_names_the_file_and_the_key(home, monkeypatch):
+    rec = _RecordingLogger()
+    monkeypatch.setattr(cfg, "_logger", lambda: rec)
+    cfg._warn_unknown_stored_keys({"max_tokens": 5, "zz_unknown_key": 1})
+    assert rec.warnings == [
+        "config.json holds the key 'zz_unknown_key', which this build does not use; "
+        "its value is ignored and the key is kept in the file."]
+
+
+def test_migrations_map_a_stored_boolean_remote_image_value():
+    stored = {"gui_proxy_remote_images": True}
+    cfg._apply_config_migrations(stored)
+    assert stored == {"gui_proxy_remote_images": cfg.REMOTE_IMAGE_ON,
+                      cfg.CONFIG_VERSION_KEY: cfg.CURRENT_CONFIG_VERSION}
+
+
+def test_migrations_at_the_current_version_neither_change_nor_warn(home):
+    stored = {"max_tokens": 5, cfg.CONFIG_VERSION_KEY: cfg.CURRENT_CONFIG_VERSION}
+    cfg._apply_config_migrations(stored)
+    assert stored == {"max_tokens": 5,
+                      cfg.CONFIG_VERSION_KEY: cfg.CURRENT_CONFIG_VERSION}
+    assert cfg._warned_newer_config_version == set()
+
+
+def test_migrations_leave_a_newer_version_untouched_and_note_it(home):
+    newer = cfg.CURRENT_CONFIG_VERSION + 1
+    stored = {"gui_proxy_remote_images": True, cfg.CONFIG_VERSION_KEY: newer}
+    cfg._apply_config_migrations(stored)
+    assert stored == {"gui_proxy_remote_images": True, cfg.CONFIG_VERSION_KEY: newer}
+    assert cfg._warned_newer_config_version == {newer}
+
+
+def test_config_needs_migration_only_when_a_step_changes_a_setting():
+    assert cfg._config_needs_migration({"gui_proxy_remote_images": True}) is True
+    assert cfg._config_needs_migration({"max_tokens": 5}) is False
+    assert cfg._config_needs_migration(
+        {"max_tokens": 5, cfg.CONFIG_VERSION_KEY: 0}) is False
+    assert cfg._config_needs_migration({}) is False
+
+
+def test_config_needs_migration_does_not_mutate_a_nested_stored_block(monkeypatch):
+    monkeypatch.setattr(cfg, "_CONFIG_STEPS",
+                        (cfg._config_rename(("plugins", "x", "a"), ("plugins", "x", "b")),))
+    monkeypatch.setattr(cfg, "CURRENT_CONFIG_VERSION", 1)
+    stored = {"plugins": {"x": {"a": 1}}}
+    assert cfg._config_needs_migration(stored) is True
+    assert stored == {"plugins": {"x": {"a": 1}}}
+
+
+def test_unknown_stored_keys_are_noted_and_known_ones_are_not(home):
+    cfg._warn_unknown_stored_keys({
+        cfg.CONFIG_VERSION_KEY: 1, "max_tokens": 5,
+        "plugins_first_use_done": ["tts"], "zz_unknown_key": 1})
+    assert cfg._warned_unknown_stored_keys == {"zz_unknown_key"}
+
+
+def test_load_rewrites_a_file_whose_settings_were_migrated(home):
+    _write(cfg.CONFIG_FILE, {"gui_proxy_remote_images": True})
+    assert cfg.load_config()["gui_proxy_remote_images"] == cfg.REMOTE_IMAGE_ON
+    assert _stored(cfg.CONFIG_FILE) == {
+        "gui_proxy_remote_images": cfg.REMOTE_IMAGE_ON,
+        cfg.CONFIG_VERSION_KEY: cfg.CURRENT_CONFIG_VERSION}
+
+
+def test_changed_config_keys_names_added_removed_and_changed_keys():
+    before = {"same": 1, "a": 1, "b": 2, "y": None, cfg.CONFIG_VERSION_KEY: 0}
+    after = {"same": 1, "b": 3, "c": 4, "x": None, cfg.CONFIG_VERSION_KEY: 1}
+    assert cfg._changed_config_keys(before, after) == ["a", "b", "c", "x", "y"]
+
+
+def test_save_logs_only_the_keys_that_changed_on_disk(home):
+    _write(cfg.CONFIG_FILE, {"max_tokens": 1234})
+    c = cfg.load_config()
+    c["port"] = 9911
+    cfg.save_config(c)
+    (event,) = _saved_events(home)
+    assert event["keys"] == ["port"]
+
+
+def test_save_with_nothing_changed_logs_nothing(home):
+    _write(cfg.CONFIG_FILE, {"max_tokens": 1234})
+    cfg.save_config(cfg.load_config())
+    assert _saved_events(home) == []
+
+
+def test_update_config_logs_a_change_inside_a_nested_block(home):
+    cfg.update_config(lambda c: c["plugins"].setdefault("demo", {}).update(k=1))
+    (event,) = _saved_events(home)
+    assert event["keys"] == ["plugins"]
+
+
+def _renamed_model_home(home) -> None:
+    _write(cfg.REGISTRY_FILE, {"new-name": {"id": "id-abc", "path": "m.gguf"}})
+    _write(cfg.CONFIG_FILE, {"default_model": "old-name",
+                             "model_refs": {"old-name": "id-abc"}})
+
+
+def test_load_follows_a_stored_model_reference_to_the_current_name(home):
+    _renamed_model_home(home)
+    loaded = cfg.load_config()
+    assert loaded["default_model"] == "new-name"
+    assert "model_refs" not in loaded
+
+
+def test_update_config_follows_a_stored_model_reference_to_the_current_name(home):
+    _renamed_model_home(home)
+    seen = {}
+    result = cfg.update_config(lambda c: seen.update(c))
+    assert seen["default_model"] == "new-name"
+    assert result["default_model"] == "new-name"
+    assert "model_refs" not in seen
+    assert _stored(cfg.CONFIG_FILE) == {
+        "default_model": "new-name", "model_refs": {"new-name": "id-abc"},
+        cfg.CONFIG_VERSION_KEY: cfg.CURRENT_CONFIG_VERSION}
