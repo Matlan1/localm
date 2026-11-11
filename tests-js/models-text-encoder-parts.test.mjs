@@ -54,7 +54,7 @@ test("a music part shows its role and the model it belongs to", async () => {
   assert.deepEqual(badges, ["ADaMoSHiFiGANV1", "part of ACE-Step"]);
 });
 
-test("the embedding picker lists embedding models and chat models but never a text encoder", async () => {
+test("the embedding picker lists embedding models but never a text encoder", async () => {
   const models = [
     { name: "bge-small", model_type: "embedding" },
     { name: "umt5-xxl-encoder-Q4_K_M", model_type: "text-encoder" },

@@ -139,7 +139,7 @@ test("a poll answered after a push does not put the older reading back", async (
 
 test("a stream that cannot be opened falls back to polling, logs once, and is retried with a growing delay", async () => {
   const p = makePage({ liveHandler: async () => ({ ok: false, status: 404, statusText: "Not Found" }) });
-  runScript(p.win, "LIVE_BACKOFF_MIN_MS = 20; LIVE_BACKOFF_MAX_MS = 1000;");
+  runScript(p.win, "LIVE_BACKOFF_MIN_MS = 100; LIVE_BACKOFF_MAX_MS = 5000;");
   p.win.startHwStats(30);
   assert.ok(await waitFor(() => p.count("/api/live") >= 4, 3000), `only ${p.count("/api/live")} attempts`);
   assert.ok(p.count("/api/stats") >= 3, "polling did not carry the status bar");
