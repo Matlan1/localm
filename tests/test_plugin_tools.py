@@ -5,9 +5,15 @@ Regression guard for the audit finding that plugin `tool_exports` were parsed
 and displayed but never wired into the agent (the README claim was vapor).
 """
 
+import os
+import pathlib
 import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from localm.plugins import engine
 from localm.plugins.coder import tools as coder_tools
 from localm.plugins.coder.plugin_tools import register_plugin_tools
 from localm.plugins.coder.tools import ToolResult
@@ -108,6 +114,39 @@ class TestDottedEntryModule:
             names, warns = register_plugin_tools()
             assert names == []
             assert len(warns) == 1 and "not found" in warns[0]
+
+    @pytest.mark.parametrize("entry", ["x./outside.tools:setup", "x.\\\\outside.tools:setup"])
+    def test_a_dotted_entry_with_a_separator_in_a_part_probes_nothing_outside(
+            self, tmp_path, monkeypatch, entry):
+        plugins = tmp_path / "plugins"
+        _make_dotted_plugin(plugins, entry)
+        _isolate(tmp_path, monkeypatch, root=plugins)
+        probed = []
+        in_lookup = []
+        real_is_file = pathlib.Path.is_file
+        real_lookup = engine._entry_module_file
+
+        def spy(self, *a, **k):
+            if in_lookup:
+                probed.append(Path(os.path.abspath(self)))
+            return real_is_file(self, *a, **k)
+
+        def lookup(base, mod_name):
+            in_lookup.append(True)
+            try:
+                return real_lookup(base, mod_name)
+            finally:
+                in_lookup.pop()
+
+        monkeypatch.setattr(pathlib.Path, "is_file", spy)
+        monkeypatch.setattr(engine, "_entry_module_file", lookup)
+        inside = Path(os.path.abspath(plugins / "dotted"))
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warns = register_plugin_tools()
+        assert names == []
+        assert len(warns) == 1 and "not found" in warns[0]
+        assert probed
+        assert all(p.is_relative_to(inside) for p in probed), probed
 
 
 class TestRegisterPluginTools:
