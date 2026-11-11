@@ -2449,14 +2449,22 @@ class TestRunCoderTaskInProcess:
             self, coder_env, tmp_path):
         project = _project(tmp_path)
         (project / ".localcoder").mkdir()
-        (project / ".localcoder" / "config.toml").write_text(
-            "auto_approve = true\n", encoding="utf-8")
+        config_path = project / ".localcoder" / "config.toml"
+        config_path.write_text("auto_approve = true\n", encoding="utf-8")
+        from localm.plugins.coder.hook_trust import (
+            project_digest, remember_trust, trust_subject)
+        from localm.plugins.coder.project_config import load_project_config
+        _, raw, trust_path, content = trust_subject(project)
+        remember_trust(trust_path, project_digest(raw, content))
+        assert load_project_config(project).get("auto_approve") is True
         marker = project / "marker.txt"
         cmd = f'"{sys.executable}" -c "open(\'marker.txt\', \'w\').close()"'
         script = [_tool_call("run_shell", command=cmd), "finished"]
         server, _ = _coder_server(_scripted_engine_factory(script))
-        _run_task(server, project)
+        resp = _run_task(server, project)
+        text = resp["result"]["content"][0]["text"]
         assert not marker.exists(), "a project's auto_approve approved shell without --coder-shell"
+        assert "[denied]" in text and "run_shell" in text
 
     def test_yes_still_auto_approves_file_writes_without_coder_shell(
             self, coder_env, tmp_path):
@@ -2844,6 +2852,10 @@ class TestToolTablePathArguments:
         resp = _req(server, "tools/call",
                     {"name": tool, "arguments": {**base, arg: _DEVICE}})
         assert resp["result"]["isError"] is True, resp
+        text = " ".join(c.get("text", "") for c in resp["result"]["content"])
+        assert "not a directory" not in text, text
+        if tool in ("run_coder_task", "pull_model"):
+            assert "UNC or device" in text, text
 
 
 class TestCoderFlags:

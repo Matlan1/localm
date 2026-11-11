@@ -80,6 +80,24 @@ def test_the_chat_plugin_registers_its_hook_on_load_and_removes_it_on_unload(cle
     assert "saved chats" not in clean_hooks
 
 
+class _JobsHost(_Host):
+    def __init__(self):
+        self.startup = []
+
+    def on_startup(self, fn):
+        self.startup.append(fn)
+
+
+def test_the_jobs_plugin_registers_its_hook_on_load_and_removes_it_on_unload(clean_hooks):
+    from localm.plugins.builtin.jobs import plug
+    plug.register(_JobsHost())
+    try:
+        assert clean_hooks.get("scheduled jobs") is plug.rename_notes
+    finally:
+        plug.unregister()
+    assert "scheduled jobs" not in clean_hooks
+
+
 def test_the_registry_module_names_no_plugin():
     src = Path(registry.__file__).read_text(encoding="utf-8")
     assert "localm.plugins" not in src

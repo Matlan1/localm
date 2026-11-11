@@ -12,6 +12,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -133,6 +134,32 @@ def test_doctor_reports_on_the_server_already_running_for_the_project(
         assert json.loads(res.stdout)["ok"] is True
     else:
         assert "Using the localm already running" in res.stdout
+
+
+def test_a_probe_only_backend_starts_no_server_even_without_no_server(proj, monkeypatch):
+    started = []
+    real_popen = subprocess.Popen
+
+    class Refuse(real_popen):
+        def __init__(self, args, *a, **k):
+            if "gui" in map(str, args):
+                started.append(args)
+                raise RuntimeError("a model server start was attempted")
+            super().__init__(args, *a, **k)
+
+    monkeypatch.setattr(subprocess, "Popen", Refuse)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    try:
+        with click.Context(_main.main):
+            backend = _main._build_backend(
+                None, None, "m1", "localm", False, free_port, False, False, proj, False,
+                probe_only=True)
+    except BaseException as exc:
+        backend = exc
+    assert started == []
+    assert str(free_port) in str(getattr(backend, "_base_url", backend))
 
 
 def test_doctor_runs_no_agent(proj, models_server, monkeypatch):
