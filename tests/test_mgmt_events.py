@@ -1,4 +1,4 @@
-"""The management-event log: closed kinds, content-free lines, every session mode,
+"""The management-event log: closed kinds, content-free lines, nothing in privacy mode,
 rotation, write failures, and the key and login emitters."""
 
 import json
@@ -18,6 +18,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setenv("LOCALM_MODE", "full")
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
@@ -81,13 +82,34 @@ def test_write_failure_returns_false_and_warns(home, monkeypatch, caplog):
     assert any("management event log" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("mode", ["privacy", "full"])
-def test_written_in_every_session_mode(home, monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["log", "full"])
+def test_written_in_log_and_full_mode(home, monkeypatch, mode):
+    monkeypatch.delenv("LOCALM_MODE")
     (home / "config.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
     import localm.auth as auth
     rec = auth.create_key("dev", ["chat"])
     (ev,) = _events(home)
     assert ev["kind"] == "key_minted" and ev["principal"] == rec["id"]
+
+
+@pytest.mark.parametrize("config", [{"mode": "privacy"}, {}, None, "not json"])
+def test_privacy_mode_writes_nothing(home, monkeypatch, config):
+    monkeypatch.delenv("LOCALM_MODE")
+    if config is not None:
+        (home / "config.json").write_text(
+            config if isinstance(config, str) else json.dumps(config), encoding="utf-8")
+    import localm.auth as auth
+    rec = auth.create_key("dev", ["chat"])
+    assert auth.revoke_key(rec["id"]) is True
+    assert mgmt_events.record("update_applied", home=home, version_to="9") is False
+    assert not (home / "logs").exists()
+
+
+def test_the_mode_variable_overrides_config(home, monkeypatch):
+    (home / "config.json").write_text(json.dumps({"mode": "full"}), encoding="utf-8")
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    assert mgmt_events.record("update_applied", home=home, version_to="9") is False
+    assert _events(home) == []
 
 
 def test_create_key_writes_one_event_and_never_the_key(home):
@@ -184,10 +206,11 @@ def test_config_save_that_changes_nothing_writes_no_event(home):
 
 
 @pytest.mark.parametrize("mode", ["privacy", "full"])
-def test_config_saved_is_written_in_every_session_mode(home, mode):
+def test_config_saved_is_written_only_outside_privacy_mode(home, monkeypatch, mode):
+    monkeypatch.delenv("LOCALM_MODE")
     (home / "config.json").write_text(json.dumps({"mode": mode}), encoding="utf-8")
     cfg.update_config(lambda c: c.update(max_tokens=1234))
-    assert [e["kind"] for e in _events(home)] == ["config_saved"]
+    assert [e["kind"] for e in _events(home)] == ([] if mode == "privacy" else ["config_saved"])
 
 
 def _plugin_manager(home):

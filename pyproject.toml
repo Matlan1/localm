@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localm"
-version = "0.3.4b1"
+version = "0.3.4b2"
 dynamic = ["scripts"]
 description = "Local AI platform - offline LLM inference, model management, and extensible agent plugins"
 readme = "docs/pypi-readme.md"

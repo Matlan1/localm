@@ -1,12 +1,14 @@
-"""Append-only log of management events, written in every session mode.
+"""Append-only log of management events, written in log and full mode only.
 
 One JSON line per event is appended to ``<data dir>/logs/management.jsonl``; the caller passes the data directory.
 A line holds the time, the event kind, and only these optional fields:
 ``principal`` (a key id or a fixed label, never a key), ``keys`` (the NAMES of
 the config keys a save changed, never their values), ``plugin``,
 ``version_from``, ``version_to`` and ``loopback`` (a failed login's client
-only). No conversation content and no secret is ever written, which is why the
-file is written in privacy mode too.
+only). No conversation content and no secret is ever written. In privacy mode
+(the default) nothing is written: the mode is ``LOCALM_MODE`` when set, else the
+``mode`` key of ``<data dir>/config.json``, else privacy; a config that cannot be
+read counts as privacy.
 
 The file is capped at ``MAX_BYTES``; at the cap it is renamed to
 ``management.jsonl.1`` (replacing the previous rotation) and a new file starts.
@@ -47,6 +49,26 @@ def log_path(home) -> Path:
     return Path(home) / "logs" / FILE_NAME
 
 
+_MODES = ("privacy", "log", "full")
+
+
+def _privacy_mode(home) -> bool:
+    """True when the session mode for the data directory *home* is privacy."""
+    env = os.environ.get("LOCALM_MODE", "").strip().lower()
+    if env in _MODES:
+        return env == "privacy"
+    try:
+        cfg = json.loads((Path(home) / "config.json").read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return True
+    mode = cfg.get("mode") if isinstance(cfg, dict) else None
+    if isinstance(mode, str) and mode.strip().lower() in _MODES:
+        return mode.strip().lower() == "privacy"
+    return True
+
+
 def _text(value) -> str:
     return str(value)[:_MAX_TEXT]
 
@@ -56,13 +78,16 @@ def record(kind: str, *, home, principal: Optional[str] = None,
            version_from: Optional[str] = None, version_to: Optional[str] = None,
            loopback: Optional[bool] = None) -> bool:
     """Append one event line under the data directory *home*. Returns True when
-    written, False when the write failed.
+    written, False when the write failed or the session mode is privacy (nothing
+    is written then).
 
     Raises ValueError for a *kind* outside ``KINDS``. Never raises for an I/O
     failure. Thread-safe; lines are appended whole.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown management event kind: {kind!r}")
+    if _privacy_mode(home):
+        return False
     event: dict = {"ts": time.time(), "kind": kind}
     if principal is not None:
         event["principal"] = _text(principal)

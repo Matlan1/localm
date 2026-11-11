@@ -11,10 +11,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.3.4b1] - 2026-11-11
+## [0.3.4b2] - 2026-11-11
 
 ### Added
-- **A management log records key, login, update and config events in every session mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content, so privacy mode writes it too. It is capped at 1 MB with one earlier file kept.
+- **A management log records key, login, update and config events in log and full mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content. Privacy mode writes nothing. It is capped at 1 MB with one earlier file kept.
 - **A setting lets canvas artifacts open other pages.** "Let canvas artifacts open other pages" (Settings, Chat; `localm config canvas_allow_navigation true`) lets an artifact load any web page in the canvas instead of the canvas closing. It is off by default and only the owner can change it; the page an artifact opens can receive data in its address.
 
 ### Security
