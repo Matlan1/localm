@@ -234,14 +234,18 @@ def test_a_registered_model_set_to_llm_is_still_loadable(env):
 def test_run_with_an_unregistered_embedding_path_exits_1(env, monkeypatch):
     emb = _gguf(env / "enc.gguf", "bert", {"bert.pooling_type": "mean"})
 
-    class _Boom:
-        def __init__(self, *a, **k):
-            raise AssertionError("an Engine was built for an embedding file")
+    built = []
 
-    monkeypatch.setattr("localm.inference.engine.Engine", _Boom)
+    class _Recorder:
+        def __init__(self, *a, **k):
+            built.append((a, k))
+            raise RuntimeError("stub engine stops here")
+
+    monkeypatch.setattr("localm.inference.engine.Engine", _Recorder)
     r = CliRunner().invoke(main, ["run", str(emb), "--no-server", "-p", "hi"])
+    assert built == [], r.output
     assert r.exit_code == 1, r.output
-    assert "embedding" in r.output.lower()
+    assert "cannot chat with it" in " ".join(r.output.split())
 
 
 def test_gui_and_serve_startup_refuse_an_embedding_model_by_name_or_path(env):

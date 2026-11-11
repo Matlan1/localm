@@ -136,3 +136,54 @@ test("a paused resumed download resumes and cancels through its record, not a pl
   assert.equal(posts.at(-1).url, `/api/models/pulls/interrupted/${DL.id}/delete`);
   assert.deepEqual(plain, []);
 });
+
+function captureDelayed(win, ms) {
+  const delayed = [];
+  const real = win.setTimeout;
+  win.setTimeout = (fn, wait, ...rest) => {
+    if (wait === ms) { delayed.push(fn); return 0; }
+    return real(fn, wait, ...rest);
+  };
+  return delayed;
+}
+
+test("Dismiss re-reads the list again a little later", async () => {
+  let gone = false;
+  const { fetchImpl } = makeFetch(
+    () => ({ downloads: gone ? [] : [DL], orphans: [] }),
+    () => ({ ok: true, body: DL }));
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await win.loadInterrupted();
+  const card = win.document.getElementById("interrupted-card");
+  const delayed = captureDelayed(win, 2500);
+  [...card.querySelectorAll("button")].find((b) => b.textContent === "Dismiss").click();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(card.querySelectorAll(".interrupted-row").length, 1);
+  assert.equal(delayed.length, 1);
+  gone = true;
+  delayed[0]();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(card.querySelectorAll(".interrupted-row").length, 0);
+});
+
+test("Resume re-reads the list again a little later", async () => {
+  let gone = false;
+  const { fetchImpl, posts } = makeFetch(
+    () => ({ downloads: gone ? [] : [DL], orphans: [] }),
+    () => ({ ok: true, body: { status: "started", job_id: "j1", spec: DL.spec, note: "" } }));
+  const { window: win } = loadApp({ fetchImpl });
+  await win.pollActivity();
+  await win.loadInterrupted();
+  win.showActivityDetails();
+  const body = win.document.getElementById("modal-body");
+  const delayed = captureDelayed(win, 2500);
+  [...body.querySelectorAll(".interrupted-row button")].find((b) => b.textContent === "Resume").click();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.deepEqual(posts.map((p) => p.url), [`/api/models/pulls/interrupted/${DL.id}/resume`]);
+  assert.equal(win.interruptedState().downloads.length, 1);
+  assert.equal(delayed.length, 1);
+  gone = true;
+  delayed[0]();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(win.interruptedState().downloads.length, 0);
+});

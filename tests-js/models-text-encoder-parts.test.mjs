@@ -67,3 +67,19 @@ test("the embedding picker lists embedding models and chat models but never a te
   assert.ok(values.includes("bge-small"), "an embedding model is offered");
   assert.ok(!values.includes("umt5-xxl-encoder-Q4_K_M"), "a text encoder is not");
 });
+
+test("the embedding picker offers only embedding models from the model list", async () => {
+  const models = [
+    { name: "bge-small", model_type: "embedding" },
+    { name: "llama-chat", model_type: "llm" },
+    { name: "mystery", model_type: "unknown" },
+    { name: "kokoro", model_type: "tts" },
+    { name: "llava-mmproj", model_type: "mmproj" },
+  ];
+  const embedding = { status: "ready", model: "bge-small-en-v1.5", dim: 384,
+                      internal: ["bge-small-en-v1.5"], error: null };
+  const { window } = loadAppWithPages({ fetchImpl: modelsFetch(models, embedding) });
+  await window.refreshEmbeddingPanel();
+  const values = [...window.document.getElementById("kb-embed-model").options].map((o) => o.value);
+  assert.deepEqual(values, ["bge-small-en-v1.5", "bge-small"]);
+});
