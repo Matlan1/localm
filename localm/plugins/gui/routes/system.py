@@ -157,6 +157,7 @@ def register(app: FastAPI, ctx) -> None:
         update_avail = _probe_available("update channel", _update_available)
         fs_access = effective_fs_access(request)
         bind_host = getattr(app.state, "bind_host", "127.0.0.1")
+        from localm.inference.app_assembly.security import canvas_navigation_allowed
         return {"scopes": sorted(held) if held else [], "open": held is None,
                 "core": core, "plugins": plugins, "suggest_plugins": suggest,
                 "bugreport_upload": bug_upload,
@@ -172,7 +173,10 @@ def register(app: FastAPI, ctx) -> None:
                 "network_bind": not _web._is_loopback_host(bind_host),
                 # Whether to offer the sandboxed artifact preview canvas to this
                 # caller (gui_preview_enabled, then gui_preview_owner_only).
-                "preview": preview_allowed(request)}
+                "preview": preview_allowed(request),
+                # Whether the canvas frame may load another page
+                # (canvas_allow_navigation).
+                "canvas_navigation": canvas_navigation_allowed()}
 
     @app.get("/api/backend", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def gui_backend():

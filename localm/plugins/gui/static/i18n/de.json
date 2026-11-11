@@ -1998,6 +1998,8 @@
   "settings.field.guiPreviewEnabled.label": "Generierte Seiten in einer Sandbox-Leinwand anzeigen",
   "settings.field.guiPreviewOwnerOnly.help": "Bietet den Leinwand-Button nur dem Owner an, nicht anderen API-Schlüsseln. Der Antworttext selbst bleibt in beiden Fällen unverändert.",
   "settings.field.guiPreviewOwnerOnly.label": "Vorschau-Leinwand auf Owner-Sitzungen beschränken",
+  "settings.field.canvasAllowNavigation.help": "Standardmäßig aus: Die Leinwand schließt sich, wenn ein Artefakt eine andere Seite laden will. Ein: Es darf jede Webseite in der Leinwand laden, und deren Adresse kann Daten nach außen tragen.",
+  "settings.field.canvasAllowNavigation.label": "Artefakte in der Leinwand dürfen andere Seiten öffnen",
   "settings.field.guiProxyRemoteImages.help": "Standardmäßig aus. 'on' lädt sie; 'ask' fragt Sie je Website und Gespräch einmal zuerst. In beiden Fällen holt dieser Rechner das Bild: die Website sieht seine Adresse, nie Ihren Browser.",
   "settings.field.guiProxyRemoteImages.label": "Externe Bilder in Antworten anzeigen (von diesem Rechner abgerufen)",
   "settings.field.hfEmbedMaxChars.help": "Maximale Gesamtzahl an Zeichen, summiert über alle Texte, die in einer /v1/embeddings-Anfrage an ein Modell im HuggingFace-Format akzeptiert werden.",

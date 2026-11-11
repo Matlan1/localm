@@ -2163,6 +2163,8 @@
   "settings.field.guiPreviewEnabled.label": "Prévisualiser les pages générées dans un canevas isolé",
   "settings.field.guiPreviewOwnerOnly.help": "Propose le bouton canevas uniquement au propriétaire, pas aux autres clés API. Le texte de la réponse reste identique dans les deux cas.",
   "settings.field.guiPreviewOwnerOnly.label": "Réserver le canevas d'aperçu aux sessions du propriétaire",
+  "settings.field.canvasAllowNavigation.help": "Désactivé par défaut : le canevas se ferme si un artefact tente de charger une autre page. Activé, il peut charger toute page web, dont l'adresse peut faire sortir des données.",
+  "settings.field.canvasAllowNavigation.label": "Autoriser les artefacts du canevas à ouvrir d'autres pages",
   "settings.field.guiProxyRemoteImages.help": "Désactivé par défaut. « on » les charge ; « ask » vous demande d'abord une fois par site et par conversation. Dans les deux cas cette machine récupère l'image : le site voit son adresse, jamais votre navigateur.",
   "settings.field.guiProxyRemoteImages.label": "Afficher les images distantes dans les réponses (récupérées par cette machine)",
   "settings.field.hfEmbedMaxChars.help": "Nombre total maximal de caractères, cumulés sur tous les textes, accepté dans une requête /v1/embeddings vers un modèle au format HuggingFace.",

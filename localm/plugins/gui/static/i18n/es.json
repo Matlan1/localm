@@ -2163,6 +2163,8 @@
   "settings.field.guiPreviewEnabled.label": "Previsualizar páginas generadas en un lienzo aislado",
   "settings.field.guiPreviewOwnerOnly.help": "Ofrece el botón de lienzo solo al propietario, no a otras claves de API. El texto de la respuesta no cambia en ningún caso.",
   "settings.field.guiPreviewOwnerOnly.label": "Limitar el lienzo de vista previa a sesiones del propietario",
+  "settings.field.canvasAllowNavigation.help": "Desactivado por defecto: el lienzo se cierra si un artefacto intenta cargar otra página. Activado, puede cargar cualquier página web y su dirección puede sacar datos.",
+  "settings.field.canvasAllowNavigation.label": "Permitir que los artefactos del lienzo abran otras páginas",
   "settings.field.guiProxyRemoteImages.help": "Desactivado de forma predeterminada. 'on' las carga; 'ask' te pregunta antes una vez por sitio y conversación. En ambos casos este equipo obtiene la imagen: el sitio ve su dirección, nunca tu navegador.",
   "settings.field.guiProxyRemoteImages.label": "Mostrar imágenes remotas en respuestas (descargadas por este equipo)",
   "settings.field.hfEmbedMaxChars.help": "Máximo total de caracteres, sumando todos los textos, aceptado en una petición /v1/embeddings a un modelo en formato HuggingFace.",

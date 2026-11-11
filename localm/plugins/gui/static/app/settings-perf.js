@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -1917,6 +1917,7 @@ export async function refreshPluginCommands() {
     // Server decides who is offered the artifact canvas; re-walk already
     // rendered blocks so a cold-load render picks the button up or loses it.
     setPreviewAllowed(data.preview !== false);
+    setCanvasNavigationAllowed(data.canvas_navigation === true);
     refreshPreviewButtons();
     if (data.core) applyCoreTabVisibility(data.core);
     // Reveal the bug-report "Send to maintainer" button only when an upload

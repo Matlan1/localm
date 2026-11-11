@@ -86,6 +86,58 @@ def test_csp_frame_src_refuses_every_url():
     assert _directive(csp, "child-src") == "", csp
 
 
+def _home_with(monkeypatch, tmp_path, **values):
+    """Point localm's config at a throwaway home holding *values*."""
+    import json
+
+    import localm.config as _cfg
+    home = tmp_path / ".localm"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    (home / "config.json").write_text(json.dumps(values), encoding="utf-8")
+
+
+def test_shell_frame_src_refuses_every_url_by_default(monkeypatch, tmp_path):
+    _home_with(monkeypatch, tmp_path)
+    with TestClient(_shell_app()) as c:
+        r = c.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    csp = r.headers.get("Content-Security-Policy", "")
+    assert _directive(csp, "frame-src") == "'none'", csp
+
+
+def test_canvas_allow_navigation_lets_the_shell_frame_load_any_web_page(
+        monkeypatch, tmp_path):
+    _home_with(monkeypatch, tmp_path, canvas_allow_navigation=True)
+    with TestClient(_shell_app()) as c:
+        shell = c.get("/")
+        health = c.get("/health")
+    csp = shell.headers.get("Content-Security-Policy", "")
+    assert _directive(csp, "frame-src") == "http: https:", csp
+    assert _directive(csp, "child-src") == "", csp
+    for name, sources in (("default-src", "'self'"), ("object-src", "'none'"),
+                          ("base-uri", "'none'"), ("form-action", "'none'"),
+                          ("frame-ancestors", "'none'"),
+                          ("img-src", "'self' data: blob:")):
+        assert _directive(csp, name) == sources, (name, csp)
+    assert _directive(health.headers.get("Content-Security-Policy", ""),
+                      "frame-src") == "'none'"
+
+
+def test_a_non_boolean_canvas_allow_navigation_keeps_frame_src_none(
+        monkeypatch, tmp_path):
+    _home_with(monkeypatch, tmp_path, canvas_allow_navigation="yes")
+    with TestClient(_shell_app()) as c:
+        r = c.get("/")
+    assert _directive(r.headers.get("Content-Security-Policy", ""),
+                      "frame-src") == "'none'"
+
+
 def _directive(csp: str, name: str) -> str:
     """The source list for one CSP directive, or "" when it is absent.
 

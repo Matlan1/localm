@@ -369,6 +369,12 @@ def add_keyless_network_gate(app: FastAPI) -> None:
                             content={"detail": _hs.KEYLESS_NETWORK_DETAIL})
 
 
+def canvas_navigation_allowed() -> bool:
+    """True when the ``canvas_allow_navigation`` setting is exactly True."""
+    from localm.config import load_config
+    return load_config().get("canvas_allow_navigation") is True
+
+
 def add_security_headers(app: FastAPI) -> None:
     """Add nosniff, the CSP with this request's nonce, and cross-origin isolation."""
     # Security response headers. The user-content render path is XSS-safe via
@@ -461,10 +467,14 @@ def add_security_headers(app: FastAPI) -> None:
         "connect-src 'self' blob: https://huggingface.co https://*.hf.co; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
-        # The artifact canvas is the GUI's only frame and loads from srcdoc,
-        # which frame-src does not govern; 'none' refuses every navigation of
-        # that frame to a URL. See test_csp_frame_src_refuses_every_url.
-        "frame-src 'none'; "
+    )
+    # The artifact canvas is the GUI's only frame and loads from srcdoc, which
+    # frame-src does not govern; 'none' refuses every navigation of that frame
+    # to a URL. See test_csp_frame_src_refuses_every_url.
+    _CSP_FRAME_SRC_DEFAULT = "frame-src 'none'; "
+    # canvas_allow_navigation on: the frame may load any http(s) page.
+    _CSP_FRAME_SRC_NAVIGATE = "frame-src http: https:; "
+    _CSP_TAIL = (
         "object-src 'none'; "
         "base-uri 'none'; "
         # See the form-action note above: a NAVIGATION directive, no default-src
@@ -485,8 +495,13 @@ def add_security_headers(app: FastAPI) -> None:
         request.state.csp_nonce = nonce
         resp = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        frame_src = _CSP_FRAME_SRC_DEFAULT
+        if (resp.headers.get("content-type", "").startswith("text/html")
+                and canvas_navigation_allowed()):
+            frame_src = _CSP_FRAME_SRC_NAVIGATE
         resp.headers.setdefault(
-            "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
+            "Content-Security-Policy",
+            _CSP_PREFIX + nonce + _CSP_SUFFIX + frame_src + _CSP_TAIL)
         # CROSS-ORIGIN ISOLATION, so onnxruntime-web can use more than one
         # thread. Without both of these the document is not isolated,
         # SharedArrayBuffer is unavailable, and onnxruntime falls back to

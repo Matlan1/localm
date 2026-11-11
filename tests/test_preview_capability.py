@@ -110,3 +110,42 @@ class TestPreviewSettingsAreOwnerOnly:
         from localm.config import DEFAULT_CONFIG
         assert DEFAULT_CONFIG["gui_preview_enabled"] is True
         assert DEFAULT_CONFIG["gui_preview_owner_only"] is False
+
+
+def _canvas_navigation(client, headers=None):
+    r = client.get("/api/capabilities", headers=headers or {})
+    assert r.status_code == 200, r.text
+    return r.json()["canvas_navigation"]
+
+
+class TestCanvasAllowNavigation:
+    def test_ships_off(self, prev_app):
+        from localm.config import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["canvas_allow_navigation"] is False
+        with TestClient(prev_app) as c:
+            assert _canvas_navigation(c) is False
+
+    def test_capabilities_reports_it_to_every_caller(self, prev_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        from localm import auth
+        with TestClient(prev_app) as c:
+            scoped = auth.create_key("s3", [S.CONFIG_READ])["key"]
+            _set(canvas_allow_navigation=True)
+            assert _canvas_navigation(c, _hdr("ownersecret")) is True
+            assert _canvas_navigation(c, _hdr(scoped)) is True
+
+    def test_is_an_owner_only_toggle_in_the_chat_group(self):
+        from localm.settings_schema import CORE_FIELDS, Widget
+        field = next(f for f in CORE_FIELDS if f.key == "canvas_allow_navigation")
+        assert field.admin_only is True
+        assert field.widget == Widget.TOGGLE
+        assert field.group == "Chat"
+
+    def test_validation_accepts_booleans_only(self):
+        from localm.settings_schema import validate_update
+        assert validate_update({"canvas_allow_navigation": True}) == {
+            "canvas_allow_navigation": True}
+        assert validate_update({"canvas_allow_navigation": "false"}) == {
+            "canvas_allow_navigation": False}
+        with pytest.raises(ValueError):
+            validate_update({"canvas_allow_navigation": "maybe"})

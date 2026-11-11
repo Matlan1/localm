@@ -1238,6 +1238,15 @@ export function setPreviewAllowed(allowed) {
   _previewAllowed = allowed !== false;
 }
 
+/* Whether a canvas artifact may load another page in its frame
+ * (canvas_allow_navigation). Starts false; /api/capabilities sets it. */
+let _canvasNavigation = false;
+
+/** Record whether a canvas artifact may load another page in its frame. */
+export function setCanvasNavigationAllowed(allowed) {
+  _canvasNavigation = allowed === true;
+}
+
 /** Whether the artifact canvas is currently offered to this caller. */
 export function isPreviewAllowed() {
   return _previewAllowed;
@@ -1282,13 +1291,18 @@ export function openArtifact(code, lang) {
   frame.className = "artifact-frame";
   frame.setAttribute("sandbox", "allow-scripts");   // NO allow-same-origin
   frame.setAttribute("referrerpolicy", "no-referrer");
+  // A credentialless frame may load a page that sends no
+  // Cross-Origin-Embedder-Policy header, which the isolated shell otherwise
+  // refuses. See test "the frame is credentialless when navigation is allowed".
+  if (_canvasNavigation) frame.setAttribute("credentialless", "");
   frame.srcdoc = artifactSrcdoc(code, lang);
   // The first load is the srcdoc; any later load means the artifact navigated
-  // its frame, so the frame is torn down and the pane says why.
+  // its frame, so the frame is torn down and the pane says why, unless
+  // canvas_allow_navigation is on.
   let loads = 0;
   frame.addEventListener("load", () => {
     loads += 1;
-    if (loads < 2 || !frame.isConnected) return;
+    if (loads < 2 || !frame.isConnected || _canvasNavigation) return;
     const note = document.createElement("p");
     note.className = "artifact-navigated";
     note.textContent = t("common.artifact.navigated");

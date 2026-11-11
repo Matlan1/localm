@@ -1149,6 +1149,9 @@ DEFAULT_CONFIG: dict = {
     "browser_inline_live_view": False,
     "gui_preview_enabled": True,
     "gui_preview_owner_only": False,
+    # Let a canvas artifact load another page in its frame. Off keeps the
+    # shell's frame-src 'none' and closes the canvas when the frame navigates.
+    "canvas_allow_navigation": False,
     "coder_rail_side": "right",
     "coder_remember_projects": True,
     "coder_projects_remembered": 20,
