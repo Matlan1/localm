@@ -133,6 +133,9 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
             "an unreadable registry.json was OVERWRITTEN; every registered "
             "model but the one just added would be gone")
         assert raised is not None, "update_registry did not refuse"
+        assert "registry.json" in str(raised)
+        assert "could not be read" in str(raised)
+        assert str(cfg_home) not in str(raised)
 
     def test_absent_config_still_writes(self, cfg_home):
         """The control: first run must be unaffected, or the refusal would be
@@ -559,3 +562,204 @@ def test_peek_registry_creates_no_directories(tmp_path, monkeypatch):
 
     assert cfg.peek_registry() == {}
     assert not home.exists()
+
+
+# --------------------------------------------------------------------------- #
+#  registry IDs, base names and the model index                               #
+# --------------------------------------------------------------------------- #
+
+def _write_registry(home, reg):
+    (home / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+
+
+def _stored_registry(home):
+    return json.loads((home / "registry.json").read_text(encoding="utf-8"))
+
+
+def _renamed_base_registry():
+    """A base entry renamed from ``old-base`` to ``base`` and a fine-tune that
+    still names it ``old-base``, every entry with an ID."""
+    return {
+        "base": {"id": "id-base", "path": "b.gguf", "former_names": ["old-base"]},
+        "tune": {"id": "id-tune", "path": "t.gguf", "base": "old-base"},
+    }
+
+
+def test_load_registry_follows_a_renamed_base(cfg_home):
+    _write_registry(cfg_home, _renamed_base_registry())
+
+    reg = cfg.load_registry()
+
+    assert reg["tune"]["base"] == "base"
+    assert reg["tune"]["model_refs"] == {"base": "id-base"}
+
+
+def test_load_registry_gives_entries_ids_and_writes_them_back(cfg_home):
+    _write_registry(cfg_home, {"m": {"path": "m.gguf"}})
+
+    reg = cfg.load_registry()
+
+    assert isinstance(reg["m"].get("id"), str) and reg["m"]["id"]
+    assert _stored_registry(cfg_home)["m"]["id"] == reg["m"]["id"]
+
+
+def test_peek_registry_follows_a_renamed_base(cfg_home):
+    _write_registry(cfg_home, _renamed_base_registry())
+
+    reg = cfg.peek_registry()
+
+    assert reg["tune"]["base"] == "base"
+    assert reg["tune"]["model_refs"] == {"base": "id-base"}
+
+
+def test_save_registry_gives_ids_and_follows_a_renamed_base(cfg_home):
+    reg = _renamed_base_registry()
+    reg["new"] = {"path": "n.gguf"}
+
+    cfg.save_registry(reg)
+
+    stored = _stored_registry(cfg_home)
+    assert isinstance(stored["new"].get("id"), str) and stored["new"]["id"]
+    assert stored["tune"]["base"] == "base"
+    assert stored["tune"]["model_refs"] == {"base": "id-base"}
+
+
+def test_update_registry_keeps_existing_entries(cfg_home):
+    _write_registry(cfg_home, {"a": {"id": "id-a", "path": "a.gguf"}})
+
+    cfg.update_registry(lambda r: r.__setitem__("b", {"path": "b.gguf"}))
+
+    stored = _stored_registry(cfg_home)
+    assert stored["a"] == {"id": "id-a", "path": "a.gguf"}
+    assert stored["b"]["path"] == "b.gguf"
+
+
+def test_update_registry_mutator_sees_ids_and_current_base_names(cfg_home):
+    reg = _renamed_base_registry()
+    reg["fresh"] = {"path": "f.gguf"}
+    _write_registry(cfg_home, reg)
+    seen = {}
+
+    def mutator(r):
+        seen["fresh_id"] = r["fresh"].get("id")
+        seen["tune_base"] = r["tune"].get("base")
+
+    out = cfg.update_registry(mutator)
+
+    assert isinstance(seen["fresh_id"], str) and seen["fresh_id"]
+    assert out["fresh"]["id"] == seen["fresh_id"]
+    assert _stored_registry(cfg_home)["fresh"]["id"] == seen["fresh_id"]
+    assert seen["tune_base"] == "base"
+
+
+def test_update_registry_entry_replaced_under_its_name_keeps_id_and_former_names(cfg_home):
+    _write_registry(cfg_home, {
+        "m": {"id": "id-m", "path": "old.gguf", "former_names": ["older"]}})
+
+    cfg.update_registry(lambda r: r.__setitem__("m", {"path": "new.gguf"}))
+
+    stored = _stored_registry(cfg_home)
+    assert stored["m"] == {"id": "id-m", "path": "new.gguf", "former_names": ["older"]}
+
+
+def test_update_registry_points_bases_at_a_model_renamed_by_the_mutator(cfg_home):
+    from localm import model_ids
+    _write_registry(cfg_home, {
+        "b": {"id": "id-b", "path": "b.gguf"},
+        "tune": {"id": "id-tune", "path": "t.gguf", "base": "b"},
+    })
+
+    cfg.update_registry(lambda r: model_ids.rename_entry(r, "b", "b2"))
+
+    stored = _stored_registry(cfg_home)
+    assert stored["tune"]["base"] == "b2"
+    assert stored["tune"]["model_refs"] == {"b2": "id-b"}
+
+
+@pytest.fixture()
+def fresh_model_index(monkeypatch):
+    monkeypatch.setattr(cfg, "_model_index_cache", None)
+
+
+def test_model_index_reads_the_registry(cfg_home, fresh_model_index):
+    _write_registry(cfg_home, _renamed_base_registry())
+
+    index = cfg.model_index()
+
+    assert index.by_name == {"base": "id-base", "tune": "id-tune"}
+    assert index.former == {"old-base": "base"}
+
+
+def test_model_index_of_an_unchanged_registry_is_served_from_the_cache(
+        cfg_home, fresh_model_index):
+    _write_registry(cfg_home, _renamed_base_registry())
+
+    first = cfg.model_index()
+
+    assert cfg.model_index() is first
+
+
+def test_model_index_follows_a_changed_registry(cfg_home, fresh_model_index):
+    _write_registry(cfg_home, {"a": {"id": "id-a"}})
+    assert cfg.model_index().by_name == {"a": "id-a"}
+
+    _write_registry(cfg_home, {"a": {"id": "id-a"}, "bb": {"id": "id-bb"}})
+
+    assert cfg.model_index().by_name == {"a": "id-a", "bb": "id-bb"}
+
+
+def test_model_index_tells_two_registry_files_apart(
+        cfg_home, fresh_model_index, monkeypatch):
+    first = cfg_home / "one" / "registry.json"
+    second = cfg_home / "two" / "registry.json"
+    stamp = 1_700_000_000_000_000_000
+    for path, name in ((first, "aa"), (second, "bb")):
+        path.parent.mkdir()
+        path.write_text(json.dumps({name: {"id": "x"}}), encoding="utf-8")
+        os.utime(path, ns=(stamp, stamp))
+    assert first.stat().st_size == second.stat().st_size
+    assert first.stat().st_mtime_ns == second.stat().st_mtime_ns
+
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", first)
+    assert cfg.model_index().by_name == {"aa": "x"}
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", second)
+    assert cfg.model_index().by_name == {"bb": "x"}
+
+
+# --------------------------------------------------------------------------- #
+#  lexical UNC / device path test and config migration helpers                #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("os_name, text, want", [
+    ("nt", "\\\\server\\share", True),
+    ("posix", "\\\\server\\share", True),
+    ("nt", "//server/share", True),
+    ("posix", "//server/share", False),
+    ("nt", "\\??\\C:\\x", True),
+    ("posix", "\\??\\C:\\x", False),
+    ("nt", "C:\\data", False),
+    ("posix", "/data", False),
+])
+def test_is_unc_or_device(monkeypatch, os_name, text, want):
+    monkeypatch.setattr(cfg, "os", _OsAs(os_name))
+
+    assert cfg._is_unc_or_device(text) is want
+
+
+@pytest.mark.parametrize("raw, want", [
+    (True, "on"), (False, "off"), ("YES", "on"), ("sideways", "sideways"), (2, 2),
+])
+def test_remote_image_migration_maps_legacy_values_and_keeps_unknown_ones(raw, want):
+    assert cfg._map_remote_image_value(raw) == want
+    stored = {"gui_proxy_remote_images": raw}
+    cfg._apply_config_migrations(stored)
+    assert stored["gui_proxy_remote_images"] == want
+
+
+def test_config_path_parent_walks_to_the_parent_of_the_last_key():
+    root = {"a": {"b": {"c": 1}}, "x": 5}
+
+    assert cfg._config_path_parent(root, ("x",)) is root
+    assert cfg._config_path_parent(root, ("a", "b")) is root["a"]
+    assert cfg._config_path_parent(root, ("a", "b", "c")) is root["a"]["b"]
+    assert cfg._config_path_parent(root, ("x", "y")) is None
