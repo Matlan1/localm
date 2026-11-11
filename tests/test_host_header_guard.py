@@ -79,6 +79,7 @@ _LOOPBACK_REFUSED = [
     f"192.168.1.5:{_PORT}", f"[fe80::1]:{_PORT}", f"mybox.local:{_PORT}",
     "", " ", f"evil.example@127.0.0.1:{_PORT}", "[::1", f"localhost:{_PORT}/x",
     "localhost..", ".localhost", "local host", f"localhost:{_PORT}:1",
+    f"[1:2:3]:{_PORT}", "[1::2::3]",
 ]
 
 
@@ -535,6 +536,7 @@ def test_allowed_hosts_goes_through_the_settings_validation():
     ("[0:0:0:0:0:0:0:1]", "::1"), ("10.0.0.1:1", "10.0.0.1"),
     ("", None), ("localhost:", None), ("[::1", None), ("a@b", None),
     ("a..b", None), (".a", None), ("a:1:2", None), ("[zz::1]", None),
+    ("[1:2:3]", None), ("[1:2:3]:80", None), ("[1::2::3]", None),
     ("My_Box:8642", "my_box"),
 ])
 def test_host_header_name(value, expected):

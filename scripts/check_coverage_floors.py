@@ -70,10 +70,10 @@ _MODULE_FLOORS: dict[str, int] = {
     "localm/bindhost.py": 100,
     "localm/scopes.py": 100,
     "localm/pathsafe.py": 92,
-    "localm/netpolicy.py": 90,
+    "localm/netpolicy.py": 96,
     "localm/auth.py": 90,
     "localm/tls.py": 87,
-    "localm/config.py": 83,
+    "localm/config.py": 94,
     "localm/portmux.py": 96,
 }
 
