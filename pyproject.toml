@@ -353,6 +353,8 @@ dev = [
     "pytest-xdist>=3.6",
     # Imported directly by tests (async ASGI clients, streaming and SSE checks).
     "httpx>=0.28.1",
+    # The HTTP client starlette.testclient.TestClient is built on when installed.
+    "httpx2>=2.16.0",
     # Feature parsers whose extraction code has tests that otherwise SILENTLY SKIP
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
