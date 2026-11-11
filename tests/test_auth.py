@@ -1379,7 +1379,8 @@ def _events(home):
             for e in map(json.loads, path.read_text(encoding="utf-8").splitlines())]
 
 
-def test_key_operations_record_their_management_events(auth, tmp_path):
+def test_key_operations_record_their_management_events(auth, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "full")
     auth.set_api_key("owner-key-123")
     assert _events(tmp_path) == [("key_minted", "owner")]
     assert auth.clear_api_key() == []

@@ -36,7 +36,7 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 
 | Mode | What it saves automatically |
 | --- | --- |
-| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). The one automatic write is the content-free [management log](#the-management-log-written-in-every-mode). This is the "no traces" mode. |
+| **privacy** (default) | **Nothing automatic about your conversations** (see "What privacy mode does not cover" below). No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
 | **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
@@ -70,7 +70,6 @@ audit log). They are not the whole of what localm writes to disk. A few
 kinds of data are explicit, deliberate assets - like a file you save
 yourself - and are written in every session mode, privacy included:
 
-- **The management log.** `<data dir>/logs/management.jsonl` records that a key was created or revoked, a login was refused, an update was applied or a setting was saved, without any key, setting value or conversation content (see [The management log](#the-management-log-written-in-every-mode)). It is written in every session mode.
 - **Scheduled job results.** Every run of a chat or coder job writes its
   prompt, the full reply, status, and timing to
   `<data dir>/jobs/results/<job_id>/<timestamp>.json`, on its own schedule,
@@ -337,9 +336,9 @@ policy](network.md) instead.
 
 ---
 
-## The management log (written in every mode)
+## The management log (log and full mode only)
 
-localm appends one line to `logs/management.jsonl` in the data folder when an API key is created or revoked, a login with a wrong key is refused, an update is applied, a setting is saved or a plugin is installed or removed. A line holds the time, the kind of event, a key id or a fixed label (never a key), the names of the settings a save changed (never their values), the plugin name and versions, and for a refused login only whether the client was on this machine. It holds no conversation content and no secret, so privacy mode writes it too. The file is capped at 1 MB and one earlier file (`management.jsonl.1`) is kept. If it cannot be written, localm logs a warning and carries on with the operation.
+localm appends one line to `logs/management.jsonl` in the data folder when an API key is created or revoked, a login with a wrong key is refused, an update is applied, a setting is saved or a plugin is installed or removed. A line holds the time, the kind of event, a key id or a fixed label (never a key), the names of the settings a save changed (never their values), the plugin name and versions, and for a refused login only whether the client was on this machine. It holds no conversation content and no secret. It is written in log and full mode only; privacy mode writes nothing. The file is capped at 1 MB and one earlier file (`management.jsonl.1`) is kept. If it cannot be written, localm logs a warning and carries on with the operation.
 
 ---
 

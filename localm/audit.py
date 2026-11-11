@@ -56,6 +56,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from localm import mgmt_events as _mgmt_events
 from localm.debuglog import logger
 
 
@@ -301,13 +302,17 @@ def automatic_write_allowed(surface: str, cwd=None) -> bool:
     :func:`effective_mode`. False in privacy mode and whenever the mode cannot be
     resolved. Never raises.
 
-    The one question every automatic writer asks. Explicit user-requested exports
-    and the management-event log are not automatic writes and do not ask it.
+    The one question every automatic writer asks, the management-event log
+    included. Explicit user-requested exports are not automatic writes and do not
+    ask it.
     """
     try:
         return effective_mode(surface, cwd=cwd) != SessionMode.PRIVACY
     except Exception:   # noqa: BLE001 - an unresolvable mode must fail closed
         return False
+
+
+_mgmt_events.set_write_gate(lambda: automatic_write_allowed("server"))
 
 
 _MODE_PERSISTENCE = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1,
