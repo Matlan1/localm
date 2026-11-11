@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
+
+### Added
+- **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
+
 ## [0.3.4b2] - 2026-11-11
 
 ### Added
