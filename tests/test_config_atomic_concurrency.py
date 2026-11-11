@@ -193,6 +193,28 @@ def test_atomic_write_leaves_no_orphan_temp(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_backup_copy_goes_through_a_tmp_file_beside_the_target(tmp_path, monkeypatch):
+    target = tmp_path / "c.json"
+    cfg._atomic_write_json(target, {"x": 1})
+    names = []
+    real_mkstemp = cfg.tempfile.mkstemp
+
+    def spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        names.append(Path(name))
+        return fd, name
+
+    monkeypatch.setattr(cfg.tempfile, "mkstemp", spy_mkstemp)
+    cfg._atomic_write_json(target, {"x": 2})
+
+    bak_temps = [p for p in names if p.name.startswith("c.json.bak.")]
+    assert len(bak_temps) == 1
+    assert bak_temps[0].parent == tmp_path
+    assert bak_temps[0].name.endswith(".tmp")
+    assert json.loads((tmp_path / "c.json.bak").read_text()) == {"x": 1}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 # Each worker process hammers the same file through the real cross-process path,
 # with no mocks.
 _CONC_NPROC = 5
