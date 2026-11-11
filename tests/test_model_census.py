@@ -367,3 +367,13 @@ def test_real_localm_add_and_api_models(tmp_path):
     assert verdicts["refused.pth"][0] == "NOT-REGISTERED", rows
     assert info["home_deleted"] is True
     shutil.rmtree(tmp_path / "work", ignore_errors=True)
+
+
+@pytest.mark.parametrize("arch, kind", [("acestep-lm", "planner"), ("acestep-dit", "diffusion"),
+                                        ("acestep-text-enc", "text-encoder"), ("acestep-vae", "vae")])
+def test_ace_step_15_parts_have_their_music_kind(arch, kind):
+    meta = {"kv": {"general.architecture": arch, f"{arch}.block_count": 4,
+                   "tokenizer.ggml.model": "gpt2"}, "tensors": ["blk.0.attn_q.weight"]}
+    implied = mc._gguf_kind(meta)
+    assert implied.kind == kind
+    assert implied.allowed == mc.KIND_TYPES[kind]
