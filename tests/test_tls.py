@@ -7,9 +7,11 @@ wrong-SAN leaf, and an IP-set change - with the CA reused across regenerations
 so a device trusted once stays trusted.
 """
 
+import ipaddress
+import json
 import socket
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -552,3 +554,137 @@ def test_leaf_validity_is_capped_at_the_ca_expiry(tmp_path, monkeypatch):
     tls._make_leaf(tmp_path, ca, key, ["localhost"], ["127.0.0.1"])
     leaf = _load(tls._leaf_cert_path(tmp_path))
     assert leaf.not_valid_after_utc == ca.not_valid_after_utc
+
+
+# ------------------------------------------------------------------ #
+#  Exact shape of the issued leaf, the meta sidecar, SAN discovery,   #
+#  and the CA renewal boundary                                        #
+# ------------------------------------------------------------------ #
+
+_FIXED_NOW = datetime(2031, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+
+def test_issued_leaf_has_exact_subject_key_validity_and_extensions(tmp_path, monkeypatch):
+    monkeypatch.setattr(tls, "_now", lambda: _FIXED_NOW)
+    ca_cert, ca_key = tls._make_ca(tmp_path)
+    leaf = tls._make_leaf(tmp_path, ca_cert, ca_key, ["localhost"], ["127.0.0.1"])
+    assert _load(tls._leaf_cert_path(tmp_path)) == leaf
+
+    cn = leaf.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+    assert [a.value for a in cn] == ["localm"]
+    assert leaf.public_key().key_size == 2048
+    key = serialization.load_pem_private_key(
+        tls._leaf_key_path(tmp_path).read_bytes(), password=None)
+    assert key.key_size == 2048
+    assert leaf.not_valid_before_utc == _FIXED_NOW - timedelta(minutes=5)
+    assert leaf.not_valid_after_utc == _FIXED_NOW + timedelta(days=tls._LEAF_DAYS)
+
+    exts = leaf.extensions
+    assert exts.get_extension_for_class(x509.SubjectAlternativeName).critical is False
+    bc = exts.get_extension_for_class(x509.BasicConstraints)
+    assert bc.critical is True
+    assert bc.value.ca is False and bc.value.path_length is None
+
+    ku = exts.get_extension_for_class(x509.KeyUsage)
+    assert ku.critical is True
+    assert ku.value.digital_signature is True
+    assert ku.value.key_encipherment is True
+    assert ku.value.content_commitment is False
+    assert ku.value.data_encipherment is False
+    assert ku.value.key_agreement is False
+    assert ku.value.key_cert_sign is False
+    assert ku.value.crl_sign is False
+
+    eku = exts.get_extension_for_class(x509.ExtendedKeyUsage)
+    assert eku.critical is False
+    assert list(eku.value) == [x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]
+
+
+def test_leaf_meta_sidecar_records_the_covered_sans_and_expiry(tmp_path, monkeypatch):
+    monkeypatch.setattr(tls, "_now", lambda: _FIXED_NOW)
+    ca_cert, ca_key = tls._make_ca(tmp_path)
+    hosts, ips = ["box.example.test", "localhost"], ["127.0.0.1", "192.168.1.50"]
+    leaf = tls._make_leaf(tmp_path, ca_cert, ca_key, hosts, ips)
+    expected = {
+        "hostnames": hosts,
+        "ips": ips,
+        "not_after": leaf.not_valid_after_utc.isoformat(),
+    }
+    text = tls._meta_path(tmp_path).read_text(encoding="utf-8")
+    assert json.loads(text) == expected
+    assert text == json.dumps(expected, indent=2)
+
+
+def test_san_targets_includes_hostname_resolved_and_primary_lan_addresses(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "box-under-test")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["10.1.2.3"])
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "192.168.77.5")
+    hosts, ips = tls.san_targets()
+    assert hosts == ["box-under-test", "localhost"]
+    assert ips == ["10.1.2.3", "127.0.0.1", "192.168.77.5", "::1"]
+
+
+def test_san_targets_skips_empty_extras_and_keeps_extras_after_a_wildcard(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "box-under-test")
+    monkeypatch.setattr(tls, "_host_ips", lambda: [])
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "")
+    hosts, ips = tls.san_targets(
+        extra_hostnames=["", "  ", "0.0.0.0", "after.local", "::", "10.0.0.5", "late.local"])
+    assert hosts == ["after.local", "box-under-test", "late.local", "localhost"]
+    assert ips == ["10.0.0.5", "127.0.0.1", "::1"]
+
+
+def test_ca_is_replaced_exactly_at_the_start_of_its_renewal_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(tls, "_now", lambda: _FIXED_NOW)
+    ca_cert, _ = tls._make_ca(tmp_path)
+    boundary = ca_cert.not_valid_after_utc - timedelta(days=tls._RENEW_MARGIN_DAYS)
+
+    monkeypatch.setattr(tls, "_now", lambda: boundary - timedelta(seconds=1))
+    kept, _ = tls._load_or_make_ca(tmp_path)
+    assert kept.serial_number == ca_cert.serial_number
+
+    monkeypatch.setattr(tls, "_now", lambda: boundary)
+    replaced, _ = tls._load_or_make_ca(tmp_path)
+    assert replaced.serial_number != ca_cert.serial_number
+
+
+def _write_leaf_outliving_ca(home, ca_cert, ca_key, not_after):
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "localm")]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(ca_cert.not_valid_before_utc)
+        .not_valid_after(not_after)
+        .add_extension(x509.SubjectAlternativeName([
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        ]), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    tls._leaf_cert_path(home).write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    tls._leaf_key_path(home).write_bytes(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ))
+
+
+def test_leaf_valid_past_the_ca_is_not_reused_once_the_ca_enters_its_renewal_window(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(tls, "_now", lambda: _FIXED_NOW)
+    ca_cert, ca_key = tls._make_ca(tmp_path)
+    ca_end = ca_cert.not_valid_after_utc
+    _write_leaf_outliving_ca(tmp_path, ca_cert, ca_key, ca_end + timedelta(days=400))
+
+    monkeypatch.setattr(
+        tls, "_now", lambda: ca_end - timedelta(days=tls._RENEW_MARGIN_DAYS + 1))
+    assert tls._leaf_is_reusable(tmp_path, ["localhost"], ["127.0.0.1"]) is True
+
+    monkeypatch.setattr(
+        tls, "_now", lambda: ca_end - timedelta(days=tls._RENEW_MARGIN_DAYS - 1))
+    assert tls._leaf_is_reusable(tmp_path, ["localhost"], ["127.0.0.1"]) is False
