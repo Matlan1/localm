@@ -999,6 +999,7 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
         # resolution just below authenticates the attach.
         attached = None
         if not (force_new or no_server):
+            _root = str(work_dir)
             try:
                 from localm import instances
                 from localm.config import home_dir
