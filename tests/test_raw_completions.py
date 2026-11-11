@@ -319,6 +319,49 @@ def test_the_hf_text_path_tokenises_the_raw_prompt_without_the_template(monkeypa
     assert be._model.generate.call_args.kwargs["input_ids"] is ids
 
 
+def test_the_hf_raw_path_refuses_a_prompt_that_tokenises_to_nothing(monkeypatch):
+    import sys
+    import types
+
+    from localm.inference.backends import _hf_worker as hfmod
+    from localm.inference.backends.base import EMPTY_RAW_PROMPT_MESSAGE, UnsupportedInputError
+    be = hfmod.HFWorker.__new__(hfmod.HFWorker)
+    be._processor = None
+    be._is_multimodal = False
+    be._model = MagicMock()
+    be.context_capacity = 1024
+    tok = MagicMock()
+    ids = MagicMock()
+    ids.shape = (1, 0)
+    tok.return_value.to.return_value = {"input_ids": ids, "attention_mask": MagicMock()}
+    be._tokenizer = tok
+
+    class _FakeStreamer:
+        def __init__(self, *a, **k):
+            pass
+
+        def __iter__(self):
+            return iter(())
+
+        def end(self):
+            pass
+
+    fake = types.ModuleType("transformers")
+    fake.TextIteratorStreamer = _FakeStreamer
+    fake.StoppingCriteriaList = list
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+    monkeypatch.setattr(hfmod, "_grammar_processor", lambda *a, **k: None)
+    caught = None
+    try:
+        list(be.chat_stream([{"role": "user", "content": "ignored"}], raw_prompt="",
+                            thinking=False, max_tokens=8))
+    except UnsupportedInputError as e:
+        caught = e
+    be._model.generate.assert_not_called()
+    assert caught is not None
+    assert str(caught) == EMPTY_RAW_PROMPT_MESSAGE
+
+
 def test_the_hf_backend_passes_raw_prompt_to_its_worker():
     from localm.inference.backends.hf import HFBackend
     b = HFBackend("does-not-need-to-exist")
