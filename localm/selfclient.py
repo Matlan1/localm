@@ -72,6 +72,47 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
         return "http", r.status_code
 
 
+def read_stall_stacks(scheme: str, port, instance_token: Optional[str] = None,
+                      bind_host: Optional[str] = None, *,
+                      timeout: float = 3.0) -> tuple:
+    """Ask a running localm server for its newest recorded stall with every
+    thread's stack (``GET /v1/server/stall-stacks``). Returns
+    ``(state, payload)``.
+
+    *state* is one of:
+      ``"ok"``           - payload is the stack text (empty when none recorded)
+      ``"unauthorized"`` - the server refused this client (401/403: no owner
+                           key here, or the server is not bound to loopback)
+      ``"unsupported"``  - the server has no such route (an older localm)
+      ``"http"``         - some other HTTP status or an unreadable body;
+                           payload is the code
+      ``"unreachable"``  - could not connect or no answer within *timeout*;
+                           payload is a short reason
+
+    *instance_token* and *bind_host* carry the same meanings as in
+    :func:`read_activity`.
+    """
+    base = f"{scheme}://{url_host(self_connect_host(bind_host))}:{port}/v1"
+    try:
+        r = self_request("GET", "/server/stall-stacks", timeout=timeout,
+                         base_url=base, instance_token=instance_token)
+    except requests.exceptions.RequestException as e:
+        return "unreachable", type(e).__name__
+    if r.status_code in (401, 403):
+        return "unauthorized", r.status_code
+    if r.status_code == 404:
+        return "unsupported", r.status_code
+    if not r.ok:
+        return "http", r.status_code
+    try:
+        body = r.json()
+    except (ValueError, RecursionError):
+        return "http", r.status_code
+    if not isinstance(body, dict) or not isinstance(body.get("stall_stacks"), str):
+        return "http", r.status_code
+    return "ok", body["stall_stacks"]
+
+
 def read_model_file_hold(scheme: str, port, model: str,
                          instance_token: Optional[str] = None,
                          bind_host: Optional[str] = None) -> tuple:

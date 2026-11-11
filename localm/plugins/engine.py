@@ -845,6 +845,14 @@ class PluginManager:
         self.last_refresh_failures: dict[str, str] = {}
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
+        # Serializes discover(), which may run on a worker thread
+        # (load_enabled_pending_off_loop, api_state off the loop) while the
+        # event loop calls it too. The config file lock is taken under it;
+        # never take this lock while holding the config file lock.
+        self._discover_lock = threading.RLock()
+        # Bumped when a plugin is disabled or unloaded, so a pending load
+        # computed off the loop before that change is dropped.
+        self._disable_gen = 0
         # (plugin name, callback) queued by Host.on_startup before the event
         # loop exists; drained once by the app lifespan.
         self._startup_callbacks: list = []
@@ -941,10 +949,17 @@ class PluginManager:
         data dir where only headless CLI commands have run still has chat
         physically provisioned before `missing_requires` / `_installed_set`
         read the installed set."""
+        with self._discover_lock:
+            return self._discover_locked()
+
+    def _discover_locked(self) -> dict[str, PluginSpec]:
+        """discover() body. Caller must hold ``_discover_lock``. Builds the new
+        spec and error maps aside and swaps them in at the end, so a reader on
+        another thread sees either the previous complete map or the new one."""
         self._ensure_preinstalled()
-        self._specs = {}
+        specs: dict[str, PluginSpec] = {}
         prior = self._discover_errors        # for change-only warning logs below
-        self._discover_errors = {}
+        errors: dict[str, str] = {}
         root = self._installed_root
         if root:
             try:
@@ -966,39 +981,42 @@ class PluginManager:
                     if not spec.compatible():
                         raise ValueError(
                             f"api_version {spec.api_version} != {API_VERSION}")
-                    self._specs[spec.name] = spec
+                    specs[spec.name] = spec
                     if warns:
                         # Record unknown manifest keys per plugin (surfaced via
                         # api_state) while the plugin still parses and loads.
                         # Logged only when new or changed, since api_state
                         # re-discovers on every fetch.
                         msg = "warning: " + "; ".join(warns)
-                        self._discover_errors[spec.name] = msg
+                        errors[spec.name] = msg
                         if prior.get(spec.name) != msg:
                             _log.warning("plugin %s: %s", spec.name,
                                          "; ".join(warns))
                 except Exception as e:       # one bad manifest must not break discovery
-                    self._discover_errors[child.name] = str(e)
-        self._drop_scope_collisions()
-        return self._specs
+                    errors[child.name] = str(e)
+        self._drop_scope_collisions(specs, errors)
+        self._specs = specs
+        self._discover_errors = errors
+        return specs
 
-    def _drop_scope_collisions(self) -> None:
-        """Remove from ``_specs`` every third-party spec whose scope is reserved
+    @staticmethod
+    def _drop_scope_collisions(specs: dict, errors: dict) -> None:
+        """Remove from *specs* every third-party spec whose scope is reserved
         or already claimed by a first-party plugin or an earlier (by name)
-        third-party plugin, and record why in ``_discover_errors``."""
+        third-party plugin, and record why in *errors*."""
         from localm.plugins import catalog as _cat
         first_party = {e.name for e in _cat.CATALOG}
-        claimed = {sp.scope: n for n, sp in self._specs.items() if n in first_party}
-        for name in sorted(self._specs):
+        claimed = {sp.scope: n for n, sp in specs.items() if n in first_party}
+        for name in sorted(specs):
             if name in first_party:
                 continue
-            reason = _scope_problem(self._specs[name], claimed)
+            reason = _scope_problem(specs[name], claimed)
             if reason:
-                self._specs.pop(name)
-                self._discover_errors[name] = reason
+                specs.pop(name)
+                errors[name] = reason
                 _log.warning("plugin %s: %s", name, reason)
             else:
-                claimed[self._specs[name].scope] = name
+                claimed[specs[name].scope] = name
 
     def _store_dir(self, name: str) -> Optional[Path]:
         # Returns None for a non-conforming id, before the join, so no
@@ -1097,6 +1115,8 @@ class PluginManager:
             cur = set(cfg.get("plugins_enabled", []))
             cur.add(name) if on else cur.discard(name)
             cfg["plugins_enabled"] = sorted(cur)
+        if not on:
+            self._disable_gen += 1
         update_config(_mutate)
 
     # ---- load / unload (in-process, isolated) ------------------------------
@@ -1169,15 +1189,47 @@ class PluginManager:
         enable(). Returns [] without loading when the manager has no app."""
         if self.app is None:
             return []
-        self.discover()
+        return self._load_pending(self._pending_specs())
+
+    async def load_enabled_pending_off_loop(self) -> list:
+        """``load_enabled_pending`` for a request handler: discovery and the
+        config read run on a worker thread, and only the import and register()
+        of a plugin that is actually pending run on the event loop, as enable()
+        does. Returns the names loaded; [] without loading when the manager has
+        no app, or when a plugin was disabled or unloaded while discovery ran
+        (the next call loads what is still pending). Never raises for a failing
+        plugin, which is recorded in errors."""
+        if self.app is None:
+            return []
+        from starlette.concurrency import run_in_threadpool
+        gen = self._disable_gen
+        specs = await run_in_threadpool(self._pending_specs)
+        if gen != self._disable_gen:
+            return []
+        return self._load_pending(specs)
+
+    def _pending_specs(self) -> list:
+        """Discover, then return the specs of installed, enabled plugins that
+        are not loaded, have no recorded load error and are not tools-only.
+        Safe to call on a worker thread."""
+        specs = self.discover()
         enabled = self._enabled_set()
+        loaded, errors = set(self._loaded), set(self._errors)
+        return [specs[n] for n in sorted(specs)
+                if n in enabled and n not in loaded and n not in errors
+                and not specs[n].tools_only]
+
+    def _load_pending(self, specs: list) -> list:
+        """Load each of *specs* that is still not loaded and has no recorded
+        load error. Runs on the event loop thread. Returns the names loaded."""
         loaded = []
-        for name in sorted(self._specs):
-            if (name in enabled and name not in self._loaded and name not in self._errors
-                    and not self._specs[name].tools_only):
-                self._safe_load(self._specs[name])
-                if name in self._loaded:
-                    loaded.append(name)
+        for spec in specs:
+            name = spec.name
+            if name in self._loaded or name in self._errors:
+                continue
+            self._safe_load(spec)
+            if name in self._loaded:
+                loaded.append(name)
         return loaded
 
     def _ensure_preinstalled(self) -> None:
@@ -1291,6 +1343,7 @@ class PluginManager:
             pass  # best-effort: worst case on_first_use fires again next start
 
     def _unload(self, name: str) -> None:
+        self._disable_gen += 1
         entry = self._loaded.pop(name, None)
         if not entry:
             return
@@ -2201,10 +2254,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
+        from starlette.concurrency import run_in_threadpool
+
         from localm.plugins import catalog as _cat
-        manager.load_enabled_pending()
+        await manager.load_enabled_pending_off_loop()
         await _cat.check_hardware_off_loop()
-        return manager.api_state()
+        return await run_in_threadpool(manager.api_state)
 
     @app.post("/api/plugins/{name}/install",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])

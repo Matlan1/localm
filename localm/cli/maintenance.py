@@ -333,6 +333,49 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
         console.print(f'[dim]Launch it:[/dim] "{escape(str(res.path))}" -m localm gui')
 
 
+def _live_server_stall_stacks() -> str:
+    """The newest recorded stall with every thread's stack from a running
+    localm server of this install (``GET /v1/server/stall-stacks``), asking
+    the most recently started identity-verified instance first and returning
+    the first non-empty answer. "" when no server runs or none has such a
+    stall. A server that cannot be asked is named in one dim console line and
+    the debug log, and the report is saved without its stacks. Never raises."""
+    from rich.markup import escape
+
+    from ..bindhost import is_own_address, self_connect_host, url_host
+    from ..config import home_dir
+    from ..debuglog import logger as _logger
+    try:
+        from .. import instances
+        from ..selfclient import read_stall_stacks
+        rows = instances.snapshot(home_dir(), reap=False, include_token=True)
+    except Exception as e:
+        _logger.debug("bug-report: could not list running servers: %s", e,
+                      exc_info=True)
+        return ""
+    for e in sorted(rows, key=lambda r: r.get("started") or "", reverse=True):
+        dial = self_connect_host(e.get("host"))
+        if not e.get("alive") or not is_own_address(dial):
+            continue
+        scheme = e.get("scheme", "http")
+        where = f"{scheme}://{url_host(dial)}:{e.get('port')}"
+        try:
+            state, payload = read_stall_stacks(scheme, e.get("port"), e.get("token"),
+                                               e.get("host"))
+        except Exception as exc:
+            state, payload = "error", type(exc).__name__
+        if state == "ok":
+            if payload:
+                return payload
+            continue
+        _logger.debug("bug-report: stall stacks of %s not read: %s (%s)",
+                      where, state, payload)
+        console.print(f"[dim]Could not read the stall record of the server at "
+                      f"{escape(where)} ({escape(state)} {escape(str(payload))}); "
+                      f"the report is saved without it.[/dim]")
+    return ""
+
+
 @main.command("bug-report")
 @click.option("-m", "--message", default="", help="What were you doing?")
 @click.option("-e", "--expected", default="",
@@ -394,9 +437,10 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     # it), so its captured freeze trace is found via the live instance registry,
     # not this process's pid.
     hang = bugreport.live_server_hang_trace()
+    stall_stacks = "" if hang else _live_server_stall_stacks()
     path = bugreport.save_user_report(
         description, what_i_expected=what_expected, what_happened=what_happened,
-        include_log=not no_log, extra_hang_trace=hang)
+        include_log=not no_log, extra_hang_trace=hang, stall_stacks=stall_stacks)
     if path is not None:
         console.print(
             f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}",
