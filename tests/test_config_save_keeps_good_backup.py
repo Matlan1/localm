@@ -37,3 +37,38 @@ def test_a_save_over_a_readable_file_still_rotates_it_into_the_backup(tmp_path):
     assert json.loads((tmp_path / "config.json.bak").read_text(encoding="utf-8")) == {
         "max_tokens": 512}
     assert not list(tmp_path.glob("config.json.unreadable-*"))
+
+
+def test_the_file_is_present_at_every_step_of_a_save(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    path.write_text('{"max_tokens": 512}', encoding="utf-8")
+    present = []
+    real = config._replace_atomic
+
+    def spy(src, dst):
+        present.append(path.is_file())
+        real(src, dst)
+        present.append(path.is_file())
+
+    monkeypatch.setattr(config, "_replace_atomic", spy)
+    config._atomic_write_json(path, {"max_tokens": 1024})
+    config._atomic_write_json(path, {"max_tokens": 2048})
+    assert present and all(present), present
+    assert json.loads(path.read_text(encoding="utf-8")) == {"max_tokens": 2048}
+    assert json.loads((tmp_path / "config.json.bak").read_text(encoding="utf-8")) == {
+        "max_tokens": 1024}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_failed_backup_copy_leaves_no_temp_and_still_saves(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    path.write_text('{"max_tokens": 512}', encoding="utf-8")
+
+    def refuse(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.shutil, "copyfile", refuse)
+    config._atomic_write_json(path, {"max_tokens": 1024})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"max_tokens": 1024}
+    assert not (tmp_path / "config.json.bak").exists()
+    assert not list(tmp_path.glob("*.tmp"))

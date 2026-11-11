@@ -177,6 +177,7 @@ def test_atomic_write_uses_unique_temp_per_write(tmp_path, monkeypatch):
     cfg._atomic_write_json(target, {"a": 1})
     cfg._atomic_write_json(target, {"a": 2})
 
+    names = [n for n in names if not Path(n).name.startswith("reg.json.bak.")]
     assert len(names) == 2
     assert names[0] != names[1]                            # unique per write
     assert all(Path(n).name != "reg.json.tmp" for n in names)   # never the old fixed name

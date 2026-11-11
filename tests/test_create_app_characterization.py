@@ -196,6 +196,7 @@ _KERNEL_ROUTES = {
     # routes/admin.py
     ("api", "POST", "/v1/server/shutdown"): ("scope:config:write",),
     ("api", "POST", "/v1/server/restart"): ("scope:config:write",),
+    ("api", "GET", "/v1/server/stall-stacks"): ("scope:admin",),
     ("api", "POST", "/api/bug-report"): ("scope:config:write",),
     ("api", "POST", "/api/bug-report/send"): ("scope:config:write",),
     ("api", "GET", "/api/issues"): ("scope:config:read",),
