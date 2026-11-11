@@ -84,6 +84,7 @@ test("several handlers on one element and handlers on many elements are all boun
 
 test("an existing data-localm-on value is not reused as a marker", () => {
   const out = srcdoc('<p data-localm-on="0">x</p><button id="b" onclick="this.textContent=\'ok\'">go</button>');
+  assert.deepEqual(handlerAttrs(parse(out)), [], out);
   const win = run(out);
   const b = win.document.getElementById("b");
   assert.notEqual(b.getAttribute("data-localm-on"), "0");
@@ -132,6 +133,7 @@ test("return false from onsubmit cancels the submission", () => {
   const out = srcdoc(
     '<form id="f" onsubmit="this.dataset.seen = \'1\'; return false"><button>s</button></form>'
     + '<form id="g" onsubmit="this.dataset.seen = \'1\'"><button>s</button></form>');
+  assert.deepEqual(handlerAttrs(parse(out)), [], out);
   const win = run(out);
   const f = win.document.getElementById("f");
   const notCancelled = f.dispatchEvent(new win.Event("submit", { cancelable: true }));
