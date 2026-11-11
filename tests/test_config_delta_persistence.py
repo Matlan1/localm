@@ -227,6 +227,40 @@ def test_remove_step_drops_the_key():
     assert stored == {"keep": 2}
 
 
+def test_rename_step_into_an_existing_block_keeps_its_other_keys():
+    stored = {"x": 5, "a": {"other": 1}}
+    cfg._apply_config_step(stored, cfg._config_rename(("x",), ("a", "new")))
+    assert stored == {"a": {"other": 1, "new": 5}}
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.warnings = []
+
+    def warning(self, fmt, *args):
+        self.warnings.append(fmt % args)
+
+
+def test_a_newer_config_version_warning_names_the_file_and_both_versions(
+        home, monkeypatch):
+    rec = _RecordingLogger()
+    monkeypatch.setattr(cfg, "_logger", lambda: rec)
+    newer = cfg.CURRENT_CONFIG_VERSION + 1
+    cfg._apply_config_migrations({"max_tokens": 5, cfg.CONFIG_VERSION_KEY: newer})
+    assert rec.warnings == [
+        f"config.json has config_version {newer}, newer than this build understands "
+        f"({cfg.CURRENT_CONFIG_VERSION}); it is read as is and not rewritten."]
+
+
+def test_an_unknown_stored_key_warning_names_the_file_and_the_key(home, monkeypatch):
+    rec = _RecordingLogger()
+    monkeypatch.setattr(cfg, "_logger", lambda: rec)
+    cfg._warn_unknown_stored_keys({"max_tokens": 5, "zz_unknown_key": 1})
+    assert rec.warnings == [
+        "config.json holds the key 'zz_unknown_key', which this build does not use; "
+        "its value is ignored and the key is kept in the file."]
+
+
 def test_migrations_map_a_stored_boolean_remote_image_value():
     stored = {"gui_proxy_remote_images": True}
     cfg._apply_config_migrations(stored)
