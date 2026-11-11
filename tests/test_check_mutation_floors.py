@@ -244,7 +244,7 @@ class TestCheck:
         """A function whose source hash moved gets fresh mutant numbering, so
         its recorded dispositions no longer describe the same mutations."""
         res = _results({M1: "killed", M2: "killed", M3: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: "killed", M3: "killed"}, floor=100.0)
         problems, _, _ = cmf.check(res, base, [MOD])
         assert len(problems) == 1
@@ -426,7 +426,7 @@ class TestControls:
 
     def test_control_whose_function_changed_must_be_repinned(self):
         res = _results({M1: "killed", M2: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: "killed"}, controls=self.CTL)
         problems, _, _ = cmf.check(res, base, [MOD])
         assert any("scope-check-weakened" in p and "re-pin" in p for p in problems)
@@ -505,7 +505,7 @@ class TestUnstable:
 
     def test_unstable_entry_of_a_changed_function_is_stale(self):
         res = _results({M2: "survived", M3: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M2: {"unstable": self.REASON}, M3: "killed"}, floor=50.0)
         problems, _, rows = cmf.check(res, base, [MOD])
         assert len(problems) == 1, problems
@@ -524,7 +524,7 @@ class TestUnstable:
 
     def test_update_re_evaluates_an_unstable_entry_of_a_changed_function(self):
         res = _results({M1: "killed", M2: "killed"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: {"unstable": self.REASON}})
         prop = cmf.propose_baseline(res, base, [MOD])
         assert prop["modules"][MOD]["mutants"][M2] == "killed"
@@ -877,7 +877,7 @@ class TestProposeBaseline:
 
     def test_equivalent_on_a_changed_function_is_re_evaluated(self):
         res = _results({M1: "killed", M2: "survived"},
-                       hashes={"x_grants": "changed000000", "x_normalize": "bbbbbbbbbbbb"})
+                       hashes={"x_grants": "changed000000", "x_normalize": HASHES["x_normalize"]})
         base = _baseline({M1: "killed", M2: {"equivalent": "was true before the edit"}})
         prop = cmf.propose_baseline(res, base, [MOD])
         assert prop["modules"][MOD]["mutants"][M2] == "survived"
