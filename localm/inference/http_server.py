@@ -3883,19 +3883,47 @@ def _stall_trace_writer(path_fn):
     return _write
 
 
-def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
+# The event loop thread's ident, set at lifespan startup; None before that and
+# after shutdown.
+_hang_loop_thread: Optional[int] = None
+
+
+def _write_thread_stacks(fh, loop_thread: Optional[int]) -> None:
+    """Write every thread's stack to *fh*: first a line naming what the event
+    loop thread (*loop_thread*, else ``_hang_loop_thread``) was in, then each
+    thread with its name, ident and daemon flag, the event loop thread first
+    (``_stall_watch.format_stacks``). Falls back to
+    ``faulthandler.dump_traceback`` when that fails."""
+    import faulthandler
+    try:
+        from localm.inference import _stall_watch as _sw
+        loop = loop_thread if loop_thread is not None else _hang_loop_thread
+        stacks = _sw.live_frames()
+        stacks.pop(threading.get_ident(), None)
+        entries = _sw.thread_entries(stacks, loop)
+        text = f"{_sw.loop_summary(entries)}\n{_sw.format_stacks(entries)}"
+    except Exception:
+        fh.write("(thread stack formatting failed; raw dump follows)\n")
+        faulthandler.dump_traceback(file=fh, all_threads=True)
+        return
+    fh.write(text)
+
+
+def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0,
+                         loop_thread: Optional[int] = None):
     """Start a plain (NON-async) daemon thread that watches the heartbeat. When
     the event loop has not ticked in `threshold`s it is blocked, so dump ALL
     thread stacks to `trace_path` via faulthandler - the only way to see what a
     fully-wedged loop is stuck in, because this thread runs OUTSIDE the loop.
     Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread)
-    for teardown; the thread OWNS its file and closes it on exit.
+    for teardown; the thread OWNS its file and closes it on exit. Each dump
+    names what the event loop thread (`loop_thread`, else `_hang_loop_thread`)
+    was in and lists that thread first (see _write_thread_stacks).
 
     The trace file is opened LAZILY, only when the first stall is detected, so a
     healthy run (the overwhelming common case, since this is on by default) never
     creates a file at all. Never blocks: it only waits on an Event, subtracts two
     numbers, and appends to a file."""
-    import faulthandler
     import traceback
 
     stop = threading.Event()
@@ -3943,7 +3971,7 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                         f"\n===== LOCALM HANG WATCHDOG: event loop stalled {lag:.1f}s "
                         f"(pid {os.getpid()}, {time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
                     try:
-                        faulthandler.dump_traceback(file=fh, all_threads=True)
+                        _write_thread_stacks(fh, loop_thread)
                     except Exception:
                         # Fallback: pure-Python walk of every thread's frames.
                         for tid, frame in sys._current_frames().items():
@@ -4022,8 +4050,8 @@ def _hang_dump(reason: str) -> None:
     calls this once per distinct incident; detection/surfacing themselves are
     NOT gated on this (they write nothing sensitive anywhere).
 
-    Two sections: every THREAD (faulthandler - where a wedged executor job is
-    visible), then every asyncio TASK with its await stack, because a
+    Two sections: every THREAD, the event loop thread first
+    (_write_thread_stacks - where a wedged executor job is visible), then every asyncio TASK with its await stack, because a
     purely-async wedge (a coroutine parked
     on an await that never completes) does not exist on any thread and is
     invisible to faulthandler. The task section is gathered ON the loop
@@ -4033,13 +4061,12 @@ def _hang_dump(reason: str) -> None:
     already shows the freeze itself."""
     if not _diagnostics_allowed():
         return
-    import faulthandler
     from localm.debuglog import hang_trace_path
     with open(hang_trace_path(), "a", encoding="utf-8",
               errors="backslashreplace") as fh:
         fh.write(f"\n===== LOCALM HANG ALARM: {reason} (pid {os.getpid()}, "
                  f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
-        faulthandler.dump_traceback(file=fh, all_threads=True)
+        _write_thread_stacks(fh, None)
         loop = _hang_dump_loop
         if loop is None or loop.is_closed():
             return
@@ -5907,7 +5934,7 @@ def _make_lifespan():
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _inference_sem, _inference_sems, _active_model_name, _server_loop
-        global _hang_dump_loop, _hang_alarm_instance
+        global _hang_dump_loop, _hang_alarm_instance, _hang_loop_thread
         # Publish the running loop so off-loop worker threads (the jobs runner) can
         # route a shared-engine unload back onto it via run_coroutine_threadsafe -
         # see unload_one_model and the _server_loop comment above.
@@ -5964,6 +5991,7 @@ def _make_lifespan():
         # privacy mode on default config), making _loop_lag_seconds() report a
         # permanent 0.00 indistinguishable from "healthy". Best-effort: a startup
         # failure must never block serving.
+        _hang_loop_thread = threading.get_ident()
         hb_task = None
         if "pytest" not in sys.modules:
             try:
@@ -5990,7 +6018,8 @@ def _make_lifespan():
                 and "pytest" not in sys.modules):
             try:
                 hang_path = _hw_path()
-                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), hang_path)
+                hang_stop, hang_thread = _start_hang_watchdog(
+                    _hw_secs(), hang_path, loop_thread=_hang_loop_thread)
                 if _hw_verbose():
                     # Explicit opt-in extras: asyncio debug logs any single callback
                     # that hogs the loop past the threshold (names the culprit at a
@@ -6186,6 +6215,8 @@ def _make_lifespan():
                 sat_stop.set()
                 if sat_thread is not None:
                     sat_thread.join(timeout=2)
+            if _hang_loop_thread == threading.get_ident():
+                _hang_loop_thread = None
             if stall_watch is not None:
                 from localm.inference import _stall_watch as _sw
                 _sw.set_active(None)

@@ -137,7 +137,8 @@ def _context_diagnostic_sections(context: Optional[dict]) -> list:
     if hang:
         parts += ["", "## Server hang trace (event-loop stall)",
                   "The hang watchdog captured every thread's stack when the server "
-                  "froze (the top of the main thread is the blocking call):",
+                  "froze. The event loop thread is listed first; its top frame is "
+                  "what the server's event loop was blocked in:",
                   "```", _br._scrub_secrets(str(hang))[:8000], "```"]
     return parts
 

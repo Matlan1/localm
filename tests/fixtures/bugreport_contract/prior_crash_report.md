@@ -82,10 +82,10 @@ llama_context: constructing llama_co
 ```
 
 ## Server hang trace (event-loop stall)
-The hang watchdog captured every thread's stack when the server froze (the top of the main thread is the blocking call):
+The hang watchdog captured every thread's stack when the server froze. The event loop thread is listed first; its top frame is what the server's event loop was blocked in:
 ```
 Thread 0x0002 (most recent call first):
-  File "C:\Users\<redacted>\Documents\localm\notes.txt", line 40 in _run_once
+  localm/notes.txt:40 in _run_once
   Authorization: <redacted>
 ```
 

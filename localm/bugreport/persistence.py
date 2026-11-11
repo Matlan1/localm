@@ -110,6 +110,7 @@ def save_user_report(description: str = "", *, summary: str = "",
                      include_log: bool = False,
                      client: Optional[dict] = None,
                      extra_hang_trace: str = "",
+                     stall_stacks: str = "",
                      scrub: Optional[Callable[[str], str]] = None) -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path.
 
@@ -130,8 +131,10 @@ def save_user_report(description: str = "", *, summary: str = "",
     JS console errors). *extra_hang_trace* lets the CLI supply a freeze trace
     it found in a DIFFERENT process (see live_server_hang_trace) - the self-pid
     check below only ever catches the caller's own freeze, which is never the
-    CLI's own case. Returns None on a write failure (the caller surfaces that
-    rather than reporting a false success). Serialized on
+    CLI's own case. *stall_stacks* (the server's in-memory record of its
+    newest stall with every thread's stack) is attached in the same section
+    when no hang trace was found. Returns None on a write failure (the
+    caller surfaces that rather than reporting a false success). Serialized on
     ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
     calls running on different worker threads at once cannot race the shared
     pre_restart.log read+delete or collide on the same-second report filename.
@@ -178,6 +181,8 @@ def save_user_report(description: str = "", *, summary: str = "",
         # (live_server_hang_trace) and passes what it found in here instead.
         if extra_hang_trace:
             hang = f"{hang}\n\n{extra_hang_trace}" if hang else extra_hang_trace
+        if not hang and stall_stacks:
+            hang = stall_stacks
         if hang:
             context["hang_traces"] = hang
         if isinstance(client, dict) and client:
