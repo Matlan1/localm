@@ -151,3 +151,83 @@ def test_every_media_call_site_leaves_delete_outputs_to_the_facade():
                     and any(k.arg == "delete_outputs" for k in node.keywords)):
                 offenders.append(f"{path.relative_to(root.parent)}:{node.lineno}")
     assert offenders == []
+
+
+def _media_backend_calls():
+    """Every call in localm/ of a media backend's ``generate`` or of
+    ``generate_media``, outside the facade module, as (location, call)."""
+    import ast
+    root = Path(__file__).resolve().parent.parent / "localm"
+    facade = root / "plugins" / "media_config.py"
+    for path in root.rglob("*.py"):
+        if path == facade:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            base = node.func.value
+            if node.func.attr == "generate_media" or (
+                    node.func.attr == "generate" and isinstance(base, ast.Name)
+                    and base.id in ("_backend", "media_backend", "image_backend")):
+                yield f"{path.relative_to(root.parent)}:{node.lineno}", node
+
+
+def test_every_media_backend_call_states_privacy():
+    """Each caller passes ``privacy=`` (or forwards ``**kwargs`` from a caller
+    that does), so the facade can force delete_outputs in privacy mode."""
+    calls = list(_media_backend_calls())
+    assert len(calls) >= 7
+    missing = [where for where, call in calls
+               if not any(k.arg in ("privacy", None) for k in call.keywords)]
+    assert missing == []
+
+
+@pytest.fixture
+def image_app(monkeypatch, tmp_path):
+    from fastapi import FastAPI
+    from localm.jobmanager import JobManager
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setenv("LOCALM_TMPDIR", str(tmp_path / "scratch"))
+    (tmp_path / "scratch").mkdir()
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("image")
+    app.state.jobs = JobManager()
+    app.state.self_url = "http://127.0.0.1:8642/v1"
+    return app
+
+
+def _png_writing_generator(calls: list):
+    def fake_generate_image(prompt, out, **kwargs):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "PNG")
+        Path(out).write_bytes(buf.getvalue())
+        calls.append(kwargs)
+        return True, f"Image saved to {out}"
+    return fake_generate_image
+
+
+@pytest.mark.parametrize("mode,configured,expected", [
+    ("privacy", False, True), ("log", True, True), ("log", False, False),
+])
+def test_gui_image_route_reaches_comfyui_with_the_decided_value(
+        image_app, monkeypatch, mode, configured, expected):
+    """POST /v1/images/generations runs the same job as /api/imagine, through
+    the real backend facade down to the ComfyUI generator."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_MODE", mode)
+    _set_delete_outputs(configured)
+    calls: list = []
+    with patch("localm.image_gen.comfy.generate_image", _png_writing_generator(calls)), \
+         TestClient(image_app) as client:
+        r = client.post("/v1/images/generations",
+                        json={"prompt": "a cat", "response_format": "b64_json"})
+    assert r.status_code == 200, r.text
+    assert len(calls) == 1
+    assert calls[0]["delete_outputs"] is expected
+    assert calls[0]["write_sidecar"] is (mode != "privacy")

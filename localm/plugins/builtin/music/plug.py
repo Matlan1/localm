@@ -254,8 +254,6 @@ async def music(req: MusicRequest, request: Request):
                 self_url=self_url,
                 instance_token=instance_token,
                 write_sidecar=not is_privacy,
-                # Delete ComfyUI's own copy when the user opted in OR privacy mode
-                # forces no traces.
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 lyrics=req.lyrics,
                 duration_seconds=req.duration_seconds,
