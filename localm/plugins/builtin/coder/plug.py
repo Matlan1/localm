@@ -780,7 +780,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         await _ensure_model_loaded(request, req.model, force=req.force,
                                           keep_others=req.keep_others)
 
-    from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
+    from localm.audit import (effective_mode, mode_at_least_as_private, parse_mode,
+                              project_mode)
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
     # is honored by the GUI coder, not just the global coder_mode.
     # Resolved BEFORE the backend, not after: the privacy gate needs it to decide
@@ -799,6 +800,15 @@ async def create_session(req: CreateSessionRequest, request: Request):
                 403, "Requesting a less private mode needs the owner key; a "
                 "scoped key uses the project's configured mode.")
     session_mode = req.mode or floor_mode.value
+    # A mode the project pins is a floor for every caller, the owner included.
+    pinned_mode = project_mode(cwd)
+    pin_note = None
+    if pinned_mode is not None and not mode_at_least_as_private(
+            parse_mode(session_mode), pinned_mode):
+        pin_note = (f"This project pins {pinned_mode.value} mode in "
+                    f".localcoder/config.toml, so this session runs in "
+                    f"{pinned_mode.value} mode, not {parse_mode(session_mode).value}.")
+        session_mode = pinned_mode.value
 
     loop = asyncio.get_running_loop()
     # WHICH model server answers this session. Off the event loop:
@@ -820,6 +830,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # indistinguishable from an applied one.
     # A localm server records this session's requests no less privately than
     # the session's own mode.
+    if pin_note:
+        notes.append(pin_note)
     if hasattr(backend, "session_mode"):
         backend.session_mode = parse_mode(session_mode).value
     if req.native_tools and not backend.supports_native_tools:
