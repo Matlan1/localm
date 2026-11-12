@@ -23,7 +23,9 @@ function visionRejectFetch(status = 400,
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url).startsWith("/api/models")) {
-      const data = { models: [{ name: "text-model" }, { name: "vision-model", vision: true }],
+      const data = { models: [
+        { name: "text-model", active: server.active === "text-model" },
+        { name: "vision-model", vision: true, active: server.active === "vision-model" }],
                      active: server.active };
       return { ok: true, status: 200, json: async () => data, text: async () => "" };
     }
@@ -111,6 +113,7 @@ test("after a refusal a model that can read images is sent the earlier image", a
   const { window, calls, server } = await setup();
   const conv = imageConv();
   await window.runCompletion(conv);   // refused by the selected model
+  await new Promise((r) => setTimeout(r, 50));   // a model-list refresh it started settles
   server.active = "vision-model";
   runScript(window, 'modelCache.active = "vision-model";');
   window.document.getElementById("model-select").value = "vision-model";

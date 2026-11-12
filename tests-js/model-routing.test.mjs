@@ -572,7 +572,9 @@ function setupRefusal({ routing, pinned = false }) {
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url).startsWith("/api/models")) {
-      const data = { models: [{ name: "plain" }, { name: "seer", vision: true }],
+      const data = { models: [
+        { name: "plain", active: server.active === "plain" },
+        { name: "seer", vision: true, active: server.active === "seer" }],
                      active: server.active };
       return { ok: true, status: 200, headers: { get: () => null },
         json: async () => data, text: async () => "" };

@@ -10,7 +10,7 @@ function makeFetch(calls, state) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ u, method, body });
     if (u === "/api/memory" && method === "GET") {

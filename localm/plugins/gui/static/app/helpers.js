@@ -948,6 +948,18 @@ export function protectMath(text) {
   return { text: protectedText, restore, finish };
 }
 
+/** *text* with every run of eight or more `*` or `_` outside code escaped
+ *  (`\\*`), so the run is plain text, unless the line holds nothing but such
+ *  marks and spaces (a thematic break). Bounds marked's emphasis scan, which
+ *  is quadratic in an unmatched delimiter run (markedjs/marked#4196). See
+ *  tests-js/markdown-degenerate-bound.test.mjs. */
+export function escapeDelimiterRuns(text) {
+  return String(text || "").split(_CODE_SPAN).map((part, i) => (i % 2 === 1 ? part
+    : part.split("\n").map((line) => (/^[ \t]*(?:[*_][ \t]*)+$/.test(line) ? line
+      : line.replace(/(?<!\\)([*_])\1{7,}/g, (run) => run.replace(/[*_]/g, "\\$&"))))
+      .join("\n"))).join("");
+}
+
 /** Render one model reply into *target*.
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
@@ -986,7 +998,7 @@ export function renderMarkdown(target, text, opts = {}) {
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     const thinkMath = protectMath(think);
     const thinkBody = det.querySelector("div");
-    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
+    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(thinkMath.text)));
     thinkMath.restore(thinkBody);
     thinkFinish = () => thinkMath.finish(thinkBody);
     if (!det.dataset.userset) det.open = open;
@@ -1003,7 +1015,7 @@ export function renderMarkdown(target, text, opts = {}) {
     target.appendChild(main);
   }
   const restMath = protectMath(rest || "");
-  main.innerHTML = DOMPurify.sanitize(marked.parse(restMath.text));
+  main.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(restMath.text)));
   restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is

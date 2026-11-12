@@ -2541,6 +2541,9 @@ export function parseRoutingHeader(resp) {
   } catch { return null; }
 }
 
+/** Milliseconds between two redraws of a streaming reply. */
+const LIVE_RENDER_MS = 50;
+
 /** After a refusal under model autoswitch "ask": a button under the chat that
  *  selects offer.suggest and sends the conversation again. Returns the row, or null when there is no
  *  chat to show it in. The row is not saved with the chat; a later re-render
@@ -2871,68 +2874,82 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     serverCompacted = !!(r.headers && typeof r.headers.get === "function"
         && r.headers.get("X-Localm-Context-Compacted"));
     let streamErr = null;
-    await readSSE(r, (payload) => {
-      if (payload === "[DONE]" || cutAtCall) return;
-      let chunk;
-      try { chunk = JSON.parse(payload); } catch { return; }
-      if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
-        const meta = chunk.localm_headers;
-        const inStream = {
-          headers: { get: (k) => (typeof meta[k] === "string" ? meta[k] : null) },
-        };
-        memUsed = parseMemoryHeader(inStream) || memUsed;
-        routing = parseRoutingHeader(inStream) || routing;
-        if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
-      }
-      if (chunk.localm_error) {
-        streamErr = chunk.localm_error;
-        return;
-      }
-      if (chunk.usage) usage = chunk.usage;
-      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-      const d = chunk.choices?.[0]?.delta || {};
-      if (d.status) {
-        updateStatusIndicator(liveBody, d.status, d.status_code, d.status_args);
-        if (chat.stick) box.scrollTop = box.scrollHeight;
-      }
-      const cDelta = d.content || "";
-      const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
-      if (cDelta || rDelta) {
-        removeStatusIndicator(liveBody);
-        full += cDelta;
-        reasoning += rDelta;
-        if (webEnabled && cDelta && /tool_call/i.test(full)) {
-          const end = firstToolCallEnd(full);
-          const rest = end >= 0 ? full.slice(end) : "";
-          const after = rest.trimStart();
-          let cutAt = -1;
-          if (end >= 0 && web.final) {
-            const next = rest.search(_TOOL_CALL_TAG);
-            if (next >= 0) cutAt = end + next;
-          } else if (after &&
-                     !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
-            // The server's inference-error text after the block (or the start
-            // of it) does not cut the reply; the turn then ends as failed.
-            cutAt = end;
-          }
-          if (cutAt >= 0) {
-            full = full.slice(0, cutAt);
-            cutAtCall = true;
-            finishReason = "stop";
-            reqCtl.abort();
-          }
+    // The reply on screen is redrawn at most once per LIVE_RENDER_MS while it
+    // streams, and once more when the stream ends.
+    let liveTimer = null;
+    const paintLive = () => {
+      liveTimer = null;
+      // Rebuild <think> from the reasoning stream so splitThink renders the
+      // collapsible block exactly as before. Back-compat: an older server that
+      // still inlines <think> in content also renders (reasoning stays empty).
+      renderMarkdown(liveBody,
+        reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
+      // R31: follow the stream ONLY while the user is at the bottom. chat.stick
+      // is latched by the scroll listener, so scrolling up reliably pauses
+      // autoscroll (recomputing nearBottom per token fought the user instead).
+      if (chat.stick) box.scrollTop = box.scrollHeight;
+    };
+    try {
+      await readSSE(r, (payload) => {
+        if (payload === "[DONE]" || cutAtCall) return;
+        let chunk;
+        try { chunk = JSON.parse(payload); } catch { return; }
+        if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
+          const meta = chunk.localm_headers;
+          const inStream = {
+            headers: { get: (k) => (typeof meta[k] === "string" ? meta[k] : null) },
+          };
+          memUsed = parseMemoryHeader(inStream) || memUsed;
+          routing = parseRoutingHeader(inStream) || routing;
+          if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
         }
-        // Rebuild <think> from the reasoning stream so splitThink renders the
-        // collapsible block exactly as before. Back-compat: an older server that
-        // still inlines <think> in content also renders (reasoning stays empty).
-        renderMarkdown(liveBody,
-          reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
-        // R31: follow the stream ONLY while the user is at the bottom. chat.stick
-        // is latched by the scroll listener, so scrolling up reliably pauses
-        // autoscroll (recomputing nearBottom per token fought the user instead).
-        if (chat.stick) box.scrollTop = box.scrollHeight;
+        if (chunk.localm_error) {
+          streamErr = chunk.localm_error;
+          return;
+        }
+        if (chunk.usage) usage = chunk.usage;
+        if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
+        const d = chunk.choices?.[0]?.delta || {};
+        if (d.status) {
+          updateStatusIndicator(liveBody, d.status, d.status_code, d.status_args);
+          if (chat.stick) box.scrollTop = box.scrollHeight;
+        }
+        const cDelta = d.content || "";
+        const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
+        if (cDelta || rDelta) {
+          removeStatusIndicator(liveBody);
+          full += cDelta;
+          reasoning += rDelta;
+          if (webEnabled && cDelta && /tool_call/i.test(full)) {
+            const end = firstToolCallEnd(full);
+            const rest = end >= 0 ? full.slice(end) : "";
+            const after = rest.trimStart();
+            let cutAt = -1;
+            if (end >= 0 && web.final) {
+              const next = rest.search(_TOOL_CALL_TAG);
+              if (next >= 0) cutAt = end + next;
+            } else if (after &&
+                       !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
+              // The server's inference-error text after the block (or the start
+              // of it) does not cut the reply; the turn then ends as failed.
+              cutAt = end;
+            }
+            if (cutAt >= 0) {
+              full = full.slice(0, cutAt);
+              cutAtCall = true;
+              finishReason = "stop";
+              reqCtl.abort();
+            }
+          }
+          if (liveTimer === null) liveTimer = setTimeout(paintLive, LIVE_RENDER_MS);
+        }
+      });
+    } finally {
+      if (liveTimer !== null) {
+        clearTimeout(liveTimer);
+        paintLive();
       }
-    });
+    }
     if (streamErr) {
       full = "";
       reasoning = "";

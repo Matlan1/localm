@@ -91,14 +91,14 @@ test("an in-stream refusal is shown once, as an error, and not saved as a reply"
   assert.match(body, /error: 503/);
 });
 
-test("an in-stream image refusal drops the image like the HTTP 400 does", async () => {
+test("an in-stream image refusal keeps the image like the HTTP 400 does", async () => {
   const { window } = setup([refusal(400, "This model cannot read images.", "image")]);
   const conv = { id: "c1", title: "t", messages: [{ role: "user", content: [
     { type: "text", text: "what is this?" },
     { type: "image_url", image_url: { url: IMG } },
   ] }] };
   await window.runCompletion(conv);
-  assert.equal(window.msgImages(conv.messages[0]).length, 0);
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the image stays in the chat");
   assert.equal(conv.messages.length, 1, "no blank reply was persisted");
 });
 
