@@ -145,6 +145,171 @@ def _uv_pin(root: Path) -> Optional[str]:
         return None
 
 
+def _runtime():
+    """The ``localm.updater_runtime`` module."""
+    from localm import updater_runtime
+    return updater_runtime
+
+
+def _sha(v) -> Optional[str]:
+    from localm import update_package
+    v = v.lower() if isinstance(v, str) else None
+    return v if update_package.is_sha256(v) else None
+
+
+def _stated_llama(root: Path) -> Optional[dict]:
+    ur = _runtime()
+    pins = ur.staged_pins(root)
+    if not pins["pinned_tag"]:
+        return None
+    version = pins["pinned_tag"]
+    if pins["rocm_build"]:
+        version += f" amd-rocm {pins['rocm_build']}"
+    assets: dict = {}
+    for rel in ur._RELEASE_TREE_FILES:
+        lit = _literals(root / rel, {"DEFAULT_URL", "DEFAULT_URL_SHA256", "_PINNED_FALLBACK_SHA256",
+                                     "_CUDA_LINUX_PINNED_SHA256"})
+        if not lit:
+            continue
+        for key in ("_PINNED_FALLBACK_SHA256", "_CUDA_LINUX_PINNED_SHA256"):
+            table = lit.get(key)
+            if isinstance(table, dict):
+                for k, v in table.items():
+                    if _sha(v):
+                        assets[str(k)] = _sha(v)
+        url, sha = lit.get("DEFAULT_URL"), _sha(lit.get("DEFAULT_URL_SHA256"))
+        if isinstance(url, str) and sha:
+            assets[url.rsplit("/", 1)[-1]] = sha
+        break
+    return {"version": version, "assets": dict(sorted(assets.items()))}
+
+
+def _stated_cuda(root: Path) -> Optional[dict]:
+    ur = _runtime()
+    lines = ur.cuda_pins(root)
+    if not lines:
+        return None
+    shas: dict = {}
+    for rel in ur._CUDA_FILES:
+        pin = _literals(root / rel, {"_CUDA_RUNTIME_PIN"}).get("_CUDA_RUNTIME_PIN")
+        if isinstance(pin, dict):
+            shas = pin
+            break
+    assets = {}
+    parts = []
+    for line in sorted(lines):
+        for pkg, ver in sorted(lines[line].items()):
+            parts.append(f"{line} {pkg}=={ver}")
+            entry = shas.get(pkg)
+            if isinstance(entry, (tuple, list)) and len(entry) == 2 and _sha(entry[1]):
+                assets[f"linux-x86_64/{pkg}=={ver}"] = _sha(entry[1])
+    return {"version": "; ".join(parts), "assets": dict(sorted(assets.items()))}
+
+
+def _stated_pytorch(root: Path) -> Optional[dict]:
+    reqs = sorted(_extras(root, ["gpu"]))
+    if not reqs:
+        return None
+    return {"version": "; ".join(reqs), "assets": {}}
+
+
+def _table_assets(table) -> dict:
+    out = {}
+    if not isinstance(table, dict):
+        return out
+    for key, value in table.items():
+        if isinstance(key, tuple) and isinstance(value, tuple) and value and _sha(value[-1]):
+            out["/".join(map(str, key))] = _sha(value[-1])
+    return out
+
+
+def _stated_sdcpp(root: Path) -> Optional[dict]:
+    lit = _literals(root / _SDCPP_SOURCE, {"TAG", "ASSETS", "EXTRA_ASSETS"})
+    if not isinstance(lit.get("TAG"), str):
+        return None
+    assets = _table_assets(lit.get("ASSETS"))
+    extras = lit.get("EXTRA_ASSETS")
+    if isinstance(extras, dict):
+        for key, items in extras.items():
+            for item in items or []:
+                if isinstance(key, tuple) and isinstance(item, tuple) and len(item) == 2 \
+                        and _sha(item[1]):
+                    assets["/".join(map(str, key)) + f"/{item[0]}"] = _sha(item[1])
+    return {"version": lit["TAG"], "assets": dict(sorted(assets.items()))}
+
+
+def _stated_koboldcpp(root: Path) -> Optional[dict]:
+    lit = _literals(root / _KOBOLD_SOURCE, {"TAG", "ASSETS"})
+    if not isinstance(lit.get("TAG"), str):
+        return None
+    return {"version": lit["TAG"],
+            "assets": dict(sorted(_table_assets(lit.get("ASSETS")).items()))}
+
+
+def _stated_comfyui(root: Path) -> Optional[dict]:
+    commit = _literals(root / _COMFY_SOURCE, {"COMFYUI_PINNED_COMMIT"}).get(
+        "COMFYUI_PINNED_COMMIT")
+    if not isinstance(commit, str):
+        return None
+    return {"version": commit, "assets": {}}
+
+
+# The setup scripts that pin uv, per platform family.
+_UV_SETUP_SCRIPTS = {"windows": ("setup.bat", "setup-gui.bat"),
+                   "posix": ("setup.sh", "setup-gui.sh")}
+
+
+def _stated_uv(root: Path) -> Optional[dict]:
+    from localm import uv_tool
+    versions, assets = {}, {}
+    for plat, scripts in _UV_SETUP_SCRIPTS.items():
+        for name in scripts:
+            try:
+                text = (root / name).read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                continue
+            ver, sha = uv_tool._VERSION_RE.search(text), uv_tool._SHA_RE.search(text)
+            if ver and sha:
+                versions[plat] = ver.group(1)
+                assets[f"{plat}/installer"] = sha.group(1).lower()
+                break
+    if not versions:
+        return None
+    distinct = sorted(set(versions.values()))
+    version = distinct[0] if len(distinct) == 1 else "; ".join(
+        f"{p} {v}" for p, v in sorted(versions.items()))
+    return {"version": version, "assets": dict(sorted(assets.items()))}
+
+
+# Every component an update can carry: the native llama.cpp runtime and its CUDA
+# libraries (``updater_runtime``), then :data:`ORDER`. Each has its reader in
+# :data:`_STATED_READERS`.
+STATED = ("llama.cpp", "cuda-runtime") + ORDER
+
+_STATED_READERS = {"llama.cpp": _stated_llama, "cuda-runtime": _stated_cuda,
+                   "pytorch": _stated_pytorch, "sdcpp": _stated_sdcpp,
+                   "koboldcpp": _stated_koboldcpp, "comfyui": _stated_comfyui,
+                   "uv": _stated_uv}
+
+
+def stated_components(root) -> dict:
+    """``{component: {"version", "assets"}}`` for every component of
+    :data:`STATED` the localm tree at *root* pins, read as text (never
+    imported), in the shape of the update package statement
+    (:mod:`localm.update_package`): the version and, per platform and backend
+    (per asset name for the llama.cpp builds), the sha256 of what is downloaded.
+    A component pinned by a commit (ComfyUI) or resolved per machine from a
+    wheel index (PyTorch) has no assets. A component the tree does not pin is
+    absent. Raises KeyError for a component of :data:`STATED` with no reader."""
+    root = Path(root)
+    out = {}
+    for name in STATED:
+        found = _STATED_READERS[name](root)
+        if found is not None:
+            out[name] = found
+    return out
+
+
 def staged_pins(root) -> dict:
     """The component pins of the localm tree at *root*, read as text: ``{"sdcpp":
     {"tag", "assets"}, "koboldcpp": {"tag", "version", "assets"}, "comfyui":
@@ -772,7 +937,7 @@ def _stop_comfy(root: Path, say: Callable) -> list:
 def _stop_torch_holders(installed_root: Path, say: Callable) -> list:
     """Stop this install's own processes that hold the PyTorch stack's native
     libraries (``updater_runtime.stop_own_holders``). Returns the holders left."""
-    from localm import updater_runtime
+    updater_runtime = _runtime()
     site = site_packages(installed_root / ".venv")
     if site is None:
         return []
