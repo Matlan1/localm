@@ -376,19 +376,23 @@ def _print_qr(url: str) -> None:
                   "terminal; just open the URL above on your phone)[/dim]")
 
 
-# gui options that only shape a FRESH server: an attach to an existing instance
-# cannot honor them, so passing one explicitly is reported as a conflict rather
-# than swallowed. Not listed here = compatible with an attach: no_browser /
-# debug / project / force_new / isolated / keep_diagnostics (local or
-# attach-control), no_model (only picks a STARTUP model, moot when nothing is
-# starting), or value-aware (model / host / port) handled below.
+# gui options that only shape a FRESH server's bind, transport or startup: an
+# attach to an existing instance cannot honor them, so passing one explicitly is
+# reported as a conflict. Not listed here = compatible with an attach:
+# no_browser / debug / project / force_new / isolated / keep_diagnostics,
+# no_model (picks a STARTUP model only), api_mode (the attach then mounts
+# nothing), the load options in _ATTACH_LOAD_OPTIONS (named as not applied), or
+# value-aware (model / host / port / mode) handled below.
 _ATTACH_CONFLICT_FLAGS = {
-    "ctx": "--ctx", "gpu_layers": "--gpu-layers",
-    "pull_spec": "--pull", "mode": "--mode", "insecure": "--insecure",
+    "pull_spec": "--pull", "insecure": "--insecure",
     "no_tls": "--no-tls", "tls_cert": "--tls-cert", "tls_key": "--tls-key",
-    "show_qr": "--qr", "api_mode": "--api-mode", "mmproj": "--mmproj",
-    "device": "--device",
+    "show_qr": "--qr",
 }
+
+# Model load options. The running server loads models with its own settings,
+# so on an attach these are named as not applied (_serve_on_running).
+_ATTACH_LOAD_OPTIONS = (("ctx", "--ctx"), ("gpu_layers", "--gpu-layers"),
+                        ("mmproj", "--mmproj"), ("device", "--device"))
 
 
 FORWARDED_EXPLICIT_KEY = "localm.gui.forwarded_explicit"
@@ -419,36 +423,36 @@ def _existing_base_url(existing: dict) -> str:
     return f"{scheme}://{_h}:{existing.get('port')}/v1"
 
 
-def _probe_active_model(existing: dict):
-    """The running instance's active model id, or None when it cannot be read
-    (unreachable / a chat-scoped attach token that cannot GET /v1/models). Used to
-    decide whether an explicitly-named `localm gui MODEL` conflicts with what the
-    running server actually serves."""
+def _running_session_mode(existing: dict):
+    """The session mode (``privacy``, ``log`` or ``full``) the instance
+    *existing* reports as ``effective_mode`` on ``GET /v1/config``, or None when
+    it cannot be read."""
+    import requests
+
+    from localm import tls
+    from localm.auth import resolve_bearer_headers
+    from localm.jsonreply import response_json
+    url = f"{_existing_base_url(existing)}/config"
     try:
-        from localm.inference.http_engine import remote_model_status
-        return remote_model_status(_existing_base_url(existing),
-                                   existing.get("token"))[1]
-    except Exception:
+        r = requests.get(url, headers=resolve_bearer_headers(existing.get("token")),
+                         timeout=5, allow_redirects=False,
+                         verify=tls.requests_verify(url))
+        if r.status_code != 200:
+            return None
+        body = response_json(r)
+    except (requests.RequestException, ValueError):
         return None
+    mode = body.get("effective_mode") if isinstance(body, dict) else None
+    return mode.lower() if isinstance(mode, str) and mode else None
 
 
-def _serves_requested_model(existing: dict, active: str, model: str) -> bool:
-    """True when the instance *existing*, whose active model is *active*, serves
-    the *model* named on the command line, by name or by file
-    (http_engine.served_model_is_requested). False when that cannot be shown."""
-    from localm.inference.http_engine import served_model_is_requested
-    return served_model_is_requested(_existing_base_url(existing),
-                                     existing.get("token"), active, model)
-
-
-def _attach_conflicts(ctx, existing: dict, model: str) -> list:
+def _attach_conflicts(ctx, existing: dict) -> list:
     """Command-line options the user passed that an attach to *existing* cannot
     honor - each a reason NOT to silently attach. Returns human-readable strings
-    (empty list = attaching is fine). port/host/model are value-aware so re-passing
-    what the running server already uses is NOT a conflict."""
+    (empty list = attaching is fine). port/host/mode are value-aware, so
+    re-passing what the running server already uses is NOT a conflict. A named
+    model and the load options are not conflicts (_serve_on_running)."""
     conflicts: list = []
-    # port / host: conflict only if the requested value DIFFERS from the running
-    # instance's - asking for the port it is already on is harmless.
     if _explicit(ctx, "port"):
         want, have = ctx.params.get("port"), existing.get("port")
         try:
@@ -461,23 +465,60 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
         want, have = ctx.params.get("host"), existing.get("host")
         if str(want) != str(have):
             conflicts.append(f"--host {want} (the running server bound {have})")
-    # model: a specific model was named. Probe the running instance; conflict only
-    # when its active model is KNOWN and different (unknown -> attach quietly, like
-    # `localm run`; same model -> attach). Never silently serve a different model.
-    if model and _explicit(ctx, "model"):
-        active = _probe_active_model(existing)
-        if active and not _serves_requested_model(existing, active, model):
-            conflicts.append(
-                f"model {model} (the running server serves {active})")
-    # everything else: an attach cannot retroactively set the running server's
-    # ctx / gpu-layers / tls / mode / ..., so an explicit pass is a conflict.
-    # (--mode is the session-persistence mode, a different namespace from the
-    # entry's SURFACE mode, so it cannot be compared cheaply - any explicit --mode
-    # conflicts.)
+    if _explicit(ctx, "mode") and ctx.params.get("mode"):
+        want = str(ctx.params.get("mode")).lower()
+        have = _running_session_mode(existing)
+        if have is None:
+            conflicts.append(f"--mode {want} (the running server's session "
+                             f"mode could not be read)")
+        elif have != want:
+            conflicts.append(f"--mode {want} (the running server records in "
+                             f"{have} mode)")
     for name, flag in _ATTACH_CONFLICT_FLAGS.items():
         if _explicit(ctx, name):
             conflicts.append(flag)
     return conflicts
+
+
+def _serve_on_running(console, ctx, existing: dict, model) -> bool:
+    """Make the attached instance *existing* serve the *model* named on the
+    command line with server_switch.serve_requested_model (the same model is
+    reused, another one is loaded through the server's load route), and name
+    the load options typed on the command line that the running server does
+    not apply (it loads models with its own settings).
+
+    Prints the switch line, and the reason when the server was not switched (it
+    keeps what it had). Returns False when a named model is not served, True
+    otherwise, including when no model was named."""
+    from rich.markup import escape
+
+    from localm.auth import resolve_bearer_token
+    load_options = [flag for name, flag in _ATTACH_LOAD_OPTIONS
+                    if _explicit(ctx, name)]
+    ok = True
+    not_applied = load_options
+    if model and _explicit(ctx, "model"):
+        from localm.inference.server_switch import serve_requested_model
+        served = serve_requested_model(
+            _existing_base_url(existing), resolve_bearer_token(existing.get("token")),
+            model, load_options=load_options, by_name=False,
+            say=lambda line: console.print(f"  [dim]{escape(line)}[/dim]"))
+        if served.name is None:
+            console.print(f"  [yellow]{escape(served.note or '')}[/yellow]")
+            ok = False
+            not_applied = []
+        else:
+            not_applied = list(served.not_applied)
+            if served.switched:
+                console.print(f"  [green]It now serves {escape(served.name)}."
+                              f"[/green]")
+    if not_applied:
+        console.print(
+            f"  [yellow]Not applied to the running server: "
+            f"{escape(', '.join(not_applied))}[/yellow] [dim](it loads models "
+            f"with its own settings; start a separate server with them using "
+            f"--new)[/dim]")
+    return ok
 
 
 @dataclass
@@ -595,9 +636,11 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
     mount its GUI (_mount_remote_gui) unless *api_mode* is set, prints its
     address, opens it unless --no-browser (_open_attached) and returns True.
     With *api_mode* the running instance is never asked to mount anything.
-    Exits 1 before any of that
-    when an option given on the command line conflicts with the running
-    instance (_attach_conflicts)."""
+    Before the mount, a model named on the command line is served by the
+    running instance (_serve_on_running). Exits 1 before any of that when an
+    option given on the command line conflicts with the running instance
+    (_attach_conflicts), and after the open when the named model is not
+    served."""
     from localm import instances
     from localm.config import home_dir
     from localm.console import show_url
@@ -607,7 +650,8 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
     existing = instances.find_attachable(home_dir(), root_dir)
     if not existing:
         return False
-    conflicts = _attach_conflicts(click.get_current_context(), existing, model)
+    cctx = click.get_current_context()
+    conflicts = _attach_conflicts(cctx, existing)
     if conflicts:
         console.print(
             f"[red]A localm server is already running for [cyan]{root_dir}"
@@ -625,6 +669,9 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
         f"[bold green]Attaching[/bold green] to the localm already "
         f"running for [cyan]{root_dir}[/cyan] "
         f"(pid {existing.get('pid')}, port {existing.get('port')}).")
+    served = _serve_on_running(console, cctx, existing, model)
+    if api_mode and existing.get("mode") == "full":
+        console.print("  [dim]It also serves the GUI.[/dim]")
     if not api_mode and existing.get("mode") != "full":
         reason = _mount_remote_gui(existing)
         if reason is None:
@@ -640,6 +687,8 @@ def _attach_to_running(console, *, model, project, force_new: bool, isolated: bo
                   soft_wrap=True)
     if not no_browser:
         _open_attached(url)
+    if not served:
+        sys.exit(1)
     return True
 
 

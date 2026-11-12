@@ -280,17 +280,21 @@ def test_gui_by_path_attaches_to_the_server_serving_that_file(
     assert "cannot apply" not in flat
 
 
-def test_gui_by_path_of_a_different_file_is_refused(
+def test_gui_by_path_of_a_different_file_asks_the_server_to_switch(
         gui_running, stand_in, model_file, tmp_path):
     other = tmp_path / "elsewhere.gguf"
     other.write_bytes(b"GGUF")
     guicli, at = gui_running
-    at(stand_in())
+    srv = stand_in()
+    at(srv)
     result = CliRunner().invoke(guicli.main, [str(other), "--no-browser"])
     flat = _flat(result.output)
     assert result.exit_code == 1, result.output
-    assert "cannot apply" in flat
-    assert "attaching" not in flat
+    assert srv.load_requests == [str(other)]
+    assert "attaching" in flat
+    assert "could not switch" in flat and "is not registered" in flat
+    assert f"it keeps serving {ACTIVE.lower()}" in flat
+    assert "cannot apply" not in flat
 
 
 def test_run_autostart_loads_in_process_when_the_new_server_cannot_switch(
