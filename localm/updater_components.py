@@ -255,14 +255,14 @@ def _stated_comfyui(root: Path) -> Optional[dict]:
 
 
 # The setup scripts that pin uv, per platform family.
-_UV_PIN_SCRIPTS = {"windows": ("setup.bat", "setup-gui.bat"),
+_UV_SETUP_SCRIPTS = {"windows": ("setup.bat", "setup-gui.bat"),
                    "posix": ("setup.sh", "setup-gui.sh")}
 
 
 def _stated_uv(root: Path) -> Optional[dict]:
     from localm import uv_tool
     versions, assets = {}, {}
-    for plat, scripts in _UV_PIN_SCRIPTS.items():
+    for plat, scripts in _UV_SETUP_SCRIPTS.items():
         for name in scripts:
             try:
                 text = (root / name).read_text(encoding="utf-8")

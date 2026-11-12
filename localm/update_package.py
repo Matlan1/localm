@@ -110,7 +110,10 @@ def _strict_json(text: str):
     def constant(name):
         raise PackageError(f"{name} is not allowed")
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    try:
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    except RecursionError:
+        raise PackageError(f"{NAME} is nested too deeply") from None
 
 
 def _fields(obj, where: str, required: set) -> None:
@@ -225,7 +228,7 @@ def check(root, version: str, components_of: Callable) -> Optional[dict]:
 
 def _extract_safe(z: zipfile.ZipFile, dest: Path) -> None:
     for info in z.infolist():
-        if info.is_dir() or not _safe_path(info.filename):
+        if info.is_dir() or not (info.filename == NAME or _safe_path(info.filename)):
             continue
         out = dest.joinpath(*info.filename.split("/"))
         out.parent.mkdir(parents=True, exist_ok=True)
