@@ -3150,6 +3150,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // received this failed turn - calling it here would silently wipe the
       // only visible trace of the error the moment the toast auto-dismisses.
       // Leave the rendered error bubble in place instead.
+      if (mediaOffer) outcome.liveRow = showMediaOffer(conv, mediaOffer);
       return outcome;
     }
     if (!finishReason) {

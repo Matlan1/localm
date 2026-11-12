@@ -191,6 +191,19 @@ test("an ask-mode reply records the suggested model, shows a chip, and the chip 
   assert.equal(select.value, "seer", "clicking the chip selects the suggested model");
 });
 
+test("a suggestion chip's tooltip says why the server did not switch", async () => {
+  const { window, doc } = setup({ routingHeader: {
+    resolved: "plain", requested: "plain", routed: false, pinned: false,
+    gaps: { tool_use: "absent" }, unmet: [], suggested: "seer",
+    ask_reason: "it would run on the CPU only" } });
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
+  await window.runCompletion(conv);
+  const reply = conv.messages[conv.messages.length - 1];
+  assert.equal(reply.routed.askReason, "it would run on the CPU only");
+  assert.match(doc.querySelector(".routed-suggest").title, /CPU only/);
+});
+
 test("a pinned chat never shows a suggestion chip", async () => {
   const { window, doc } = setup({ routingHeader: {
     resolved: "plain", requested: "plain", routed: false, pinned: true,
@@ -563,7 +576,7 @@ test("a compacted reply cut at its first tool call still marks the conversation 
   assert.equal((first.content.match(/<tool_call>/g) || []).length, 1);
 });
 
-function setupRefusal({ routing, pinned = false }) {
+function setupRefusal({ routing, pinned = false, status = 400, refusal = "image" }) {
   const calls = [];
   let posts = 0;
   const impl = async (url, opts = {}) => {
@@ -571,9 +584,9 @@ function setupRefusal({ routing, pinned = false }) {
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions" && posts++ === 0) {
-      const headers = { get: (k) => (k === "X-Localm-Refusal" ? "image"
+      const headers = { get: (k) => (k === "X-Localm-Refusal" ? refusal
         : (k === "X-Localm-Model-Routing" && routing ? JSON.stringify(routing) : null)) };
-      return { ok: false, status: 400, headers,
+      return { ok: false, status, headers,
         json: async () => ({ detail: "plain cannot read images" }), text: async () => "" };
     }
     return { ok: true, status: 200, headers: { get: () => null },
@@ -626,6 +639,31 @@ test("an ask-mode image refusal offers the suggested model; one click restores t
     && p.image_url.url === image.image_url.url), "the image is sent again");
   assert.equal(conv.messages[conv.messages.length - 1].content, "a red square");
   assert.equal(doc.querySelector(".media-offer"), null);
+});
+
+test("an image refusal names why the server did not switch on its own", async () => {
+  const routing = { ...ASK_ROUTING, ask_reason: "loading it unloads plain" };
+  const { window, doc, conv } = setupRefusal({ routing });
+  await window.runCompletion(conv);
+  const why = doc.querySelector(".media-offer .media-offer-why");
+  assert.ok(why, "the offer carries the reason");
+  assert.match(why.textContent, /loading it unloads plain/);
+});
+
+test("a refusal that is not about an attachment still offers the suggested model, keeping the message", async () => {
+  const routing = { resolved: "plain", requested: "plain", routed: false, pinned: false,
+    gaps: { context_length: "absent" }, unmet: ["context_length"], suggested: "seer",
+    ask_reason: "it does not fit in this machine's VRAM and RAM" };
+  const { window, doc, conv, select, calls } = setupRefusal({ routing, status: 413, refusal: null });
+  await window.runCompletion(conv);
+  assert.ok(Array.isArray(conv.messages[0].content), "nothing is stripped");
+  const offer = doc.querySelector(".media-offer .routed-suggest");
+  assert.ok(offer, "the refusal offers the suggested model");
+  assert.match(doc.querySelector(".media-offer .media-offer-why").textContent, /VRAM and RAM/);
+  offer.click();
+  assert.equal(select.value, "seer");
+  for (let i = 0; i < 50 && chatPosts(calls).length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(chatPosts(calls)[1].body.model, "seer");
 });
 
 test("an image refusal with no suggestion offers nothing", async () => {
