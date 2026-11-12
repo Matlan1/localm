@@ -57,6 +57,10 @@ _QUEUE_MAX = 10_000
 # timeout: any event resets the clock.
 _IDLE_REAP_SECONDS = 24 * 3600
 
+# Seconds between two checks that the keystore key behind each key-created
+# session is still live.
+_KEY_WATCH_SECONDS = 5.0
+
 # The longest close_all_for_exit() waits for live sessions to close.
 _EXIT_CLOSE_BUDGET_S = 5.0
 
@@ -198,6 +202,10 @@ class CoderSession:
         # /api/coder route so a scoped key can only see/steer the sessions IT made,
         # not the owner's full-capability sessions (session isolation).
         self.principal: Optional[str] = None
+        # The sha256 of the keystore key that created this session, or None
+        # (the owner key, open mode). The session ends when that key is revoked,
+        # removed or expired (SessionManager watches it).
+        self.key_hash: Optional[str] = None
         self.restricted = restricted
         self.model = getattr(backend, "model_id", "")
         # Whether this session's model is a pin: always answered by it, or the
@@ -1044,13 +1052,81 @@ class SessionManager:
         self._sessions: dict[str, CoderSession] = {}
         self._lock = threading.Lock()
         self._reaping = False
+        self._watching = False
         with _live_managers_lock:
             _live_managers.add(self)
+        from localm import auth
+        auth.add_revoke_listener(_end_sessions_of_revoked_key)
 
     def create(self, session: CoderSession) -> CoderSession:
         with self._lock:
             self._sessions[session.id] = session
+        if session.key_hash:
+            self._start_key_watch()
         return session
+
+    def end_sessions_of_key(self, key_hash: Optional[str]) -> list[str]:
+        """Close and remove every session created by the keystore key with
+        sha256 *key_hash*, or by any keystore key when *key_hash* is None.
+        Returns the ids ended."""
+        with self._lock:
+            ids = [s.id for s in self._sessions.values()
+                   if s.key_hash and (key_hash is None or s.key_hash == key_hash)]
+        ended = []
+        for session_id in ids:
+            if self.remove(session_id) is not None:
+                ended.append(session_id)
+        if ended:
+            from localm.debuglog import logger
+            logger.info("coder: ended %d session(s) whose key was revoked or "
+                        "expired", len(ended))
+        return ended
+
+    def end_sessions_of_dead_keys(self) -> list[str]:
+        """Close and remove every session whose creating keystore key is no
+        longer live (revoked, removed or expired, ``auth.key_hash_live``).
+        Returns the ids ended."""
+        from localm import auth
+        with self._lock:
+            hashes = {s.key_hash for s in self._sessions.values() if s.key_hash}
+        ended = []
+        for h in hashes:
+            if not auth.key_hash_live(h):
+                ended.extend(self.end_sessions_of_key(h))
+        return ended
+
+    def _start_key_watch(self) -> None:
+        """Start the daemon thread that runs :meth:`end_sessions_of_dead_keys`
+        every ``_KEY_WATCH_SECONDS`` while a key-created session is live; it
+        exits when none is. Does nothing when it already runs."""
+        with self._lock:
+            if self._watching:
+                return
+            self._watching = True
+
+        def _run() -> None:
+            from localm.debuglog import logger
+            while True:
+                time.sleep(_KEY_WATCH_SECONDS)
+                try:
+                    self.end_sessions_of_dead_keys()
+                except Exception:
+                    logger.warning("coder: checking the keys of live sessions "
+                                   "failed", exc_info=True)
+                with self._lock:
+                    if not any(s.key_hash for s in self._sessions.values()):
+                        self._watching = False
+                        return
+
+        try:
+            threading.Thread(target=_run, name="coder-key-watch", daemon=True).start()
+        except Exception:
+            with self._lock:
+                self._watching = False
+            from localm.debuglog import logger
+            logger.warning("coder: could not start the session key watch; a "
+                           "revoked key's sessions end only on an in-process "
+                           "revoke", exc_info=True)
 
     def follow_model_rename(self, old_name: str, new_name: str) -> None:
         """Tell every live session that a model was renamed."""
@@ -1192,6 +1268,16 @@ class SessionManager:
                 logger.warning("coder: closing session %s failed",
                                getattr(s, "id", "?"), exc_info=True)
         return closed
+
+
+def _end_sessions_of_revoked_key(key_hash: Optional[str]) -> None:
+    """Revoke listener (``auth.add_revoke_listener``): end, in every live
+    SessionManager, the sessions created by the revoked key (*key_hash*), or by
+    any keystore key when *key_hash* is None."""
+    with _live_managers_lock:
+        managers = list(_live_managers)
+    for mgr in managers:
+        mgr.end_sessions_of_key(key_hash)
 
 
 def stop_all_live_sessions() -> int:

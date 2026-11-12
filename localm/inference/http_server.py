@@ -6306,6 +6306,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         mounting.add_api_landing(app)
     transport.add_request_privacy(app)      # innermost
     transport.add_client_left_answer(app)
+    transport.add_credential_recheck(app)
     diagnostics.add_debug_stacks(app)
     cors_cfg = security.add_cors(app)
     security.add_origin_guard(app, cors_cfg)

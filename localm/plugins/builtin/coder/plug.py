@@ -286,6 +286,18 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     return False, principal_id(request)
 
 
+def _revocable_key_hash(request: Request) -> str | None:
+    """The sha256 of the keystore key this request presented (as a bearer or
+    through its session cookie), or None for the owner key, open mode and no
+    key."""
+    from localm import auth
+    from localm.inference.http_server import principal_id
+    key_hash = principal_id(request)
+    if key_hash and auth.scopes_for_key_hash(key_hash) is not None:
+        return key_hash
+    return None
+
+
 def _get_session(request: Request, session_id: str):
     session = _sessions(request).get(session_id)
     if session is None:
@@ -866,6 +878,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
+    session.key_hash = await loop.run_in_executor(
+        get_plugin_executor(), lambda: _revocable_key_hash(request))
     # Whether THIS session is itself a resume, for the join-guard above: it
     # must be able to tell "a resume request landed on an already-resumed
     # session" (join it) apart from "a resume request landed on a plain,

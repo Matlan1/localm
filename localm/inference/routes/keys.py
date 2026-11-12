@@ -151,15 +151,19 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str, request: Request):
-        """Revoke a named key. Answers 409 when the server is reachable from the
-        network, must hold a key, and this is its last one."""
+        """Revoke a named key and end what runs under it: its browser sessions,
+        the coder sessions it created and its open streams. Answers 409 when the
+        server is reachable from the network, must hold a key, and this is its
+        last one."""
+        from fastapi.concurrency import run_in_threadpool
+
         from localm.auth import removal_leaves_no_key, revoke_key
         from localm.config import ConfigUnreadable
         if (_hs.network_bind_needs_key(request.app)
                 and removal_leaves_no_key(revoke_id=key_id)):
             raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
         try:
-            revoked = revoke_key(key_id)
+            revoked = await run_in_threadpool(revoke_key, key_id)
         except ConfigUnreadable as e:
             raise HTTPException(409, str(e)) from e
         if not revoked:
