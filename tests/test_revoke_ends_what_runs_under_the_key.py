@@ -195,3 +195,41 @@ def test_an_open_mode_stream_with_a_revoke_runs_to_its_end(monkeypatch):
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200
     assert "data: 49" in r.text
+
+
+def test_an_unreadable_keystore_ends_no_session(monkeypatch):
+    mgr = SessionManager()
+    s = mgr.create(_Session("s1", "h1"))
+    monkeypatch.setattr(auth, "_load_keystore_checked", lambda: ([], False))
+    assert mgr.end_sessions_of_dead_keys() == []
+    assert not s.closed and mgr.get("s1") is s
+    monkeypatch.setattr(auth, "_load_keystore_checked", lambda: ([], True))
+    assert mgr.end_sessions_of_dead_keys() == ["s1"]
+
+
+def test_an_open_mode_stream_survives_the_first_key(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi.responses import StreamingResponse
+
+    from localm.inference.http_server import create_app
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+
+    async def _gen():
+        for i in range(30):
+            yield f"data: {i}\n\n"
+            if i == 2:
+                auth.set_api_key("owner-key-owner-key-9999")
+
+    @app.get("/v1/test-stream")
+    async def _stream():
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(app) as c:
+        r = c.get("/v1/test-stream",
+                  headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert "data: 29" in r.text

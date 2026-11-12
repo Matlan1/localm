@@ -683,6 +683,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # run_tests/git-hooks is RCE, so disabling the executing tools - not just
     # confining the cwd - is the real containment.)
     is_owner, principal = _principal_from_request(request)
+    from fastapi.concurrency import run_in_threadpool
+    creating_key = await run_in_threadpool(_revocable_key_hash, request)
     # A key carrying the privileged coder:full scope (owner-only to mint) gets the
     # UNRESTRICTED coder, same as the owner; a plain coder-scoped key stays
     # restricted (read + confined edit, no shell).
@@ -890,8 +892,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
-    session.key_hash = await loop.run_in_executor(
-        get_plugin_executor(), lambda: _revocable_key_hash(request))
+    session.key_hash = creating_key
     # Whether THIS session is itself a resume, for the join-guard above: it
     # must be able to tell "a resume request landed on an already-resumed
     # session" (join it) apart from "a resume request landed on a plain,
@@ -899,6 +900,11 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # instead, unaffected by the plain session already running).
     session.opened_via_resume = bool(req.resume and not restricted)
     mgr.create(session)
+    if creating_key:
+        from localm import auth
+        if await run_in_threadpool(auth.key_hash_live_checked, creating_key) is False:
+            await run_in_threadpool(mgr.remove, session.id)
+            raise HTTPException(401, "The key that opened this session was revoked.")
     # Optional resume: restore this cwd's saved conversation into the new
     # session. Owner / coder:full only - a restricted scoped session must not
     # load the owner's prior conversation. The checkpoint read runs off the loop.

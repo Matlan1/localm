@@ -1314,6 +1314,23 @@ def key_hash_live(key_hash: Optional[str]) -> bool:
     return False
 
 
+def key_hash_live_checked(key_hash: Optional[str]) -> Optional[bool]:
+    """:func:`key_hash_live`, or None when the keystore could not be read
+    (``_load_keystore_checked`` read_ok False), so a caller can tell "the key is
+    gone" from "could not look"."""
+    if not key_hash:
+        return False
+    records, read_ok = _load_keystore_checked()
+    if not read_ok:
+        return None
+    now = time.time()
+    for r in records:
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            return not (exp is not None and now > float(exp))
+    return False
+
+
 def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
     """The scopes a LIVE keystore key with this sha256 *key_hash* grants, or None.
 

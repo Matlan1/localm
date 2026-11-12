@@ -78,7 +78,8 @@ class CredentialRecheckMiddleware:
     :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
     response is closed with an empty final chunk and the handler is cancelled
     the way a client disconnect cancels it. A request that presented no
-    credential is not checked."""
+    credential, or was made while no key was configured (open mode, where the
+    GUI's shell token is not a key), is not checked."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -86,8 +87,10 @@ class CredentialRecheckMiddleware:
     @staticmethod
     def _has_credential(scope) -> bool:
         from starlette.requests import Request
+
+        from localm.auth import any_key_configured
         token, _source = _hs._request_token(Request(scope))
-        return bool(token and token.strip())
+        return bool(token and token.strip()) and any_key_configured()
 
     @staticmethod
     def _accepted(scope) -> bool:

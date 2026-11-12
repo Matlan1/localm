@@ -10,6 +10,7 @@ tool is the real containment. These tests pin both halves.
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -411,6 +412,33 @@ def test_scoped_key_cannot_force_a_less_private_mode(tmp_path, monkeypatch):
         # at import time, unaffected by this test's HOME_DIR monkeypatch), and
         # leaving it open trips the suite's own end-of-run cleanup elsewhere.
         client.delete(f"/api/coder/sessions/{r4.json()['id']}",
+                      headers={"Authorization": "Bearer ownersecret"})
+
+
+@pytest.mark.parametrize("scope_list, privileged", [(["coder"], False), (["admin"], True)])
+def test_revoking_the_key_that_opened_a_session_ends_it(tmp_path, monkeypatch,
+                                                        scope_list, privileged):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    made = auth.create_key("dev", scope_list, allow_privileged=privileged)
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions",
+                        headers={"Authorization": f"Bearer {made['key']}"},
+                        json={"cwd": str(proj)})
+        assert r.status_code == 200, r.text
+        sid = r.json()["id"]
+        sess = app.state.coder_sessions.get(sid)
+        assert sess.key_hash == auth._hash_key(made["key"])
+        owner = client.post("/api/coder/sessions",
+                            headers={"Authorization": "Bearer ownersecret"},
+                            json={"cwd": str(proj)}).json()["id"]
+        assert auth.revoke_key(made["id"]) is True
+        assert app.state.coder_sessions.get(sid) is None
+        assert sess.closed
+        assert app.state.coder_sessions.get(owner) is not None
+        client.delete(f"/api/coder/sessions/{owner}",
                       headers={"Authorization": "Bearer ownersecret"})
 
 

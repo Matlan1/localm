@@ -1084,14 +1084,21 @@ class SessionManager:
 
     def end_sessions_of_dead_keys(self) -> list[str]:
         """Close and remove every session whose creating keystore key is no
-        longer live (revoked, removed or expired, ``auth.key_hash_live``).
-        Returns the ids ended."""
+        longer live (revoked, removed or expired,
+        ``auth.key_hash_live_checked``). A keystore that cannot be read ends
+        nothing and is logged at WARNING. Returns the ids ended."""
         from localm import auth
         with self._lock:
             hashes = {s.key_hash for s in self._sessions.values() if s.key_hash}
         ended = []
         for h in hashes:
-            if not auth.key_hash_live(h):
+            live = auth.key_hash_live_checked(h)
+            if live is None:
+                from localm.debuglog import logger
+                logger.warning("coder: the keystore could not be read, so the keys "
+                               "of live sessions were not checked this time")
+                return ended
+            if not live:
                 ended.extend(self.end_sessions_of_key(h))
         return ended
 
