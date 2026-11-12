@@ -313,15 +313,15 @@ def register(app: FastAPI, ctx) -> None:
         The launch command and API URL are owner-only, so their values are
         omitted for a non-owner caller, as for ``GET /v1/config/schema``."""
         from localm.config import load_config
-        from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
+        from localm.settings_schema import (MEDIA_PLUGIN_LABELS, MEDIA_PLUGINS,
+                                            media_schema_json)
         cfg = load_config()
         plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
-        labels = {"image": "Image", "music": "Music", "video": "Video"}
         is_owner = _hs.caller_is_operator(request)
         out = []
         for name in MEDIA_PLUGINS:
             block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
-            out.append({"plugin": name, "label": labels[name],
+            out.append({"plugin": name, "label": MEDIA_PLUGIN_LABELS[name],
                         "fields": media_schema_json(name, block, cfg,
                                                      is_owner=is_owner)})
         return {"plugins": out}

@@ -38,6 +38,7 @@ MIN_SIDE = 64
 MAX_SIDE = 1920
 MAX_FRAMES = 241
 DEFAULT_WIDTH, DEFAULT_HEIGHT = 832, 480
+RUNTIME_PLACE = "Settings > Media > Video > Native runtime"
 
 
 @dataclass(frozen=True)
@@ -135,8 +136,8 @@ def missing_model_message(blk: Optional[dict] = None) -> str:
     pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type} --sha256 {p.sha256}"
                       for p in missing_parts(rec, blk) or rec.parts)
     return (f"No native video model is set up. The recommended one is {rec.name} "
-            f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native model' "
-            "and its text encoder and VAE in Settings > Video.")
+            f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set "
+            "Settings > Media > Video > Native model and its text encoder and VAE.")
 
 
 def resolve_models(s: dict) -> dict:
@@ -160,7 +161,7 @@ def resolve_models(s: dict) -> dict:
                                  _resolve_file(value, key.replace("_", "-")))
         label = display_name(model)
         built = pairing.build_context(_resolve_file(model, "model"), label, explicit,
-                                      where="Settings > Video", media="video")
+                                      where="Settings > Media > Video", media="video")
         ctx = dict(built["ctx"])
         ctx["diffusion_flash_attn"] = True
         info = built["info"]
@@ -307,7 +308,7 @@ def check_size(width: int, height: int) -> Optional[str]:
 def _start_image_refusal(name: str) -> str:
     return (f"{name} is a text-to-video model and cannot start from an image. Set an "
             "image-to-video model (for example a Wan I2V model with its CLIP vision "
-            "encoder) in Settings > Video, or leave the start image out.")
+            "encoder) in Settings > Media > Video, or leave the start image out.")
 
 
 def lora_refusal(s: dict, loras: list) -> Optional[str]:
@@ -342,7 +343,7 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
                 + ", ".join(sorted(unsupported)) + ".")
     if model_overrides:
         return ("Workflow model choices apply to ComfyUI. The native backend uses "
-                "the model set in Settings > Video.")
+                "the model set in Settings > Media > Video > Native model.")
     if placement:
         return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
                 "use the ComfyUI backend.")
@@ -534,7 +535,7 @@ def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: i
     else:
         problem = ""
     if not rate:
-        hint = f" Pick the {' or '.join(runtimes)} runtime in Settings > Video." if runtimes else ""
+        hint = f" Pick the {' or '.join(runtimes)} runtime in {RUNTIME_PLACE}." if runtimes else ""
         return (f"localm could not measure how fast this GPU runs {label}'s attention on the "
                 f"Vulkan runtime{problem}, so it cannot tell whether each sampling step stays "
                 f"under {limit.safe_seconds:g} s. {limit.reason}.{hint}")
@@ -553,7 +554,7 @@ def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: i
     return (f"{frames} frames at {width}x{height} is too much for {label} on the Vulkan runtime "
             f"on this GPU: each sampling step would run one attention job of about {secs:.1f} s "
             f"on the GPU. {attention.limit_sentence(limit)} "
-            f"{fit}{attention.runtime_hint('Video', runtimes)}.")
+            f"{fit}{attention.runtime_hint(RUNTIME_PLACE, runtimes)}.")
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
@@ -688,7 +689,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 tile = _decode_tile(info, width, height, frames, say, rt.backend)
             except vaetile.DecodeTooLarge as e:
                 return False, (f"This video cannot be decoded on the GPU: {e}. Lower the size "
-                               "or pick another GPU runtime in Settings > Video.")
+                               "or pick another GPU runtime in Settings > Media > Video > "
+                               "Native runtime.")
             params = {
                 "prompt": prompt, "negative_prompt": negative,
                 "width": width, "height": height, "seed": int(seed),

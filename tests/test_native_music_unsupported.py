@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm.media import native_models
+from localm.media.sdcpp import families
 
 
 def _safetensors(path, names):
@@ -58,19 +59,29 @@ def test_only_the_acestep_v1_checkpoint_is_listed_with_a_reason(tmp_path):
     assert "ComfyUI" in out[0]["reason"] and "ACE-Step v1" in out[0]["reason"]
 
 
+def _music(path):
+    return families.music_entry({"path": str(path), "model_type": "diffusion-unet"})
+
+
 def test_a_header_with_only_some_v1_markers_is_not_flagged(tmp_path):
     p = _safetensors(tmp_path / "x.safetensors", V1_TENSORS[:2])
-    assert native_models.is_acestep_v1_checkpoint(p) is False
+    assert _music(p) is None
+
+
+def test_the_v1_checkpoint_is_music_and_says_it_is_the_whole_checkpoint(tmp_path):
+    info = _music(_safetensors(tmp_path / "v1.safetensors", V1_TENSORS))
+    assert info is not None and info.kind == "music"
+    assert info.detail == {"acestep": "v1", "checkpoint": True}
 
 
 def test_unreadable_and_oversize_headers_are_not_flagged(tmp_path, monkeypatch):
     short = tmp_path / "short.safetensors"
     short.write_bytes(b"\x01\x02")
-    assert native_models.is_acestep_v1_checkpoint(short) is False
-    assert native_models.is_acestep_v1_checkpoint(tmp_path / "nope.safetensors") is False
+    assert _music(short) is None
+    assert _music(tmp_path / "nope.safetensors") is None
     huge = tmp_path / "huge.safetensors"
     huge.write_bytes(struct.pack("<Q", 1 << 40) + b"{}")
-    assert native_models.is_acestep_v1_checkpoint(huge) is False
+    assert _music(huge) is None
 
 
 def test_the_music_route_reports_the_unsupported_list(tmp_path, monkeypatch):

@@ -112,7 +112,7 @@ def _build_music_workflow(
         return False, (
             "The music workflow has no sampler / prompt / latent node localm can "
             "drive. Export an ACE-Step workflow from ComfyUI (Save -> API format) "
-            "and select it on the Workflow panel (Settings -> Media -> Music).")
+            "and select it on the Workflow panel of the Music page.")
 
     # ACE-Step latent length (seconds), then the prompt node's tags / lyrics.
     if "seconds" in latent.get("inputs", {}):
