@@ -2082,6 +2082,19 @@ def net_off_refusal(what: str = "") -> str:
     return f"{lead} {NET_OFF_REMEDY}."
 
 
+#: How to let a download through while network access is off.
+NET_OFF_DOWNLOAD_REMEDY = (
+    "Turn it on, or turn on \"Allow model downloads while network access is off\", "
+    "in Settings > Server & network; or run: localm config net_mode ask (or: "
+    "localm config net_allow_model_downloads true)")
+
+
+def net_off_download_refusal(what: str) -> str:
+    """The text of a net_mode=off refusal of a download: *what* was refused and
+    :data:`NET_OFF_DOWNLOAD_REMEDY`."""
+    return f"Network access is off (net_mode=off), so {what}. {NET_OFF_DOWNLOAD_REMEDY}."
+
+
 def network_mode() -> str:
     """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
 

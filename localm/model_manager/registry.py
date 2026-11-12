@@ -3182,9 +3182,9 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         blocked_note = (
             f"{len(net_blocked_mmproj)} model(s) may be missing a vision "
             f"projector ({', '.join(net_blocked_mmproj)}) but network access "
-            "is off (net_mode=off), so localm did not check. Enable network "
-            "access to let localm look, or pull the projector explicitly with "
-            "--mmproj."
+            "is off (net_mode=off), so localm did not check. Turn it on in "
+            "Settings > Server & network > Network access to let localm look, or "
+            "pull the projector explicitly with --mmproj."
         )
         note = f"{note} {blocked_note}".strip() if note else blocked_note
 

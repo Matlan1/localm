@@ -860,8 +860,10 @@ def class_summary(klass: str) -> str:
 def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     """Stream the release asset (build zip) from the proxy to *dest*; return the path.
 
-    Raises :class:`~localm.bugreport.LocalmError` on failure. *opener* is injectable
-    for tests: it receives ``(url, headers, timeout, dest)`` and writes the file."""
+    Raises :class:`~localm.bugreport.LocalmError` on failure, and before any
+    connection when network access is off and the update channel is not exempt
+    (``update_ignore_net_policy``). *opener* is injectable for tests: it
+    receives ``(url, headers, timeout, dest)`` and writes the file."""
     from localm.bugreport import LocalmError
     base, token = endpoint()
     if not base:
@@ -870,6 +872,9 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
         aid = int(asset_id)
     except (TypeError, ValueError):
         raise LocalmError("bad asset id", reason=str(asset_id)) from None
+    from localm.bugreport.transport import refuse_when_network_off
+    refuse_when_network_off("the update was not downloaded",
+                            exempt=_net_policy_allows_update_check())
     url = base.rstrip("/") + f"/update/download?id={aid}"
     headers = {"User-Agent": "localm"}
     if token:

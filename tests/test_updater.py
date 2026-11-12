@@ -556,18 +556,21 @@ def test_apply_deps_refuses_a_build_without_a_lock_before_the_swap(
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
 
 
-def test_apply_deps_refused_by_net_mode_off_before_the_swap(
+def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
         tmp_path, monkeypatch, sig_env, no_uv):
     _config(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     inst = _fake_install(tmp_path, deps=("click",))
     _fake_uv(inst / ".uv")
     ran = []
+    downloads = []
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+        updater.apply(5, installed=inst, signature=sig,
+                      download_opener=lambda *a: downloads.append(a) or op(*a),
                       runner=lambda c: ran.append(c) or 0)
-    assert "net_mode=off" in ei.value.reason
+    assert ei.value.stage == "network_off"
+    assert downloads == []
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
 
 

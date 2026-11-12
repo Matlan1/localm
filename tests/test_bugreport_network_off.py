@@ -138,3 +138,52 @@ def test_cli_send_with_network_off_says_why_and_sends_nothing(monkeypatch):
     out = "\n".join(printed)
     assert "Network access is off" in out
     assert "localm config net_mode ask" in out
+
+
+def test_an_update_download_with_network_off_opens_no_connection(monkeypatch, tmp_path):
+    from localm import updater
+    _off(monkeypatch, "env")
+    calls = []
+    with pytest.raises(LocalmError) as ei:
+        updater.download(7, tmp_path / "u.zip",
+                         opener=lambda *a: calls.append(a))
+    assert calls == []
+    assert ei.value.stage == "network_off"
+
+
+def test_an_update_download_exempted_by_its_setting_is_sent(monkeypatch, tmp_path):
+    from localm import updater
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": URL,
+                                     "update_ignore_net_policy": True})
+    calls = []
+    updater.download(7, tmp_path / "u.zip", opener=lambda *a: calls.append(a))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("make", ["general", "download"])
+def test_the_off_refusals_name_the_settings_place_and_the_command(make):
+    from localm import config
+    text = (config.net_off_refusal("x") if make == "general"
+            else config.net_off_download_refusal("x"))
+    assert "Settings > Server & network" in text
+    assert "localm config net_mode ask" in text
+    assert "net_mode=off" in text
+
+
+def test_no_source_words_an_off_refusal_of_its_own():
+    """Every net_mode=off refusal text comes from config.net_off_refusal or
+    config.net_off_download_refusal."""
+    import re
+    from pathlib import Path
+
+    import localm
+    root = Path(localm.__file__).parent
+    pattern = re.compile(r"Network access is disabled|Set net_mode to ask"
+                         r"|The user can enable it|allow just downloads"
+                         r"|Enable it with:? +localm config net_mode", re.I)
+    hits = [f"{p.relative_to(root)}:{i}"
+            for p in root.rglob("*.py")
+            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if pattern.search(line)]
+    assert hits == []

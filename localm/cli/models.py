@@ -926,10 +926,10 @@ def _resume_interrupted(r: dict) -> int:
         return 1
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():
-        console.print(
-            "[red]Network access is disabled (net_mode=off).[/red] Resuming is a "
-            "download; enable it with: localm config net_mode ask - or allow just "
-            "downloads: localm config net_allow_model_downloads true")
+        from localm.config import net_off_download_refusal
+        from localm.console import markup_safe
+        console.print("[red]" + markup_safe(net_off_download_refusal(
+            "the download was not resumed")) + "[/red]")
         return 1
     try:
         check = pending_pulls.check_upstream(rec)
