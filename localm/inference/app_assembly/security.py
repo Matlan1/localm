@@ -233,6 +233,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                 and _path not in _ANTHROPIC_CROSS_ORIGIN_OK
                 and _path not in _RESPONSES_CROSS_ORIGIN_OK):
             if _cross_origin_refused(request):
+                _hs._note_refusal(request.scope, "cross-origin request")
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Cross-origin request refused "
@@ -323,6 +324,11 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                 # (never-served) instance token some other way.
                 cross_origin = is_metadata_get and _cross_origin_refused(request)
                 if not token_ok or cross_origin:
+                    _hs._note_refusal(
+                        request.scope,
+                        "open-mode management without the shell token"
+                        if not token_ok else
+                        "open-mode management read from another origin")
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Open-mode management requires the "
@@ -365,6 +371,8 @@ def add_keyless_network_gate(app: FastAPI) -> None:
             _klog.warning(
                 "no API key is configured while bound to %s: refusing requests "
                 "until a key is set", getattr(st, "bind_host", "?"))
+        _hs._note_refusal(request.scope,
+                          "no API key is configured on a network bind")
         return JSONResponse(status_code=401,
                             content={"detail": _hs.KEYLESS_NETWORK_DETAIL})
 
@@ -537,6 +545,8 @@ def add_docs_loopback_gate(app: FastAPI) -> None:
         if request.url.path in _DOCS_PATHS:
             host = getattr(request.app.state, "bind_host", "127.0.0.1")
             if not _hs._is_loopback_host(host):
+                _hs._note_refusal(request.scope,
+                                  "API docs are served on a loopback bind only")
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
         return await call_next(request)
 
@@ -748,6 +758,7 @@ class HostHeaderGuard:
             await self.app(scope, receive, send)
             return
         self._log_refusal(st, name)
+        _hs._note_refusal(scope, "Host header not allowed")
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
             return
