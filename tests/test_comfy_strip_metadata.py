@@ -118,7 +118,7 @@ def test_png_without_iend_fails_and_writes_nothing(tmp_path):
 
 
 def test_bytes_after_iend_are_dropped(tmp_path):
-    """Data appended after IEND (where a tool can hide text) is removed."""
+    """Data appended after IEND is removed."""
     blob = _png_with_text_prompt() + b"appended prompt: secret"
     path = tmp_path / "generated.png"
     path.write_bytes(blob)

@@ -12,7 +12,7 @@ unchanged: MP4 ``stco``/``co64`` chunk offsets and FLAC seek points are
 absolute and must stay valid.
 
 PNG images are handled the same way: ``tEXt``, ``zTXt``, ``iTXt`` and ``eXIf``
-chunks are dropped.
+chunks are dropped, and so are any bytes after the ``IEND`` chunk.
 
 Pure Python, no dependencies. ``strip_output`` is the typed entry point: it
 returns a ``StripResult`` that says whether metadata was stripped, there was
@@ -296,7 +296,9 @@ def strip_output(kind: str, output_path: Path) -> StripResult:
     Returns a ``StripResult``: STRIPPED when metadata was neutralised,
     NOTHING_TO_STRIP when the container is recognised and carried none, FAILED
     (with the reason) when the file is a container this kind does not handle,
-    is unreadable, or the rewrite failed. Raises KeyError for an unknown *kind*.
+    is unreadable or malformed (a block, box or chunk that runs past the end of
+    the file, or a PNG without an IEND chunk), or the rewrite failed. Raises
+    KeyError for an unknown *kind*.
     """
     return _strip(output_path, _KIND_FORMATS[kind], kind, _CONTENTS[kind])
 
@@ -305,7 +307,7 @@ def strip_image_metadata(output_path: Path) -> str:
     """Strip PNG text and EXIF chunks from a generated image, in place.
 
     Returns "" unless the strip failed, else a WARNING string: the file is not a
-    PNG, or the rewrite failed."""
+    PNG, is malformed, or the rewrite failed."""
     return strip_output("image", output_path).warning
 
 
