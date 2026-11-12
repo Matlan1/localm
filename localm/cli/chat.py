@@ -57,88 +57,21 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
             "single load.")
 
 
-_SWITCH_TIMEOUT_S = (10, 900)
-
-
-def _switch_server_model(base_url: str, token: Optional[str],
-                         model: str) -> tuple[Optional[str], Optional[str]]:
-    """Ask the localm server at *base_url* (its ``/v1`` root) to load *model*
-    and make it the active model, through ``POST /v1/models/load``.
-
-    Returns ``(name, None)`` on success, where *name* is the name the server
-    reports for the model (address requests by it), or ``(None, reason)`` when
-    the server did not load it: unreachable, a non-2xx answer (its ``detail``
-    is quoted), a reply that is not a JSON object, or a status other than
-    ``loaded``, ``already_loaded`` or ``peer_routed``. Never raises for those."""
-    import requests
-
-    from .. import tls
-    from ..jsonreply import response_json
-    from ..auth import resolve_bearer_headers
-    url = f"{base_url.rstrip('/')}/models/load"
-    headers = resolve_bearer_headers(token)
-    try:
-        resp = requests.post(url, json={"model": model}, headers=headers,
-                             timeout=_SWITCH_TIMEOUT_S, allow_redirects=False,
-                             verify=tls.requests_verify(url))
-    except requests.RequestException as e:
-        return None, f"it could not be reached: {e}"
-    try:
-        data = response_json(resp)
-    except ValueError:
-        data = None
-    if resp.status_code >= 300:
-        detail = data.get("detail") if isinstance(data, dict) else None
-        return None, f"HTTP {resp.status_code}" + (f": {detail}" if detail else "")
-    if not isinstance(data, dict):
-        return None, "its reply was not valid JSON"
-    status = data.get("status")
-    if status not in ("loaded", "already_loaded", "peer_routed"):
-        return None, f"it answered with status {status!r}"
-    name = data.get("model")
-    return (name if isinstance(name, str) and name else model), None
-
-
 def _serve_requested_model(base_url: str, token: Optional[str], model: str, *,
                            starting: bool = False) -> tuple[Optional[str], Optional[str]]:
-    """Make the localm server at *base_url* answer with *model*.
-
-    *starting* marks a server this run just started with *model*: one that
-    reports no model yet is still loading it and is not switched.
-
-    Returns ``(name, None)`` with the name to address the server's model by:
-    the server's active model when it is *model* by name or by file
-    (``served_model_is_requested``); *model* itself when the server's model
-    cannot be read (``remote_model_status`` answered ``unknown``) or, with
-    *starting*, when it reports none; otherwise
-    the name ``_switch_server_model`` reports after switching the server to
-    *model*. Returns ``(None, note)`` when the server is not switched, with
-    *note* saying why and that the model is loaded in this process: the run
-    was given load options (``_load_options_given``) the server's load would
-    not apply, or the switch failed. Prints a line before switching."""
+    """``server_switch.serve_requested_model`` for ``localm run``: the run's
+    load options (``_load_options_given``), loading in this process as the
+    fallback, the switch line printed dim. Returns ``(name, None)`` with the
+    name to address the server's model by, or ``(None, note)`` when MODEL is
+    loaded in this process instead."""
     from rich.markup import escape
 
-    from ..inference.http_engine import (remote_model_status,
-                                         served_model_is_requested)
-    state, active = remote_model_status(base_url, token)
-    if state == "unknown" or (starting and state == "empty"):
-        return model, None
-    if active and served_model_is_requested(base_url, token, active, model):
-        return active, None
-    held = f"serves {active}" if active else "has no model loaded"
-    dropped = _load_options_given()
-    if dropped:
-        return None, (f"The localm server here {held}; switching it to {model} "
-                      f"would load it with the server's own settings instead of "
-                      f"{', '.join(dropped)}, so {model} is loaded in this "
-                      f"process.")
-    console.print(f"[dim]The localm server here {escape(held)}; switching it "
-                  f"to {escape(model)}...[/dim]")
-    name, why = _switch_server_model(base_url, token, model)
-    if name is None:
-        return None, (f"The localm server here could not switch to {model} "
-                      f"({why}); loading it in this process.")
-    return name, None
+    from ..inference.server_switch import serve_requested_model
+    served = serve_requested_model(
+        base_url, token, model, load_options=_load_options_given(),
+        in_process=True, starting=starting,
+        say=lambda line: console.print(f"[dim]{escape(line)}[/dim]"))
+    return served.name, served.note
 
 
 class _TurnRouter:
