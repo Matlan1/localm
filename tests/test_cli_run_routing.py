@@ -20,6 +20,13 @@ from localm.inference import capability_routing as cr
 from localm.inference.backends.base import (ContextCapacityExceededError,
                                             UnsupportedInputError)
 from localm.inference.compact import estimate_tokens
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 _REAL_CONFIGURED_MODE = cr.configured_mode
 
@@ -199,9 +206,9 @@ class TestInProcessRouting:
         router, engines, log = _router()
         eng = router.engine_for(_image_turn(img))
         assert eng is engines["seer"]
-        assert eng.loaded and not engines["plain"].loaded
-        assert log.index(("unload", "plain")) < log.index(("load", "seer")), \
-            "the loaded model is freed before the routed one loads"
+        assert eng.loaded and engines["plain"].loaded, \
+            "a vision model that fits beside the loaded one is loaded beside it"
+        assert ("unload", "plain") not in log
         assert "reading images" in router.note(eng)
 
     def test_a_plain_turn_goes_back_to_the_loaded_model(self, reg):
@@ -324,9 +331,11 @@ class TestNamingTheAnsweringModel:
         _always_fails(engines["plain"])
         out = _printed(monkeypatch)
         _drive(monkeypatch, [_words(4000), KeyboardInterrupt()], engines["plain"], router)
-        assert "\nCould not load plain: no VRAM" in out
-        assert [line for line in out
-                if "answered by" in line or "answering with" in line.lower()] == []
+        assert "Could not load roomy: no VRAM" in out
+        assert "Could not load seer: no VRAM" in out
+        assert not any("Could not load plain" in line for line in out), \
+            "plain stayed loaded while the routed models were tried beside it"
+        assert engines["plain"].answered == 1
 
     def test_a_loaded_model_that_refuses_the_image_is_not_named(self, reg, monkeypatch):
         _, img = reg
@@ -518,9 +527,9 @@ class TestLoadFailures:
 
     def test_after_a_failed_load_the_unloaded_model_is_not_brought_back(
             self, reg, monkeypatch):
-        """seer answers the image turns. The next turn needs vision and a
-        window no installed model has, so it goes to plain, whose load fails
-        once. /compact and the turn after it use plain; seer stays unloaded."""
+        """seer answers the image turns beside plain. The next turn needs vision
+        and a window no installed model has, so roomy replaces seer beside
+        plain. seer is not loaded again, and plain is never unloaded."""
         _, img = reg
         router, engines, log = _router()
         plain = engines["plain"]
@@ -530,9 +539,12 @@ class TestLoadFailures:
                [f"/image {img}", "what is this?", "t1", "t2",
                 needs_what_no_model_has, "/compact", "ok", KeyboardInterrupt()],
                plain, router)
-        assert _max_resident(log) == 1, f"two models were loaded at once: {log}"
+        assert ("unload", "plain") not in log, \
+            "routed models are loaded beside plain and never unload it"
+        assert _max_resident(log) <= 2, f"more than plain and one routed model: {log}"
         assert not engines["seer"].loaded
-        assert plain.seen[-1][-1] == {"role": "user", "content": "ok"}
+        assert log.count(("load", "seer")) == 1, f"seer was brought back: {log}"
+        assert plain.loaded
 
 
 class TestBuildCliEngine:
@@ -555,3 +567,59 @@ class TestBuildCliEngine:
         assert made[1:] == [], "a path on disk that is not a registry name builds nothing"
         assert refused is not None and "Model not found" in str(refused)
 
+
+
+class TestAskBeforeUnloadingTheLoadedModel:
+    """A vision model that fits only once plain is unloaded is never loaded on
+    its own: the turn asks, or names it, and plain is kept."""
+
+    @pytest.fixture
+    def fits_only_without_plain(self, monkeypatch):
+        from localm.inference import capability_routing as _cr
+        from localm.inference import http_server as hs
+        from localm.inference import routing_fit
+        monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
+            free=1, total=1000, usable=True))
+        monkeypatch.setattr(
+            routing_fit, "classify",
+            lambda engine, free, *a, **k: ((_cr.FIT_GPU, 0) if (free or 0) >= 100
+                                           else (_cr.FIT_CPU_ONLY, 0)))
+
+    def _plain_holding_vram(self):
+        router, engines, log = _router()
+        engines["plain"].vram_load_bytes = 500
+        return router, engines, log
+
+    def test_without_a_terminal_it_names_the_model_and_loads_nothing(
+            self, reg, monkeypatch, fits_only_without_plain):
+        _, img = reg
+        router, engines, log = self._plain_holding_vram()
+        out = _printed(monkeypatch)
+        eng = router.engine_for(_image_turn(img))
+        assert eng is engines["plain"] and engines["plain"].loaded
+        assert ("unload", "plain") not in log
+        assert not getattr(engines.get("seer"), "loaded", False)
+        hint = [line for line in out if "seer can answer this" in line]
+        assert hint and "loading it unloads plain" in hint[0]
+
+    def test_a_yes_unloads_plain_and_the_vision_model_answers(
+            self, reg, monkeypatch, fits_only_without_plain):
+        _, img = reg
+        router, engines, log = self._plain_holding_vram()
+        asked = []
+        router._confirm = lambda decision: asked.append(decision.ask_reason) or True
+        eng = router.engine_for(_image_turn(img))
+        assert asked == ["loading it unloads plain"]
+        assert eng is engines["seer"] and eng.loaded
+        assert not engines["plain"].loaded
+        assert log.index(("unload", "plain")) < log.index(("load", "seer"))
+
+    def test_a_no_keeps_plain_and_loads_nothing(
+            self, reg, monkeypatch, fits_only_without_plain):
+        _, img = reg
+        router, engines, log = self._plain_holding_vram()
+        router._confirm = lambda decision: False
+        eng = router.engine_for(_image_turn(img))
+        assert eng is engines["plain"] and engines["plain"].loaded
+        assert not getattr(engines.get("seer"), "loaded", False)
+        assert ("unload", "plain") not in log

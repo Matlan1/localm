@@ -131,6 +131,7 @@
   "chat.reply.cutEmpty": "el flujo de la respuesta terminó antes de que llegara texto",
   "chat.reply.cutToast": "La respuesta se cortó antes de que el modelo acabara - responde “continue” para reanudar",
   "chat.routed.answerWith": "Responder con {model}",
+  "chat.routed.askReason": "No se cambió automáticamente: {reason}.",
   "chat.routed.cap.audio_input": "oír audio",
   "chat.routed.cap.context_length": "una conversación más larga",
   "chat.routed.cap.reasoning": "razonamiento",

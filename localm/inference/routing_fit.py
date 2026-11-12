@@ -177,8 +177,9 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
     (an unloaded engine) and classified at each option ``_tiers`` allows; the
     best option usable without asking wins, else the best class, else the
     cheapest. An option that unloads models adds their VRAM to the reading's
-    free figure, which is only meaningful on one GPU, so on two or more GPUs
-    such an option is ``FIT_UNSIZED``. Blocking: reads model files."""
+    free figure; it is left out when a freed amount is unknown or the load
+    spreads over two or more GPUs (a freed amount has no device). Blocking:
+    reads model files."""
     peers = frozenset(peers)
     out: dict[str, Fit] = {}
     tiers = _tiers(residents.values(), unload_policy)
@@ -196,16 +197,15 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
             from localm.debuglog import logger as _dbg
             _dbg.debug("routing fit: cannot build %s to size it (%s: %s)",
                        name, type(exc).__name__, exc)
-            out[name] = Fit(FIT_UNSIZED)
+            out[name] = Fit(FIT_UNSIZED, error=f"{type(exc).__name__}: {exc}")
             continue
         size = _file_bytes(engine)
         options = []
         for tier, evicts, freed in tiers:
             if tier and (freed is None or reading.devices >= 2):
-                cls, disk = FIT_UNSIZED, 0
-            else:
-                free = None if reading.free is None else reading.free + int(freed or 0)
-                cls, disk = classify(engine, free, reading, ram_available, ram_total)
+                continue
+            free = None if reading.free is None else reading.free + int(freed or 0)
+            cls, disk = classify(engine, free, reading, ram_available, ram_total)
             options.append(Fit(cls, evicts_user=evicts, load_bytes=size,
                                disk_read_bytes=disk))
         out[name] = min(options, key=lambda f: (f.needs_ask, f.cls, len(f.evicts_user)))

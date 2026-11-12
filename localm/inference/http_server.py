@@ -6059,6 +6059,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
     _embedder_sem = None
     _last_activity_per_model.clear()
     _routing_latch.clear()
+    _routing_loaded.clear()
     # A fresh app boot must never carry over a name remembered from a
     # previous create_app() call in the same process (test reuse, a restart) -
     # see _last_active_model_name's own docstring for why it exists at all.

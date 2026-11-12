@@ -61,16 +61,21 @@ class _TurnRouter:
     Attached to a server (*build* is None) the server routes the request
     itself; this only works out the context window to ask for, so the
     conversation is not compacted when a roomier model can hold it. Loaded in
-    this process, it swaps engines: the current one is unloaded before another
-    is loaded."""
+    this process, candidates are sized against what is loaded here
+    (``routing_fit``): one that fits beside MODEL is loaded beside it; one that
+    would unload MODEL, run on the CPU only, read its weights from disk or
+    cannot be sized is used only after *confirm* (called with the decision,
+    returning True for yes) agrees, and is otherwise only suggested
+    (``suggestion``). Without *confirm* nothing is asked and MODEL answers."""
 
     def __init__(self, engine, model_name: str, *, pinned: bool, build=None,
-                 known: Optional[dict] = None):
+                 known: Optional[dict] = None, confirm=None):
         self.primary = engine
         self._known = dict(known or {})
         self.model_name = model_name
         self.pinned = pinned
         self._build = build
+        self._confirm = confirm
         self._engines = {model_name: engine}
         self.current = model_name
         self.min_context: Optional[int] = None
@@ -106,14 +111,33 @@ class _TurnRouter:
                 known[caps.VISION] = True
             if getattr(cur, "supports_audio", False) is True:
                 known[caps.AUDIO] = True
+        loaded = [n for n, e in self._engines.items() if getattr(e, "loaded", False)]
+        fit = self._fit if self.in_process else cr.fit_resident_only(loaded)
         decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
-                                 fit=cr.fit_resident_only([self.current]),
-                                 resident=[self.current], reg=reg,
+                                 fit=fit, resident=loaded, reg=reg,
                                  current_known=known, mode=cr.configured_mode())
         self.last_decision = decision
         self.min_context = (comp if not self.pinned
                             and caps.CONTEXT_LENGTH in decision.gaps else None)
         return decision
+
+    def _fit(self, names):
+        """``routing_fit.assess`` for *names* against this process's loaded
+        engines: MODEL is the user's choice, any other loaded engine is one
+        routing loaded."""
+        from localm.inference import http_server as hs
+        from localm.inference import routing_fit
+        from localm.inference.backends.llamacpp._sizing import ram_reading
+        residents = {
+            n: routing_fit.Resident(name=n, hold=hs._resident_vram_hold(e),
+                                    user_chosen=n == self.model_name)
+            for n, e in self._engines.items() if getattr(e, "loaded", False)}
+        ram_total, ram_available = ram_reading()
+        return routing_fit.assess(
+            names, residents=residents,
+            build=lambda n: self._engines.get(n) or self._build(n),
+            reading=hs.routing_vram_reading(), ram_available=ram_available,
+            ram_total=ram_total, unload_policy=routing_fit.UNLOAD_ALWAYS)
 
     def engine_for(self, messages: list):
         """The engine to answer a turn with *messages*: MODEL's, or in this
@@ -123,44 +147,45 @@ class _TurnRouter:
         answers in place of, else is empty. Raises what MODEL's own load raised
         when that fails too.
 
-        In this process a model other than the one loaded is never loaded on
-        its own: that would unload the model the session runs. Routing then
-        suggests it (``suggestion``) instead."""
+        A routed candidate is loaded beside MODEL; one the user agreed to
+        through *confirm* is loaded after unloading every other engine."""
         decision = self.plan(messages)
         self.failed_to_load = ()
         if not self.in_process:
             return self.primary
-        hint = self.suggestion()
-        if hint:
-            from rich.markup import escape
-            console.print(f"[yellow]{escape(hint)}[/yellow]")
+        from rich.markup import escape
         names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+        beside = bool(names)
+        if not names and decision.suggested and self._confirm is not None:
+            if self._confirm(decision):
+                names = [decision.suggested]
+        elif not names and decision.suggested:
+            console.print(f"[yellow]{escape(self.suggestion())}[/yellow]")
         failed = []
         for name in names:
             try:
-                return self._use(name)
+                return self._use(name, keep_model=beside)
             except Exception as e:
-                from rich.markup import escape
                 console.print(f"[yellow]Could not load {escape(name)}: "
                               f"{escape(str(e))}[/yellow]")
                 failed.append(name)
-        eng = self._use(self.model_name)
+        eng = self._use(self.model_name, keep_model=True)
         self.failed_to_load = tuple(failed)
         return eng
 
-    def _use(self, name: str):
-        if name == self.current:
-            eng = self._engines[name]
-            if not getattr(eng, "loaded", True):
-                eng.load()
-            return eng
-        prev = self._engines[self.current]
-        if getattr(prev, "loaded", True):
-            prev.unload()
+    def _use(self, name: str, *, keep_model: bool):
+        """Load *name* (when it is not loaded) and make it current. Every other
+        loaded engine is unloaded first, except MODEL's when *keep_model*."""
         eng = self._engines.get(name) or self._build(name)
         self._engines[name] = eng
+        for other, e in self._engines.items():
+            if other == name or (keep_model and other == self.model_name):
+                continue
+            if getattr(e, "loaded", False):
+                e.unload()
+        if not getattr(eng, "loaded", False):
+            eng.load()
         self.current = name
-        eng.load()
         return eng
 
     def suggestion(self) -> Optional[str]:
@@ -173,6 +198,16 @@ class _TurnRouter:
         why = f" ({decision.ask_reason})" if decision.ask_reason else ""
         return (f"{decision.suggested} can answer this ({self.model_name} lacks {gaps}); "
                 f"it was not loaded{why}. Run  localm run {decision.suggested}  to use it.")
+
+    def ask(self, decision) -> bool:
+        """Ask on the terminal whether to use ``decision.suggested`` for this
+        turn; True for yes. The question names the reason it was not used on its
+        own."""
+        from rich.prompt import Confirm
+        why = f" ({decision.ask_reason})" if decision.ask_reason else ""
+        gaps = ", ".join(sorted(decision.gaps)) or "this request"
+        return Confirm.ask(f"{self.model_name} lacks {gaps}. Use {decision.suggested} "
+                           f"for this turn{why}?", default=False, console=console)
 
     def answered_by(self, engine) -> str:
         """The model that answered the last turn on *engine*."""
@@ -580,6 +615,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             build=lambda name: _build_cli_engine(
                 name, n_gpu_layers=gpu_layers, device=device),
             known=_projector_known(mmproj_path))
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            router._confirm = router.ask
     else:
         router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
                              pinned=pin_model)

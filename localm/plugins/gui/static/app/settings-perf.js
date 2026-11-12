@@ -2544,11 +2544,13 @@ function userContentSnapshot(conv) {
   return snap;
 }
 
-/** After a refusal under model autoswitch "ask": a button under the chat that
- *  puts the stripped attachments back (offer.before), selects offer.suggest and
- *  sends the conversation again. Returns the row, or null when there is no
- *  chat to show it in. The row is not saved with the chat; a later re-render
- *  or another send removes it. */
+/** After a refusal that names a model the server did not switch to on its
+ *  own: a button under the chat that puts the stripped attachments back
+ *  (offer.before, when there is one), selects offer.suggest and sends the
+ *  conversation again, with offer.reason (why the server did not switch) shown
+ *  beside it when present. Returns the row, or null when there is no chat to
+ *  show it in. The row is not saved with the chat; a later re-render or
+ *  another send removes it. */
 function showMediaOffer(conv, offer) {
   const box = $("chat-messages");
   if (!box) return null;
@@ -2559,7 +2561,7 @@ function showMediaOffer(conv, offer) {
   btn.onclick = () => {
     row.remove();
     if (currentConv() !== conv || chat.busy) return;
-    for (const [m, content] of offer.before) {
+    for (const [m, content] of offer.before || []) {
       if (conv.messages.includes(m)) m.content = content;
     }
     if ([...modelSelect.options].some((o) => o.value === offer.suggest)) {
@@ -2571,6 +2573,9 @@ function showMediaOffer(conv, offer) {
     runCompletion(conv);
   };
   row.appendChild(btn);
+  if (offer.reason) {
+    row.appendChild(el("div", "media-offer-why", t("chat.routed.askReason", { reason: offer.reason })));
+  }
   box.appendChild(row);
   box.scrollTop = box.scrollHeight;
   return row;
@@ -2592,6 +2597,7 @@ export function parseRoutingData(data) {
         ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
       unmet,
       ...(typeof data.suggested === "string" && data.suggested ? { suggested: data.suggested } : {}),
+      ...(typeof data.ask_reason === "string" && data.ask_reason ? { askReason: data.ask_reason } : {}),
       ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
       ...(data.placement && typeof data.placement === "object"
         && Number.isFinite(data.placement.gpu_layers) && Number.isFinite(data.placement.total_layers)
@@ -2999,7 +3005,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const n = stripUserAudio(conv);
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { before, suggest };
+        mediaOffer = { before, suggest, reason: e.routing.askReason || "" };
         toast(t("chat.audio.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3035,7 +3041,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const n = stripUserImages(conv);
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { before, suggest };
+        mediaOffer = { before, suggest, reason: e.routing.askReason || "" };
         toast(t("chat.vision.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3049,6 +3055,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + localizeServerNotes(e.message) + "]*");
       toast(t("chat.requestFailed", { message: e.message }), true);
+      const suggest = !pinnedModel && e.routing && e.routing.suggested;
+      if (suggest) mediaOffer = { before: null, suggest, reason: e.routing.askReason || "" };
     }
   } finally {
     signal.removeEventListener("abort", forwardAbort);
@@ -3093,7 +3101,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         ...(routing.placement ? { placement: routing.placement } : {}) }
     : (routing && !routing.pinned && routing.suggested
       ? { from: routing.requested || modelName, suggest: routing.suggested,
-          gaps: [...routing.gaps, ...routing.unmet] }
+          gaps: [...routing.gaps, ...routing.unmet],
+          ...(routing.askReason ? { askReason: routing.askReason } : {}) }
       : (routing && !routing.pinned && routing.note
         ? { fallback: routing.note, gaps: [] } : null));
   if (aborted) {

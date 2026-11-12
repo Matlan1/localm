@@ -22,6 +22,13 @@ from fastapi.testclient import TestClient
 
 import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 
 _REAL_CONFIGURED_MODE = cr.configured_mode
@@ -63,7 +70,7 @@ TOOLS_ONLY = _reg(
 
 class TestPlanRoute:
     def test_routes_an_unpinned_request_to_a_capable_model(self):
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=TOOLS_ONLY)
         assert d.resolved == "tooly"
         assert d.routed is True
@@ -72,21 +79,21 @@ class TestPlanRoute:
     def test_NEVER_moves_an_explicitly_pinned_model(self):
         """The binding constraint, at the planner. A capable alternative exists
         and is deliberately NOT chosen."""
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=True, reg=TOOLS_ONLY)
         assert d.resolved == "plain"
         assert d.routed is False
         assert d.gaps == {"tool_use": False}      # still REPORTED, never acted on
 
     def test_no_gap_leaves_the_model_alone(self):
-        d = cr.plan_route("tooly", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("tooly", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=TOOLS_ONLY)
         assert d.resolved == "tooly"
         assert d.routed is False
         assert d.has_gap is False
 
     def test_no_needs_does_nothing(self):
-        d = cr.plan_route("plain", cr.CapabilityNeeds(), pinned=False,
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(), pinned=False,
                           reg=TOOLS_ONLY)
         assert d.resolved == "plain"
         assert d.has_gap is False
@@ -94,7 +101,7 @@ class TestPlanRoute:
     def test_unmet_when_no_installed_model_qualifies(self):
         """The honest fallback: routing that found nowhere better says so."""
         reg = _reg(a={"tool_use": False}, b={"tool_use": False})
-        d = cr.plan_route("a", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("a", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.resolved == "a"
         assert d.routed is False
@@ -104,7 +111,7 @@ class TestPlanRoute:
         """Positive membership only: a model nobody has inspected must not
         receive a request on the strength of an absent key."""
         reg = _reg(current={"tool_use": False}, unmeasured={})
-        d = cr.plan_route("current",
+        d = _rf.plan_route("current",
                           cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.resolved == "current"
@@ -115,7 +122,7 @@ class TestPlanRoute:
         routes. A confirmed-capable model is installed and resident, so every
         incentive to swap is present."""
         reg = _reg(unmeasured={}, tooly={"tool_use": True})
-        d = cr.plan_route("unmeasured",
+        d = _rf.plan_route("unmeasured",
                           cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, resident=["tooly"], reg=reg)
         assert d.resolved == "unmeasured"
@@ -127,7 +134,7 @@ class TestPlanRoute:
         """A pinned model keeps the suggestion surface: the unknown is recorded
         as None, never False - it is not a model known to lack tools."""
         reg = _reg(unmeasured={}, tooly={"tool_use": True})
-        d = cr.plan_route("unmeasured",
+        d = _rf.plan_route("unmeasured",
                           cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=True, reg=reg)
         assert d.resolved == "unmeasured"
@@ -144,7 +151,7 @@ class TestPlanRoute:
                             lambda name, **kw: "Z:/models/proj.gguf"
                             if name == "seer" else None)
         reg = _reg(unmeasured={}, seer={"mmproj": "Z:/models/proj.gguf"})
-        d = cr.plan_route("unmeasured", cr.CapabilityNeeds(capabilities=("vision",)),
+        d = _rf.plan_route("unmeasured", cr.CapabilityNeeds(capabilities=("vision",)),
                           pinned=False, reg=reg)
         assert d.resolved == "seer"
         assert d.gaps == {"vision": None}
@@ -152,7 +159,7 @@ class TestPlanRoute:
     def test_an_unknown_tool_use_does_not_hide_a_confirmed_context_shortfall(self):
         reg = _reg(unmeasured={"context_length": 4096},
                    tooly={"tool_use": True, "context_length": 131072})
-        d = cr.plan_route(
+        d = _rf.plan_route(
             "unmeasured", cr.CapabilityNeeds(capabilities=("tool_use",),
                                              min_context=100000),
             pinned=False, reg=reg)
@@ -164,14 +171,14 @@ class TestPlanRoute:
         window as too small would re-route almost every request on a registry
         that predates the field."""
         reg = _reg(unmeasured={}, big={"context_length": 131072})
-        d = cr.plan_route("unmeasured", cr.CapabilityNeeds(min_context=100000),
+        d = _rf.plan_route("unmeasured", cr.CapabilityNeeds(min_context=100000),
                           pinned=False, reg=reg)
         assert d.has_gap is False
         assert d.resolved == "unmeasured"
 
     def test_confirmed_too_small_context_routes(self):
         reg = _reg(small={"context_length": 4096}, big={"context_length": 131072})
-        d = cr.plan_route("small", cr.CapabilityNeeds(min_context=100000),
+        d = _rf.plan_route("small", cr.CapabilityNeeds(min_context=100000),
                           pinned=False, reg=reg)
         assert d.resolved == "big"
         assert d.gaps == {"context_length": False}
@@ -180,7 +187,7 @@ class TestPlanRoute:
         reg = _reg(plain={"tool_use": False},
                    coldbig={"tool_use": True, "context_length": 131072},
                    warm={"tool_use": True, "context_length": 8192})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, resident=["warm"], reg=reg)
         assert d.resolved == "warm"
 
@@ -188,7 +195,7 @@ class TestPlanRoute:
         reg = _reg(plain={"tool_use": False},
                    big={"tool_use": True, "context_length": 131072},
                    small={"tool_use": True, "context_length": 8192})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.resolved == "big"
 
@@ -198,7 +205,7 @@ class TestPlanRoute:
         reg = _reg(plain={"tool_use": False, "context_length": 4096},
                    toolsmall={"tool_use": True, "context_length": 4096},
                    roomy={"tool_use": False, "context_length": 131072})
-        d = cr.plan_route(
+        d = _rf.plan_route(
             "plain", cr.CapabilityNeeds(capabilities=("tool_use",),
                                         min_context=100000),
             pinned=False, reg=reg)
@@ -211,7 +218,7 @@ class TestPlanRoute:
         requested capability too is no better and nothing moves."""
         reg = _reg(plain={"tool_use": False, "context_length": 131072},
                    other={"tool_use": False, "context_length": 131072})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",),
                                                       min_context=100000),
                           pinned=False, reg=reg)
         assert d.resolved == "plain"
@@ -221,7 +228,7 @@ class TestPlanRoute:
         reg = _reg(plain={"tool_use": False, "context_length": 4096},
                    toolsonly={"tool_use": True, "context_length": 4096},
                    both={"tool_use": True, "context_length": 131072})
-        d = cr.plan_route(
+        d = _rf.plan_route(
             "plain", cr.CapabilityNeeds(capabilities=("tool_use",),
                                         min_context=100000),
             pinned=False, reg=reg)
@@ -245,13 +252,13 @@ class TestContextNeed:
 
 class TestDescribe:
     def test_names_the_capability_that_drove_the_choice(self):
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=TOOLS_ONLY)
         text = d.describe()
         assert "tool_use" in text and "plain" in text and "tooly" in text
 
     def test_says_nothing_happened_when_nothing_did(self):
-        d = cr.plan_route("tooly", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("tooly", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=TOOLS_ONLY)
         assert d.describe() == "no capability gap"
 
@@ -734,13 +741,13 @@ class TestNoCurrentModel:
         """With no model resolved at all, a decision that names one must also
         report itself as a route. Disagreeing would put a model in the audit
         header that never answers the request."""
-        d = cr.plan_route(None, cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route(None, cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=TOOLS_ONLY)
         assert d.resolved == "tooly"
         assert d.routed is True
 
     def test_a_decision_that_changes_nothing_is_not_a_route(self):
-        d = cr.plan_route(None, cr.CapabilityNeeds(), pinned=False,
+        d = _rf.plan_route(None, cr.CapabilityNeeds(), pinned=False,
                           reg=TOOLS_ONLY)
         assert d.resolved is None
         assert d.routed is False
@@ -757,7 +764,7 @@ class TestOnlyChatModelsAreTargets:
             embedder={"tool_use": True, "context_length": 131072,
                       "model_type": "embedding"},
         )
-        d = cr.plan_route("small", cr.CapabilityNeeds(min_context=20000),
+        d = _rf.plan_route("small", cr.CapabilityNeeds(min_context=20000),
                           pinned=False, reg=reg)
         assert d.routed is False
         assert d.unmet == ("context_length",)
@@ -768,7 +775,7 @@ class TestOnlyChatModelsAreTargets:
                       "unknown"):
             reg[f"x-{mtype}"] = {"path": f"Z:/m/{mtype}.gguf", "source": "local",
                                  "model_type": mtype, "tool_use": True}
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.routed is False
 
@@ -776,7 +783,7 @@ class TestOnlyChatModelsAreTargets:
         reg = _reg(plain={"tool_use": False},
                    gone={"tool_use": True, "missing": True},
                    here={"tool_use": True})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.resolved == "here"
         assert d.candidates == ("here",)
@@ -784,13 +791,13 @@ class TestOnlyChatModelsAreTargets:
     def test_a_legacy_entry_with_no_type_is_a_chat_model(self):
         reg = _reg(plain={"tool_use": False}, legacy={"tool_use": True})
         del reg["legacy"]["model_type"]
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("tool_use",)),
                           pinned=False, reg=reg)
         assert d.resolved == "legacy"
 
     def test_a_live_capability_the_registry_does_not_record_is_no_gap(self):
         reg = _reg(plain={}, seer={})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
                           pinned=False, reg=reg, current_known={"vision": True})
         assert d.has_gap is False
         assert d.resolved == "plain"
@@ -1065,7 +1072,7 @@ UNMEASURED = _reg(unmeasured={}, tooly={"tool_use": True, "context_length": 3276
 
 class TestAutoswitchModes:
     def test_off_never_moves_a_request_with_a_confirmed_gap(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
                           resident=["tooly"], mode="off")
         assert d.resolved == "plain"
         assert d.routed is False
@@ -1074,7 +1081,7 @@ class TestAutoswitchModes:
         assert d.describe() == "kept plain (tool_use=absent); model autoswitch is off"
 
     def test_ask_keeps_the_model_and_names_the_one_it_would_use(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="ask")
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="ask")
         assert d.resolved == "plain"
         assert d.routed is False
         assert d.suggested == "tooly"
@@ -1083,12 +1090,12 @@ class TestAutoswitchModes:
 
     def test_ask_has_no_suggestion_when_nothing_qualifies(self):
         reg = _reg(a={"tool_use": False}, b={"tool_use": False})
-        d = cr.plan_route("a", TOOLS, pinned=False, reg=reg, mode="ask")
+        d = _rf.plan_route("a", TOOLS, pinned=False, reg=reg, mode="ask")
         assert d.suggested is None
         assert d.unmet == ("tool_use",)
 
     def test_ask_has_no_suggestion_without_a_confirmed_gap(self):
-        d = cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+        d = _rf.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
                           mode="ask")
         assert d.has_gap is False
         assert d.suggested is None
@@ -1097,13 +1104,13 @@ class TestAutoswitchModes:
         reg = _reg(plain={"tool_use": False},
                    cold={"tool_use": True, "context_length": 131072},
                    warm={"tool_use": True, "context_length": 8192})
-        d = cr.plan_route("plain", TOOLS, pinned=False, resident=["warm"], reg=reg,
+        d = _rf.plan_route("plain", TOOLS, pinned=False, resident=["warm"], reg=reg,
                           mode="loaded")
         assert d.resolved == "warm"
         assert d.candidates == ("warm",)
 
     def test_loaded_stays_when_the_capable_model_is_not_loaded(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, resident=[],
+        d = _rf.plan_route("plain", TOOLS, pinned=False, resident=[],
                           reg=TOOLS_ONLY, mode="loaded")
         assert d.resolved == "plain"
         assert d.routed is False
@@ -1111,20 +1118,20 @@ class TestAutoswitchModes:
         assert "no loaded model provides tool_use" in d.describe()
 
     def test_auto_moves_on_a_confirmed_gap_only(self):
-        assert cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
+        assert _rf.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY,
                              mode="auto").resolved == "tooly"
-        assert cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+        assert _rf.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
                              mode="auto").resolved == "unmeasured"
 
     def test_eager_also_moves_on_an_unknown_capability(self):
-        d = cr.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
+        d = _rf.plan_route("unmeasured", TOOLS, pinned=False, reg=UNMEASURED,
                           mode="eager")
         assert d.resolved == "tooly"
         assert d.gaps == {"tool_use": None}
 
     @pytest.mark.parametrize("mode", cr.AUTOSWITCH_MODES)
     def test_a_pinned_request_is_never_moved_in_any_mode(self, mode):
-        d = cr.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY,
+        d = _rf.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY,
                           resident=["tooly"], mode=mode)
         assert d.resolved == "plain"
         assert d.routed is False
@@ -1132,7 +1139,7 @@ class TestAutoswitchModes:
 
     def test_image_ignores_every_need_but_vision(self):
         needs = cr.CapabilityNeeds(capabilities=("tool_use",), min_context=20000)
-        d = cr.plan_route("plain", needs, pinned=False, reg=TOOLS_ONLY,
+        d = _rf.plan_route("plain", needs, pinned=False, reg=TOOLS_ONLY,
                           resident=["tooly"], mode="image")
         assert d.resolved == "plain"
         assert d.routed is False
@@ -1151,26 +1158,26 @@ class TestAutoswitchModes:
                          "mmproj": str(proj)})
         needs = cr.CapabilityNeeds(capabilities=("vision", "tool_use"),
                                    min_context=20000)
-        d = cr.plan_route("plain", needs, pinned=False, reg=reg, mode="image")
+        d = _rf.plan_route("plain", needs, pinned=False, reg=reg, mode="image")
         assert d.resolved == "seer"
         assert d.routed is True
         assert d.gaps == {"vision": False}
 
     def test_image_still_reports_a_pinned_models_other_gaps(self):
-        d = cr.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY, mode="image")
+        d = _rf.plan_route("plain", TOOLS, pinned=True, reg=TOOLS_ONLY, mode="image")
         assert d.resolved == "plain"
         assert d.gaps == {"tool_use": False}
 
     @pytest.mark.parametrize("mode", ["off", "ask"])
     def test_an_image_request_keeps_the_model_under_off_and_ask(self, mode):
         reg = _reg(plain={}, seer={"mmproj": "Z:/models/proj.gguf"})
-        d = cr.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
+        d = _rf.plan_route("plain", cr.CapabilityNeeds(capabilities=("vision",)),
                           pinned=False, reg=reg, mode=mode)
         assert d.resolved == "plain"
         assert d.routed is False
 
     def test_an_unrecognised_mode_reads_as_auto(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="bogus")
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=TOOLS_ONLY, mode="bogus")
         assert d.resolved == "tooly"
         assert d.policy == "auto"
 
@@ -1222,7 +1229,7 @@ class TestAutoswitchOverHTTP:
         r = _ask(client, required_capabilities=["tool_use"])
         blob = json.loads(r.headers["X-Localm-Model-Routing"])
         assert _answering_model(engines) == ["plain"]
-        assert "tooly" not in engines
+        assert not getattr(engines.get("tooly"), "loaded", False)
         assert blob["routed"] is False
         assert blob["pinned"] is False
         assert blob["resolved"] == "plain"
@@ -1283,7 +1290,7 @@ class TestAskOffersTheModelThatCanReadTheAttachment:
         assert blob["routed"] is False
         assert blob["resolved"] == "plain"
         assert _answering_model(engines) == []
-        assert "seer" not in engines
+        assert not getattr(engines.get("seer"), "loaded", False)
 
     def test_a_streamed_image_refusal_under_ask_carries_the_suggestion(
             self, vision_server, monkeypatch):

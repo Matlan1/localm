@@ -124,12 +124,15 @@ class Fit:
     *cls* is a ``FIT_*`` class. *evicts_user* names the loaded models the user
     chose that would be unloaded to reach it. *load_bytes* is the model's size
     on disk (0 for a resident one). *disk_read_bytes* is what it would read
-    from disk while answering, for ``FIT_DISK``."""
+    from disk while answering, for ``FIT_DISK``. *error* is set when the model
+    could not even be prepared for loading; such a model is never chosen or
+    suggested, and the error is reported as a load error."""
 
     cls: int
     evicts_user: tuple[str, ...] = ()
     load_bytes: int = 0
     disk_read_bytes: int = 0
+    error: str = ""
 
     @property
     def needs_ask(self) -> bool:
@@ -604,10 +607,15 @@ def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip, fit,
     def eligible(n: str) -> bool:
         return n != current and (not only_resident or n in resident_set)
 
+    errors: list[str] = []
+
     def ranked(names, extra=lambda n: 0):
         fits = dict(fit(list(names)))
         for n in names:
             fits.setdefault(n, Fit(FIT_UNSIZED))
+        broken = [n for n in names if fits[n].error]
+        errors.extend(f"{n}: {fits[n].error}" for n in broken)
+        names = [n for n in names if not fits[n].error]
 
         def key(n: str):
             f = fits[n]
@@ -617,6 +625,11 @@ def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip, fit,
         return sorted(names, key=key), {n: fits[n] for n in names}
 
     def decide(order, fits, skipped, unmet_of=None):
+        if not order:
+            return RoutingDecision(current=current, resolved=current, pinned=False,
+                                   needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)),
+                                   skipped=skipped, load_errors=tuple(errors),
+                                   fits=fits)
         usable = tuple(n for n in order if not fits[n].needs_ask)
         unmet_of = unmet_of or {}
         if usable:

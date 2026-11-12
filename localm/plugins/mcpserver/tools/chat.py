@@ -57,6 +57,8 @@ def routing_note(decision) -> Optional[str]:
     if decision is None:
         return None
     if not decision.routed:
+        if decision.suggested and not decision.pinned:
+            return f"[{decision.describe()}]"
         if decision.pinned or not (decision.skipped or decision.load_errors):
             return None
         return f"[{decision.describe()}]"
@@ -82,9 +84,13 @@ def answer_with(engines: EngineCache, decision, run):
     if decision.routed:
         names = list(decision.candidates or (decision.resolved,))
     names.append(decision.current)
+    from localm.inference.http_server import RouteRefused as _RouteRefused
     errors: list[str] = []
     skipped = []
+    refused = None
     for name in names:
+        if name == decision.current and refused is not None and not errors:
+            decision = decision.asked(refused.model, refused.reason)
         try:
             # A load prints native sizing diagnostics straight to stdout, the
             # stream the JSON-RPC frames travel on.
@@ -111,7 +117,13 @@ def answer_with(engines: EngineCache, decision, run):
             skipped.append(e.skipped)
             _srv._log(f"not loading {name}: {e}")
             continue
+        except _RouteRefused as e:
+            refused = refused or e
+            _srv._log(f"not loading {name}: {e.reason}")
+            continue
         except Exception as e:
+            if name == decision.current and decision.suggested and not decision.pinned:
+                raise RuntimeError(f"{e} [{decision.describe()}]") from e
             if name == decision.current:
                 raise
             errors.append(f"{name}: {e}")
