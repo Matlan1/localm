@@ -63,6 +63,13 @@ class _StandIn:
                 else:
                     self._send(404, {"detail": "not found"})
 
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer.load_requests.append(body.get("model"))
+                self._send(404, {"detail": f"Model '{body.get('model')}' is not registered."})
+
+        self.load_requests: list[str] = []
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base_url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -142,28 +149,47 @@ def test_run_by_registered_name_of_that_file_attaches(attach, stand_in, model_fi
     assert engine_spy.call_args.kwargs["model"] == ACTIVE
 
 
-def test_run_by_path_of_a_different_file_is_still_refused(
-        attach, stand_in, model_file, tmp_path):
+@pytest.fixture
+def in_process(monkeypatch):
+    """Record that run() reached its in-process load, stopping it there (the
+    model is reported missing) so no real model is loaded."""
+    lookups = []
+
+    def lookup(name, *a, **k):
+        lookups.append(name)
+        return None
+
+    monkeypatch.setattr("localm.cli.chat.get_operator_model_info", lookup)
+    return lookups
+
+
+def test_run_by_path_of_a_different_file_loads_in_process(
+        attach, stand_in, model_file, tmp_path, in_process):
     other = tmp_path / "other" / model_file.name
     other.parent.mkdir()
     other.write_bytes(b"GGUF" + b"\1" * 200)  # same base name, different size
     engine_spy, to = attach
-    to(stand_in())
+    srv = stand_in()
+    to(srv)
     result = CliRunner().invoke(run, [str(other), "-p", "hi"])
     flat = _flat(result.output)
-    assert result.exit_code == 1, result.output
+    assert srv.load_requests == [str(other)]
     assert not engine_spy.called
-    assert "not the requested" in flat
-    assert "--no-server" in flat
+    assert in_process == [str(other)]
+    assert "could not switch" in flat and "is not registered" in flat
+    assert "not the requested" not in flat
+    assert "--no-server" not in flat
 
 
-def test_run_by_path_is_refused_when_the_server_identity_cannot_be_read(
-        attach, stand_in, model_file):
+def test_run_by_path_loads_in_process_when_the_server_identity_cannot_be_read(
+        attach, stand_in, model_file, in_process):
     engine_spy, to = attach
-    to(stand_in(status=403))
+    srv = stand_in(status=403)
+    to(srv)
     result = CliRunner().invoke(run, [str(model_file), "-p", "hi"])
-    assert result.exit_code == 1, result.output
+    assert srv.load_requests == [str(model_file)], result.output
     assert not engine_spy.called
+    assert in_process == [str(model_file)]
 
 
 # ------------------------------------------------------------------ #
@@ -267,8 +293,8 @@ def test_gui_by_path_of_a_different_file_is_refused(
     assert "attaching" not in flat
 
 
-def test_run_autostart_refuses_a_server_that_serves_a_different_model(
-        monkeypatch, stand_in, model_file, tmp_path):
+def test_run_autostart_loads_in_process_when_the_new_server_cannot_switch(
+        monkeypatch, stand_in, model_file, tmp_path, in_process):
     srv = stand_in(active="qwen2.5-0.5b",
                    detail={"id": "qwen2.5-0.5b", "path": "qwen.gguf",
                            "size_bytes": 999, "sha256": None})
@@ -289,6 +315,9 @@ def test_run_autostart_refuses_a_server_that_serves_a_different_model(
 
     result = CliRunner().invoke(run, [str(model_file), "-p", "hi"])
     flat = _flat(result.output)
-    assert result.exit_code == 1, result.output
+    assert srv.load_requests == [str(model_file)]
     assert not engine_spy.called
-    assert "qwen2.5-0.5b" in flat and "not the requested" in flat
+    assert in_process == [str(model_file)]
+    assert "serves qwen2.5-0.5b" in flat and "could not switch" in flat
+    assert "not the requested" not in flat
+    assert "--no-server" not in flat

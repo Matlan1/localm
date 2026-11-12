@@ -20,6 +20,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **Every update package states exactly what it changes.** It lists each localm file with its checksum, and each component (the llama.cpp runtime, its CUDA libraries, PyTorch, stable-diffusion.cpp, KoboldCpp, ComfyUI, uv) with its version and the checksum of every platform and backend build. An update replaces only what its package states. A package that is cut off, damaged or does not match its statement, or that the free disk space cannot hold, is refused before anything changes, and a failure while the files are written puts everything back.
+- **`localm run` with a different model switches the running server to it.** When the background server for the folder holds another model, or none, `localm run MODEL` now loads MODEL on that server and chats with it, instead of stopping and asking you to re-run with `--no-server`. If the server cannot load it (a model given by a path that is not registered, or a failed load), or you passed `--ctx`, `--gpu-layers`, `--mmproj` or `--device`, which the server's load would not use, `run` says why and loads the model in its own process.
 
 ## [0.3.4b2] - 2026-11-11
 
