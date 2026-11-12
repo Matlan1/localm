@@ -525,3 +525,19 @@ def test_the_load_time_check_counts_no_unload_that_did_not_happen(monkeypatch):
                                                        else (cr.FIT_CPU_ONLY, 0)))
     fit = hs._routed_load_fit("seer", object())
     assert fit.cls == cr.FIT_CPU_ONLY and fit.needs_ask
+
+
+def test_a_routed_switch_that_finds_the_users_model_loaded_does_not_claim_it(
+        vision_server, monkeypatch):
+    """A routed load that waited while the user's own load of the same model
+    finished reuses it and leaves it the user's."""
+    import asyncio
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    named = client.post("/v1/chat/completions", json={
+        "model": "seer", "messages": [{"role": "user", "content": "hi"}], "stream": False})
+    assert named.status_code == 200 and "seer" not in hs._routing_loaded
+    result = asyncio.run(hs.switch_engine("seer", None, preempt=False, activate=False,
+                                          routed=True))
+    assert result["status"] == "already_active"
+    assert "seer" not in hs._routing_loaded
