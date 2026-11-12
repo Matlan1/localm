@@ -83,7 +83,7 @@ def test_a_key_removed_elsewhere_or_expired_ends_its_sessions(monkeypatch):
     monkeypatch.setattr("localm.plugins.coder.sessions._KEY_WATCH_SECONDS", 0.05)
     mgr = SessionManager()
     live = {"h1": True}
-    monkeypatch.setattr(auth, "key_hash_live", lambda h: live.get(h, False))
+    monkeypatch.setattr(auth, "key_hash_live_checked", lambda h: live.get(h, False))
     s = mgr.create(_Session("s1", "h1"))
     time.sleep(0.3)
     assert not s.closed
