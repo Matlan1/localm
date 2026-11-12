@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The delete-outputs setting now applies to every way of generating media.** With `comfy_delete_outputs` (or a media plugin's own delete-outputs setting) on, the chat REPL's `/generate-image`, `/generate-music` and `/generate-video`, the `localm image`, `localm music` and `localm video` commands, the coder's image tool and the MCP `generate_image` tool kept ComfyUI's own copy of the file (which records the prompt) and its history entry outside privacy mode. They now remove them as the GUI does.
 - **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
 - **The debug log now lists requests the server refuses before they reach a route.** A request turned away by the open-mode management check, the cross-origin check, the no-key network check, the Host header check, the request size limit, the API docs check or a CORS preflight left no line in the debug log. Every request now gets one line with its method, path and status, and a refused one also says which check refused it. The line never carries a key, token, header value or request content, and debug mode does not change the response.
 
