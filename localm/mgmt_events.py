@@ -1,12 +1,14 @@
-"""Append-only log of management events, written in every session mode.
+"""Append-only log of management events, written in log and full mode only.
 
 One JSON line per event is appended to ``<data dir>/logs/management.jsonl``; the caller passes the data directory.
 A line holds the time, the event kind, and only these optional fields:
 ``principal`` (a key id or a fixed label, never a key), ``keys`` (the NAMES of
 the config keys a save changed, never their values), ``plugin``,
 ``version_from``, ``version_to`` and ``loopback`` (a failed login's client
-only). No conversation content and no secret is ever written, which is why the
-file is written in privacy mode too.
+only). No conversation content and no secret is ever written. In privacy mode
+(the default) nothing is written: the gate ``localm.audit`` installs with
+:func:`set_write_gate` (``automatic_write_allowed("server")``) decides, and with no
+gate installed nothing is written.
 
 The file is capped at ``MAX_BYTES``; at the cap it is renamed to
 ``management.jsonl.1`` (replacing the previous rotation) and a new file starts.
@@ -47,6 +49,29 @@ def log_path(home) -> Path:
     return Path(home) / "logs" / FILE_NAME
 
 
+_write_gate = None
+
+
+def set_write_gate(gate) -> None:
+    """Install *gate*, a no-argument callable that is True when automatic writes
+    are allowed. ``localm.audit`` installs ``automatic_write_allowed("server")``
+    when it is imported."""
+    global _write_gate
+    _write_gate = gate
+
+
+def _write_allowed() -> bool:
+    """True when the installed gate allows the write; False with no gate, when the
+    gate says no, or when it raises."""
+    gate = _write_gate
+    if gate is None:
+        return False
+    try:
+        return bool(gate())
+    except Exception:
+        return False
+
+
 def _text(value) -> str:
     return str(value)[:_MAX_TEXT]
 
@@ -56,13 +81,16 @@ def record(kind: str, *, home, principal: Optional[str] = None,
            version_from: Optional[str] = None, version_to: Optional[str] = None,
            loopback: Optional[bool] = None) -> bool:
     """Append one event line under the data directory *home*. Returns True when
-    written, False when the write failed.
+    written, False when the write failed or the session mode is privacy (nothing
+    is written then).
 
     Raises ValueError for a *kind* outside ``KINDS``. Never raises for an I/O
     failure. Thread-safe; lines are appended whole.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown management event kind: {kind!r}")
+    if not _write_allowed():
+        return False
     event: dict = {"ts": time.time(), "kind": kind}
     if principal is not None:
         event["principal"] = _text(principal)

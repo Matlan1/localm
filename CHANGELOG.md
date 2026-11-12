@@ -11,13 +11,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
+
+### Added
+- **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
+
 ### Changed
 - **`localm run` with a different model switches the running server to it.** When the background server for the folder holds another model, or none, `localm run MODEL` now loads MODEL on that server and chats with it, instead of stopping and asking you to re-run with `--no-server`. If the server cannot load it (a model given by a path that is not registered, or a failed load), or you passed `--ctx`, `--gpu-layers`, `--mmproj` or `--device`, which the server's load would not use, `run` says why and loads the model in its own process.
 
-## [0.3.4b1] - 2026-11-11
+## [0.3.4b2] - 2026-11-11
 
 ### Added
-- **A management log records key, login, update and config events in every session mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content, so privacy mode writes it too. It is capped at 1 MB with one earlier file kept.
+- **A management log records key, login, update and config events in log and full mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content. Privacy mode writes nothing. It is capped at 1 MB with one earlier file kept.
 - **A setting lets canvas artifacts open other pages.** "Let canvas artifacts open other pages" (Settings, Chat; `localm config canvas_allow_navigation true`) lets an artifact load any web page in the canvas instead of the canvas closing. It is off by default and only the owner can change it; the page an artifact opens can receive data in its address.
 
 ### Security

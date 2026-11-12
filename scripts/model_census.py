@@ -276,6 +276,7 @@ KIND_TYPES: dict[str, tuple[str, ...]] = {
     "upscaler": ("upscaler",),
     "controlnet": ("controlnet",),
     "textual-inversion": ("textual-inversion",),
+    "planner": ("planner",),
     "undetermined": (),
 }
 
@@ -284,6 +285,9 @@ _ENCODER_TEXT_ARCHES = frozenset({
     "neo-bert", "gemma-embedding", "roberta", "xlm-roberta", "eurobert",
 })
 _TTS_ARCHES = frozenset({"wavtokenizer-dec", "outetts", "orpheus", "kokoro"})
+# ACE-Step 1.5 music parts, named by their GGUF architecture.
+_MUSIC_ARCHES = {"acestep-lm": "planner", "acestep-dit": "diffusion",
+                 "acestep-text-enc": "text-encoder", "acestep-vae": "vae"}
 _DIFFUSION_TENSOR_PREFIXES = (
     "model.diffusion_model.", "double_blocks.", "single_blocks.", "transformer_blocks.",
     "joint_blocks.", "input_blocks.", "img_in.", "diffusion_model.", "x_embedder.",
@@ -332,6 +336,8 @@ def _gguf_kind(meta: dict) -> Implied:
         return out("reranker", f"GGUF {arch}.pooling_type={pooling} (rank)")
     if isinstance(pooling, int) and pooling > 0:
         return out("embedding", f"GGUF {arch}.pooling_type={pooling}")
+    if arch in _MUSIC_ARCHES:
+        return out(_MUSIC_ARCHES[arch], f"GGUF ACE-Step 1.5 music part {arch}")
     if arch == "t5encoder":
         return out("text-encoder", "GGUF t5encoder with no pooling head (diffusion text encoder)")
     if arch in _ENCODER_TEXT_ARCHES:

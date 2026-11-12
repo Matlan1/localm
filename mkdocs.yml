@@ -60,6 +60,7 @@ nav:
       - Native app identity: native-app.md
   - Using localm:
       - CLI reference: cli.md
+      - Supported models: models.md
       - Knowledge and RAG: rag.md
       - Durable memory: memory.md
       - Scheduled jobs: jobs.md

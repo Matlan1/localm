@@ -784,9 +784,6 @@ class SpeechSynthesizer:
         except BaseException:
             self.close()
             raise
-        logger.info("speech model ready: %s (%s, %d Hz, mmproj on %s)",
-                    Path(model_path).name, PIPELINE_NAMES[self.pipeline],
-                    self.sample_rate, "GPU" if self._mtmd.on_gpu else "CPU")
 
     @property
     def sampling(self) -> SamplingParams:
