@@ -595,7 +595,7 @@ window.clearImageProxyCache = clearImageProxyCache;
  *  error, which is indistinguishable from the reader declining and would make
  *  the `ask` state silently unusable on a phone.
  *
- *  Dismissing through the shared modal chrome (the x, or the backdrop) is a
+ *  Dismissing through the shared modal chrome (the x, or Escape) is a
  *  DECLINE. Those handlers are not ours, so it is detected by polling for
  *  display:none - the same pattern promptText and the missing-model modal use. */
 function askOriginConsent(origin) {
@@ -1733,8 +1733,20 @@ export function openModal(title, bodyBuilder) {
   bodyBuilder(body);
   $("modal").style.display = "flex";
 }
-$("modal-close").onclick = () => ($("modal").style.display = "none");
-$("modal").onclick = (e) => { if (e.target === $("modal")) $("modal").style.display = "none"; };
+/** Close the shared modal. A dialog waiting for an answer reads a close it did
+ *  not make itself as a cancel. */
+export function closeModal() {
+  $("modal").style.display = "none";
+}
+$("modal-close").onclick = closeModal;
+// A click outside the dialog does nothing: it neither cancels, dismisses nor
+// accepts. Escape and the x cancel.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  if ($("modal").style.display === "none") return;
+  e.preventDefault();
+  closeModal();
+});
 
 /** Confirm a destructive action with the in-page modal. window.confirm() is
  *  suppressed in some mobile / PWA browsers (the NET-1 prompt() class of bug),
@@ -1757,7 +1769,7 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
  *  to `await` the outcome (e.g. only retrying a request with `force: true`
  *  once confirmed) instead of continuing inside a callback. Resolves true if
  *  confirmed, false if cancelled OR dismissed via the shared modal chrome
- *  (x / backdrop) - same polling pattern as promptText above, since those
+ *  (x / Escape) - same polling pattern as promptText above, since those
  *  handlers are not ours. */
 export function confirmDangerAsync(title, message, confirmLabel) {
   return new Promise((resolve) => {
@@ -1788,7 +1800,7 @@ export function confirmDangerAsync(title, message, confirmLabel) {
 }
 
 /** Ask with the in-page modal and resolve to the key of the button chosen,
- *  or null when the dialog was cancelled or dismissed (x / backdrop).
+ *  or null when the dialog was cancelled or dismissed (x / Escape).
  *  *choices* are ``{key, label, danger}`` in display order; a Cancel button
  *  comes first. */
 export function chooseAsync(title, message, choices) {
@@ -1864,7 +1876,7 @@ export function promptText(title, defaultValue) {
     });
     input.focus();
     input.select();
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // Dismissing via the shared modal chrome (x / Escape) sets display:none;
     // poll for it and treat as cancel - those handlers are not ours (same
     // pattern _offerModelDownload's missing-model modal uses below, for the
     // same reason).
@@ -1957,7 +1969,7 @@ function _offerModelDownload(missingModel, log, plugin) {
       row.appendChild(dl);
       body.appendChild(row);
     });
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // Dismissing via the shared modal chrome (x / Escape) sets display:none;
     // poll for it and treat as "not now" - those handlers are not ours (same
     // pattern as picker.js's pickPath, for the same reason).
     watch = setInterval(() => {

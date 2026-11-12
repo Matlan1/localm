@@ -177,10 +177,29 @@ def test_routes_append_get_patch_delete(client):
 
 def test_routes_put_replaces_from_textarea(client):
     client.post("/api/memory/append", json={"text": "first fact"})
-    r = client.put("/api/memory", json={"text": "- one thing\n- another thing"})
+    base = client.get("/api/memory").json()["text"]
+    r = client.put("/api/memory", json={"text": "- one thing\n- another thing", "base": base})
     assert r.status_code == 200 and r.json()["count"] == 2
     items = client.get("/api/memory").json()["items"]
     assert {it["text"] for it in items} == {"one thing", "another thing"}
+
+
+def test_routes_put_keeps_facts_added_after_the_dialog_opened(client):
+    client.post("/api/memory/append", json={"text": "old fact"})
+    client.post("/api/memory/append", json={"text": "doomed fact"})
+    base = client.get("/api/memory").json()["text"]          # the dialog opens
+    client.post("/api/memory/append", json={"text": "newer fact"})   # another tab, the CLI
+    r = client.put("/api/memory", json={"text": "- old fact\n- typed fact", "base": base})
+    assert r.status_code == 200
+    assert r.json()["kept_newer"] == 1
+    items = {it["text"] for it in client.get("/api/memory").json()["items"]}
+    assert items == {"old fact", "typed fact", "newer fact"}, items
+
+
+def test_routes_put_without_a_base_is_refused(client):
+    client.post("/api/memory/append", json={"text": "keep me"})
+    assert client.put("/api/memory", json={"text": ""}).status_code == 422
+    assert {it["text"] for it in client.get("/api/memory").json()["items"]} == {"keep me"}
 
 
 def test_routes_patch_missing_404(client):
@@ -190,7 +209,7 @@ def test_routes_patch_missing_404(client):
 def test_routes_write_blocked_in_privacy(client, monkeypatch):
     monkeypatch.setenv("LOCALM_MODE", "privacy")
     assert client.post("/api/memory/append", json={"text": "x"}).status_code == 403
-    assert client.put("/api/memory", json={"text": "x"}).status_code == 403
+    assert client.put("/api/memory", json={"text": "x", "base": ""}).status_code == 403
     assert client.delete("/api/memory/abc").status_code == 403
     g = client.get("/api/memory").json()
     assert g["writable"] is False                   # read still works, not writable

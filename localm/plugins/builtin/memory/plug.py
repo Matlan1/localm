@@ -108,6 +108,8 @@ def _require_writable() -> None:
 
 class MemoryUpdate(BaseModel):
     text: str
+    # The text the edit started from (GET /api/memory "text").
+    base: str
 
 
 class MemoryAppend(BaseModel):
@@ -477,9 +479,12 @@ async def memory_get(request: Request = None):
 
 @_router.put("/api/memory")
 async def memory_put(req: MemoryUpdate, request: Request = None):
-    """Bulk-edit: the modal textarea is the authoritative user memory. DIFF-AWARE:
-    a line matching an existing record's text keeps that record as-is; only new
-    lines become new user records; omitted lines are deletes.
+    """Bulk-edit from the memory dialog: *text* is the edited list and *base* the
+    list the edit started from. A fact in *base* that is no longer in *text* is
+    deleted; a line of *text* that matches an existing record keeps that record
+    as-is; any other line becomes a new user record. A record that is in neither
+    (added after *base* was read, by another tab, the background pass, the CLI or
+    an MCP client) is kept, so a dialog opened earlier never deletes it.
 
     The existing/records diff below is a snapshot-then-decide-then-write sequence,
     so this route holds the namespace lock across the whole thing: a concurrent
@@ -492,6 +497,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         raise HTTPException(413, "Memory too large (max 64k chars)")
     facts = [_strip_bullet(ln)[:MAX_TEXT_LEN]
              for ln in req.text.splitlines() if _strip_bullet(ln)]
+    base_facts = {_strip_bullet(ln)[:MAX_TEXT_LEN]
+                  for ln in req.base.splitlines() if _strip_bullet(ln)}
     # Reject over-cap writes at the door rather than accept facts the next prune would
     # hard-delete.
     if len(facts) > N_MAX:
@@ -508,7 +515,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         _migrate_legacy(store)
         with store.lock():
             store._load()
-            existing = {r.text: r for r in store.all()}
+            current = store.all()
+            existing = {r.text: r for r in current}
             seen: set = set()
             records: list = []
             for f in facts:
@@ -518,11 +526,19 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
                 keep = existing.get(f)
                 records.append(keep if keep is not None else MemoryRecord(
                     text=f, kind="semantic", source="user", importance=0.8))
+            newer = [r for r in current
+                     if r.text not in seen and r.text not in base_facts]
+            records.extend(newer)
+            if len(records) > N_MAX:
+                raise HTTPException(
+                    413, f"Too many memory records ({len(records)}, with "
+                    f"{len(newer)} added since this list was opened); the store "
+                    f"keeps at most {N_MAX}. Trim the list before saving.")
             store.replace(records, embed_fn=_embed_fn())
-        return records
+        return records, len(newer)
 
-    records = await _off_loop(_do_put)
-    return {"status": "saved", "count": len(records)}
+    records, kept_newer = await _off_loop(_do_put)
+    return {"status": "saved", "count": len(records), "kept_newer": kept_newer}
 
 
 @_router.post("/api/memory/append")

@@ -1305,7 +1305,7 @@ test("R27: ticking 'don't ask again' stops the approval popup re-firing", async 
 });
 
 // ---------------------------------------------------------------------------
-//  confirmWebRequest: dismissing the modal (the x, or the backdrop) must
+//  confirmWebRequest: dismissing the modal (the x, or Escape) must
 //  settle the promise instead of leaving runCompletion()'s await hanging
 //  forever. On unfixed code an unbounded await of a dismissed promise hangs
 //  the test runner rather than failing it, so every await below goes through
@@ -1315,7 +1315,7 @@ test("R27: ticking 'don't ask again' stops the approval popup re-firing", async 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const race = (p) => Promise.race([p.then((v) => ({ v })), wait(1500).then(() => null)]);
 
-test("confirmWebRequest: dismissing via the shared modal chrome (x/backdrop) resolves false", async () => {
+test("confirmWebRequest: dismissing via the shared modal chrome (x/Escape) resolves false", async () => {
   const { window } = loadApp();
   const modal = window.document.getElementById("modal");
 

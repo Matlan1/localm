@@ -1518,7 +1518,7 @@ function confirmEmbeddingModelSwitch(model, report) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);

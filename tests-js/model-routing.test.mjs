@@ -565,11 +565,18 @@ test("a compacted reply cut at its first tool call still marks the conversation 
 
 function setupRefusal({ routing, pinned = false }) {
   const calls = [];
+  const server = { active: "plain" };
   let posts = 0;
   const impl = async (url, opts = {}) => {
     let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ url: String(url), body });
+    if (String(url).startsWith("/api/models")) {
+      const data = { models: [{ name: "plain" }, { name: "seer", vision: true }],
+                     active: server.active };
+      return { ok: true, status: 200, headers: { get: () => null },
+        json: async () => data, text: async () => "" };
+    }
     if (String(url) === "/v1/chat/completions" && posts++ === 0) {
       const headers = { get: (k) => (k === "X-Localm-Refusal" ? "image"
         : (k === "X-Localm-Model-Routing" && routing ? JSON.stringify(routing) : null)) };
@@ -599,17 +606,16 @@ function setupRefusal({ routing, pinned = false }) {
     content: [{ type: "text", text: "what colour?" }, image] }] };
   if (pinned) conv.pinnedModel = "plain";
   activateConv(window, conv);
-  return { window, doc, calls, conv, select, image };
+  return { window, doc, calls, conv, select, image, server };
 }
 
 const ASK_ROUTING = { resolved: "plain", requested: "plain", routed: false, pinned: false,
   gaps: { vision: "absent" }, unmet: ["vision"], suggested: "seer" };
 
-test("an ask-mode image refusal offers the suggested model; one click restores the image and answers with it", async () => {
+test("an ask-mode image refusal offers the suggested model; one click answers with it and the image", async () => {
   const { window, doc, calls, conv, select, image } = setupRefusal({ routing: ASK_ROUTING });
   await window.runCompletion(conv);
-  assert.equal(typeof conv.messages[0].content, "string", "the image is stripped first");
-  assert.match(conv.messages[0].content, /Image removed/);
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the image stays in the chat");
   const offer = doc.querySelector(".media-offer .routed-suggest");
   assert.ok(offer, "the refusal offers the model that can read the image");
   assert.match(offer.textContent, /seer/);
@@ -631,7 +637,7 @@ test("an ask-mode image refusal offers the suggested model; one click restores t
 test("an image refusal with no suggestion offers nothing", async () => {
   const { window, doc, conv } = setupRefusal({ routing: { ...ASK_ROUTING, suggested: undefined } });
   await window.runCompletion(conv);
-  assert.match(conv.messages[0].content, /Image removed/);
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the image stays in the chat");
   assert.equal(doc.querySelector(".media-offer"), null);
 });
 
@@ -641,31 +647,45 @@ test("a pinned chat's image refusal never offers another model", async () => {
   assert.equal(doc.querySelector(".media-offer"), null);
 });
 
-const ALL_IMAGES_REMOVED = /all images in this conversation were removed/;
+const IMAGES_KEPT = /images stay in this conversation but are not sent to plain again/;
 
 for (const [name, opts] of [
   ["suggested model", { routing: ASK_ROUTING }],
   ["no suggestion", { routing: { ...ASK_ROUTING, suggested: undefined } }],
   ["pinned chat", { routing: ASK_ROUTING, pinned: true }],
 ]) {
-  test(`an image refusal toast says every image was removed (${name})`, async () => {
+  test(`an image refusal toast says the images stay and are not sent to that model (${name})`, async () => {
     const { window, doc, conv } = setupRefusal(opts);
     await window.runCompletion(conv);
     const text = doc.getElementById("toast").textContent;
-    assert.match(text, ALL_IMAGES_REMOVED, text);
-    assert.doesNotMatch(text, /removed the image\b/, text);
+    assert.match(text, IMAGES_KEPT, text);
+    assert.doesNotMatch(text, /removed/, text);
   });
 }
 
-test("an image refusal removes the images of earlier turns too, as the toast says", async () => {
-  const { window, conv, image } = setupRefusal({ routing: ASK_ROUTING });
+test("an image refusal keeps the images of earlier turns; the refusing model gets none, another model gets all", async () => {
+  const { window, conv, calls, select, image, server } = setupRefusal({ routing: ASK_ROUTING });
   conv.messages.unshift(
     { role: "user", content: [{ type: "text", text: "first" }, image] },
     { role: "assistant", content: "ok" });
   await window.runCompletion(conv);
-  const left = conv.messages.filter((m) => Array.isArray(m.content)
+  const kept = conv.messages.filter((m) => Array.isArray(m.content)
     && m.content.some((p) => p.type === "image_url"));
-  assert.equal(left.length, 0);
+  assert.equal(kept.length, 2, "both images stay in the conversation");
+
+  conv.messages.push({ role: "user", content: "just text now" });
+  await window.runCompletion(conv);
+  const images = (post) => post.body.messages.flatMap((m) =>
+    Array.isArray(m.content) ? m.content.filter((p) => p.type === "image_url") : []);
+  assert.equal(images(chatPosts(calls).pop()).length, 0, "plain is sent no image");
+
+  server.active = "seer";
+  select.value = "seer";
+  conv.messages.push({ role: "user", content: "and you, seer?" });
+  await window.runCompletion(conv);
+  const toSeer = chatPosts(calls).pop();
+  assert.equal(toSeer.body.model, "seer");
+  assert.equal(images(toSeer).length, 2, "seer is sent both images");
 });
 
 // ---- a pin follows its model through a rename ----
