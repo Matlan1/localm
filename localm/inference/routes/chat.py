@@ -171,6 +171,11 @@ def register(app: FastAPI, ctx) -> None:
             skipped_now = []
             refused = None
             for _cand in route.candidates or (route.resolved,):
+                routed_status = _hs.loading_routed_status(_cand, route.current,
+                                                          sorted(route.gaps))
+
+                def _say_routed(text, _status=routed_status):
+                    say(_status if text == LOADING_MODEL_STATUS else text)
                 try:
                     # activate=False: answering one request with the routed
                     # model does not make it the model every later unnamed
@@ -180,7 +185,7 @@ def register(app: FastAPI, ctx) -> None:
                     # it, and a load that would need the user's yes is refused.
                     engine = await _hs.get_engine(_cand, activate=False,
                                                   skip_if_latched=True, routed=True,
-                                                  on_status=say)
+                                                  on_status=_say_routed)
                 except _hs.LoadSkipped as e:
                     skipped_now.append(e.skipped)
                     continue
@@ -200,8 +205,8 @@ def register(app: FastAPI, ctx) -> None:
                 break
             if skipped_now:
                 route = route.with_skipped(skipped_now)
-            if engine is None and refused is not None and not load_errors:
-                route = route.asked(refused.model, refused.reason)
+            if engine is None and refused is not None:
+                route = route.asked(refused.model, refused.fit, load_errors)
             elif engine is None:
                 route = route.without_route(load_errors)
         if route.has_gap:
@@ -523,7 +528,8 @@ def register(app: FastAPI, ctx) -> None:
                         prompt_tokens, capacity,
                         encoder_decoder=_hs._engine_is_encoder_decoder(engine),
                         reply_reserve=_hs._engine_reply_reserve(engine),
-                        limit=reason))
+                        limit=reason),
+                    headers=_capability_route_header(route))
 
         except BaseException:
             _hs._unpin(engine)

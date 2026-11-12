@@ -245,6 +245,8 @@ def _served_engine(job: Job, live):
     decision = hs.plan_capability_route(job.model or None, messages, required,
                                         pin_model=bool(job.model))
     target = decision.resolved
+    if decision.suggested and not decision.routed:
+        logger.info("jobs: %s", decision.describe())
     if not target:
         return live
 

@@ -276,12 +276,16 @@ class RoutingDecision:
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
                        load_errors=tuple(load_errors))
 
-    def asked(self, name: str, reason: str) -> RoutingDecision:
+    def asked(self, name: str, fit: "Fit",
+              load_errors: Sequence[str] = ()) -> RoutingDecision:
         """This decision turned into a suggestion: *current* answers, *name* is
-        ``suggested`` with *reason* as ``ask_reason``, nothing is a candidate."""
-        return replace(self, resolved=self.current, suggested=name, ask_reason=reason,
-                       candidates=(), candidate_unmet={},
-                       unmet=tuple(sorted(self.gaps)))
+        ``suggested`` with *fit* (measured when its load was refused) as its fit
+        and the reason, nothing is a candidate, and *load_errors* records the
+        candidates that failed to load."""
+        return replace(self, resolved=self.current, suggested=name,
+                       ask_reason=fit.ask_reason(), candidates=(), candidate_unmet={},
+                       unmet=tuple(sorted(self.gaps)), fits={**self.fits, name: fit},
+                       load_errors=tuple(load_errors))
 
     def with_skipped(self, more: Sequence[SkippedCandidate]) -> RoutingDecision:
         """This decision with *more* added to ``skipped``: models found to be
@@ -543,8 +547,8 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     caller can rank without it.
 
     Ranking: candidates usable without asking (``Fit.needs_ask`` False) first,
-    then (when no model meets every need) the ones meeting more of the other
-    needs, then the fit class, then already resident, then the smaller load,
+    then the fit class, then (when no model meets every need) the ones meeting
+    more of the other needs, then already resident, then the smaller load,
     then the larger confirmed context window, then name, so the result is
     deterministic. When the best candidate needs asking, the decision keeps
     *current*, names it in ``suggested`` with ``ask_reason`` and leaves
@@ -620,7 +624,7 @@ def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip, fit,
         def key(n: str):
             f = fits[n]
             ctx = caps.model_context_length(n, reg=reg) or 0
-            return (f.needs_ask, extra(n), f.cls, 0 if n in resident_set else 1,
+            return (f.needs_ask, f.cls, extra(n), 0 if n in resident_set else 1,
                     f.load_bytes, -ctx, n)
         return sorted(names, key=key), {n: fits[n] for n in names}
 

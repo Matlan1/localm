@@ -69,6 +69,7 @@ def test_a_load_the_fresh_measurement_refuses_is_named_not_loaded(reg, monkeypat
     assert res["isError"] is True and late.ask_reason() in text
     assert not getattr(engines.made.get("seer"), "loaded", False)
     assert "seer" not in engines._routing_loaded
+    assert "seer" not in engines._engines, "the refused engine is not left in the cache"
 
 
 def test_a_routed_load_never_evicts_the_clients_model(reg, monkeypatch):

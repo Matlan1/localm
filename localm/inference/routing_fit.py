@@ -26,6 +26,7 @@ from localm.inference.capability_routing import (FIT_CPU_ONLY, FIT_DISK,
 _RAM_HEADROOM = 2 * 1024 ** 3
 
 UNLOAD_ALWAYS = "always"
+UNLOAD_NEVER = "never"
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,10 @@ def classify(engine, free: Optional[int], reading: VramReading,
     placement = None
     if callable(predict):
         try:
-            placement = predict(gpu_free, reading.total, ram_available, ram_total)
+            if reading.devices >= 2:
+                placement = predict(None, None, ram_available, ram_total)
+            else:
+                placement = predict(gpu_free, reading.total, ram_available, ram_total)
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("routing fit: predicting %s failed (%s: %s)",

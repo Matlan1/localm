@@ -159,9 +159,11 @@ def coder_engine(engines: EngineCache, decision):
     candidate that cannot be built or loaded is skipped. Returns
     ``(engine, name, decision)``, the decision rewritten to name the model
     whose engine is returned. Raises what getting that last model raised."""
+    from localm.inference.http_server import RouteRefused
     names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
     load_errors = []
     skipped = []
+    refused = None
     for name in names:
         try:
             with _quiet_stdout():
@@ -171,6 +173,10 @@ def coder_engine(engines: EngineCache, decision):
         except ModelLoadSkipped as e:
             skipped.append(e.skipped)
             _srv._log(f"not loading {name} for a coder task: {e}")
+            continue
+        except RouteRefused as e:
+            refused = refused or e
+            _srv._log(f"not loading {name} for a coder task: {e.reason}")
             continue
         except Exception as e:
             load_errors.append(f"{name}: {e}")
@@ -185,7 +191,9 @@ def coder_engine(engines: EngineCache, decision):
         engine = engines.get_loaded_chat(decision.current)
     if skipped:
         decision = decision.with_skipped(skipped)
-    if decision.routed:
+    if decision.routed and refused is not None:
+        decision = decision.asked(refused.model, refused.fit, load_errors)
+    elif decision.routed:
         decision = decision.without_route(load_errors)
     return engine, decision.current, decision
 

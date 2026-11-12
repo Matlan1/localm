@@ -177,10 +177,20 @@ def test_unload_for_room_never_or_ask_unloads_nothing_for_a_route(policy):
     assert _assess(["v"], [routed], policy=policy)["v"].cls == cr.FIT_CPU_ONLY
 
 
-def test_on_two_gpus_an_unload_cannot_be_counted():
+def test_on_two_gpus_the_backend_sizes_itself_and_no_unload_is_counted():
+    asked = []
+
+    class TwoGpu(_Sized):
+        def predict_placement(self, free, total, ram_available, ram_total):
+            asked.append(free)
+            return None if free is None else super().predict_placement(
+                free, total, ram_available, ram_total)
     routed = routing_fit.Resident("old-route", hold=200, user_chosen=False)
-    fit = _assess(["v"], [routed], reading=_reading(devices=2))["v"]
-    assert fit.cls == cr.FIT_CPU_ONLY
+    fit = routing_fit.assess(["v"], residents={"old-route": routed},
+                             build=lambda n: TwoGpu(100), reading=_reading(devices=2),
+                             ram_available=_BIG, ram_total=_BIG, unload_policy="always")["v"]
+    assert asked == [None], "only the backend's own split reading is used, once"
+    assert fit.evicts_user == () and fit.cls == cr.FIT_UNSIZED
 
 
 def test_an_unusable_reading_is_unsized():
@@ -335,6 +345,7 @@ def test_the_load_time_measurement_can_refuse_a_planned_route(vision_server, mon
     assert r.status_code == 400
     blob = json.loads(r.headers["X-Localm-Model-Routing"])
     assert blob["suggested"] == "seer" and blob["ask_reason"] == late.ask_reason()
+    assert blob["fit"] == "disk", "the header carries the fit measured at load time"
     assert not getattr(engines.get("seer"), "loaded", False)
     assert "seer" not in hs._routing_loaded
 
@@ -458,3 +469,59 @@ def test_a_served_job_loads_its_routed_model_as_a_routed_load(job_world, monkeyp
         t.join(5)
         loop.close()
     assert calls == [("tooly", True)]
+
+
+def test_a_routed_request_for_a_model_the_user_loaded_does_not_claim_it(vision_server, monkeypatch):
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    named = client.post("/v1/chat/completions", json={
+        "model": "seer", "messages": [{"role": "user", "content": "hi"}], "stream": False})
+    assert named.status_code == 200 and engines["seer"].loaded
+    hs._active_model_name = "plain"
+    r = client.post("/v1/chat/completions", json={
+        "model": "plain", "pin_model": False, "messages": _IMAGE_MSG, "stream": False})
+    assert r.status_code == 200
+    assert engines["seer"].answered == 2
+    assert "seer" not in hs._routing_loaded, "the user's own model stays the user's"
+
+
+def test_a_routed_load_reports_which_model_and_why(vision_server, monkeypatch):
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    built = []
+    real = hs.loading_routed_status
+    monkeypatch.setattr(hs, "loading_routed_status",
+                        lambda *a: built.append(a) or real(*a))
+    assert _post_image(client).status_code == 200
+    assert built == [("seer", "plain", ["vision"])]
+    text = real("seer", "plain", ["vision"])
+    assert text == "Loading 'seer' for this request: 'plain' lacks image input..."
+    assert text.code == "loading_routed"
+
+
+def test_a_context_overflow_carries_the_routing_header(vision_server, monkeypatch):
+    client, engines, registry = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    registry["plain"]["context_length"] = 4096
+    engines["plain"].count_messages_tokens = lambda messages: 10 ** 6
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "stream": False,
+        "min_context": 100000, "model_autoswitch": "ask"})
+    assert r.status_code == 413, r.text
+    assert "X-Localm-Model-Routing" in r.headers
+
+
+def test_the_load_time_check_counts_no_unload_that_did_not_happen(monkeypatch):
+    """An idle model routing loaded would make room if unloaded, but room-making
+    left it resident: the load-time check judges the state as it is."""
+    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
+        free=1, total=_BIG, usable=True))
+    from localm.inference.backends.llamacpp import _sizing
+    monkeypatch.setattr(_sizing, "ram_reading", lambda: (_BIG, _BIG))
+    monkeypatch.setattr(hs, "_routing_residents", lambda exclude="": {
+        "old-route": routing_fit.Resident("old-route", hold=500, user_chosen=False)})
+    monkeypatch.setattr(routing_fit, "classify",
+                        lambda engine, free, *a, **k: ((cr.FIT_GPU, 0) if (free or 0) >= 100
+                                                       else (cr.FIT_CPU_ONLY, 0)))
+    fit = hs._routed_load_fit("seer", object())
+    assert fit.cls == cr.FIT_CPU_ONLY and fit.needs_ask

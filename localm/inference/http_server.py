@@ -591,6 +591,21 @@ LOADING_BESIDE_STATUS = ("Loading '{model}' beside {resident}, which could not b
                          "will run on the CPU (slower)...")
 
 
+# Status while capability routing loads another model for one request.
+LOADING_ROUTED_STATUS = "Loading '{model}' for this request: '{current}' lacks {needs}..."
+
+
+def loading_routed_status(model: str, current: Optional[str], needs: list[str]) -> StatusText:
+    """LOADING_ROUTED_STATUS for routing loading *model* because *current*
+    lacks *needs* (capability names), as a StatusText with code
+    ``loading_routed`` and args ``model``, ``current`` and ``needs``."""
+    words = {"vision": "image input", "audio_input": "audio input",
+             "tool_use": "tool calls", "context_length": "a long enough context window"}
+    args = {"model": model, "current": current or "",
+            "needs": ", ".join(words.get(n, n) for n in needs) or "what this request needs"}
+    return StatusText(LOADING_ROUTED_STATUS.format(**args), "loading_routed", args)
+
+
 def loading_beside_status(model: str, resident: list[str]) -> StatusText:
     """LOADING_BESIDE_STATUS for *model* loading beside the *resident* models,
     as a StatusText with code ``loading_beside`` and args ``model`` and
@@ -875,8 +890,6 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
 
     if preempt:
         _routing_loaded.discard(name)
-    guarded = (routed or name in _routing_loaded) and not preempt
-    newly_routed = routed and not preempt and not _is_reusable(_engines.get(name))
 
     if preempt:
         _switch_desired = name
@@ -892,6 +905,12 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
     async with exclusively(sem):
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
+
+        users_resident = (_is_reusable(_engines.get(name))
+                          and name not in _routing_loaded)
+        guarded = (not preempt and not users_resident
+                   and (routed or (reserve_ctx is not None and name in _routing_loaded)))
+        newly_routed = routed and not preempt and not _is_reusable(_engines.get(name))
 
         healing = None
         was_active = False
@@ -1036,7 +1055,7 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                     None, _engine_factory, name)
             if healing is None:
                 _apply_requested_context(name, new_engine, reserve_ctx)
-            if guarded:
+            if guarded and healing is None:
                 fit = await loop.run_in_executor(None, _routed_load_fit, name, new_engine)
                 if fit.needs_ask:
                     from localm.debuglog import logger as _dbg
@@ -1050,7 +1069,7 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
 
             if healing is not None:
                 healing.unloading = False
-            if routed and not preempt:
+            if newly_routed:
                 _routing_loaded.add(name)
             _switch_commit(name, new_engine, sem, activate=activate or was_active,
                            on_active=on_active)
@@ -1065,6 +1084,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
         finally:
             if not loaded:
                 _remember_evicted_active(prior_active, name)
+                if name not in _engines:
+                    _routing_loaded.discard(name)
 
 
 def _remember_evicted_active(prior: Optional[str], name: str) -> None:
@@ -1386,19 +1407,17 @@ def _routing_engine_for(name: str):
 
 def _routed_load_fit(name: str, engine):
     """The ``Fit`` of loading *engine* as *name* now, for a routed load: a
-    fresh GPU and RAM reading, unloading only the idle models routing loaded.
-    Blocking; must not run on the event loop thread."""
+    fresh GPU and RAM reading of the state the load will meet, unloading
+    nothing more. Blocking; must not run on the event loop thread."""
     from localm.config import load_config
     from localm.inference import routing_fit
     from localm.inference.backends.llamacpp._sizing import ram_reading
     reading = routing_vram_reading()
     ram_total, ram_available = ram_reading()
-    residents = {n: r for n, r in _routing_residents(exclude=name).items()
-                 if not r.user_chosen}
     fits = routing_fit.assess(
-        [name], residents=residents, build=lambda _n: engine, reading=reading,
+        [name], residents={}, build=lambda _n: engine, reading=reading,
         ram_available=ram_available, ram_total=ram_total,
-        unload_policy=switch_admission.unload_policy(load_config()))
+        unload_policy=routing_fit.UNLOAD_NEVER)
     return fits[name]
 
 
@@ -2829,6 +2848,7 @@ def _forget_removed_model(name: str) -> bool:
     if not path or not Path(str(path)).is_absolute() or Path(str(path)).exists():
         return False
     _engines.pop(name, None)
+    _routing_loaded.discard(name)
     if name in _engines_lru:
         _engines_lru.remove(name)
     _inference_sems.pop(name, None)

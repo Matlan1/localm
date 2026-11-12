@@ -295,6 +295,7 @@ export const I18N_EN = {
   "chat.status.generating": "Generating response…",
   "chat.status.growingContext": "Reloading the model with a larger context window…",
   "chat.status.loadingModel": "Loading model…",
+  "chat.status.loadingRouted": "Loading '{model}' for this request: '{current}' lacks {needs}…",
   "chat.status.loadingBeside": "Loading '{model}' beside {resident}, which could not be unloaded: not enough GPU memory is free, so part of it will run on the CPU (slower)…",
   "chat.status.processing": "Processing prompt…",
   "chat.status.recallingMemory": "Recalling memories…",

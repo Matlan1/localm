@@ -166,6 +166,7 @@
   "chat.status.encodingImageGpu": "Encodage de l'image (GPU)…",
   "chat.status.generating": "Génération de la réponse…",
   "chat.status.growingContext": "Rechargement du modèle avec une fenêtre de contexte plus grande…",
+  "chat.status.loadingRouted": "Chargement de « {model} » pour cette requête : il manque {needs} à « {current} »…",
   "chat.status.loadingBeside": "Chargement de « {model} » à côté de {resident}, sans pouvoir libérer de mémoire : pas assez de mémoire GPU libre, une partie s'exécutera donc sur le CPU (plus lent)…",
   "chat.status.loadingModel": "Chargement du modèle…",
   "chat.status.processing": "Traitement du prompt…",

@@ -89,8 +89,8 @@ def answer_with(engines: EngineCache, decision, run):
     skipped = []
     refused = None
     for name in names:
-        if name == decision.current and refused is not None and not errors:
-            decision = decision.asked(refused.model, refused.reason)
+        if name == decision.current and refused is not None:
+            decision = decision.asked(refused.model, refused.fit, errors)
         try:
             # A load prints native sizing diagnostics straight to stdout, the
             # stream the JSON-RPC frames travel on.

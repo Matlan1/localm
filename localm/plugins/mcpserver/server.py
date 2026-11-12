@@ -442,9 +442,9 @@ class EngineCache:
         return assess
 
     def _refuse_if_routing_must_ask(self, name: str, engine) -> None:
-        """Raise ``RouteRefused`` when loading *engine* as *name* now, unloading
-        only models routing loaded, would need the user's yes. Caller holds
-        ``_lock``."""
+        """Raise ``RouteRefused`` when loading *engine* as *name* into the state
+        room-making left, unloading nothing more, would need the user's yes.
+        Caller holds ``_lock``."""
         if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
             return
         from localm.config import load_config
@@ -452,13 +452,10 @@ class EngineCache:
         from localm.inference import routing_fit, switch_admission
         from localm.inference.backends.llamacpp._sizing import ram_reading
         ram_total, ram_available = ram_reading()
-        residents = {n: r for n, r in self._residents_for_routing(exclude=name).items()
-                     if not r.user_chosen}
         fit = routing_fit.assess(
-            [name], residents=residents, build=lambda _n: engine,
+            [name], residents={}, build=lambda _n: engine,
             reading=hs.routing_vram_reading(), ram_available=ram_available,
-            ram_total=ram_total,
-            unload_policy=switch_admission.unload_policy(load_config()))[name]
+            ram_total=ram_total, unload_policy=routing_fit.UNLOAD_NEVER)[name]
         if fit.needs_ask:
             raise hs.RouteRefused(name, fit)
 
@@ -516,7 +513,7 @@ class EngineCache:
                 self.drop_peer(name)
             if skip_if_latched:
                 self._refuse_if_latched(name)
-            guarded = routed or name in self._routing_loaded
+            guarded = routed
             was_loaded = getattr(self._engines.get(name), "loaded", False) is True
             if guarded:
                 self._protect = frozenset(n for n in self._engines
@@ -526,7 +523,12 @@ class EngineCache:
             finally:
                 self._protect = frozenset()
             if guarded:
-                self._refuse_if_routing_must_ask(name, engine)
+                try:
+                    self._refuse_if_routing_must_ask(name, engine)
+                except Exception:
+                    if not was_loaded and not self.is_peer(engine):
+                        self._discard(name, engine)
+                    raise
             engine = self._loaded(name, engine)
             if routed and not was_loaded and not self.is_peer(engine):
                 self._routing_loaded.add(name)

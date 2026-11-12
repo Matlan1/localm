@@ -178,6 +178,7 @@
   "chat.status.generating": "Antwort wird generiert…",
   "chat.status.growingContext": "Das Modell wird mit einem größeren Kontextfenster neu geladen…",
   "chat.status.loadingModel": "Modell wird geladen…",
+  "chat.status.loadingRouted": "'{model}' wird für diese Anfrage geladen: '{current}' fehlt {needs}…",
   "chat.status.loadingBeside": "'{model}' wird neben {resident} geladen (nicht entladbar): Es ist nicht genug GPU-Speicher frei, daher läuft ein Teil auf der CPU (langsamer)…",
   "chat.status.processing": "Prompt wird verarbeitet…",
   "chat.status.recallingMemory": "Erinnerungen werden abgerufen…",
