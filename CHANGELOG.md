@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **`localm run` with a different model switches the running server to it.** When the background server for the folder holds another model, or none, `localm run MODEL` now loads MODEL on that server and chats with it, instead of stopping and asking you to re-run with `--no-server`. If the server cannot load it (a model given by a path that is not registered, or a failed load), or you passed `--ctx`, `--gpu-layers`, `--mmproj` or `--device`, which the server's load would not use, `run` says why and loads the model in its own process.
+
 ## [0.3.4b1] - 2026-11-11
 
 ### Added

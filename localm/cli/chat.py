@@ -26,10 +26,14 @@ def _detached_stdio_kwargs() -> dict:
 
 
 def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
-                          autostart_attempted: bool = False) -> Optional[str]:
+                          autostart_attempted: bool = False,
+                          switch_note: Optional[str] = None) -> Optional[str]:
     """The note to print when `localm run` is about to load the model in THIS
     process instead of attaching to a background server, so the fallback is never
     silent. None when the user opted out with --no-server (stay quiet).
+
+    *switch_note*, when given, is returned as is: the running server was asked
+    to serve the model and did not (``_serve_requested_model``).
 
     When an auto-start WAS launched but did not come up in time,
     ``autostart_attempted`` is True so the note acknowledges that timeout instead
@@ -38,6 +42,8 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
     saw."""
     if no_server:
         return None
+    if switch_note is not None:
+        return switch_note
     if attach_error is not None:
         return (f"Could not attach to a localm server ({attach_error}); loading "
                 "the model in this process.")
@@ -49,6 +55,89 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
     return ("No localm server is serving this directory; loading the model in "
             "this process. Start one with `localm serve` so clients share a "
             "single load.")
+
+
+_SWITCH_TIMEOUT_S = (10, 900)
+
+
+def _switch_server_model(base_url: str, token: Optional[str],
+                         model: str) -> tuple[Optional[str], Optional[str]]:
+    """Ask the localm server at *base_url* (its ``/v1`` root) to load *model*
+    and make it the active model, through ``POST /v1/models/load``.
+
+    Returns ``(name, None)`` on success, where *name* is the name the server
+    reports for the model (address requests by it), or ``(None, reason)`` when
+    the server did not load it: unreachable, a non-2xx answer (its ``detail``
+    is quoted), a reply that is not a JSON object, or a status other than
+    ``loaded``, ``already_loaded`` or ``peer_routed``. Never raises for those."""
+    import requests
+
+    from .. import tls
+    from ..jsonreply import response_json
+    url = f"{base_url.rstrip('/')}/models/load"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        resp = requests.post(url, json={"model": model}, headers=headers,
+                             timeout=_SWITCH_TIMEOUT_S, allow_redirects=False,
+                             verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        return None, f"it could not be reached: {e}"
+    try:
+        data = response_json(resp)
+    except ValueError:
+        data = None
+    if resp.status_code >= 300:
+        detail = data.get("detail") if isinstance(data, dict) else None
+        return None, f"HTTP {resp.status_code}" + (f": {detail}" if detail else "")
+    if not isinstance(data, dict):
+        return None, "its reply was not valid JSON"
+    status = data.get("status")
+    if status not in ("loaded", "already_loaded", "peer_routed"):
+        return None, f"it answered with status {status!r}"
+    name = data.get("model")
+    return (name if isinstance(name, str) and name else model), None
+
+
+def _serve_requested_model(base_url: str, token: Optional[str], model: str, *,
+                           starting: bool = False) -> tuple[Optional[str], Optional[str]]:
+    """Make the localm server at *base_url* answer with *model*.
+
+    *starting* marks a server this run just started with *model*: one that
+    reports no model yet is still loading it and is not switched.
+
+    Returns ``(name, None)`` with the name to address the server's model by:
+    the server's active model when it is *model* by name or by file
+    (``served_model_is_requested``); *model* itself when the server's model
+    cannot be read (``remote_model_status`` answered ``unknown``) or, with
+    *starting*, when it reports none; otherwise
+    the name ``_switch_server_model`` reports after switching the server to
+    *model*. Returns ``(None, note)`` when the server is not switched, with
+    *note* saying why and that the model is loaded in this process: the run
+    was given load options (``_load_options_given``) the server's load would
+    not apply, or the switch failed. Prints a line before switching."""
+    from rich.markup import escape
+
+    from ..inference.http_engine import (remote_model_status,
+                                         served_model_is_requested)
+    state, active = remote_model_status(base_url, token)
+    if state == "unknown" or (starting and state == "empty"):
+        return model, None
+    if active and served_model_is_requested(base_url, token, active, model):
+        return active, None
+    held = f"serves {active}" if active else "has no model loaded"
+    dropped = _load_options_given()
+    if dropped:
+        return None, (f"The localm server here {held}; switching it to {model} "
+                      f"would load it with the server's own settings instead of "
+                      f"{', '.join(dropped)}, so {model} is loaded in this "
+                      f"process.")
+    console.print(f"[dim]The localm server here {escape(held)}; switching it "
+                  f"to {escape(model)}...[/dim]")
+    name, why = _switch_server_model(base_url, token, model)
+    if name is None:
+        return None, (f"The localm server here could not switch to {model} "
+                      f"({why}); loading it in this process.")
+    return name, None
 
 
 class _TurnRouter:
@@ -366,6 +455,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     engine = None
     is_registered = False
     attach_error: Optional[BaseException] = None
+    switch_note: Optional[str] = None
     if not no_server:
         from .. import instances
         from ..config import home_dir
@@ -381,8 +471,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             target = None
         if target:
             from ..auth import resolve_bearer_token
-            from ..inference.http_engine import (
-                HttpEngine, remote_model_status, served_model_is_requested)
+            from ..inference.http_engine import HttpEngine
             # The discovered instance's own per-instance token is only
             # meaningful in OPEN mode (it satisfies the origin guard, not
             # _enforce_request's key check). Once an owner key is configured,
@@ -391,51 +480,23 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             # share the same data dir, so the owner key on disk is exactly the
             # credential this process is entitled to use.
             attach_token = resolve_bearer_token(target.get("token"))
-            state, active = remote_model_status(
-                target["base_url"], attach_token)
-            # Never let `localm run X` answer with a DIFFERENT model. When the
-            # running server serves a KNOWN model that is not the one the user
-            # asked for, attaching would stream a reply generated by that other
-            # model - indistinguishable from X answering. Refuse instead of
-            # silently overriding the user's explicit choice; --no-server is the
-            # way out.
-            if active and model and not served_model_is_requested(
-                    target["base_url"], attach_token, active, model):
+            # The server answers with MODEL: it already serves it, or it is
+            # switched to it. When it is not switched, MODEL loads in this
+            # process below and switch_note says why.
+            served, switch_note = _serve_requested_model(
+                target["base_url"], attach_token, model)
+            if served is not None:
+                engine = HttpEngine(
+                    target["base_url"], token=attach_token,
+                    model=served, display_name=served,
+                    pin_model=pin_model, client_id="chat",
+                    session_mode=session_mode)
+                # show_url(): target["base_url"] can carry a bracketed IPv6 host
+                # (RFC 3986), which show_url()'s own docstring documents.
                 console.print(
-                    f"[red]The localm server here serves "
-                    f"[bold]{escape(active)}[/bold], not "
-                    f"the requested [bold]{escape(model)}[/bold].[/red]\n"
-                    f"[dim]Attaching would answer with {escape(active)}, so localm "
-                    f"will not do that silently. To run {escape(model)}, re-run "
-                    f"with [bold]--no-server"
-                    f"[/bold] (loads it in this process).[/dim]")
-                sys.exit(1)
-            if state == "empty":
-                # The server is up but has no model loaded, so it cannot serve the
-                # requested model either. Refuse cleanly rather than attach and fail
-                # mid-stream; --no-server loads the model in this process.
-                console.print(
-                    f"[red]A localm server is running for this directory but has no "
-                    f"model loaded, so it cannot serve [bold]{escape(model)}[/bold]."
-                    f"[/red]\n"
-                    f"[dim]Load a model on its Models page/API, or re-run with "
-                    f"[bold]--no-server[/bold] to run {escape(model)} in this "
-                    f"process.[/dim]")
-                sys.exit(1)
-            # state == "unknown": the server answered our attach but we could not
-            # read /v1/models (it needs the models scope, so a chat-scoped attach
-            # token gets a 403). Do NOT claim it has no model - it very likely does;
-            # attach quietly and let the reply come from whatever it serves.
-            engine = HttpEngine(
-                target["base_url"], token=attach_token,
-                model=active or model, display_name=active or model,
-                pin_model=pin_model, client_id="chat", session_mode=session_mode)
-            # show_url(): target["base_url"] can carry a bracketed IPv6 host
-            # (RFC 3986), which show_url()'s own docstring documents.
-            console.print(
-                f"[dim]connected to the localm server at "
-                f"{show_url(target['base_url'])} (no second model load)[/dim]")
-            _dropped = _load_options_given()
+                    f"[dim]connected to the localm server at "
+                    f"{show_url(target['base_url'])} (no second model load)[/dim]")
+            _dropped = _load_options_given() if served is not None else []
             if _dropped:
                 console.print(
                     f"[yellow]Not applied to the running server: "
@@ -445,7 +506,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     f"[/dim]")
 
     autostart_attempted = False
-    if engine is None and not no_server:
+    if engine is None and not no_server and switch_note is None:
         autostart_attempted = True
         console.print("[dim]No server running. Starting one in the background...[/dim]")
         import subprocess
@@ -480,25 +541,17 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 target = instances.attach_target(home_dir(), instances.resolve_root_dir())
                 if target:
                     from ..auth import resolve_bearer_token
-                    from ..inference.http_engine import (
-                        HttpEngine, remote_model_status, served_model_is_requested)
+                    from ..inference.http_engine import HttpEngine
                     _token = resolve_bearer_token(target.get("token"))
                     # Addresses the model by the name the server reports for it.
-                    _active = remote_model_status(target["base_url"], _token)[1]
-                    if _active and model and not served_model_is_requested(
-                            target["base_url"], _token, _active, model):
-                        console.print(
-                            f"[red]The localm server that came up here serves "
-                            f"[bold]{escape(_active)}[/bold], not the requested "
-                            f"[bold]{escape(model)}[/bold].[/red]\n"
-                            f"[dim]To run {escape(model)}, re-run with "
-                            f"[bold]--no-server[/bold] (loads it in this "
-                            f"process).[/dim]")
-                        sys.exit(1)
+                    _served, switch_note = _serve_requested_model(
+                        target["base_url"], _token, model, starting=True)
+                    if _served is None:
+                        break
                     engine = HttpEngine(
                         target["base_url"],
                         token=_token,
-                        model=_active or model, display_name=_active or model,
+                        model=_served, display_name=_served,
                         pin_model=pin_model,
                         client_id="chat", session_mode=session_mode)
                     console.print(f"[dim]connected to newly started server at "
@@ -508,7 +561,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             attach_error = e
 
     if engine is None:
-        _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
+        _note = _attach_fallback_note(no_server, attach_error, autostart_attempted,
+                                      switch_note=switch_note)
         if _note:
             console.print(f"[dim]{escape(_note)}[/dim]")
         # A registered name or a path on disk (`localm run /full/path`).
