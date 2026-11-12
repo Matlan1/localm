@@ -30,8 +30,10 @@ def _require_network_allowed() -> None:
     if not _net_allowed():
         raise netpolicy.NetworkPolicyError(
             "setup-llama downloads the llama.cpp runtime, and network access is "
-            "disabled (net_mode=off). Enable it with:  localm config net_mode ask  "
-            "or provision from a local build:  localm setup-llama --from <build-dir>",
+            "off (net_mode=off). Turn it on, or allow model downloads while it is "
+            "off, in Settings > Server & network; or run: localm config net_mode "
+            "ask; or provision from a local build: localm setup-llama --from "
+            "<build-dir>",
             off=True)
 
 

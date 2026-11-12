@@ -617,7 +617,8 @@ def check(*, opener=None) -> dict:
     if _prerelease_channel_enabled():
         query["channel"] = "prerelease"
     path = "/update?" + urllib.parse.urlencode(query)
-    data = _proxy.request(base, path, token=token, opener=opener)
+    data = _proxy.request(base, path, token=token, opener=opener,
+                          net_exempt=_net_policy_allows_update_check())
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
     # Whether "not newer" means anything: is_newer() returns False both for a
@@ -662,7 +663,8 @@ def _selection_request(path: str, params: dict, *, opener=None) -> dict:
     qs = urllib.parse.urlencode(query)
     try:
         data = _proxy.request(base, path + (f"?{qs}" if qs else ""), token=token,
-                              opener=opener)
+                              opener=opener,
+                              net_exempt=_net_policy_allows_update_check())
     except LocalmError as e:
         if str(e.reason).startswith("HTTP 404"):
             raise LocalmError(

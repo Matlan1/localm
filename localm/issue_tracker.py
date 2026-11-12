@@ -57,17 +57,6 @@ def available() -> bool:
     return endpoint()[0] is not None
 
 
-def _refuse_when_network_off() -> None:
-    """Raise LocalmError when ``net_mode`` is ``off``. An unreadable config
-    resolves to ``off`` (``netpolicy.network_mode``), so it refuses too."""
-    from localm.bugreport import LocalmError
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
-        raise LocalmError("network access is disabled (net_mode = off)",
-                          reason="the issues list needs the network; set "
-                                 "net_mode to ask or allow to see it")
-
-
 def get_issue(number: int, *, opener=None, timeout: float = LOOKUP_TIMEOUT_S) -> Optional[dict]:
     """Return one issue's trimmed dict, or None if not found. *timeout* is seconds
     per socket operation, so one call can take several times that. Raises
@@ -83,8 +72,8 @@ def get_issue(number: int, *, opener=None, timeout: float = LOOKUP_TIMEOUT_S) ->
         n = int(number)
     except (TypeError, ValueError):
         raise LocalmError("bad issue number", reason=str(number)) from None
-    _refuse_when_network_off()
-    data = _proxy.request(base, f"/issues?number={n}", token=token, opener=opener, timeout=timeout)
+    data = _proxy.request(base, f"/issues?number={n}", token=token, opener=opener,
+                          timeout=timeout, net_exempt=False)
     issue = data.get("issue") if isinstance(data, dict) else None
     return issue if isinstance(issue, dict) else None
 
