@@ -74,8 +74,9 @@ def _switch_server_model(base_url: str, token: Optional[str],
 
     from .. import tls
     from ..jsonreply import response_json
+    from ..auth import resolve_bearer_headers
     url = f"{base_url.rstrip('/')}/models/load"
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = resolve_bearer_headers(token)
     try:
         resp = requests.post(url, json={"model": model}, headers=headers,
                              timeout=_SWITCH_TIMEOUT_S, allow_redirects=False,
