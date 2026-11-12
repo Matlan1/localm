@@ -32,7 +32,15 @@ def _existing_instance(monkeypatch, token="raw-instance-token"):
                    "mode": "chat", "token": token}
     monkeypatch.setattr(instances, "attach_target", lambda *a, **k: fake_target)
     monkeypatch.setattr(instances, "resolve_root_dir", lambda *a, **k: ".")
+    _model_unreadable(monkeypatch)
     return fake_target
+
+
+def _model_unreadable(monkeypatch):
+    """The served-model probe answers "unknown", so the attach neither reaches
+    a server on the stubbed address nor asks it to switch."""
+    monkeypatch.setattr("localm.inference.http_engine.remote_model_status",
+                        lambda *a, **k: ("unknown", None))
 
 
 def _no_existing_instance(monkeypatch):
@@ -128,6 +136,7 @@ class TestAttachToAutoStartedInstance:
 
         monkeypatch.setattr("subprocess.Popen", fake_popen)
         monkeypatch.setattr(instances, "attach_target", fake_attach_target)
+        _model_unreadable(monkeypatch)
 
     def test_owner_key_used_when_configured(self, monkeypatch):
         target = {"base_url": "http://127.0.0.1:8642/v1", "port": 8642,

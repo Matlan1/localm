@@ -942,8 +942,6 @@ class TestAttachOrNew:
         (("-H", "0.0.0.0"), "--host 0.0.0.0 (the running server bound 127.0.0.1)"),
         (("--pull", "org/repo"), "--pull"),
         (("--insecure",), "--insecure"),
-        (("--ctx", "4096"), "--ctx"),
-        (("--api-mode",), "--api-mode"),
         (("--no-tls",), "--no-tls"),
     ])
     def test_an_explicit_option_the_running_server_cannot_apply_exits_1(
@@ -958,14 +956,35 @@ class TestAttachOrNew:
         assert gui.nothing_started()
         assert gui.mounts == []
 
-    def test_naming_a_different_model_than_the_running_one_exits_1(self, gui, monkeypatch):
+    def test_naming_a_different_model_switches_the_running_one(self, gui, monkeypatch):
         gui.register_model("usable")
         gui.running_instance(mode="full")
         monkeypatch.setattr("localm.inference.http_engine.remote_model_status",
                             lambda *a, **k: ("loaded", "other-model"))
-        r = gui.invoke("usable")
-        assert r.exit_code == 1, r.output
-        assert "- model usable (the running server serves other-model)" in r.flat
+        gui.mount_body = {"status": "loaded", "model": "usable"}
+        r = gui.invoke("usable", "--no-browser")
+        assert r.exit_code == 0, r.output
+        assert [m["url"] for m in gui.mounts] == [
+            f"http://127.0.0.1:{PEER_PORT}/v1/models/load"]
+        assert gui.mounts[0]["headers"] == {"Authorization": "Bearer tok"}
+        assert ("The localm server here serves other-model; switching it to "
+                "usable...") in r.flat
+        assert "It now serves usable." in r.flat
+        assert "cannot apply" not in r.flat
+        assert gui.nothing_started()
+
+    @pytest.mark.parametrize("args, line", [
+        (("--ctx", "4096"), "Not applied to the running server: --ctx"),
+        (("--api-mode",), "It also serves the GUI."),
+    ])
+    def test_options_an_attach_does_not_apply_are_named_not_refused(
+            self, gui, args, line):
+        gui.running_instance(mode="full")
+        r = gui.invoke(*args, "--no-browser")
+        assert r.exit_code == 0, r.output
+        assert "Attaching" in r.flat
+        assert line in r.flat
+        assert "cannot apply" not in r.flat
         assert gui.nothing_started()
 
     @pytest.mark.parametrize("args", [
