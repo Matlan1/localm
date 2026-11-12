@@ -169,16 +169,23 @@ def register(app: FastAPI, ctx) -> None:
         if route.routed:
             load_errors = []
             skipped_now = []
+            refused = None
             for _cand in route.candidates or (route.resolved,):
                 try:
                     # activate=False: answering one request with the routed
                     # model does not make it the model every later unnamed
                     # request resolves to. skip_if_latched: a load that failed
                     # while this request waited for the model is not repeated.
+                    # routed: only models routing loaded may be unloaded for
+                    # it, and a load that would need the user's yes is refused.
                     engine = await _hs.get_engine(_cand, activate=False,
-                                                  skip_if_latched=True, on_status=say)
+                                                  skip_if_latched=True, routed=True,
+                                                  on_status=say)
                 except _hs.LoadSkipped as e:
                     skipped_now.append(e.skipped)
+                    continue
+                except _hs.RouteRefused as e:
+                    refused = refused or e
                     continue
                 except (HTTPException, OSError, ValueError) as e:
                     detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
@@ -193,7 +200,9 @@ def register(app: FastAPI, ctx) -> None:
                 break
             if skipped_now:
                 route = route.with_skipped(skipped_now)
-            if engine is None:
+            if engine is None and refused is not None and not load_errors:
+                route = route.asked(refused.model, refused.reason)
+            elif engine is None:
                 route = route.without_route(load_errors)
         if route.has_gap:
             from localm.debuglog import logger as _dbg

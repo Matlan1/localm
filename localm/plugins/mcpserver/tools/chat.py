@@ -90,7 +90,9 @@ def answer_with(engines: EngineCache, decision, run):
             # stream the JSON-RPC frames travel on.
             with _quiet_stdout():
                 engine = engines.get_loaded_chat(
-                    name, skip_if_latched=name != decision.current)
+                    name, skip_if_latched=name != decision.current,
+                    routed=name != decision.current,
+                    named=name == decision.current and decision.pinned)
             try:
                 result = run(engine, name)
             except ModelEvictedError:

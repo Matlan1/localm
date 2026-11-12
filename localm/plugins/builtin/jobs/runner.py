@@ -263,7 +263,8 @@ def _served_engine(job: Job, live):
     for name in names:
         fut = asyncio.run_coroutine_threadsafe(
             hs.get_engine(name, activate=False,
-                          skip_if_latched=decision.routed and name != decision.current),
+                          skip_if_latched=decision.routed and name != decision.current,
+                          routed=decision.routed and name != decision.current),
             loop)
         try:
             return fut.result(timeout=_SERVED_LOAD_TIMEOUT_S)
@@ -326,8 +327,12 @@ def _headless_routed_model(job: Job) -> Optional[str]:
     --no-server`` apply. A chat job needing structured tool calls (web access
     on), or a longer conversation than the current model was trained for, is
     routed to an installed model that has it. A job's own ``model`` is always
-    the one used."""
+    the one used. A candidate is sized as the server sizes one
+    (``http_server.routing_fit_assessor``), so a model that would unload one
+    already loaded here, read its weights from disk or not fit at all is not
+    chosen; the job then runs on the current model."""
     from localm.inference import capability_routing as cr
+    from localm.inference import http_server as hs
     current = job.model or _default_chat_model()
     required = []
     if job.task_kind == "chat":
@@ -337,7 +342,7 @@ def _headless_routed_model(job: Job) -> Optional[str]:
     needs = cr.request_needs(
         [{"role": "user", "content": job.prompt or ""}], required=required)
     decision = cr.plan_route(current, needs, pinned=bool(job.model),
-                             mode=cr.configured_mode())
+                             fit=hs.routing_fit_assessor(), mode=cr.configured_mode())
     return decision.resolved
 
 

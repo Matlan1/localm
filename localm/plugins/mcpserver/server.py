@@ -202,6 +202,11 @@ class EngineCache:
         # depth of open scopes. Both guarded by _lock.
         self._scope_lease: list = []
         self._scope_depth = 0
+        # Resident models capability routing loaded, not ones a request named.
+        # A routed load unloads only models in this set. Guarded by _lock.
+        self._routing_loaded: set = set()
+        # Models get() must not evict for the load in progress. Guarded by _lock.
+        self._protect: frozenset = frozenset()
 
     @contextlib.contextmanager
     def _load_scope(self):
@@ -397,8 +402,65 @@ class EngineCache:
                     if n not in peers}
 
         return cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                             current_known=known, skip=skip_set,
-                             mode=cr.configured_mode())
+                             fit=self._fit_assessor(peers), current_known=known,
+                             skip=skip_set, mode=cr.configured_mode())
+
+    def _residents_for_routing(self, exclude: str = "") -> dict:
+        """This server's loaded models as ``routing_fit.Resident`` records."""
+        from localm.config import load_config
+        from localm.inference import http_server as hs
+        from localm.inference import residency, routing_fit
+        pinned = residency.pinned_model_names(load_config())
+        with self._lock:
+            engines = [(n, e) for n, e in self._engines.items()
+                       if n != exclude and getattr(e, "loaded", False)]
+            routed = set(self._routing_loaded)
+        return {n: routing_fit.Resident(
+                    name=n, hold=hs._resident_vram_hold(e), user_chosen=n not in routed,
+                    evictable=n not in pinned and getattr(e, "unloading", False) is not True)
+                for n, e in engines}
+
+    def _fit_assessor(self, peers):
+        """The ``fit`` argument of ``plan_route`` for this server: each candidate
+        sized against a fresh GPU and RAM reading and this server's residents."""
+        def assess(names):
+            from localm.config import load_config
+            from localm.inference import http_server as hs
+            from localm.inference import routing_fit, switch_admission
+            from localm.inference.backends.llamacpp._sizing import ram_reading
+            ram_total, ram_available = ram_reading()
+
+            def build(name):
+                with self._lock:
+                    own = self._engines.get(name)
+                return own if own is not None else self._factory(name)
+            return routing_fit.assess(
+                names, residents=self._residents_for_routing(), build=build,
+                reading=hs.routing_vram_reading(), ram_available=ram_available,
+                ram_total=ram_total,
+                unload_policy=switch_admission.unload_policy(load_config()), peers=peers)
+        return assess
+
+    def _refuse_if_routing_must_ask(self, name: str, engine) -> None:
+        """Raise ``RouteRefused`` when loading *engine* as *name* now, unloading
+        only models routing loaded, would need the user's yes. Caller holds
+        ``_lock``."""
+        if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
+            return
+        from localm.config import load_config
+        from localm.inference import http_server as hs
+        from localm.inference import routing_fit, switch_admission
+        from localm.inference.backends.llamacpp._sizing import ram_reading
+        ram_total, ram_available = ram_reading()
+        residents = {n: r for n, r in self._residents_for_routing(exclude=name).items()
+                     if not r.user_chosen}
+        fit = routing_fit.assess(
+            [name], residents=residents, build=lambda _n: engine,
+            reading=hs.routing_vram_reading(), ram_available=ram_available,
+            ram_total=ram_total,
+            unload_policy=switch_admission.unload_policy(load_config()))[name]
+        if fit.needs_ask:
+            raise hs.RouteRefused(name, fit)
 
     def get_chat(self, name: str):
         """The engine to answer a chat with model *name*: this server's own
@@ -426,7 +488,8 @@ class EngineCache:
             self._peers.pop(name, None)
             self._peer_targets.pop(name, None)
 
-    def get_loaded_chat(self, name: str, *, skip_if_latched: bool = False):
+    def get_loaded_chat(self, name: str, *, skip_if_latched: bool = False,
+                        routed: bool = False, named: bool = False):
         """get_chat() with the model ready to answer. Another instance's copy
         found by an earlier call is used only while that instance still
         answers and accepts the credential it was verified with; otherwise it
@@ -439,13 +502,35 @@ class EngineCache:
         request named), a model that is neither loaded here nor another
         instance's copy in use is not loaded while ``routing_latch()`` holds
         it: ModelLoadSkipped is raised before anything is evicted. The latch
-        is read under the cache lock, after the route was planned."""
+        is read under the cache lock, after the route was planned.
+
+        With *routed* only models capability routing loaded may be evicted to
+        make room, and when the load would need the user's yes (``Fit.needs_ask``)
+        ``RouteRefused`` is raised before it starts; a model loaded that way is
+        remembered as routing-loaded. With *named* (the request named the
+        model) it no longer is."""
         with self._lock, self._load_scope():
+            if named:
+                self._routing_loaded.discard(name)
             if name in self._peers and not self._peer_still_answers(name):
                 self.drop_peer(name)
             if skip_if_latched:
                 self._refuse_if_latched(name)
-            return self._loaded(name, self.get_chat(name))
+            guarded = routed or name in self._routing_loaded
+            was_loaded = getattr(self._engines.get(name), "loaded", False) is True
+            if guarded:
+                self._protect = frozenset(n for n in self._engines
+                                          if n != name and n not in self._routing_loaded)
+            try:
+                engine = self.get_chat(name)
+            finally:
+                self._protect = frozenset()
+            if guarded:
+                self._refuse_if_routing_must_ask(name, engine)
+            engine = self._loaded(name, engine)
+            if routed and not was_loaded and not self.is_peer(engine):
+                self._routing_loaded.add(name)
+            return engine
 
     def _refuse_if_latched(self, name: str) -> None:
         """Raise ModelLoadSkipped when *name* would have to be loaded here and
@@ -782,7 +867,7 @@ class EngineCache:
         from localm.inference import residency
         cfg = load_config()
         cap = residency.resident_cap(cfg)
-        pinned = residency.pinned_model_names(cfg)
+        pinned = residency.pinned_model_names(cfg) | self._protect
         required = self._model_required_bytes(name)
         started = time.monotonic()
         waited = 0.0
@@ -879,6 +964,7 @@ class EngineCache:
         if not begin_unload(engine):
             return False
         self._engines.pop(victim, None)
+        self._routing_loaded.discard(victim)
         if victim in self._lru:
             self._lru.remove(victim)
         _log(f"evicting {victim} to make room for {loading}")

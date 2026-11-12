@@ -74,6 +74,19 @@ from localm.inference.protocol import (
 _routing_latch = RoutingLatch()
 
 
+class RouteRefused(HTTPException):
+    """503 raised instead of a load capability routing chose when, measured
+    again under the load lease, the model would run in a way routing must ask
+    about first (``capability_routing.Fit.needs_ask``). ``fit`` is that
+    measurement and ``reason`` its ``ask_reason``."""
+
+    def __init__(self, name: str, fit) -> None:
+        self.model = name
+        self.fit = fit
+        self.reason = fit.ask_reason()
+        super().__init__(503, f"'{name}' was not loaded: {self.reason}")
+
+
 class LoadSkipped(HTTPException):
     """503 raised instead of a load that was refused because the model's last
     load failed and that failure still applies. ``skipped`` is the latch's
@@ -86,6 +99,10 @@ class LoadSkipped(HTTPException):
 
 # Map of display name -> Engine instance
 _engines: dict[str, Engine] = {}
+# Resident models capability routing loaded for a request, not ones the user
+# chose. A routed load, or a reload of one of these, never unloads a model
+# outside this set (switch_engine's ``routed``).
+_routing_loaded: set[str] = set()
 # Order of model usage (display names, MRU at the end)
 _engines_lru: list[str] = []
 # Display names currently mid-eviction: detached from _engines/_engines_lru
@@ -679,7 +696,7 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
-                        skip_if_latched: bool = False,
+                        skip_if_latched: bool = False, routed: bool = False,
                         on_status: Optional[Callable[[str], None]] = None,
                         allow_embedding: bool = False,
                         reserve_ctx: Optional[int] = None,
@@ -699,7 +716,13 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     With *skip_if_latched* (a load that capability routing chose, not one the
     user asked for) a model that is not resident is not loaded when its last
     load failed and that failure still applies once the model's semaphore is
-    held; ``LoadSkipped`` is raised instead. *on_status*, when given, is called
+    held; ``LoadSkipped`` is raised instead. With *routed* (a load capability routing
+    chose) and for any reload of a model in ``_routing_loaded``, only models in
+    ``_routing_loaded`` may be unloaded to make room, and when the load, measured
+    again under the lease, would need the user's yes (``Fit.needs_ask``),
+    ``RouteRefused`` is raised before anything loads; a routed load that loads
+    or reuses a model no user chose adds it to ``_routing_loaded``. An explicit
+    switch (*preempt*) removes *name* from it. *on_status*, when given, is called
     on the event loop thread with ``WAITING_FOR_MODEL_STATUS`` while the load
     waits for a busy model to finish and with ``LOADING_MODEL_STATUS`` when it
     goes on.
@@ -770,7 +793,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     try:
         return await _switch_engine_leased(
             name, make_engine, lease, on_active=on_active, preempt=preempt,
-            force=force, activate=activate, skip_if_latched=skip_if_latched,
+            force=force, activate=activate, skip_if_latched=skip_if_latched, routed=routed,
             on_status=on_status, allow_embedding=allow_embedding,
             reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
     finally:
@@ -840,7 +863,7 @@ def _release_late_lease(fut) -> None:
 async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                                 on_active=None, preempt: bool = True,
                                 force: bool = False, activate: bool = True,
-                                skip_if_latched: bool = False,
+                                skip_if_latched: bool = False, routed: bool = False,
                                 on_status: Optional[Callable[[str], None]] = None,
                                 allow_embedding: bool = False,
                                 reserve_ctx: Optional[int] = None,
@@ -849,6 +872,11 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
     global _engine_factory, _switch_desired
 
     await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
+
+    if preempt:
+        _routing_loaded.discard(name)
+    guarded = (routed or name in _routing_loaded) and not preempt
+    newly_routed = routed and not preempt and not _is_reusable(_engines.get(name))
 
     if preempt:
         _switch_desired = name
@@ -933,6 +961,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                         and _placement_heal_due(name, resident)):
                     heal_budget = None
             if heal_budget is None and _engines.get(name) is resident and _is_reusable(resident):
+                if newly_routed:
+                    _routing_loaded.add(name)
                 _switch_reuse_resident(name, sem, activate=activate, on_active=on_active)
                 return {"status": "already_active", "model": name,
                         **_gpu_placement_fields(resident)}
@@ -964,6 +994,10 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
+        if guarded and budget is not None:
+            budget = dataclasses.replace(
+                budget, pinned=budget.pinned | frozenset(
+                    n for n in list(_engines) if n != name and n not in _routing_loaded))
         prior_active = _active_model_name
         loaded = False
         try:
@@ -1002,6 +1036,13 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                     None, _engine_factory, name)
             if healing is None:
                 _apply_requested_context(name, new_engine, reserve_ctx)
+            if guarded:
+                fit = await loop.run_in_executor(None, _routed_load_fit, name, new_engine)
+                if fit.needs_ask:
+                    from localm.debuglog import logger as _dbg
+                    _dbg.info("capability routing: not loading %s: %s", name,
+                              fit.ask_reason())
+                    raise RouteRefused(name, fit)
             interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
                                              reading=reading)
             if interrupted is not None:
@@ -1009,6 +1050,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
 
             if healing is not None:
                 healing.unloading = False
+            if routed and not preempt:
+                _routing_loaded.add(name)
             _switch_commit(name, new_engine, sem, activate=activate or was_active,
                            on_active=on_active)
             loaded = True
@@ -1258,6 +1301,107 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             evictions.append(release)
 
 
+def _discover_module():
+    """``localm.discover``, imported on first use."""
+    from localm import discover
+    return discover
+
+
+def routing_vram_reading():
+    """One GPU reading for capability routing, as a ``routing_fit.VramReading``:
+    the same ``vram_capacity`` and implicit-split readings ``switch_engine``
+    takes. Blocking; must not run on the event loop thread."""
+    from localm.inference import routing_fit
+    discover = _discover_module()
+    info, status = discover.vram_capacity(
+        return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE,
+        wait_for_inflight=True)
+    ok = status == discover.GPU_PROBE_OK
+    free, total = info.get("free"), info.get("total")
+    scoped = info.get("free_scope") == discover.FREE_SCOPE_PROCESS
+    devices = 1
+    if ok:
+        implicit = discover.implicit_split_free()
+        if implicit is not None:
+            free = implicit["free"]
+            devices = int(implicit.get("devices") or 1)
+            scoped = implicit.get("free_scope") == discover.FREE_SCOPE_PROCESS
+    from localm.config import load_config
+    split = load_config().get("gpu_split_indices")
+    if isinstance(split, (list, tuple)) and len(split) >= 2:
+        devices = max(devices, len(split))
+    present = not (ok and not total)
+    return routing_fit.VramReading(
+        free=free if isinstance(free, int) else None,
+        total=total if isinstance(total, int) else None,
+        usable=ok and not scoped and isinstance(free, int), devices=devices,
+        gpu_present=present)
+
+
+def _routing_residents(exclude: str = "") -> dict:
+    """The resident chat models as ``routing_fit.Resident`` records, *exclude*
+    left out. Blocking (reads each model's VRAM hold); must not run on the
+    event loop thread."""
+    from localm.config import load_config
+    from localm.inference import routing_fit
+    pinned = residency.pinned_model_names(load_config())
+    out = {}
+    for name, engine in list(_engines.items()):
+        if name == exclude or not getattr(engine, "loaded", False):
+            continue
+        mmap = getattr(engine, "mmap_state", None)
+        out[name] = routing_fit.Resident(
+            name=name, hold=_resident_vram_hold(engine),
+            user_chosen=name not in _routing_loaded,
+            evictable=(name not in pinned
+                       and getattr(engine, "unloading", False) is not True),
+            reads_from_disk=bool(isinstance(mmap, dict) and mmap.get("mmap_cpu_from_disk")))
+    return out
+
+
+def routing_fit_assessor(peers=()):
+    """The ``fit`` argument ``capability_routing.plan_route`` needs: sizes each
+    candidate against a fresh GPU and RAM reading, the resident models and
+    the ``unload_for_room`` setting (``routing_fit.assess``). Models in
+    *peers* are answered by a peer and load nothing here. Blocking when
+    called; must not run on the event loop thread."""
+    def assess(names):
+        from localm.config import load_config
+        from localm.inference import routing_fit
+        from localm.inference.backends.llamacpp._sizing import ram_reading
+        reading = routing_vram_reading()
+        ram_total, ram_available = ram_reading()
+        return routing_fit.assess(
+            names, residents=_routing_residents(), build=_routing_engine_for,
+            reading=reading, ram_available=ram_available, ram_total=ram_total,
+            unload_policy=switch_admission.unload_policy(load_config()), peers=peers)
+    return assess
+
+
+def _routing_engine_for(name: str):
+    """An engine for *name* to size, without loading it: the tracked one when
+    there is one, else a fresh one from the engine factory."""
+    return _engines.get(name) or _engine_factory(name)
+
+
+def _routed_load_fit(name: str, engine):
+    """The ``Fit`` of loading *engine* as *name* now, for a routed load: a
+    fresh GPU and RAM reading, unloading only the idle models routing loaded.
+    Blocking; must not run on the event loop thread."""
+    from localm.config import load_config
+    from localm.inference import routing_fit
+    from localm.inference.backends.llamacpp._sizing import ram_reading
+    reading = routing_vram_reading()
+    ram_total, ram_available = ram_reading()
+    residents = {n: r for n, r in _routing_residents(exclude=name).items()
+                 if not r.user_chosen}
+    fits = routing_fit.assess(
+        [name], residents=residents, build=lambda _n: engine, reading=reading,
+        ram_available=ram_available, ram_total=ram_total,
+        unload_policy=switch_admission.unload_policy(load_config()))
+    return fits[name]
+
+
 async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget, *,
                              reading: Optional[_FirstPassReading] = None
                              ) -> switch_admission.VramProbe:
@@ -1275,8 +1419,10 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget, *,
     the one discrete GPU beside integrated ones) is judged by their summed
     free VRAM (``discover.implicit_split_free``, the budget the backend sizes
     the load against), and the probe is marked ``implicit_split``."""
-    from localm import discover
-    from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
+    discover = _discover_module()
+    gpu_split_shortfall = discover.gpu_split_shortfall
+    implicit_split_free = discover.implicit_split_free
+    vram_capacity = discover.vram_capacity
 
     run = _FirstPassReading.run
     v_info, probe_status = await run(loop, reading, functools.partial(
@@ -1866,6 +2012,8 @@ def _switch_detach_victim(victim: str, engine, *, activate: bool,
     was_active = _active_model_name == victim
     engine.unloading = True
     _engines.pop(victim, None)
+    if not keep_sem:
+        _routing_loaded.discard(victim)
     if victim in _engines_lru:
         _engines_lru.remove(victim)
     if not keep_sem:
@@ -2661,6 +2809,7 @@ def plan_capability_route(model_name: str | None, messages: list,
                 if n not in peer_routes}
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
+                          fit=routing_fit_assessor(peers=peer_routes),
                           current_known=known, skip=skip_set,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
@@ -2697,6 +2846,7 @@ def _forget_removed_model(name: str) -> bool:
 
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
+                     routed: bool = False,
                      on_status: Optional[Callable[[str], None]] = None,
                      allow_embedding: bool = False) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary. An
@@ -2716,7 +2866,9 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
     With ``skip_if_latched`` a model that is not resident is not loaded when its
     last load failed and that failure still applies: ``LoadSkipped`` is raised.
-    Capability routing sets it for the models it chose.
+    Capability routing sets it for the models it chose, and ``routed`` (see
+    ``switch_engine``; a resident model is returned as it is). A request that
+    names the model and makes it active removes it from ``_routing_loaded``.
 
     A resident model left partly on the CPU whose ``_placement_heal_due`` holds
     is passed to switch_engine, which reloads it, instead of being returned as
@@ -2781,6 +2933,9 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     # unload-await race. An engine flagged unloading falls through to switch_engine
     # below, which reloads it cleanly under its per-model semaphore (the unloader
     # holds that semaphore for the native free, so the reload serializes AFTER it).
+    if activate and not routed and (model_name or "").strip() == name:
+        _routing_loaded.discard(name)
+
     if (name in _engines and _engines[name].loaded
             and getattr(_engines[name], "unloading", False) is not True
             and not (load and _placement_heal_due(name, _engines[name]))):
@@ -2801,7 +2956,8 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
     res = await switch_engine(name, _engine_factory, preempt=False,
                               activate=activate, skip_if_latched=skip_if_latched,
-                              on_status=on_status, allow_embedding=allow_embedding)
+                              routed=routed, on_status=on_status,
+                              allow_embedding=allow_embedding)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
@@ -3589,6 +3745,9 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     engine = _engines.pop(old_name, None)
     if engine is None:
         return False
+    if old_name in _routing_loaded:
+        _routing_loaded.discard(old_name)
+        _routing_loaded.add(new_name)
     engine.display_name = new_name
     _engines[new_name] = engine
     if old_name in _engines_lru:
@@ -8322,8 +8481,12 @@ def _capability_route_header(route, placement=None) -> dict:
     must be able to tell them apart, so they are not flattened into one flag.
     Compact ASCII JSON, header-safe:
     ``{"resolved","requested","routed","pinned","gaps":{cap:"absent"|"unknown"},
-    "unmet":[...]}``, plus ``"suggested":<model>`` when model autoswitch is
-    ``ask`` and another model would have answered, plus ``"load_errors":[...]`` (each cut to 200
+    "unmet":[...]}``, plus ``"suggested":<model>`` when another model would
+    answer if the user agreed (model autoswitch ``ask``, or a model that would
+    run CPU-only, read from disk, be unsized or unload one the user chose),
+    with ``"ask_reason"`` (cut to 300 characters) saying why it was not used,
+    plus ``"fit"``, the fit class name of the model that answered or is
+    suggested when one was measured, plus ``"load_errors":[...]`` (each cut to 200
     characters) when every capable model failed to load, and, when a model was
     left out because its last load failed, ``"skipped":[{"model","failed_at",
     "retry_at","reason"}]`` (the times in epoch seconds). ``"note"`` carries
@@ -8346,6 +8509,14 @@ def _capability_route_header(route, placement=None) -> dict:
     suggested = getattr(route, "suggested", None)
     if suggested:
         payload["suggested"] = suggested
+    ask_reason = getattr(route, "ask_reason", "")
+    if suggested and ask_reason:
+        payload["ask_reason"] = ask_reason[:300]
+    fits = getattr(route, "fits", None) or {}
+    measured = fits.get(suggested or route.resolved)
+    if measured is not None:
+        from localm.inference.capability_routing import FIT_NAMES
+        payload["fit"] = FIT_NAMES.get(measured.cls, str(measured.cls))
     load_errors = getattr(route, "load_errors", ())
     if load_errors:
         payload["load_errors"] = [str(e)[:200] for e in load_errors]

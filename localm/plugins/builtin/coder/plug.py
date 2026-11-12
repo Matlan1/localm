@@ -391,6 +391,11 @@ def _tool_capability_note(model_name: str, pinned: bool = True) -> str:
                 return (f"{model_name} is not confirmed to format structured "
                         f"tool calls, and it answers this session's requests: "
                         f"{decision.describe_skipped()}.")
+            if not decision.routed and decision.suggested:
+                why = f" ({decision.ask_reason})" if decision.ask_reason else ""
+                return (f"{model_name} is not confirmed to format structured tool "
+                        f"calls; {decision.suggested} is, but it was not loaded"
+                        f"{why}. Pick it for the session to use it.")
             if not decision.routed:
                 return ""
             return (f"{model_name} is not confirmed to format structured tool "
@@ -399,9 +404,9 @@ def _tool_capability_note(model_name: str, pinned: bool = True) -> str:
                     f"model for the session to always use that one instead.")
         if _caps.model_tool_use_capability(model_name, reg=reg) is not False:
             return ""
-        from localm.inference.capability_routing import CapabilityNeeds, plan_route
-        better = list(plan_route(model_name, CapabilityNeeds(capabilities=(_caps.TOOL_USE,)),
-                                 pinned=False, reg=reg).candidates)
+        from localm.inference.capability_routing import CapabilityNeeds, capable_models
+        better = capable_models(CapabilityNeeds(capabilities=(_caps.TOOL_USE,)),
+                                exclude=model_name, reg=reg)
         if not better:
             return ""
         return (f"{model_name} has no tool-call formatting in its chat template. "

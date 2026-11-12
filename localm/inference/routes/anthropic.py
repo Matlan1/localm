@@ -144,7 +144,8 @@ def register(app: FastAPI, ctx) -> None:
         except ToolsError as exc:
             raise A.AnthropicError(400, str(exc)) from None
         route = await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(_hs.plan_capability_route, req.model, messages, None))
+            None, functools.partial(_hs.plan_capability_route, req.model, messages, None,
+                                    autoswitch="loaded"))
         if not req.model and route.resolved is None:
             raise A.AnthropicError(400, "model is required")
         peer = peer_routing.get_route(route.resolved) if route.resolved else None

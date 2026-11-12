@@ -166,7 +166,8 @@ def coder_engine(engines: EngineCache, decision):
         try:
             with _quiet_stdout():
                 engine = engines.get_loaded_chat(
-                    name, skip_if_latched=name != decision.current)
+                    name, skip_if_latched=name != decision.current,
+                    routed=name != decision.current)
         except ModelLoadSkipped as e:
             skipped.append(e.skipped)
             _srv._log(f"not loading {name} for a coder task: {e}")

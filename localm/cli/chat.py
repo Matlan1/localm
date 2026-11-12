@@ -107,10 +107,11 @@ class _TurnRouter:
             if getattr(cur, "supports_audio", False) is True:
                 known[caps.AUDIO] = True
         decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
+                                 fit=cr.fit_resident_only([self.current]),
                                  resident=[self.current], reg=reg,
                                  current_known=known, mode=cr.configured_mode())
         self.last_decision = decision
-        self.min_context = (comp if decision.routed
+        self.min_context = (comp if not self.pinned
                             and caps.CONTEXT_LENGTH in decision.gaps else None)
         return decision
 
@@ -120,11 +121,19 @@ class _TurnRouter:
         fails to load is skipped for the next capable one, then MODEL. Each
         failure is printed; ``failed_to_load`` names the routed models MODEL
         answers in place of, else is empty. Raises what MODEL's own load raised
-        when that fails too."""
+        when that fails too.
+
+        In this process a model other than the one loaded is never loaded on
+        its own: that would unload the model the session runs. Routing then
+        suggests it (``suggestion``) instead."""
         decision = self.plan(messages)
         self.failed_to_load = ()
         if not self.in_process:
             return self.primary
+        hint = self.suggestion()
+        if hint:
+            from rich.markup import escape
+            console.print(f"[yellow]{escape(hint)}[/yellow]")
         names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
         failed = []
         for name in names:
@@ -153,6 +162,17 @@ class _TurnRouter:
         self.current = name
         eng.load()
         return eng
+
+    def suggestion(self) -> Optional[str]:
+        """One line naming the model routing would use for the last planned
+        turn and why it did not, when it suggested one; else None."""
+        decision = self.last_decision
+        if decision is None or not decision.suggested:
+            return None
+        gaps = ", ".join(sorted(decision.gaps)) or "this request"
+        why = f" ({decision.ask_reason})" if decision.ask_reason else ""
+        return (f"{decision.suggested} can answer this ({self.model_name} lacks {gaps}); "
+                f"it was not loaded{why}. Run  localm run {decision.suggested}  to use it.")
 
     def answered_by(self, engine) -> str:
         """The model that answered the last turn on *engine*."""

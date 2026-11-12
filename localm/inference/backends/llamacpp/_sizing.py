@@ -71,6 +71,13 @@ MTP_DRAFT_SCORE_BYTES = 4
 MTP_DRAFT_COMPUTE_MARGIN_BYTES = 384 * 1024 * 1024
 
 
+def ram_reading() -> tuple[Optional[int], Optional[int]]:
+    """``(total, available)`` system RAM bytes (``sysstats.system_ram``), each
+    None when it cannot be read."""
+    from localm.sysstats import system_ram
+    return system_ram()
+
+
 class MmapDecision(NamedTuple):
     """How a load memory-maps the model file (:func:`decide_use_mmap`).
 
@@ -2751,9 +2758,8 @@ class VramSizingMixin:
 
     @staticmethod
     def _ram_reading() -> tuple[Optional[int], Optional[int]]:
-        """``(total, available)`` system RAM bytes (``sysstats.system_ram``)."""
-        from localm.sysstats import system_ram
-        return system_ram()
+        """``(total, available)`` system RAM bytes (:func:`ram_reading`)."""
+        return ram_reading()
 
     def _mmap_byte_counts(self, gpu_layers: int, on_gpu: bool, n_cpu_moe: int
                           ) -> tuple[Optional[int], Optional[int], bool]:
