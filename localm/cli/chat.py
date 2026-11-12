@@ -128,14 +128,18 @@ class _TurnRouter:
         from localm.inference import http_server as hs
         from localm.inference import routing_fit
         from localm.inference.backends.llamacpp._sizing import ram_reading
+        from localm.inference.capability_routing import fit_resident_only as cr_fit_resident_only
         residents = {
             n: routing_fit.Resident(name=n, hold=hs._resident_vram_hold(e),
                                     user_chosen=n == self.model_name)
             for n, e in self._engines.items() if getattr(e, "loaded", False)}
         ram_total, ram_available = ram_reading()
+        build = self._build
+        if build is None:
+            return cr_fit_resident_only(list(residents))(names)
         return routing_fit.assess(
             names, residents=residents,
-            build=lambda n: self._engines.get(n) or self._build(n),
+            build=lambda n: self._engines.get(n) or build(n),
             reading=hs.routing_vram_reading(), ram_available=ram_available,
             ram_total=ram_total, unload_policy=routing_fit.UNLOAD_ALWAYS)
 
@@ -160,7 +164,7 @@ class _TurnRouter:
             if self._confirm(decision):
                 names = [decision.suggested]
         elif not names and decision.suggested:
-            console.print(f"[yellow]{escape(self.suggestion())}[/yellow]")
+            console.print(f"[yellow]{escape(self.suggestion() or '')}[/yellow]")
         failed = []
         for name in names:
             try:

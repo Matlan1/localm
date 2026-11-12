@@ -237,7 +237,7 @@ class _LogWriter:
 
     def __init__(self) -> None:
         import queue
-        self._queue: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
 
@@ -254,7 +254,7 @@ class _LogWriter:
     def on_writer_thread(self) -> bool:
         return threading.current_thread() is self._thread
 
-    def put(self, handler: "_OffThreadEmit", text: str, record: logging.LogRecord) -> None:
+    def put(self, handler: _OffThreadEmit, text: str, record: logging.LogRecord) -> None:
         if self.on_writer_thread():
             handler._write(text, record)
             return
@@ -284,8 +284,8 @@ class _LogWriter:
 _log_writer = _LogWriter()
 
 
-class _OffThreadEmit:
-    """Mixin for a ``logging.StreamHandler``: ``emit`` formats the record on the
+class _OffThreadEmit(logging.StreamHandler):
+    """A ``logging.StreamHandler`` whose ``emit`` formats the record on the
     calling thread and hands the text to ``_log_writer``; the stream write and
     flush run on the writer thread. A write that fails is reported through
     ``handleError`` there, as a synchronous handler would. The handler's own

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# ruff: noqa: F811
 """The MCP server routes by fit like the HTTP server: a vision model that would
 read from disk, run on the CPU only, be unsized or unload the model the client
 uses is named, never loaded; one that fits is loaded beside it; a load the

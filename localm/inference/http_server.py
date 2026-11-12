@@ -812,6 +812,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             on_status=on_status, allow_embedding=allow_embedding,
             reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
     finally:
+        _forget_routing_reading()
         left = _loads_in_flight.get(name, 1) - 1
         if left > 0:
             _loads_in_flight[name] = left
@@ -1328,6 +1329,33 @@ def _discover_module():
     return discover
 
 
+# The last planning reading: (monotonic time taken, VramReading). Dropped when a
+# switch_engine call ends (see _forget_routing_reading).
+_routing_reading_cache: Optional[tuple] = None
+ROUTING_READING_MAX_AGE_S = 10.0
+
+
+def _forget_routing_reading() -> None:
+    """Drop the cached planning reading, so the next plan measures again."""
+    global _routing_reading_cache
+    _routing_reading_cache = None
+
+
+def planning_vram_reading():
+    """``routing_vram_reading()`` reused for up to ``ROUTING_READING_MAX_AGE_S``
+    seconds and until a load ends, for planning a route only; a load capability
+    routing chose is measured again under the load lease
+    (``_routed_load_fit``). Blocking; must not run on the event loop thread."""
+    global _routing_reading_cache
+    cached = _routing_reading_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[0] <= ROUTING_READING_MAX_AGE_S:
+        return cached[1]
+    reading = routing_vram_reading()
+    _routing_reading_cache = (time.monotonic(), reading)
+    return reading
+
+
 def routing_vram_reading():
     """One GPU reading for capability routing, as a ``routing_fit.VramReading``:
     the same ``vram_capacity`` and implicit-split readings ``switch_engine``
@@ -1390,7 +1418,7 @@ def routing_fit_assessor(peers=()):
         from localm.config import load_config
         from localm.inference import routing_fit
         from localm.inference.backends.llamacpp._sizing import ram_reading
-        reading = routing_vram_reading()
+        reading = planning_vram_reading()
         ram_total, ram_available = ram_reading()
         return routing_fit.assess(
             names, residents=_routing_residents(), build=_routing_engine_for,
@@ -1409,7 +1437,6 @@ def _routed_load_fit(name: str, engine):
     """The ``Fit`` of loading *engine* as *name* now, for a routed load: a
     fresh GPU and RAM reading of the state the load will meet, unloading
     nothing more. Blocking; must not run on the event loop thread."""
-    from localm.config import load_config
     from localm.inference import routing_fit
     from localm.inference.backends.llamacpp._sizing import ram_reading
     reading = routing_vram_reading()
@@ -2031,6 +2058,7 @@ def _switch_detach_victim(victim: str, engine, *, activate: bool,
     was_active = _active_model_name == victim
     engine.unloading = True
     _engines.pop(victim, None)
+    _forget_routing_reading()
     if not keep_sem:
         _routing_loaded.discard(victim)
     if victim in _engines_lru:
@@ -3068,6 +3096,7 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
             outcome["exc"] = e
             raise
         finally:
+            _forget_routing_reading()
             try:
                 loop.call_soon_threadsafe(finished.set)
             except RuntimeError:

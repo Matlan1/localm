@@ -276,7 +276,7 @@ class RoutingDecision:
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
                        load_errors=tuple(load_errors))
 
-    def asked(self, name: str, fit: "Fit",
+    def asked(self, name: str, fit: Fit,
               load_errors: Sequence[str] = ()) -> RoutingDecision:
         """This decision turned into a suggestion: *current* answers, *name* is
         ``suggested`` with *fit* (measured when its load was refused) as its fit

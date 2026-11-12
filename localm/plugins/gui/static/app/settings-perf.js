@@ -2965,7 +2965,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // localm/inference/backends/base.py, and by neither of the route's other
       // grammar 400s) - retry this turn unconstrained, and stop asking for the
       // rest of this page's session.
-      if (e.status === 400 && body.grammar_lazy && String(e.detail).includes("would be ignored")) {
+      if (e.status === 400 && body.grammar_lazy && !e.refusal
+          && String(e.detail).includes("would be ignored")) {
         chat.toolGrammarUnsupported = true;
         delete body.grammar;
         delete body.grammar_lazy;

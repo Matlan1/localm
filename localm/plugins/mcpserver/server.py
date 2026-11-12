@@ -447,9 +447,8 @@ class EngineCache:
         Caller holds ``_lock``."""
         if self.is_peer(engine) or getattr(engine, "loaded", False) is True:
             return
-        from localm.config import load_config
         from localm.inference import http_server as hs
-        from localm.inference import routing_fit, switch_admission
+        from localm.inference import routing_fit
         from localm.inference.backends.llamacpp._sizing import ram_reading
         ram_total, ram_available = ram_reading()
         fit = routing_fit.assess(

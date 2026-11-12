@@ -576,7 +576,8 @@ test("a compacted reply cut at its first tool call still marks the conversation 
   assert.equal((first.content.match(/<tool_call>/g) || []).length, 1);
 });
 
-function setupRefusal({ routing, pinned = false, status = 400, refusal = "image" }) {
+function setupRefusal({ routing, pinned = false, status = 400, refusal = "image",
+                        detail = "plain cannot read images", netConfig = {} }) {
   const calls = [];
   let posts = 0;
   const impl = async (url, opts = {}) => {
@@ -587,10 +588,10 @@ function setupRefusal({ routing, pinned = false, status = 400, refusal = "image"
       const headers = { get: (k) => (k === "X-Localm-Refusal" ? refusal
         : (k === "X-Localm-Model-Routing" && routing ? JSON.stringify(routing) : null)) };
       return { ok: false, status, headers,
-        json: async () => ({ detail: "plain cannot read images" }), text: async () => "" };
+        json: async () => ({ detail }), text: async () => "" };
     }
     return { ok: true, status: 200, headers: { get: () => null },
-      json: async () => ({}), text: async () => "" };
+      json: async () => (String(url) === "/v1/config" ? netConfig : {}), text: async () => "" };
   };
   const { window } = loadApp({ fetchImpl: impl });
   window.readSSE = async (_r, onData) => {
@@ -664,6 +665,18 @@ test("a refusal that is not about an attachment still offers the suggested model
   assert.equal(select.value, "seer");
   for (let i = 0; i < 50 && chatPosts(calls).length < 2; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(chatPosts(calls)[1].body.model, "seer");
+});
+
+test("an image refusal whose text says the image would be ignored is not retried as a grammar refusal", async () => {
+  const { window, doc, calls, conv } = setupRefusal({
+    routing: ASK_ROUTING, netConfig: { net_mode: "allow" },
+    detail: "This model cannot accept image input (it is text-only), so the attached image would be ignored." });
+  doc.getElementById("p-web").checked = true;
+  runScript(window, "chat.toolGrammar = true; chat.toolGrammarUnsupported = false;");
+  await window.runCompletion(conv);
+  const posts = chatPosts(calls);
+  assert.equal(posts.length, 1, "the refused request is not sent again");
+  assert.equal(posts[0].body.grammar_lazy, true, "the request carried the tool grammar");
 });
 
 test("an image refusal with no suggestion offers nothing", async () => {

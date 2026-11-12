@@ -2833,7 +2833,8 @@ class VramSizingMixin:
         if free_vram is None or self._model_bytes() <= 0:
             return None
         configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
-        if not self.n_gpu_layers_auto or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
+        if (not getattr(self, "n_gpu_layers_auto", False)
+                or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS):
             layers, n_cpu_moe = int(self.n_gpu_layers), configured_moe
         else:
             budget = self._auto_gpu_layers_budget(reading=(int(free_vram), total_vram))
@@ -2850,8 +2851,8 @@ class VramSizingMixin:
         decision = self._mmap_decision_for(getattr(self, "use_mmap", "auto"), layers, on_gpu,
                                            host, read, per_token, ram_total, ram_available)
         full = layers >= self._DEFAULT_GPU_LAYERS
-        per_token_read = (not full or per_token) and read is not None and read > 0
-        from_disk = (per_token_read and ram_available is not None
+        from_disk = ((not full or per_token) and read is not None and read > 0
+                     and ram_available is not None
                      and read + HOST_RAM_HEADROOM_BYTES > ram_available)
         return {"layers": layers, "full": full, "n_cpu_moe": n_cpu_moe,
                 "mmap": decision.reason, "host_bytes": host, "cpu_read_bytes": read,

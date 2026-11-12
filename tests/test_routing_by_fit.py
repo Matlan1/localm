@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# ruff: noqa: F811
 """Capability routing chooses by how a candidate would run on this machine
 (its fit class) and asks before any move that would read weights from disk,
 run on the CPU only beside a GPU, could not be sized, or unload a model the
@@ -541,3 +542,20 @@ def test_a_routed_switch_that_finds_the_users_model_loaded_does_not_claim_it(
                                           routed=True))
     assert result["status"] == "already_active"
     assert "seer" not in hs._routing_loaded
+
+
+def test_planning_reuses_a_recent_reading_until_a_load_ends(monkeypatch):
+    readings = []
+
+    def measure():
+        readings.append(1)
+        return routing_fit.VramReading(free=len(readings), total=10, usable=True)
+    monkeypatch.setattr(hs, "routing_vram_reading", measure)
+    hs._forget_routing_reading()
+    first = hs.planning_vram_reading()
+    assert hs.planning_vram_reading() is first and len(readings) == 1
+    hs._forget_routing_reading()
+    assert hs.planning_vram_reading().free == 2
+    monkeypatch.setattr(hs, "ROUTING_READING_MAX_AGE_S", -1.0)
+    assert hs.planning_vram_reading().free == 3
+    hs._forget_routing_reading()

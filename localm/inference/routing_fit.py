@@ -106,7 +106,9 @@ def _classify_by_size(engine, free: int, reading: VramReading,
         if isinstance(answer, tuple) and answer and answer[0]:
             full, minimum = int(answer[0]), int(answer[1] or answer[0])
     if full is None:
-        full = minimum = residency.required_vram_bytes(size) + residency.DEFAULT_HEADROOM_BYTES
+        full = residency.required_vram_bytes(size) + residency.DEFAULT_HEADROOM_BYTES
+    if minimum is None:
+        minimum = full
     if reading.gpu_present and free >= full:
         return FIT_GPU, 0
     if _experts_read_from_disk(engine):
