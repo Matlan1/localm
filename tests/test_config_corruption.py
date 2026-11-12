@@ -763,3 +763,33 @@ def test_config_path_parent_walks_to_the_parent_of_the_last_key():
     assert cfg._config_path_parent(root, ("a", "b")) is root["a"]
     assert cfg._config_path_parent(root, ("a", "b", "c")) is root["a"]["b"]
     assert cfg._config_path_parent(root, ("x", "y")) is None
+
+
+@pytest.mark.parametrize("stored, want", [
+    ("false", False), ("0", False), ("no", False), ("off", False), ("", False),
+    ("garbage", False), (0, False), (1, False), (None, False), ([], False),
+    ({"on": True}, False), (True, True), ("true", True), (" Yes ", True), ("1", True),
+])
+def test_keep_diagnostics_reads_only_an_explicit_on(cfg_home, monkeypatch, stored, want):
+    """A hand-edited value turns diagnostics on only when it says on."""
+    monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+    cfg.update_config(lambda c: c.update(keep_diagnostics=stored))
+    assert cfg.keep_diagnostics_enabled() is want
+
+
+def test_an_unrecognised_keep_diagnostics_value_is_reported_once(cfg_home, monkeypatch, capsys):
+    monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+    monkeypatch.setattr(cfg, "_warned_bad_keep_diagnostics", set())
+    cfg.update_config(lambda c: c.update(keep_diagnostics="false-ish"))
+    assert cfg.keep_diagnostics_enabled() is False
+    assert cfg.keep_diagnostics_enabled() is False
+    err = capsys.readouterr().err
+    assert err.count("keep_diagnostics='false-ish'") == 1
+
+
+def test_privacy_mode_with_a_string_false_keeps_diagnostics_off(cfg_home, monkeypatch):
+    from localm.audit import diagnostics_allowed
+    monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    cfg.update_config(lambda c: c.update(keep_diagnostics="false", mode="privacy"))
+    assert diagnostics_allowed() is False

@@ -67,6 +67,11 @@ REMOTE_IMAGE_LEGACY_BOOL = (REMOTE_IMAGE_OFF, REMOTE_IMAGE_ON)
 # _normalize_remote_image_mode).
 _warned_bad_remote_image_mode: set = set()
 
+# keep_diagnostics values already reported as unrecognised, once per process.
+_warned_bad_keep_diagnostics: set = set()
+
+_KEEP_DIAGNOSTICS_ON = ("1", "true", "on", "yes")
+
 
 def coerce_remote_image_mode(val):
     """*val* as one of REMOTE_IMAGE_MODES, or None if it is not a shape this
@@ -1748,14 +1753,32 @@ def keep_diagnostics_enabled() -> bool:
     the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
     ``--keep-diagnostics`` flag, a per-run override) OR the persistent
     ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
-    launcher and the in-app toggle both take effect. Never raises."""
+    launcher and the in-app toggle both take effect. The config value counts as
+    on only when it is ``true`` or one of the strings ``1``, ``true``, ``on``,
+    ``yes`` (any case, surrounding spaces ignored). Every other value counts as
+    off; one that is not false, null, 0 or one of the strings ``0``, ``false``,
+    ``off``, ``no`` or empty is also reported once on stderr. Never raises."""
     if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
-            "1", "true", "on", "yes"):
+            _KEEP_DIAGNOSTICS_ON):
         return True
     try:
-        return bool(load_config().get("keep_diagnostics"))
+        raw = load_config().get("keep_diagnostics")
     except Exception:
         return False
+    if raw is True:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in _KEEP_DIAGNOSTICS_ON:
+        return True
+    if raw in (False, None) or (isinstance(raw, str) and raw.strip().lower() in (
+            "", "0", "false", "off", "no")):
+        return False
+    token = repr(raw)
+    if token not in _warned_bad_keep_diagnostics:
+        _warned_bad_keep_diagnostics.add(token)
+        print(f"[localm] config.json has keep_diagnostics={token}, which is not "
+              "true or false; treating it as false (diagnostics stay off in "
+              "privacy mode).", file=sys.stderr)
+    return False
 
 
 def _user_delta(cfg: dict) -> dict:
