@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A `keep_diagnostics` value that does not say on no longer keeps diagnostics in privacy mode.** A hand-edited `config.json` with `"keep_diagnostics": "false"` (a string) turned automatic diagnostics on. The setting is now on only for `true` or the strings `1`, `true`, `on` and `yes`; any other value is off, and a value localm does not recognise is reported once when it is read.
 - **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
 - **The debug log now lists requests the server refuses before they reach a route.** A request turned away by the open-mode management check, the cross-origin check, the no-key network check, the Host header check, the request size limit, the API docs check or a CORS preflight left no line in the debug log. Every request now gets one line with its method, path and status, and a refused one also says which check refused it. The line never carries a key, token, header value or request content, and debug mode does not change the response.
 
