@@ -705,3 +705,56 @@ def test_asyncio_handler_ignores_cancellation(monkeypatch):
     finally:
         loop.close()
     assert calls == []
+
+
+@pytest.mark.parametrize("content", ["{half a marker", "[4242]", ""])
+def test_an_unreadable_crash_marker_is_cleared_but_not_reported(
+        tmp_path, monkeypatch, caplog, content):
+    """A marker that cannot be read or is not a JSON object may belong to a
+    privacy-mode run, so it is handled like one: cleared, logged, no report."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    marker = run / "server-crash.inst-u.marker"
+    marker.write_text(content, encoding="utf-8")
+    calls = _record_reports(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+
+    assert calls == []
+    assert not marker.exists()
+    assert any("not reported" in r.getMessage() and "could not be read" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_unreadable_stopping_record_with_a_fatal_trace_is_not_reported(
+        tmp_path, monkeypatch, caplog):
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    record, trace = _write_stopping(run, "inst-w", 4242, _FATAL_TRACE)
+    record.write_text("{torn", encoding="utf-8")
+    calls = _record_reports(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+
+    assert calls == []
+    assert not record.exists() and not trace.exists()
+    assert any("not reported" in r.getMessage() and "could not be read" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_readable_marker_without_the_diagnostics_key_is_still_reported(
+        tmp_path, monkeypatch):
+    """The control: only an unreadable marker reads as private."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-x", 4242)
+    calls = _record_reports(monkeypatch, tmp_path)
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is not None
+    assert len(calls) == 1
