@@ -710,8 +710,8 @@ def test_asyncio_handler_ignores_cancellation(monkeypatch):
 @pytest.mark.parametrize("content", ["{half a marker", "[4242]", ""])
 def test_an_unreadable_crash_marker_is_cleared_but_not_reported(
         tmp_path, monkeypatch, caplog, content):
-    """A marker that cannot be read or is not a JSON object may belong to a
-    privacy-mode run, so it is handled like one: cleared, logged, no report."""
+    """A marker that cannot be read or is not a JSON object is handled like a
+    privacy-mode run: cleared, logged, no report."""
     _pin_mode(monkeypatch, "log")
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     run = tmp_path / "run"
@@ -758,3 +758,17 @@ def test_a_readable_marker_without_the_diagnostics_key_is_still_reported(
 
     assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is not None
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("body", [{"context": {}}, {"pid": "x", "context": {}}])
+def test_a_readable_marker_without_a_usable_pid_is_reported(tmp_path, monkeypatch, body):
+    _pin_mode(monkeypatch, "log")
+    run = tmp_path / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    marker = run / "server-crash.inst-y.marker"
+    marker.write_text(json.dumps(body), encoding="utf-8")
+    calls = _record_reports(monkeypatch, tmp_path)
+
+    assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is not None
+    assert len(calls) == 1
+    assert not marker.exists()

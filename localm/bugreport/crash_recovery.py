@@ -6,7 +6,7 @@ trace, log and exit code, and filing the report on the next start.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from localm.bugreport.logs import _find_run_log, _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import trim_trace_for_report
@@ -278,7 +278,7 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
                 "bugreport: prior hard crash detected (%s); not reported: %s",
                 marker.name, _not_reported_reason(readable))
             return None
-        ctx = {"prior_run": info}
+        ctx: dict[str, Any] = {"prior_run": info}
         if exit_record:
             ctx["prior_exit"] = exit_record
         if trace:
@@ -357,7 +357,7 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
                 "bugreport: native fault during a prior clean stop detected (%s); "
                 "not reported: %s", record.name, _not_reported_reason(readable))
             return None
-        ctx = {"prior_run": dict(info, stage="stopping"),
+        ctx: dict[str, Any] = {"prior_run": dict(info, stage="stopping"),
                "native_trace": trim_trace_for_report(text)}
         tail, log_unavailable = _recent_log_tail_result(home, pid=info.get("pid"))
         if tail:
