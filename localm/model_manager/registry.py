@@ -76,7 +76,10 @@ MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae
 # GPT2LMHeadModel, etc. This follows HF's own stable class-naming convention (a
 # hard signal), NOT fuzzy substring tag matching. An architecture not matched here
 # is left 'unknown' rather than silently assumed to be an LLM.
-_HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")
+# Must name every suffix the HF worker loads as a generative model. See
+# test_registry_types_every_architecture_the_hf_worker_generates_with.
+_HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel",
+                         "ForSeq2SeqLM", "ForImageTextToText", "ForVision2Seq")
 
 # Registry types whose entry records an mmproj: the vision projector of an 'llm',
 # the speech generation stages of a 'tts' model.

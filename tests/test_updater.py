@@ -1404,6 +1404,7 @@ def test_apply_refuses_to_swap_a_release_tree_into_site_packages(monkeypatch, tm
 
 def test_apply_records_one_update_applied_event(tmp_path, monkeypatch, sig_env):
     import json
+    monkeypatch.setenv("LOCALM_MODE", "full")
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)

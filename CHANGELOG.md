@@ -12,12 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
 - **The debug log now lists requests the server refuses before they reach a route.** A request turned away by the open-mode management check, the cross-origin check, the no-key network check, the Host header check, the request size limit, the API docs check or a CORS preflight left no line in the debug log. Every request now gets one line with its method, path and status, and a refused one also says which check refused it. The line never carries a key, token, header value or request content, and debug mode does not change the response.
 
-## [0.3.4b1] - 2026-11-11
+### Added
+- **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
+
+## [0.3.4b2] - 2026-11-11
 
 ### Added
-- **A management log records key, login, update and config events in every session mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content, so privacy mode writes it too. It is capped at 1 MB with one earlier file kept.
+- **A management log records key, login, update and config events in log and full mode.** `logs/management.jsonl` in the data folder gets one line when an API key is created or revoked, a login with a wrong key is refused (and whether the client was on this machine), an update is applied, or a setting is saved (the names of the settings, never their values). It never holds a key, a setting value or conversation content. Privacy mode writes nothing. It is capped at 1 MB with one earlier file kept.
 - **A setting lets canvas artifacts open other pages.** "Let canvas artifacts open other pages" (Settings, Chat; `localm config canvas_allow_navigation true`) lets an artifact load any web page in the canvas instead of the canvas closing. It is off by default and only the owner can change it; the page an artifact opens can receive data in its address.
 
 ### Security

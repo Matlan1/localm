@@ -151,6 +151,7 @@ def test_loaded_config_does_not_alias_default_config(config_file):
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "full")
     h = tmp_path / "home"
     h.mkdir()
     monkeypatch.setattr(cfg, "HOME_DIR", h)

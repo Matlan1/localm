@@ -3,8 +3,11 @@
 not retried for a minute, a crashed worker dropped, released by the server's
 unload-all, VRAM eviction, shutdown and restart paths, and the voices folder."""
 
+import ast
 import asyncio
+import logging
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -90,6 +93,27 @@ class TestResidency:
         speech.synthesize(m, "hi", on_progress=progress.append)
         assert _FakeEngine.loads == ["a"]
         assert [e["stage"] for e in progress].count("loading") == 1
+
+    def test_one_load_logs_speech_model_ready_once(self, engines, home, caplog):
+        m = _model(home, "a")
+        with caplog.at_level(logging.INFO, logger="localm"):
+            speech.synthesize(m, "hi")
+            speech.synthesize(m, "hi")
+        ready = [r.getMessage() for r in caplog.records
+                 if r.getMessage().startswith("speech model ready")]
+        assert ready == ["speech model ready: a (24000 Hz, projector on CPU)"]
+
+    def test_only_one_logger_call_in_localm_says_speech_model_ready(self):
+        root = Path(speech.__file__).resolve().parents[1]
+        sites = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                        and node.args and isinstance(node.args[0], ast.Constant) \
+                        and isinstance(node.args[0].value, str) \
+                        and node.args[0].value.startswith("speech model ready"):
+                    sites.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
+        assert len(sites) == 1 and sites[0].startswith("inference/speech.py:"), sites
 
     def test_another_model_replaces_the_resident_one(self, engines, home):
         a, b = _model(home, "a"), _model(home, "b")
