@@ -172,13 +172,25 @@ def _media_backend_calls():
                 yield f"{path.relative_to(root.parent)}:{node.lineno}", node
 
 
+def _is_plugin_forwarder(where: str) -> bool:
+    parts = Path(where.split(":")[0]).parts
+    return parts[:3] == ("localm", "plugins", "builtin") and parts[-1] == "backend.py"
+
+
 def test_every_media_backend_call_states_privacy():
-    """Each caller passes ``privacy=`` (or forwards ``**kwargs`` from a caller
-    that does), so the facade can force delete_outputs in privacy mode."""
+    """Each caller passes ``privacy=`` itself, so the facade can force
+    delete_outputs in privacy mode. A plugin backend's ``generate_media``
+    forwards its caller's ``**kwargs`` instead."""
     calls = list(_media_backend_calls())
     assert len(calls) >= 7
-    missing = [where for where, call in calls
-               if not any(k.arg in ("privacy", None) for k in call.keywords)]
+    missing = []
+    for where, call in calls:
+        names = {k.arg for k in call.keywords}
+        if "privacy" in names:
+            continue
+        if _is_plugin_forwarder(where) and None in names:
+            continue
+        missing.append(where)
     assert missing == []
 
 
