@@ -303,8 +303,12 @@ class _OffThreadEmit:
     def _write(self, text: str, record: logging.LogRecord) -> None:
         try:
             stream = self.stream
+            if stream is None and isinstance(self, logging.FileHandler):
+                # As FileHandler.emit: a closed file handler reopens its file.
+                # See test_a_closed_file_handler_reopens_its_file.
+                self.stream = stream = self._open()
             if stream is None:
-                return
+                raise ValueError("log handler has no stream")
             stream.write(text)
             stream.flush()
         except RecursionError:

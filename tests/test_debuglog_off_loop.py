@@ -105,3 +105,28 @@ def test_a_failing_stream_is_reported_not_raised(monkeypatch):
         debuglog.logger.removeHandler(handler)
         debuglog.logger.setLevel(old_level)
     assert [r.getMessage() for r in reported] == ["lost line"]
+
+
+def test_a_closed_file_handler_reopens_its_file(tmp_path):
+    """logging.config.dictConfig (uvicorn configures its loggers with it) closes
+    every existing handler; the next record must still reach the file, as with
+    the stdlib FileHandler."""
+    import logging.config
+    path = tmp_path / "debug.log"
+    handler = debuglog._OffThreadFileHandler(path, mode="a", encoding="utf-8", delay=True)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    debuglog.logger.addHandler(handler)
+    old_level = debuglog.logger.level
+    debuglog.logger.setLevel(logging.DEBUG)
+    try:
+        debuglog.logger.debug("before")
+        assert debuglog._log_writer.drain(10)
+        logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+        assert handler.stream is None
+        debuglog.logger.debug("after")
+        assert debuglog._log_writer.drain(10)
+    finally:
+        debuglog.logger.removeHandler(handler)
+        debuglog.logger.setLevel(old_level)
+        handler.close()
+    assert path.read_text(encoding="utf-8").splitlines() == ["before", "after"]

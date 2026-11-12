@@ -12,6 +12,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Sending an image to a model that cannot read it no longer loads a vision model that does not fit.** Choosing another model for an image, an audio clip, a longer conversation or tool calls now measures how each installed model would load on this machine (whole on the GPU, experts in system RAM, partly on the CPU, or reading its weights from disk) and prefers the one that runs best, instead of the one with the largest context window. A model that would read its weights from disk while answering, run on the CPU only, could not be measured, or would unload the model you picked is never loaded on its own: the chat offers it with the reason ("Answer with ..."), and `localm run` asks before using it. A model that fits beside yours is loaded beside it.
+- **The server stays reachable while a model loads.** `/health` reports the model being loaded instead of answering 503, and debug-log writes no longer run on the server's request loop, so a busy disk cannot stall requests.
 - **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
 
 ### Added
