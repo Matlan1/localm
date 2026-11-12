@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import localm
-from localm import _version, updater
+from localm import _version, update_package, updater, updater_components
 from localm.bugreport import LocalmError
 from tests._exe_stub import write_exe_stub
 from tests._net_config import set_config
@@ -42,7 +42,7 @@ def _zip(version, *, files=None):
         z.writestr("localm/__init__.py", f"# {version}")
         for name, text in (files or {}).items():
             z.writestr(name, text)
-    return buf.getvalue()
+    return update_package.stamped(buf.getvalue(), updater_components.stated_components)
 
 
 def _download(data):

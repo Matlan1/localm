@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from localm import _version, updater
+from localm import _version, update_package, updater, updater_components
 from localm.bugreport import LocalmError
 from tests._update_signing import Trust, envelope, keypair, keyset, pub_hex, sig_b64
 
@@ -370,7 +370,7 @@ def _build_zip_bytes(version="0.2.0", deps=("click",)) -> bytes:
         z.writestr("pyproject.toml", '[project]\nname = "localm"\ndependencies = ['
                    + ", ".join(f'"{d}"' for d in deps) + ']\n')
         z.writestr("localm/__init__.py", f"# {version}")
-    return buf.getvalue()
+    return update_package.stamped(buf.getvalue(), updater_components.stated_components)
 
 
 def _opener_for(data: bytes):

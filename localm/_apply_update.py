@@ -444,21 +444,75 @@ def rollback(backup_dir, installed, names) -> None:
             f"rollback incomplete (backup kept at {backup_dir}): " + "; ".join(errors[:6]))
 
 
+# Free space kept on top of what an update writes, in bytes.
+SPACE_MARGIN = 64 * 1024 * 1024
+
+
+class NoSpace(Exception):
+    """The disk cannot hold an update and its backup; nothing was changed."""
+
+
+def _tree_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file() and not _within_preserved(p.relative_to(path.parent).as_posix()):
+            total += p.stat().st_size
+    return total
+
+
+def space_needed(staged_root, installed, names) -> tuple:
+    """``(new, backup)``: the bytes swapping *names* from *staged_root* writes
+    into *installed*, and the bytes the backup of what they replace takes. A
+    PRESERVE_WITHIN sub-tree is neither backed up nor replaced, so it is not
+    counted."""
+    staged_root, installed = Path(staged_root), Path(installed)
+    new = sum(_tree_bytes(staged_root / n) for n in names if (staged_root / n).exists())
+    backup = sum(_tree_bytes(installed / n) for n in names if (installed / n).exists())
+    return new, backup
+
+
+def check_space(staged_root, installed, names, backup_parent, *, free=None) -> None:
+    """Raise :class:`NoSpace` unless the drive of *installed* has room for the
+    new files and the drive of *backup_parent* (an existing folder) for the
+    backup, each with :data:`SPACE_MARGIN` to spare; one drive holding both
+    needs room for both. *free* returns the free bytes at a path (default
+    ``shutil.disk_usage(path).free``). Raises OSError when the free space cannot
+    be read. Changes nothing."""
+    import os
+    installed, backup_parent = Path(installed), Path(backup_parent)
+    free = free or (lambda path: shutil.disk_usage(path).free)
+    new, backup = space_needed(staged_root, installed, names)
+    places: dict = {}
+    for where, need in ((installed, new), (backup_parent, backup)):
+        key = os.stat(where).st_dev
+        first, total = places.get(key, (where, 0))
+        places[key] = (first, total + need)
+    for where, need in places.values():
+        have = free(where)
+        if have < need + SPACE_MARGIN:
+            mb = 1024 * 1024
+            raise NoSpace(f"{where} has {have // mb} MB free and the update needs "
+                          f"{(need + SPACE_MARGIN) // mb + 1} MB there")
+
+
 class BackupFailed(Exception):
     """:func:`backup` could not complete: nothing was swapped and what it wrote is
     gone."""
 
 
-def swap_with_backup(staged_root, installed, backup_dir) -> list:
+def swap_with_backup(staged_root, installed, backup_dir, names=None) -> list:
     """Back up, then swap the staged source into the install. Returns the list of
-    swapped names (for a later rollback).
+    swapped names (for a later rollback). *names* are the top-level entries to
+    swap, default every entry of the staged build (:func:`swap_entries`).
 
     Raises :class:`BackupFailed` when the backup cannot be completed, with nothing
     swapped and *backup_dir* removed. Raises the swap's own error, after restoring the
     install, when the swap fails partway, with *backup_dir* removed. Raises
     RuntimeError when the restore fails too, with *backup_dir* kept: it is then the
     only copy of what the swap replaced."""
-    names = swap_entries(staged_root)
+    names = swap_entries(staged_root) if names is None else list(names)
     try:
         backup(installed, names, backup_dir)
     except OSError as e:

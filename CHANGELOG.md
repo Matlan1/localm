@@ -13,11 +13,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **Hugging Face image-text and sequence-to-sequence models are listed and picked for chat.** A model folder whose architecture ends in `ForImageTextToText`, `ForVision2Seq` or `ForSeq2SeqLM` loaded when named, but registered as an unknown type, so it was left out of the chat picker, automatic model choice and `/v1/models`. It now registers as a language model.
+- **The debug log now lists requests the server refuses before they reach a route.** A request turned away by the open-mode management check, the cross-origin check, the no-key network check, the Host header check, the request size limit, the API docs check or a CORS preflight left no line in the debug log. Every request now gets one line with its method, path and status, and a refused one also says which check refused it. The line never carries a key, token, header value or request content, and debug mode does not change the response.
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
 
 ### Changed
+- **Every update package states exactly what it changes.** It lists each localm file with its checksum, and each component (the llama.cpp runtime, its CUDA libraries, PyTorch, stable-diffusion.cpp, KoboldCpp, ComfyUI, uv) with its version and the checksum of every platform and backend build. An update replaces only what its package states. A package that is cut off, damaged or does not match its statement, or that the free disk space cannot hold, is refused before anything changes, and a failure while the files are written puts everything back.
 - **`localm run` with a different model switches the running server to it.** When the background server for the folder holds another model, or none, `localm run MODEL` now loads MODEL on that server and chats with it, instead of stopping and asking you to re-run with `--no-server`. If the server cannot load it (a model given by a path that is not registered, or a failed load), or you passed `--ctx`, `--gpu-layers`, `--mmproj` or `--device`, which the server's load would not use, `run` says why and loads the model in its own process.
 
 ## [0.3.4b2] - 2026-11-11
