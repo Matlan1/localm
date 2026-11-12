@@ -81,6 +81,19 @@ def test_a_fitting_candidate_beats_a_disk_reading_one_with_a_larger_window():
     assert d.resolved == "small" and d.candidates == ("small",)
 
 
+def test_a_whole_gpu_fit_beats_a_partial_one_with_a_larger_window():
+    reg = {"current": {"path": "Z:/c.gguf", "model_type": "llm", "tool_use": False},
+           "big": {"path": "Z:/b.gguf", "model_type": "llm", "tool_use": True,
+                   "context_length": 262144},
+           "small": {"path": "Z:/s.gguf", "model_type": "llm", "tool_use": True,
+                     "context_length": 8192}}
+    fits = {"big": cr.Fit(cr.FIT_PARTIAL), "small": cr.Fit(cr.FIT_GPU)}
+    d = cr.plan_route("current", cr.CapabilityNeeds(capabilities=("tool_use",)),
+                      pinned=False, fit=lambda names: {n: fits[n] for n in names},
+                      reg=reg, mode="auto")
+    assert d.resolved == "small" and d.candidates == ("small", "big")
+
+
 def test_only_a_disk_reading_candidate_is_suggested_with_the_reason():
     d = _decide({"a": cr.Fit(cr.FIT_DISK, disk_read_bytes=22 << 30)})
     assert not d.routed and d.suggested == "a"
