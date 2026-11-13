@@ -2000,34 +2000,69 @@ def model_is_external(name: str) -> bool:
     return epath is not None and is_external_path(epath)
 
 
+def _registered_file_suffix(entry: object) -> Optional[str]:
+    """The lower-case extension of the single file *entry* was registered with,
+    or None when that is a GGUF (``.gguf`` or an Ollama blob), a directory, or
+    unknown. A path that no longer exists counts as a file only when its
+    extension is a dot followed by letters and digits with at least one letter
+    (``.onnx``, ``.safetensors``), so a folder named like ``Qwen2.5-7B`` is not
+    read as a ``.5-7b`` file."""
+    old = _entry_path(entry) if isinstance(entry, dict) else None
+    if not old:
+        return None
+    path = Path(old)
+    suffix = path.suffix.lower()
+    if suffix == ".gguf" or path.name.startswith("sha256-"):
+        return None
+    try:
+        if path.exists():
+            return (suffix or None) if path.is_file() else None
+    except OSError:
+        pass
+    if re.fullmatch(r"\.[a-z0-9]{1,16}", suffix) and re.search(r"[a-z]", suffix):
+        return suffix
+    return None
+
+
 def relocate_target(new_path: str, name: Optional[str] = None
                     ) -> "tuple[Path | None, str | None]":
     """Validate *new_path* as a relocate destination for the registered model
-    *name*: a real GGUF file or a HuggingFace model directory, or, for a model
-    registered as an image, video or music component file (a ``.safetensors`` /
-    ``.sft`` diffusion model, text encoder, VAE, LoRA, ControlNet or embedding,
-    or a ``.pth`` / ``.pt`` upscaler), a file of that kind, checked the way
-    registration checks it (``_media_component_type``). Returns (resolved Path,
-    None) when valid, or (None, reason) when not - the single source of truth
-    `relocate_model` (CLI) and the GUI's POST /api/models/relocate route both
-    call, so the two surfaces can never disagree about what counts as a valid
-    target."""
+    *name*, with the checks registration applies to that kind of path:
+
+    - a directory: a HuggingFace model directory (``_is_hf_model_dir``);
+    - a ``.gguf`` file or an Ollama blob (``sha256-...``): a usable, complete GGUF;
+    - for a model registered as an image, video or music component file (a
+      ``.safetensors`` / ``.sft`` diffusion model, text encoder, VAE, LoRA,
+      ControlNet or embedding, or a ``.pth`` / ``.pt`` upscaler): a file of that
+      kind (``_media_component_type``);
+    - for a model registered as any other single file (a pulled file of a type
+      registration does not inspect): a file with the same extension.
+
+    Without *name* only the first two are accepted. Returns (resolved Path, None)
+    when valid, or (None, reason) when not. `relocate_model` (CLI) and the GUI's
+    POST /api/models/relocate route both call it."""
     p = Path(new_path).expanduser()
     if not p.exists():
         return None, f"Path does not exist: {p}"
     entry = _mm.load_registry().get(name) if name else None
     entry_type = entry.get("model_type") if isinstance(entry, dict) else None
-    if (p.is_file() and entry_type in _MEDIA_COMPONENT_TYPES
-            and p.suffix.lower() in _MEDIA_FILE_SUFFIXES + _CHECKPOINT_SUFFIXES):
-        if _media_component_type(p, entry_type) == entry_type:
-            return p, None
-        return None, f"Not a {entry_type} model file: {p}"
-    if p.is_dir():
-        from localm.inference.engine import _is_hf_dir
-        if not _is_hf_dir(str(p)):
-            return None, f"Not a HuggingFace model directory: {p}"
-    elif p.suffix.lower() != ".gguf":
+    old_suffix = _registered_file_suffix(entry)
+    suffix = p.suffix.lower()
+    is_blob = p.is_file() and p.name.startswith("sha256-")
+    if p.is_file() and not is_blob and suffix != ".gguf":
+        if entry_type in _MEDIA_COMPONENT_TYPES and suffix in (
+                _MEDIA_FILE_SUFFIXES + _CHECKPOINT_SUFFIXES):
+            if _media_component_type(p, entry_type) == entry_type:
+                return p, None
+            return None, f"Not a {entry_type} model file: {p}"
+        if old_suffix is not None:
+            if suffix == old_suffix:
+                return p, None
+            return None, f"Not a {old_suffix} file like the one this model was registered with: {p}"
         return None, f"Not a GGUF model file: {p}"
+    if p.is_dir():
+        if not _is_hf_model_dir(p):
+            return None, f"Not a HuggingFace model directory: {p}"
     elif (unusable := gguf_unusable_reason(p)) is not None:
         return None, f"{p}: {unusable}"
     elif not _has_gguf_magic(p):
@@ -2041,8 +2076,9 @@ def relocate_target(new_path: str, name: Optional[str] = None
 def relocate_model(name: str, new_path: str) -> bool:
     """Re-point a registered model to *new_path* - for an EXTERNAL model whose file
     was MOVED (it shows 'missing' but is not gone, just relocated). Validates the new
-    path is a real GGUF file or HF dir, updates the registry, and clears the missing
-    flag. Returns True on success."""
+    path with ``relocate_target`` (a file or folder of the kind the model was
+    registered as), updates the registry, and clears the missing flag. Returns True
+    on success."""
     from rich.markup import escape
 
     reg = _mm.load_registry()

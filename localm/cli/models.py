@@ -1281,7 +1281,9 @@ def relocate_cmd(model, new_path):
     An externally-referenced model (one whose file lives outside <data dir>/models)
     shows as 'missing' when you move it. Instead of re-adding it under a new name,
     relocate re-points the existing registry entry - keeping its name, source, and
-    any aliases. NEW_PATH must be a real .gguf file or a HuggingFace model dir.
+    any aliases. NEW_PATH must be the same kind of model the entry was registered
+    as: a .gguf file, a HuggingFace model folder, or the same kind of image, video
+    or music model file (or other single file) as before.
     """
     import sys
     if not relocate_model(model, str(new_path)):
