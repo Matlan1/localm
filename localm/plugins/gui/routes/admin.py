@@ -108,43 +108,55 @@ def register(app: FastAPI, ctx) -> None:
             sources.append(home_dir())               # home root for stray *.log
         except Exception:
             pass
-        out = dest_dir / f"localm-logs-{_time.strftime('%Y%m%d-%H%M%S')}"
+        stem = f"localm-logs-{_time.strftime('%Y%m%d-%H%M%S')}"
         seen: set = set()
-        found = 0            # *.log candidates seen (files that DO exist)
+        logs: list = []      # *.log files that exist, deduplicated by real path
+        for src in sources:
+            if not src or not src.is_dir():
+                continue
+            for p in src.glob("*.log"):
+                if p.resolve() in seen:
+                    continue
+                seen.add(p.resolve())
+                logs.append(p)
+        found = len(logs)
+        if found == 0:
+            # Nothing to export: no folder is created.
+            return {"copied": 0, "found": 0, "dest": "",
+                    "message": "No log files were found to export."}
         copied = 0           # successfully copied
         errors: list = []    # per-file copy failures, with the real reason
         try:
-            out.mkdir(parents=True, exist_ok=True)
+            # A new folder for every export: an existing name (a second export
+            # in the same second) gets a numbered suffix.
+            out = dest_dir / stem
+            n = 1
+            while True:
+                try:
+                    out.mkdir()
+                    break
+                except FileExistsError:
+                    n += 1
+                    out = dest_dir / f"{stem}-{n}"
             used: set = set()
-            for src in sources:
-                if not src or not src.is_dir():
-                    continue
-                for p in src.glob("*.log"):
-                    if p.resolve() in seen:
-                        continue
-                    seen.add(p.resolve())
-                    found += 1
-                    # Two logs can share a basename across home/ and home/logs/;
-                    # disambiguate so the second does not clobber the first.
-                    target = p.name
-                    n = 1
-                    while target in used:
-                        target = f"{p.stem}-{n}{p.suffix}"
-                        n += 1
-                    used.add(target)
-                    try:
-                        shutil.copy2(p, out / target)
-                        copied += 1
-                    except OSError as ce:
-                        # Record the error so the response reports the copy failure
-                        # below rather than a "no files" success.
-                        errors.append(f"{p.name}: {ce}")
+            for p in logs:
+                # Two logs can share a basename across home/ and home/logs/;
+                # disambiguate so the second does not clobber the first.
+                target = p.name
+                k = 1
+                while target in used:
+                    target = f"{p.stem}-{k}{p.suffix}"
+                    k += 1
+                used.add(target)
+                try:
+                    shutil.copy2(p, out / target)
+                    copied += 1
+                except OSError as ce:
+                    # Record the error so the response reports the copy failure
+                    # below rather than a "no files" success.
+                    errors.append(f"{p.name}: {ce}")
         except OSError as e:
             raise HTTPException(500, f"Could not write to that folder: {e}") from e
-        if found == 0:
-            # Genuinely empty: there were no *.log files anywhere to export.
-            return {"copied": 0, "found": 0, "dest": str(out),
-                    "message": "No log files were found to export."}
         if copied == 0:
             # Files existed but every copy failed: report it with a non-200, not with
             # the empty-case message.
