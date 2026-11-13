@@ -1616,6 +1616,7 @@ export const I18N_EN = {
 
   // ---- Settings > schema-driven fields (settings_schema.py CORE_FIELDS) ----
   "settings.field.inheritOption": "(inherit)",
+  "settings.field.unsetOption": "(not set)",
   "settings.field.defaultPlaceholder": "default ({value})",
   "settings.field.secretPlaceholder": "unchanged",
   "settings.field.secretConfiguredPlaceholder": "saved (enter new value to replace)",
@@ -2378,6 +2379,7 @@ export const I18N_EN = {
   "settings.comfy.removeTitle": "Remove localm's ComfyUI?",
   "settings.comfy.removeBody": "This deletes localm's own ComfyUI under the data folder. Your own ComfyUI is not touched, and downloaded models are kept.",
   "settings.comfy.removed": "Removed localm's ComfyUI",
+  "settings.comfy.nothingToRemove": "No managed ComfyUI is installed, so nothing was removed.",
   "settings.comfy.removeFailed": "Remove failed",
   "settings.comfy.updateAvailable": "Installed ComfyUI {installed} - localm ships {pinned}. Update to move to it.",
   "settings.comfy.newerPin": "a newer pin",

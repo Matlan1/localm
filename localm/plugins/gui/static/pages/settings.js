@@ -279,10 +279,19 @@ export function buildSettingControl(field) {
   switch (field.widget) {
     case "select": {
       input = document.createElement("select");
-      for (const opt of field.options || []) {
+      const blankLabel = t("settings.field.inheritOption");
+      const choices = (field.options || []).map((opt) => [opt, opt === "" ? blankLabel : opt]);
+      // A select that is unset (or may be unset) gets a blank choice, so it never
+      // shows an empty box and can return to unset. A media plugin field's blank
+      // inherits the shared value; any other blank means "not set".
+      if (!choices.some(([v]) => v === "")
+          && (value == null || field.shipped_default === null)) {
+        choices.unshift(["", field.catalog_scopes ? blankLabel : t("settings.field.unsetOption")]);
+      }
+      for (const [v, label] of choices) {
         const o = document.createElement("option");
-        o.value = opt;
-        o.textContent = opt === "" ? t("settings.field.inheritOption") : opt;
+        o.value = v;
+        o.textContent = label;
         input.appendChild(o);
       }
       input.value = value == null ? "" : String(value);
@@ -2096,26 +2105,17 @@ export function _mediaChanged(cur, orig) {
  *  fields (group="Media", skipped from the flat core loop above) can be pulled
  *  out and rendered here instead of vanishing. */
 export async function buildMediaSection(form, fields) {
-  let data;
+  // A failed read of the per-plugin settings loses only the three plugin boxes:
+  // the boxes drawn from the schema below still render, and the failure is shown
+  // where the plugin boxes would be.
+  let data = {};
+  let loadError = null;
   try {
     const r = await fetch("/v1/media/config", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    // Surface, do not hide (binding rule 5): the group=Media fields are skipped
-    // from the flat form, so if this fetch fails we must SHOW that the media
-    // settings could not load - silently dropping the section would make those
-    // settings vanish with no clue why.
-    const fail = el("section", "card settings-section");
-    fail.id = "settings-sec-media";
-    fail.dataset.sec = "media";
-    fail.dataset.group = "media";
-    fail.dataset.secLabel = t("settings.sectionHeading.media");
-    fail.appendChild(settingsSectionHead(t("settings.sectionHeading.media"), "media"));
-    fail.appendChild(el("div", "sub",
-      t("settings.media.loadFailed", { message: e.message })));
-    form.appendChild(fail);
-    return;
+    loadError = e;
   }
   const byName = {};
   for (const p of (data.plugins || [])) byName[p.plugin] = p;
@@ -2137,19 +2137,14 @@ export async function buildMediaSection(form, fields) {
   panel.appendChild(managed);
   renderManagedComfyPanel(managed, { targetField });
 
-  // SHARED media settings: every remaining visible group="Media" schema field
-  // that is neither explicitly placed here (comfy_target above,
-  // comfy_gpu_placement below) nor per-plugin-mapped (media_per_plugin, from
-  // MEDIA_PLUGIN_FIELDS - those render inside the per-plugin boxes instead).
-  // Rendered by EXCLUSION, not an allowlist, on purpose: a name allowlist is
-  // exactly how comfy_launch_timeout / comfy_disable_auto_launch /
-  // comfy_func_shim ended up rendered NOWHERE in the GUI (schema-visible,
-  // CLI-only in practice; 2026-07-22 settings-exposure audit) - this way a
-  // future Media field is visible by default and cannot silently vanish.
-  // Saved through the Media section's generic PATCH /v1/config path.
+  // SHARED media settings: every visible group="Media" schema field that is not
+  // explicitly placed elsewhere (comfy_target above, comfy_gpu_placement
+  // below), including the shared defaults behind the per-plugin fields
+  // (media_per_plugin), which a blank per-plugin field uses. Selected by
+  // exclusion, so a new Media field is drawn here by default. Saved through the
+  // Media section's generic PATCH /v1/config path.
   const sharedFields = (fields || []).filter(f =>
-    f.group === "Media" && !f.media_per_plugin
-    && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
+    f.group === "Media" && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
   const sharedCtrls = sharedFields.map(f => buildSettingControl(f)).filter(Boolean);
   if (sharedCtrls.length) {
     const box = el("div", "media-comfy-box");
@@ -2204,6 +2199,10 @@ export async function buildMediaSection(form, fields) {
   // and a later single-subsection re-render (R12) can find its node.
   _mediaSubs = {};
   _mediaControls = {};
+  if (loadError) {
+    panel.appendChild(el("div", "sub media-load-failed",
+      t("settings.media.loadFailed", { message: loadError.message })));
+  }
   const grid = el("div", "media-settings-grid");
   panel.appendChild(grid);
   for (const name of MEDIA_PLUGIN_ORDER) {
@@ -2953,6 +2952,29 @@ function startComfyJobIndicator(anchorEl, logEl) {
  *  /api/comfy/remove. Re-renders itself in place after either finishes, so the
  *  view always matches what is on disk. Off by default: nothing here runs
  *  until the user clicks Set up. */
+/** Draw the "ComfyUI to use" control (comfy_target) into *host* and register it
+ *  in the shared control list, replacing an earlier entry for the key, since
+ *  the panel re-renders in place. Returns the drawn controls (empty when the
+ *  schema did not send the field). */
+function appendComfyTargetRow(host, toggleFields) {
+  const row = el("div", "media-comfy-row");
+  const ctrls = [];
+  for (const field of [toggleFields.targetField]) {
+    if (!field) continue;
+    const ctrl = buildSettingControl(field);
+    if (!ctrl) continue;
+    ctrls.push(ctrl);
+    row.appendChild(ctrl.node);
+  }
+  if (ctrls.length) {
+    host.appendChild(row);
+    const keys = new Set(ctrls.map(c => c.field.key));
+    _settingsControls = _settingsControls.filter(c => !keys.has(c.field.key));
+    _settingsControls.push(...ctrls);
+  }
+  return ctrls;
+}
+
 export async function renderManagedComfyPanel(host, toggleFields) {
   host.replaceChildren();
   const head = subCardHead(t("settings.comfy.ownHead"), "download", "cat-teal");
@@ -2995,25 +3017,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // Built independently of the actions row below: Remove must always be
     // offered once installed, even if the schema fetch is missing this field
     // for some reason (rule 5 - a partial schema must not hide Remove).
-    const row = el("div", "media-comfy-row");
-    const ctrls = [];
-    for (const field of [toggleFields.targetField]) {
-      if (!field) continue;
-      const ctrl = buildSettingControl(field);
-      if (!ctrl) continue;
-      ctrls.push(ctrl);
-      row.appendChild(ctrl.node);
-    }
-    if (ctrls.length) {
-      host.appendChild(row);
-      // This panel can re-render in place (after Set up / Remove / Save)
-      // without a full page refresh, which would otherwise leave stale,
-      // detached-node entries for these two keys piling up in the shared
-      // control list every time - drop any prior entries for them first.
-      const keys = new Set(ctrls.map(c => c.field.key));
-      _settingsControls = _settingsControls.filter(c => !keys.has(c.field.key));
-      _settingsControls.push(...ctrls);
-    }
+    const ctrls = appendComfyTargetRow(host, toggleFields);
 
     const actions = el("div", "actions");
     if (ctrls.length) {
@@ -3047,7 +3051,8 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           const r = await fetch("/api/comfy/remove",
                                 { method: "POST", headers: authHeaders() });
           const d = await r.json().catch(() => ({}));
-          toast(r.ok ? t("settings.comfy.removed") : (d.detail || t("settings.comfy.removeFailed")), !r.ok);
+          if (r.ok && d.status === "noop") toast(t("settings.comfy.nothingToRemove"));
+          else toast(r.ok ? t("settings.comfy.removed") : (d.detail || t("settings.comfy.removeFailed")), !r.ok);
         } catch {
           toast(t("settings.comfy.removeFailed"), true);
         }
@@ -3301,11 +3306,19 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.
+  const targetCtrls = appendComfyTargetRow(host, toggleFields);
   const actions = el("div", "actions");
   const setup = el("button", "btn-primary comfy-managed-setup-btn",
                    t("settings.comfy.setup"));
   setup.type = "button";
   actions.appendChild(setup);
+  if (targetCtrls.length) {
+    const save = el("button", "btn-secondary",
+      t("settings.save.section", { name: t("settings.comfy.ownHead") }));
+    save.type = "button";
+    save.onclick = () => savingState(save, () => saveSettingsSection("media", host));
+    actions.appendChild(save);
+  }
   host.appendChild(actions);
   const log = el("pre", "comfy-managed-log");
   log.style.display = "none";
@@ -3459,6 +3472,7 @@ export function renderMediaSubsection(name) {
   _mediaControls[name] = controls;
   sub.appendChild(grid);
   enhanceNativeModelFields(name, controls);
+  syncComfyOnlyFields(controls);
 
   const actions = el("div", "actions");
   // R11/R13: client-side "Copy from <other>" - prefills this subsection's shared
@@ -3546,9 +3560,43 @@ export async function enhanceNativeModelFields(name, controls) {
   }
 }
 
+/** Media plugin field keys that only ComfyUI reads (their block path starts at
+ *  "comfy"). Bound to settings_schema.MEDIA_PLUGIN_FIELDS by
+ *  tests/test_media_settings_page_rules.py. */
+export const MEDIA_COMFY_ONLY_KEYS = new Set([
+  "workdir", "launch_cmd", "api_url", "output_dir", "delete_outputs",
+  "fast_dequant", "float_type",
+]);
+
+/** Hide a media box's ComfyUI-only fields while its backend is "native", and
+ *  show them again for "auto" or "comfy". No-op for a box without a backend
+ *  field. */
+export function syncComfyOnlyFields(controls) {
+  const backend = controls.find((c) => c.field.key === "backend");
+  if (!backend) return;
+  const input = backend.node.querySelector("select");
+  const apply = () => {
+    const native = backend.read() === "native";
+    for (const c of controls) {
+      if (MEDIA_COMFY_ONLY_KEYS.has(c.field.key)) c.node.hidden = native;
+    }
+  };
+  if (input) input.addEventListener("change", apply);
+  apply();
+}
+
+/** True when Copy from may copy media field *key* between plugin boxes: the
+ *  backend choice ("backend") and the native backend settings ("native_*") are
+ *  each plugin's own and are never copied. */
+export function mediaFieldCopyable(key) {
+  return key !== "backend" && !key.startsWith("native_");
+}
+
 /** R11: prefill the *to* subsection's shared fields from the *from* subsection's
  *  current in-DOM values. Prefill only (no server call); the user still presses
- *  Save. Only fields present in BOTH subsections are copied. */
+ *  Save. Only fields present in BOTH subsections are copied, never a backend or
+ *  native field (mediaFieldCopyable), and never a choice the *to* box does not
+ *  offer. */
 export function copyMediaFields(from, to) {
   const src = _mediaControls[from] || [];
   const dst = _mediaControls[to] || [];
@@ -3558,7 +3606,11 @@ export function copyMediaFields(from, to) {
   for (const c of dst) {
     const s = byKey[c.field.key];
     if (!s || !c.write) continue;     // only fields both subsections have
-    c.write(s.read());
+    if (!mediaFieldCopyable(c.field.key)) continue;
+    const v = s.read();
+    if (c.field.widget === "select" && v != null && v !== ""
+        && !(c.field.options || []).includes(v)) continue;
+    c.write(v);
     c.node.classList.remove("media-inherited");
     n += 1;
   }
