@@ -53,29 +53,35 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
     return None
 
 
-def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names: installed (physically present in the
-    installed folder) AND enabled (config). "Installed" is disk presence in the
-    store to installed model, NOT a config flag, so this scans the installed
-    folder."""
+def _installed_plugins() -> tuple[set, Optional[OSError]]:
+    """``(names, error)``: the plugins physically present in the installed
+    folder, and the OSError that stopped the scan of that folder, or None. A
+    failed scan is logged at debug level; *names* then holds what was found
+    before it failed."""
     from pathlib import Path
 
     from localm.debuglog import logger
     from localm.plugins.loader import plugins_dir
-    installed = set()
+    installed: set = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
             if (not child.name.startswith(".") and child.is_dir()
                     and (child / "plugin.toml").is_file()):
                 installed.add(child.name)
     except OSError as exc:
-        # Surface a real disk or permission fault on the plugins-dir scan: an
-        # empty result here does NOT prove no plugins exist, the scan itself may
-        # have failed.
         logger.debug("active_plugins: failed to scan plugins dir %s: %s",
                      plugins_dir(), exc)
-    enabled = set(cfg.get("plugins_enabled", []) or [])
-    return installed & enabled
+        return installed, exc
+    return installed, None
+
+
+def active_plugins(cfg: dict) -> set:
+    """The set of ACTIVE plugin names: installed (physically present in the
+    installed folder) AND enabled (config). "Installed" is disk presence in the
+    store to installed model, NOT a config flag, so this scans the installed
+    folder. A scan that fails returns what it found before failing."""
+    installed, _error = _installed_plugins()
+    return installed & set(cfg.get("plugins_enabled", []) or [])
 
 
 def would_cycle(name: str, source: str, cfg: dict) -> bool:
@@ -102,17 +108,25 @@ def resolve_config(name: str, cfg: dict,
     *active* is the set of active plugin names (installed AND enabled); when None
     it is derived from disk + config via ``active_plugins`` (the source plugin
     must be installed on disk and enabled, per the store->installed model).
-    Returns ``(block, warning_or_None)``. The returned block is a deep copy, so
-    the stored config is never mutated even if the caller writes to nested blocks.
+    Returns ``(block, warning_or_None)``. When the plugins folder could not be
+    read to tell whether the source is active, the warning says so instead of
+    calling the source inactive. The returned block is a deep copy, so the
+    stored config is never mutated even if the caller writes to nested blocks.
     """
     own = _own_block(name, cfg)
     src = own.get("use_config_from")
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
         return own, None
 
+    scan_error: Optional[OSError] = None
     if active is None:
-        active = active_plugins(cfg)
+        installed, scan_error = _installed_plugins()
+        active = installed & set(cfg.get("plugins_enabled", []) or [])
     if src not in _plugins(cfg) or src not in active:
+        if scan_error is not None and src in _plugins(cfg):
+            return own, (f"'{name}' is set to use '{src}' config, but the plugins "
+                         f"folder could not be read to check whether '{src}' is "
+                         f"active ({scan_error}); using its own settings.")
         return own, (f"'{name}' is set to use '{src}' config, but '{src}' is not "
                      f"active; using its own settings.")
     if would_cycle(name, src, cfg):
@@ -250,18 +264,25 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     declares *capability* (one of ``CAPABILITIES``; any other name raises
     KeyError).
 
-    ``generate`` takes the extra keyword ``privacy`` (default False), which is
-    not passed to the backend. It passes the backend ``delete_outputs`` as
-    True when ``privacy`` is set and as the settings' ``delete_outputs``
-    otherwise; a caller that passes ``delete_outputs`` itself gets a TypeError.
+    ``generate`` takes the extra keywords ``privacy`` and ``withhold_on_trace``
+    (both default False), which are not passed to the backend. It passes the
+    backend ``delete_outputs`` as True when ``privacy`` is set and as the
+    settings' ``delete_outputs`` otherwise; a caller that passes
+    ``delete_outputs`` itself gets a TypeError. The generation is STRICT when
+    ``privacy`` or ``withhold_on_trace`` is set (``withhold_on_trace``: the
+    file is handed to a caller as it is, for example in an HTTP response).
+    A strict generation passes a backend that declares ``NEEDS_COMFY_SERVER``
+    ``containment_required=True``, so a ComfyUI copy or history entry it could
+    not remove fails the generation.
     When the backend declares
     ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a non-empty
     file at *out_path*, ``generate`` strips
     the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
     ``video``) once, here. A failed strip appends the WARNING to the message;
-    with ``privacy`` it instead deletes the file and returns
-    ``(False, <message naming the reason>)``, so a file that may still carry the
-    prompt is never reported as generated."""
+    a strict generation instead returns ``(False, "Output withheld: <reason>")``.
+    A strict generation that fails for any reason deletes *out_path*, and the
+    message says when it could not, so a file that may still carry the prompt
+    is never left behind or reported as generated."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()
@@ -284,36 +305,47 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
         return resolve(s).free_vram(s, *args, **kwargs)
 
     def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
-                 **kwargs) -> tuple[bool, str]:
-        if "delete_outputs" in kwargs:
-            raise TypeError("generate() sets delete_outputs from the settings "
-                            "and privacy; do not pass it")
+                 withhold_on_trace: bool = False, **kwargs) -> tuple[bool, str]:
+        if "delete_outputs" in kwargs or "containment_required" in kwargs:
+            raise TypeError("generate() sets delete_outputs and containment_required "
+                            "from the settings, privacy and withhold_on_trace; do not "
+                            "pass them")
+        strict = bool(privacy or withhold_on_trace)
         impl = resolve(s)
+        if strict and getattr(impl, "NEEDS_COMFY_SERVER", False):
+            kwargs["containment_required"] = True
         ok, message = impl.generate(
             s, prompt, out_path, *args,
             delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
-        if (not ok or not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
+        if not ok:
+            return False, (message + _remove_withheld(out_path)) if strict else message
+        if (not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
                 or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
             return ok, message
         from localm.media.output_metadata import strip_output
         result = strip_output(output_kind, Path(out_path))
         if not result.failed:
             return ok, message
-        if privacy:
-            removed = ""
-            try:
-                Path(out_path).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                removed = (f" The file could not be removed ({e}); delete "
-                           f"{out_path} by hand.")
-            return False, f"Output withheld: {result.reason}{removed}"
+        if strict:
+            return False, f"Output withheld: {result.reason}{_remove_withheld(out_path)}"
         return ok, f"{message}\n{result.reason}"
 
     return SimpleNamespace(resolve=resolve, supports=supports,
                            ensure_available=ensure_available,
                            free_vram=free_vram, generate=generate)
+
+
+def _remove_withheld(out_path) -> str:
+    """Delete *out_path* when it exists. Returns "" when it is gone, or a
+    sentence telling the user to delete it by hand when it could not be
+    removed. Never raises."""
+    try:
+        Path(out_path).unlink()
+    except FileNotFoundError:
+        return ""   # See test_withheld_file_already_gone_is_not_reported.
+    except OSError as e:
+        return f" The file could not be removed ({e}); delete {out_path} by hand."
+    return ""
 
 
 def media_session_is_private() -> bool:

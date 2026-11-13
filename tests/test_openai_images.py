@@ -50,6 +50,7 @@ class _Backend:
         self.calls = []
         self.result = None
         self.fail = None
+        self.warning = None
 
     def settings(self, cfg):
         return {"reload_after": True, "warning": "",
@@ -64,7 +65,8 @@ class _Backend:
             return False, self.fail
         w, h = kw.get("width", 8), kw.get("height", 8)
         out_path.write_bytes(self.result or _png(w, h))
-        return True, f"Image saved to {out_path.name} (seed 1)"
+        saved = f"Image saved to {out_path.name} (seed 1)"
+        return True, f"{saved}\n{self.warning}" if self.warning else saved
 
 
 @pytest.fixture
@@ -617,3 +619,25 @@ class TestRemoveTreeWhenIdle:
         d = self._tree(tmp_path)
         plug._remove_tree_when_idle(d, [])
         assert not d.exists()
+
+
+class TestTheResponseIsHandedOutAsItIs:
+    """The file goes to the caller as it is, so the generation runs strict and
+    the response names every warning it reported."""
+
+    def test_the_generation_is_strict(self, client, backend):
+        r = client.post(URL, json={"prompt": "a cat"})
+        assert r.status_code == 200, r.text
+        assert backend.calls[0]["withhold_on_trace"] is True
+
+    def test_a_generation_warning_reaches_the_response(self, client, backend, log_mode):
+        backend.warning = "WARNING: ComfyUI's own console reported: lora missing"
+        r = client.post(URL, json={"prompt": "a cat", "response_format": "b64_json"})
+        assert r.status_code == 200, r.text
+        assert r.json()["warnings"] == [backend.warning]
+
+    def test_a_withheld_file_is_a_502_naming_why(self, client, backend):
+        backend.fail = "Output withheld: WARNING: generated file is not PNG"
+        r = client.post(URL, json={"prompt": "a cat"})
+        assert r.status_code == 502
+        assert "Output withheld: WARNING: generated file is not PNG" in r.json()["detail"]
