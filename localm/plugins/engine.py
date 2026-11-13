@@ -648,8 +648,9 @@ class PluginHost:
 
     def register_inference_backend(self, descriptor) -> None:
         """Register *descriptor* (a ``contract.InferenceBackendDescriptor``) in
-        the process-wide backend registry, stamped with this plugin's name.
-        Removed again by :meth:`unmount`."""
+        the process-wide backend registry, stamped with this plugin's name. A
+        store-installed plugin's descriptors are asked before a third-party
+        plugin's. Removed again by :meth:`unmount`."""
         import dataclasses
 
         from localm.inference import backend_registry
@@ -659,7 +660,7 @@ class PluginHost:
                 f"InferenceBackendDescriptor (see localm.plugins.contract), got "
                 f"{type(descriptor).__name__}")
         stamped = dataclasses.replace(descriptor, plugin_name=self._spec.name)
-        backend_registry.register(stamped)
+        backend_registry.register(stamped, first_party=self._spec.builtin)
         self._backends.append(stamped)
         self.audit("inference_backend_registered", {"backend": stamped.name})
 

@@ -31,6 +31,7 @@ def _fresh_registry(monkeypatch, tmp_path):
     import localm.config as cfg
     import localm.plugins.engine as plugins_engine
     monkeypatch.setattr(backend_registry, "_DESCRIPTORS", [])
+    monkeypatch.setattr(backend_registry, "_FIRST_PARTY_PLUGINS", set())
     monkeypatch.setattr(plugins_engine, "_backend_manager", None)
     monkeypatch.setattr(plugins_engine, "_server_manager_attached", False)
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
@@ -123,6 +124,29 @@ class TestCreateBackend:
         backend_registry.register(_descriptor([], name="first", plugin="a"))
         backend_registry.register(_descriptor([], name="second", plugin="b"))
         assert backend_registry.backend_for(str(d)).name == "first"
+
+    def test_a_first_party_backend_is_asked_before_a_third_party_one(self, tmp_path):
+        from localm.plugins.engine import PluginHost, PluginSpec
+        d = _exl2_dir(tmp_path)
+        greedy: list = []
+        PluginHost(FastAPI(), object(), PluginSpec(name="aaa")).register_inference_backend(
+            _descriptor(greedy, name="greedy"))
+        PluginHost(FastAPI(), object(), PluginSpec(name="exllama", builtin=True)
+                   ).register_inference_backend(_descriptor([], name="exllama"))
+        claimed = backend_registry.backend_for(str(d))
+        assert (claimed.name, claimed.plugin_name) == ("exllama", "exllama")
+        assert greedy == []
+        assert [x.plugin_name for x in backend_registry.registered()] == ["exllama", "aaa"]
+
+    def test_unregistering_a_first_party_plugin_drops_its_precedence(self, tmp_path):
+        d = _exl2_dir(tmp_path)
+        backend_registry.register(_descriptor([], name="third", plugin="aaa"))
+        backend_registry.register(_descriptor([], name="first", plugin="zzz"),
+                                  first_party=True)
+        assert backend_registry.unregister_plugin("zzz") == 1
+        assert backend_registry.backend_for(str(d)).name == "third"
+        backend_registry.register(_descriptor([], name="again", plugin="zzz"))
+        assert [x.name for x in backend_registry.registered()] == ["third", "again"]
 
     def test_re_registering_keeps_the_claim_order(self, tmp_path):
         d = _exl2_dir(tmp_path)

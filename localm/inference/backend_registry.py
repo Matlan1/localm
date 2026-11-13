@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Inference backends registered by plugins (``Host.register_inference_backend``).
 
-Process-wide list of ``InferenceBackendDescriptor`` objects, asked in
-registration order by ``engine.create_backend`` for a model path the built-in
-GGUF and Hugging Face backends refuse. Holds no vendor code.
+Process-wide list of ``InferenceBackendDescriptor`` objects, asked by
+``engine.create_backend`` for a model path the built-in GGUF and Hugging Face
+backends refuse: descriptors of first-party plugins first, then third-party
+ones, each group in registration order. Holds no vendor code.
 
 ``_LOCK`` is a leaf lock: it guards only the list, and no descriptor callback
 (``claims``/``create``) and no other lock is ever taken while it is held. See
@@ -19,11 +20,14 @@ from localm.debuglog import logger
 
 _LOCK = threading.Lock()
 _DESCRIPTORS: list = []
+_FIRST_PARTY_PLUGINS: set = set()
 
 
-def register(descriptor: Any) -> None:
+def register(descriptor: Any, *, first_party: bool = False) -> None:
     """Add *descriptor* at the end, or in the place of an earlier one with the
-    same ``name`` from the same plugin. Raises ValueError for an empty name or a
+    same ``name`` from the same plugin. *first_party* records that its plugin
+    was installed from the bundled store, which puts every descriptor of that
+    plugin ahead of third-party ones. Raises ValueError for an empty name or a
     ``claims``/``create`` that is not callable."""
     if not getattr(descriptor, "name", ""):
         raise ValueError("an inference backend descriptor needs a name")
@@ -33,6 +37,10 @@ def register(descriptor: Any) -> None:
         raise ValueError(f"inference backend {descriptor.name!r}: create is not callable")
     key = (descriptor.name, descriptor.plugin_name)
     with _LOCK:
+        if first_party:
+            _FIRST_PARTY_PLUGINS.add(descriptor.plugin_name)
+        else:
+            _FIRST_PARTY_PLUGINS.discard(descriptor.plugin_name)
         for i, d in enumerate(_DESCRIPTORS):
             if (d.name, d.plugin_name) == key:
                 _DESCRIPTORS[i] = descriptor
@@ -45,22 +53,28 @@ def unregister_plugin(plugin_name: str) -> int:
     with _LOCK:
         before = len(_DESCRIPTORS)
         _DESCRIPTORS[:] = [d for d in _DESCRIPTORS if d.plugin_name != plugin_name]
+        _FIRST_PARTY_PLUGINS.discard(plugin_name)
         return before - len(_DESCRIPTORS)
 
 
 def registered() -> list:
-    """A snapshot of the registered descriptors, in registration order."""
+    """A snapshot of the registered descriptors in the order they are asked:
+    first-party plugins' descriptors, then third-party ones, each group in
+    registration order."""
     with _LOCK:
-        return list(_DESCRIPTORS)
+        return sorted(_DESCRIPTORS,
+                      key=lambda d: d.plugin_name not in _FIRST_PARTY_PLUGINS)
 
 
 def claiming(model_path: str) -> Optional[Any]:
-    """The first registered descriptor whose ``claims(model_path)`` is True, or
-    None. A ``claims`` that raises is logged at WARNING and counts as not
-    claiming."""
+    """The first descriptor, in :func:`registered` order, whose
+    ``claims(model_path)`` is True, or None. A ``claims`` that raises is logged
+    at WARNING and counts as not claiming."""
     for descriptor in registered():
         try:
             if descriptor.claims(str(model_path)):
+                logger.debug("inference backend %r (plugin %r) claims %s",
+                             descriptor.name, descriptor.plugin_name, model_path)
                 return descriptor
         except Exception as e:
             logger.warning("inference backend %r (plugin %r): claims() raised on %s "
