@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The runtime and component steps of an update are carried out by the installed
-(new) version at its own start, never by the process that applied the update:
-every ``updater.apply`` call site defers them, a server restart in a process
-older than the installed version hands them to the re-executed version, and a
-failure of those steps at the new version's start rolls the update back."""
+(new) version at its own start, never by the process that applied the update
+(a terminal downgrade, whose older version's start may not, carries them out
+itself): every ``updater.apply`` call site defers them, a server restart in a
+process older than the installed version hands them to the re-executed version,
+and a failure of those steps at the new version's start rolls the update back."""
 
 from __future__ import annotations
 
@@ -250,3 +251,25 @@ def test_a_preload_waits_for_the_restart_that_installs_the_update(monkeypatch):
     monkeypatch.delenv("LOCALM_FINISH_UPDATE_AFTER_START")
     gui_cli._start_preload(None, Engine())
     assert loaded.wait(10.0)
+
+
+def test_a_stale_update_record_dropped_at_start_never_rolls_the_repair_back(at_start,
+                                                                           monkeypatch):
+    updater_components.write_pending([{"name": "sdcpp", "update": True}], root=".",
+                                     version="0.0.1")
+    runs = []
+
+    def finish_pending(**kw):
+        runs.append(updater_components.read_pending())
+        if len(runs) == 1:
+            updater_components.clear_pending()
+            return None
+        return {"state": "failed", "note": "components failed"}
+    monkeypatch.setattr(updater_components, "finish_pending", finish_pending)
+    monkeypatch.setattr(updater_components, "catch_up", lambda root=None, *, repair=False: (
+        updater_components.write_pending([{"name": "sdcpp", "update": True}], root=".",
+                                         version="9.9.9", repair=repair)
+        or [{"name": "sdcpp", "update": True, "note": "sd.cpp"}]))
+    _core._finish_pending_component_update("gui")
+    assert [r["repair"] for r in runs] == [False, True]
+    assert at_start["rolled_back"] == 0
