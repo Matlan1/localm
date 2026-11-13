@@ -852,8 +852,8 @@ class HFRunner:
                         f"{self._backend_label} model load timed out after {timeout:.0f}s "
                         f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
-                        "or raise hf_load_timeout_s if this model genuinely "
-                        "needs longer to load.") from e
+                        "or raise 'HuggingFace load timeout (s)' in Settings > Model "
+                        "if this model genuinely needs longer to load.") from e
         kind = result[0]
         if kind == "ok":
             return result[1]

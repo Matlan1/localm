@@ -1480,7 +1480,7 @@ export const I18N_EN = {
   "models.relocate.title": "Point this entry at the file's new location",
   "models.relocate.working": "Checking…",
   "models.relocate.toast": "Relocated '{name}'",
-  "models.bundledCodeNote": "This model ships its own code, which did not run because 'Allow model-bundled custom code' is off; localm used transformers' own support for it instead. That may be why this failed. If you trust the model's source, try turning that setting on (localm config hf_trust_remote_code true).",
+  "models.bundledCodeNote": "This model ships its own code, which did not run because 'Allow model-bundled custom code' is off; localm used transformers' own support for it instead. That may be why this failed. If you trust the model's source, try turning that setting on (Settings > Model, or `localm config hf_trust_remote_code true`).",
   "models.bundledCodeAlwaysNote": "This model ships its own code, which localm does not run for this kind of model; it uses transformers' own support for it instead. That may be why this failed.",
   "models.ownCodeOff": "own code off",
   "models.ownCodeOffHint": "This model ships its own code, which does not run: it uses transformers' own support. If it fails, the failure message says what to try.",

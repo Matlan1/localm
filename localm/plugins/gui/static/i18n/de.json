@@ -1347,7 +1347,7 @@
   "models.relocate.title": "Diesen Eintrag auf den neuen Speicherort der Datei verweisen lassen",
   "models.relocate.working": "Wird geprüft…",
   "models.relocate.toast": "Speicherort von '{name}' aktualisiert",
-  "models.bundledCodeNote": "Dieses Modell bringt eigenen Code mit, der nicht ausgeführt wurde, weil 'Im Modell enthaltenen eigenen Code zulassen' ausgeschaltet ist; localm hat stattdessen die eigene Unterstützung von transformers verwendet. Das kann der Grund für diesen Fehler sein. Wenn Sie der Quelle des Modells vertrauen, schalten Sie diese Einstellung versuchsweise ein (localm config hf_trust_remote_code true).",
+  "models.bundledCodeNote": "Dieses Modell bringt eigenen Code mit, der nicht ausgeführt wurde, weil 'Im Modell enthaltenen eigenen Code zulassen' ausgeschaltet ist; localm hat stattdessen die eigene Unterstützung von transformers verwendet. Das kann der Grund für diesen Fehler sein. Wenn Sie der Quelle des Modells vertrauen, schalten Sie diese Einstellung versuchsweise ein (Einstellungen > Modell, oder `localm config hf_trust_remote_code true`).",
   "models.bundledCodeAlwaysNote": "Dieses Modell bringt eigenen Code mit, den localm für diese Modellart nicht ausführt; es verwendet stattdessen die eigene Unterstützung von transformers. Das kann der Grund für diesen Fehler sein.",
   "models.ownCodeOff": "eigener Code aus",
   "models.ownCodeOffHint": "Dieses Modell bringt eigenen Code mit, der nicht ausgeführt wird: Es verwendet die eigene Unterstützung von transformers. Bei einem Fehler nennt die Meldung, was Sie versuchen können.",

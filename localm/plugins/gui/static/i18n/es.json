@@ -1375,7 +1375,7 @@
   "models.relocate.title": "Apunta esta entrada a la nueva ubicación del archivo",
   "models.relocate.toast": "Se reubicó '{name}'",
   "models.relocate.working": "Comprobando…",
-  "models.bundledCodeNote": "Este modelo incluye su propio código, que no se ejecutó porque 'Permitir código propio incluido en el modelo' está desactivado; localm usó en su lugar el soporte propio de transformers. Esa puede ser la causa de este fallo. Si confías en el origen del modelo, prueba a activar ese ajuste (localm config hf_trust_remote_code true).",
+  "models.bundledCodeNote": "Este modelo incluye su propio código, que no se ejecutó porque 'Permitir código propio incluido en el modelo' está desactivado; localm usó en su lugar el soporte propio de transformers. Esa puede ser la causa de este fallo. Si confías en el origen del modelo, prueba a activar ese ajuste (Ajustes > Modelo, o `localm config hf_trust_remote_code true`).",
   "models.bundledCodeAlwaysNote": "Este modelo incluye su propio código, que localm no ejecuta para este tipo de modelo; usa en su lugar el soporte propio de transformers. Esa puede ser la causa de este fallo.",
   "models.ownCodeOff": "código propio desactivado",
   "models.ownCodeOffHint": "Este modelo incluye su propio código, que no se ejecuta: usa el soporte propio de transformers. Si falla, el mensaje indica qué probar.",
