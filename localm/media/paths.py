@@ -145,11 +145,20 @@ def _is_bare_name(raw: str) -> bool:
             and Path(raw).name == raw)
 
 
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, False for a path the system refuses to look at (a
+    name too long, for example) instead of raising."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _bare_name_target(raw: str, home: Path) -> str:
     """The path of the file named *raw* (a bare file name) in the uploads folder
     or a generated-media gallery, or *raw* unchanged when no root holds it.
     Raises InputImageRefused when more than one root holds that name."""
-    hits = [root / raw for root in _home_input_roots(home) if (root / raw).is_file()]
+    hits = [root / raw for root in _home_input_roots(home) if _is_file(root / raw)]
     if len(hits) > 1:
         raise InputImageRefused(
             f"'{raw}' is in more than one of the uploads folder and the generated-media "
@@ -205,7 +214,7 @@ def check_input_image(raw: str) -> Path:
             "uploads folder) or one of the generated-media galleries. Other "
             "locations, including the localm data directory itself and the "
             "localm install directory, are not readable here.")
-    if not resolved.is_file():
+    if not _is_file(resolved):
         raise InputImageRefused(f"Input image not found: {raw}")
     return resolved
 

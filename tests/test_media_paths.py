@@ -668,3 +668,20 @@ def test_a_bare_name_that_is_a_link_out_of_a_root_is_refused(tmp_path, monkeypat
         pytest.skip("this account cannot create symlinks")
     with pytest.raises(media_paths.InputImageRefused):
         media_paths.check_input_image("innocent.png")
+
+
+def test_a_name_the_system_refuses_to_look_up_is_a_refusal_not_an_error(tmp_path, monkeypatch):
+    home = _input_home(tmp_path, monkeypatch)
+    (home / "uploads").mkdir()
+    real_is_file = Path.is_file
+
+    def is_file(self):
+        if self.name.startswith("toolong"):
+            raise OSError(36, "File name too long", str(self))
+        return real_is_file(self)
+    monkeypatch.setattr(Path, "is_file", is_file)
+    with pytest.raises(media_paths.InputImageRefused) as ei:
+        media_paths.check_input_image("toolong" + "x" * 300 + ".png")
+    assert str(home) not in str(ei.value)
+    with pytest.raises(media_paths.InputImageRefused):
+        media_paths.check_input_image(str(home / "uploads" / "toolong.png"))
