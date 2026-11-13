@@ -219,7 +219,8 @@ to disk.
 
 With the `browser` plugin installed and enabled, the coding agent gets tools
 to drive a real, automated browser (`browser_navigate`, `browser_click`,
-`browser_fill`, plus read-only `browser_read`/`browser_screenshot`/
+`browser_fill`, `browser_screenshot` (which saves a PNG into the project and
+asks first, like a file write), plus read-only `browser_read`/
 `browser_console`/`browser_network`/`browser_close`). It reaches only what
 this same policy already allows: every request the driven page makes -
 including images and scripts the page pulls in on its own, and every hop of
