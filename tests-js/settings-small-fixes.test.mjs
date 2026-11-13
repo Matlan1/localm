@@ -44,6 +44,7 @@ async function settle() {
 
 async function open(patches = [], refusal) {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches, refusal) });
+  await settle();
   runScript(win, 'caps.fsAccess = "host"; refreshSettingsPage();');
   await settle();
   return win;
@@ -56,7 +57,7 @@ test("each folder list's picker says whether the folder is allowed or denied", a
     win.document.querySelector(`[data-field-key="${key}"] .pathlist-add`).click();
   }
   await settle();
-  assert.deepEqual(win.__titles, ["Pick a folder to allow", "Pick a folder to deny"]);
+  assert.deepEqual([...win.__titles], ["Pick a folder to allow", "Pick a folder to deny"]);
 });
 
 test("the secret Clear button's tooltip follows its Clear / Undo state", async () => {

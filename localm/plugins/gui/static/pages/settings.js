@@ -2836,7 +2836,10 @@ export async function buildTtsSection(form) {
       }
       toast(t("settings.tts.modelReady"));
     } catch (err) {
-      toast(t("settings.tts.setupFailed", { message: err.message || err }), true);
+      // A provider error flagged `shown` has already been toasted with its reason.
+      if (!(err && err.shown)) {
+        toast(t("settings.tts.setupFailed", { message: (err && err.message) || err }), true);
+      }
     } finally {
       setupBtn.disabled = false;
       await updateKokoroStatus();

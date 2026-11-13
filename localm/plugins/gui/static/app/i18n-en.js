@@ -2242,12 +2242,6 @@ export const I18N_EN = {
   "settings.field.tts.device.help": "webgpu currently produces corrupted, buzzing audio on many GPUs, so auto always uses wasm instead. Pick webgpu only to test whether that has been fixed.",
   "settings.field.tts.dtype.label": "Model precision",
   "settings.field.tts.dtype.help": "auto picks fp32 (clean audio). q8/fp16 download less but sound worse; q8 produced audible cracks on the WASM path.",
-  "settings.field.tts.engine.label": "Engine",
-  "settings.field.tts.engine.help": "Speech engine the plugin uses.",
-  "settings.field.tts.library.label": "Kokoro library path",
-  "settings.field.tts.library.help": "Path to the vendored kokoro-js bundle, relative to the tts plugin's static folder.",
-  "settings.field.tts.wasmPaths.label": "ONNX runtime WASM path",
-  "settings.field.tts.wasmPaths.help": "Folder holding the onnxruntime WASM runtime, relative to the tts plugin's static folder; keep the trailing slash. Blank falls back to the vendored copy that ships with the plugin.",
 
   // ---- Settings > schema-driven section headings (CORE_SECTION_HEADING) ----
   "settings.sectionHeading.engine": "Runtime & GPU",
@@ -2624,7 +2618,7 @@ export const I18N_EN = {
 
   // ---- Settings > Your data ----
   "settings.privacyData.title": "Your data",
-  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone.",
+  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone. Memory facts, generated images, music and video, coder sessions and logs are not touched. In privacy mode the server's conversation store is closed, so conversations it kept earlier stay until you delete them with chat persistence on.",
 
   // ---- Settings > Diagnostics ----
   "settings.diagnostics.title": "Diagnostics",
@@ -2982,7 +2976,7 @@ export const I18N_EN = {
   "appearance.language.help":
     "The language the interface is shown in. Saved on the server, so it follows this instance to every browser that connects to it. Parts of the app that are not translated yet stay in English.",
   "appearance.language.saveFailed":
-    "Could not save the language on the server - this browser shows it now, but the language saved on the server returns on the next load.",
+    "Could not save the language on the server - it applies in this browser but may not on other devices.",
   "appearance.logoStyle": "Logo style",
   "appearance.logoStyle.help":
     "How the wordmark is drawn in the sidebar. Saved on the server, so every browser and the desktop launcher use it.",
