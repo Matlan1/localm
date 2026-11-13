@@ -371,6 +371,9 @@ export function register(ctx) {
           ? (r.error || "(error, no detail)")
           : (r.output || "(no output)");
         item.appendChild(pre);
+        if (r.answered_by) {
+          item.appendChild(el("div", "job-meta sub", `Answered by ${r.answered_by}`));
+        }
         if (r.routing) item.appendChild(el("div", "job-meta sub job-routing", r.routing));
         body.appendChild(item);
       }
@@ -409,6 +412,9 @@ export function register(ctx) {
       ["cron", "Custom cron (5-field)"],
     ]);
     const schedDetails = el("div", "jobs-sched-details");
+    const schedHint = el("div", "sub",
+      "A new job first runs at the scheduler's next check (within a minute), then on " +
+      "its schedule. Times of day use the clock of the computer the server runs on.");
     
     function updateSchedDetails() {
       clear(schedDetails);
@@ -456,6 +462,7 @@ export function register(ctx) {
     updateSchedDetails();
     schedContainer.appendChild(schedKind);
     schedContainer.appendChild(schedDetails);
+    schedContainer.appendChild(schedHint);
 
     // Model is a dropdown of installed models (blank = active/default). It is
     // populated asynchronously from /api/models so the form renders immediately.
@@ -500,7 +507,7 @@ export function register(ctx) {
       } else if (preset === "interval") {
         kind = "interval";
         let raw = document.getElementById("jobs-sched-interval").value.trim();
-        if (!/^\d+$/.test(raw)) raw = raw === "" ? "3600" : "";
+        if (!/^\d+$/.test(raw)) raw = "";
         schedule = parseInt(raw, 10);
         if (Number.isNaN(schedule) || schedule < 1) {
           toast("Interval must be a whole number of seconds (e.g. 3600).", true);
@@ -555,7 +562,7 @@ export function register(ctx) {
   // usable. Uses raw fetch (not api(), which is namespaced to /api/jobs).
   async function populateModels(sel) {
     try {
-      const r = await fetch("/api/models", { headers: authHeaders() });
+      const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
       if (!r.ok) return;
       const data = await r.json();
       for (const m of (data && data.models) || []) {
