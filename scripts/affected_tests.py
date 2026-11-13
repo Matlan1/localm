@@ -229,8 +229,6 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",
     "tests/test_dependabot_groups.py": "uses the selector's requirement parsing only",
     "tests/test_run_affected_tests.py": "runs the selector with a stand-in or for one named file",
-    "tests/test_pin_pipeline_paths.py": "reads the git directory of the checkout, not a listing",
-    "tests/test_pin_task_script.py": "runs the pin task on a repository in tmp_path",
     "tests/test_rollback_standalone.py": "lists the update backup folder of an install in tmp_path",
     "tests/test_update_watchdog.py": "lists the update backup folder of an install in tmp_path",
     "tests/test_update_all_or_nothing.py": "lists the update backup folder of an install in tmp_path",
