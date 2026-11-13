@@ -2736,8 +2736,8 @@ class HFWorker:
         if vision_plan is not None:
             vision_cache.arm(*vision_plan)
         prefill_progress = None
-        layers = _decoder_layers(model) if on_status else None
-        if layers is not None:
+        layers = _decoder_layers(model) if on_status is not None else None
+        if on_status is not None and layers is not None:
             from localm.inference.protocol import PREFILL_PROGRESS_INTERVAL_S
             prefill_progress = _PrefillLayerProgress(
                 on_status, layers, PREFILL_PROGRESS_INTERVAL_S)
