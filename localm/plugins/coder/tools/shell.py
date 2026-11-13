@@ -512,6 +512,14 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
         return _job_not_found(registry, job_id)
 
     outcome = job.kill()
+    if getattr(job, "kind", "") == "agent":
+        # A background sub-agent has no process output; its status is the
+        # check_agent_job text.
+        from .agents import tool_check_agent_job
+        status = tool_check_agent_job(cwd, job_id)
+        return ToolResult(ok=not outcome.startswith("kill FAILED"),
+                          output=f"<kill_result>{outcome}</kill_result>\n" + status.output,
+                          summary=f"{job_id} {outcome}")
     output, summary, trunc, _st = _render_job(job)
     output = f"<kill_result>{outcome}</kill_result>\n" + output
     # A kill that could not stop the process must never report success.
