@@ -515,6 +515,9 @@ def read_json_state(path: Path, default):
 
 
 _CROSS_LOCK_TIMEOUT = 10.0      # seconds to wait for a lock held by another process
+# Wait budget, in seconds, for store_lock on a best-effort write made on the
+# request path (a last_used stamp, a marker back-fill).
+BEST_EFFORT_LOCK_TIMEOUT = 0.5
 _CROSS_LOCK_STALE_AGE = 30.0    # a lock file whose holder cannot be identified (no start
                                  # identity, another pid space, unreadable) and that is
                                  # older than this is presumed abandoned and is reclaimed

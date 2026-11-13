@@ -12,7 +12,10 @@ and every later create once the injection is spent, is the real call."""
 
 import ast
 import os
+import subprocess
+import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -23,16 +26,28 @@ from localm.storekit import ConfigLockTimeout, store_lock
 _windows_only = pytest.mark.skipif(os.name != "nt", reason="the wait is Windows-only")
 
 
+# A refusal loop still running this long after the first injected create has
+# ignored its deadline; the fake then raises AssertionError so the test fails
+# instead of hanging.
+_RUNAWAY_S = 30.0
+
+
 def _refuse_lock_create(monkeypatch, lockpath, times, *, first_real=0):
     """Patch os.open so the exclusive create of *lockpath* raises
     PermissionError(13) *times* times, after letting the first *first_real*
-    creates of it through to the real call. Returns the counters."""
+    creates of it through to the real call. Returns the counters. Raises
+    AssertionError from the create once _RUNAWAY_S has passed since the first
+    create of *lockpath*."""
     real = os.open
-    state = {"left": times, "real_left": first_real, "creates": 0}
+    state = {"left": times, "real_left": first_real, "creates": 0, "first": None}
 
     def fake(path, flags, *a, **kw):
         if str(path) == str(lockpath) and (flags & os.O_CREAT) and (flags & os.O_EXCL):
             state["creates"] += 1
+            if state["first"] is None:
+                state["first"] = time.time()
+            elif time.time() - state["first"] > _RUNAWAY_S:
+                raise AssertionError(f"store_lock kept creating {lockpath.name} past its deadline")
             if state["real_left"]:
                 state["real_left"] -= 1
                 return real(path, flags, *a, **kw)
@@ -88,12 +103,19 @@ def test_store_lock_access_denied_that_never_clears_raises_permission_error(
 def test_store_lock_held_then_access_denied_reports_a_lock_timeout(tmp_path, monkeypatch):
     target = tmp_path / "auth.json"
     lockpath = tmp_path / "auth.json.lock"
-    lockpath.write_bytes(storekit._lock_token(os.getppid(), "a-live-holder"))
-    state = _refuse_lock_create(monkeypatch, lockpath, 10_000, first_real=1)
-    with pytest.raises(OSError) as info:
-        with store_lock(target, timeout=0.5):
-            pass
-    caught = info.value
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        lockpath.write_bytes(storekit._lock_token(holder.pid, "a-live-holder"))
+        state = _refuse_lock_create(monkeypatch, lockpath, 10_000, first_real=1)
+        with pytest.raises(OSError) as info:
+            with store_lock(target, timeout=0.5):
+                pass
+        caught = info.value
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
 
     assert lockpath.exists(), "the live holder's lock was removed"
     assert isinstance(caught, ConfigLockTimeout), repr(caught)
@@ -118,13 +140,17 @@ def test_store_lock_access_denied_on_posix_is_raised_at_once(tmp_path, monkeypat
 
 
 def _excl_flag(node):
-    return any(isinstance(n, ast.Attribute) and n.attr == "O_EXCL" for n in ast.walk(node))
+    return any((isinstance(n, ast.Attribute) and n.attr == "O_EXCL")
+               or (isinstance(n, ast.Name) and n.id == "O_EXCL") for n in ast.walk(node))
 
 
 def _is_os_open_excl(node):
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "open" and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "os" and any(_excl_flag(a) for a in node.args))
+    """A call named ``open`` (``os.open``, an aliased module's ``open``, or a
+    bare imported ``open``) with an O_EXCL flag among its arguments."""
+    if not isinstance(node, ast.Call):
+        return False
+    name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+    return name == "open" and any(_excl_flag(a) for a in [*node.args, *node.keywords])
 
 
 def _handler_names(handler):
@@ -162,3 +188,31 @@ def test_every_lock_file_create_decides_access_denied_through_storekit():
                 missing.append(site)
     assert len(sites) >= 2, f"expected store_lock and collection_lock, found {sites}"
     assert not missing, f"lock-file creates that do not decide through storekit: {missing}"
+
+
+@pytest.mark.parametrize("stamp", ["last_used", "alg_marker"])
+def test_best_effort_keystore_stamps_give_up_within_the_short_budget(monkeypatch, stamp):
+    """The request-path keystore stamps take store_lock with
+    BEST_EFFORT_LOCK_TIMEOUT, so a lock create refused for good costs a
+    verify about that long, never _CROSS_LOCK_TIMEOUT. Neither raises."""
+    import localm.auth as auth
+    from localm.config import ensure_dirs
+
+    ensure_dirs()
+    lockpath = auth.keystore_file().with_name("auth.json.lock")
+    lockpath.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    state = _refuse_lock_create(monkeypatch, lockpath, 10_000)
+
+    started = time.time()
+    if stamp == "last_used":
+        auth._touch_last_used(uuid.uuid4().hex)
+    else:
+        auth._mark_record_alg(uuid.uuid4().hex, "sha256")
+    elapsed = time.time() - started
+
+    assert state["creates"] >= 1, "the stamp never tried to take the keystore lock"
+    assert storekit.BEST_EFFORT_LOCK_TIMEOUT < storekit._CROSS_LOCK_TIMEOUT
+    assert elapsed < storekit.BEST_EFFORT_LOCK_TIMEOUT + 2.0, (
+        f"the stamp waited {elapsed:.2f}s on a refused lock create")
+    assert not lockpath.exists()
