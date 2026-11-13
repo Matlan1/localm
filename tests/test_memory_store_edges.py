@@ -62,7 +62,8 @@ def test_a_line_that_is_not_utf8_is_kept_byte_for_byte(tmp_path):
     assert [r.text for r in again.all()] == ["User likes tea"]
     again.add(MemoryRecord(text="User lives in Graz", source="user"))
     raw = s.path.read_bytes()
-    assert bad in raw.split(b"\n"), "the undecodable line is written back unchanged"
+    lines = [ln.rstrip(b"\r") for ln in raw.split(b"\n")]
+    assert bad in lines, "the undecodable line is written back unchanged"
     assert sorted(r.text for r in _store(tmp_path).all()) == [
         "User likes tea", "User lives in Graz"]
 
