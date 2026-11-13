@@ -95,20 +95,186 @@ def _imagine(app, client, headers):
             time.sleep(0.05)
     assert job.status == "done", job.status
     assert len(calls) == 1
-    return calls[0]
+    return calls[0], job
 
 
 def test_gui_chat_imagine_follows_the_chat_privacy_setting(chat_private, server):
     app, client = server
-    kwargs = _imagine(app, client, {"X-Client-Id": "chat"})
+    kwargs, _job = _imagine(app, client, {"X-Client-Id": "chat"})
     assert kwargs["write_sidecar"] is False
     assert kwargs["delete_outputs"] is True
 
 
 def test_imagine_without_the_chat_header_follows_the_server_mode(chat_private, server):
     app, client = server
-    kwargs = _imagine(app, client, {})
+    kwargs, _job = _imagine(app, client, {})
     assert kwargs["write_sidecar"] is True
+
+
+def _activity_text(root=None):
+    from localm.jobmanager import activity_dir
+    d = Path(root) if root is not None else activity_dir()
+    if not d.is_dir():
+        return ""
+    return "".join(f.read_text(encoding="utf-8") for f in d.glob("*.json"))
+
+
+def _wait_finished(job):
+    deadline = time.monotonic() + 30
+    while job.finished_at is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.1)
+    assert job.finished_at is not None
+
+
+def test_a_private_chat_job_keeps_no_finished_row(chat_private, server):
+    app, client = server
+    _kwargs, private_job = _imagine(app, client, {"X-Client-Id": "chat"})
+    _wait_finished(private_job)
+    assert private_job.id not in _activity_text()
+    _kwargs, open_job = _imagine(app, client, {})
+    _wait_finished(open_job)
+    text = _activity_text()
+    assert open_job.id in text
+    assert private_job.id not in text
+
+
+@pytest.fixture
+def jobs(tmp_path):
+    from localm.jobmanager import JobManager, _ActivityStore
+    return JobManager(store=_ActivityStore(tmp_path / "activity"), reconcile=False)
+
+
+def test_a_job_started_in_a_private_request_runs_private(chat_private, jobs):
+    from localm.audit import request_is_privacy, request_privacy
+    seen = []
+
+    def body(job):
+        seen.append(request_is_privacy())
+        return True
+    with request_privacy(True):
+        job = jobs.start_fn("imagine", body)
+    _wait_finished(job)
+    assert seen == [True]
+    assert job.private is True
+
+
+def test_a_later_job_does_not_write_a_private_jobs_finished_row(chat_private, jobs,
+                                                                tmp_path):
+    from localm.audit import request_privacy
+    with request_privacy(True):
+        private_job = jobs.start_fn("imagine", lambda job: True)
+    _wait_finished(private_job)
+    open_job = jobs.start_fn("pull", lambda job: True)
+    _wait_finished(open_job)
+    text = _activity_text(tmp_path / "activity")
+    assert open_job.id in text
+    assert private_job.id not in text
+
+
+def test_keep_diagnostics_keeps_a_private_jobs_finished_row(chat_private, jobs,
+                                                           tmp_path, monkeypatch):
+    from localm.audit import request_privacy
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+    with request_privacy(True):
+        private_job = jobs.start_fn("imagine", lambda job: True)
+    _wait_finished(private_job)
+    assert private_job.id in _activity_text(tmp_path / "activity")
+
+
+def test_a_private_job_stays_private_across_its_record():
+    from localm.jobmanager import Job
+    job = Job(id="abc", kind="imagine", argv=[])
+    job.private = True
+    assert Job.from_record(job.to_record()).private is True
+    job.private = False
+    assert "private" not in job.to_record()
+    assert Job.from_record(job.to_record()).private is False
+
+
+def test_a_self_request_from_a_private_request_says_privacy(chat_private):
+    import http.server
+    import threading
+    from localm.audit import request_privacy, request_privacy_headers
+    from localm.selfclient import self_request
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append((self.headers.get("X-Localm-Session-Mode"),
+                         self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        self_request("POST", "/models/load", base_url=base, timeout=10,
+                     headers=request_privacy_headers())
+        with request_privacy(True):
+            self_request("POST", "/models/load", base_url=base, timeout=10,
+                         headers=request_privacy_headers())
+        self_request("POST", "/models/load", base_url=base, timeout=10,
+                     headers={"Authorization": "Bearer not-the-key"})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert seen == [(None, None), ("privacy", None), (None, None)]
+
+
+def test_a_private_jobs_requests_to_the_server_say_privacy():
+    from localm.jobmanager import Job
+    from localm.vram import _job_headers
+    job = Job(id="abc", kind="imagine", argv=[])
+    assert _job_headers(job) == {}
+    job.private = True
+    assert _job_headers(job) == {"X-Localm-Session-Mode": "privacy"}
+    assert _job_headers(MagicMock()) is None
+
+
+def test_every_self_request_of_vram_and_rag_names_its_headers():
+    """Each ``self_request`` call in ``localm/vram.py`` and the RAG plugin
+    passes ``headers=``, so a private request's mode reaches the server."""
+    import ast
+    root = Path(__file__).resolve().parent.parent / "localm"
+    found = []
+    for rel in ("vram.py", "plugins/builtin/rag/plug.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "self_request"):
+                found.append((f"{rel}:{node.lineno}",
+                              any(k.arg == "headers" for k in node.keywords)))
+    assert len(found) >= 5
+    assert [where for where, named in found if not named] == []
+
+
+def test_a_model_load_inside_a_private_request_runs_private(chat_private, monkeypatch):
+    import asyncio
+    from localm import audit
+    from localm.inference import http_server as hs
+    seen = []
+
+    class Engine:
+        display_name = "x"
+
+        def load(self):
+            seen.append(audit.request_is_privacy())
+    monkeypatch.setattr(hs._routing_latch, "fingerprint", lambda name: None)
+    monkeypatch.setattr(hs._routing_latch, "record_success", lambda name: None)
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        await hs._switch_load(loop, "x", Engine(), preempt=False)
+        with audit.request_privacy(True):
+            await hs._switch_load(loop, "x", Engine(), preempt=False)
+    asyncio.run(go())
+    assert seen == [False, True]
 
 
 def test_every_media_job_carries_the_request_privacy():

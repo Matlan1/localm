@@ -625,6 +625,14 @@ def wait_for_vram_release(
 # via a self-authenticated round trip to /v1/models/unload and /v1/models/load.
 # Only the progress-message wording differs between them.
 
+def _job_headers(job: Any) -> Optional[dict]:
+    """The headers *job* sends on a request to the server's own API
+    (``jobmanager.Job.self_request_headers``), or None for an object that is not
+    a ``Job``."""
+    method = getattr(type(job), "self_request_headers", None)
+    return method(job) if callable(method) else None
+
+
 def unload_chat_for_media(job: Any, self_url: str, media_label: str,
                           instance_token: Optional[str] = None) -> bool:
     """Unload the chat model BEFORE a media (image/music/video) model loads, so
@@ -651,7 +659,8 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
     try:
         from localm.selfclient import self_request
         resp = self_request("POST", "/models/unload?media=false", timeout=300,
-                            base_url=self_url, instance_token=instance_token)
+                            base_url=self_url, instance_token=instance_token,
+                            headers=_job_headers(job))
         if not resp.ok:
             job.push({"type": "line", "text":
                       f"Could not unload the chat model (HTTP {resp.status_code}) - "
@@ -1169,7 +1178,7 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         try:
             from localm.selfclient import self_request
             resp = self_request("POST", "/models/load", timeout=300, base_url=self_url,
-                                instance_token=instance_token)
+                                instance_token=instance_token, headers=_job_headers(job))
             if not resp.ok:
                 # A non-2xx (503 "No model specified", 401, or a 500 when the engine
                 # load fails because the media backend still holds VRAM - the exact
