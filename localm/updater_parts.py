@@ -67,10 +67,6 @@ def note_kept_record(root, previous: Optional[str], version: str) -> None:
         updater._apply_warn("could not record the kept install record: %s", e)
 
 
-def _source_checkout(root: Path) -> bool:
-    return (root / ".git").exists()
-
-
 def _deps_extras() -> list:
     """The extras the dependency step installs (``_apply_update.DEPS_EXTRAS``)."""
     from localm import _apply_update as au
@@ -107,8 +103,9 @@ def installed_parts(root=None) -> dict:
     "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
     "last_steps"}``:
     ``app`` the code's version, ``install_record`` the venv's localm record
-    version (None when there is none to compare: no venv, a source checkout,
-    or a pip install) and whether it is ``app`` (False also when the venv has
+    version (None when there is none to compare: no venv, or a pip install;
+    a git clone with a venv is compared like any install) and whether it is
+    ``app`` (False also when the venv has
     no record at all). A record of another version is a problem
     (``install_record_problem``) unless an update that kept the dependencies
     left it (:func:`note_kept_record`),
@@ -127,7 +124,7 @@ def installed_parts(root=None) -> dict:
     problems: list = []
     record, record_matches, deps_problems = None, None, []
     record_problem = False
-    if not _source_checkout(root) and not updater.is_site_packages_install(root):
+    if not updater.is_site_packages_install(root):
         d = {"venv": False}
         try:
             d = _deps(root)

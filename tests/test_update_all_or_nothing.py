@@ -921,6 +921,18 @@ def test_installed_parts_names_an_install_record_of_another_version(install, mon
     assert any("click missing" in p for p in parts["problems"])
 
 
+def test_a_git_clone_install_still_gets_its_dependencies_checked(install, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    (inst / ".git").mkdir()
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    assert updater_parts.installed_parts(inst)["install_record"] == "0.3.1"
+    _uninstall(site, "click")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["consistent"] is False
+    assert any("click missing" in p for p in parts["problems"])
+
+
 def test_installed_parts_names_a_component_at_another_pin(install, home):
     from localm import updater_parts
     inst, _site = install
