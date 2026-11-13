@@ -32,7 +32,7 @@ from localm.plugins.builtin.jobs.webtool import (
 from localm.plugins.coder.tools.files import (
     _WS_FALLBACK_MAX_TEXT, _WS_FALLBACK_MAX_TOKENS, _resolve_edit)
 
-BUDGET = 0.5
+BUDGET = 2.0
 
 
 def _timed(fn, *a, **kw):
