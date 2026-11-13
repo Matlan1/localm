@@ -1777,7 +1777,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     "build; this reply is reported as failed and later grammar "
                     "requests to this model are refused.[/yellow]"
                 )
-                grammar_failed = True
+                grammar_failed = bool(grammar)
             if done.get("chatml_fallback_reason") and not self._chatml_fallback:
                 # First time this model has needed the ChatML fallback: latch it and
                 # surface the degrade on the console, not only in the debug log.

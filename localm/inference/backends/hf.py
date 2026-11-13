@@ -743,5 +743,6 @@ class HFBackend(BaseBackend):
                 "[yellow]grammar constraints failed at generation time for this "
                 "model (the xgrammar runtime raised); this reply is reported as "
                 "failed and later grammar requests are refused.[/yellow]")
-            from .base import GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError
-            raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_MESSAGE)
+            if grammar:
+                from .base import GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError
+                raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_MESSAGE)

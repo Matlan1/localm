@@ -111,6 +111,14 @@ def test_the_kv_cache_advice_says_f16_does_not_help_a_memory_shortage():
 
 
 @pytest.mark.parametrize("make", [_gguf, _hf], ids=["gguf", "hf"])
+def test_a_reply_that_asked_for_no_grammar_is_not_reported(make):
+    backend = make()
+    backend._runner = _FakeRunner({"finish_reason": "stop", "grammar_unsupported": True})
+    assert list(backend.chat_stream(_MSG, max_tokens=8)) == ["{", "not json"]
+    assert backend._grammar_unsupported is True
+
+
+@pytest.mark.parametrize("make", [_gguf, _hf], ids=["gguf", "hf"])
 def test_a_reply_whose_grammar_held_is_not_reported(make):
     backend = make()
     backend._runner = _FakeRunner({"finish_reason": "stop", "grammar_unsupported": False})
