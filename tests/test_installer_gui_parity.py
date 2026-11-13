@@ -439,11 +439,11 @@ class TestLinuxMenuEntry:
         (bindir / "LocaLM").write_bytes(b"")
         monkeypatch.setattr(gui.os, "access", lambda p, mode: Path(p).name == "LocaLM")
         text = Path(gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)).read_text()
-        assert f"Exec={bindir / 'LocaLM'} -m localm gui" in text
+        assert f"Exec={(bindir / 'LocaLM').as_posix()} -m localm gui" in text
 
     def test_without_the_branded_binary_it_runs_localm_gui(self, gui, tmp_path, posix):
         text = Path(gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)).read_text()
-        assert f"Exec={gui.venv_bin(tmp_path) / 'localm'} gui" in text
+        assert f"Exec={(gui.venv_bin(tmp_path) / 'localm').as_posix()} gui" in text
 
     def test_the_older_entry_for_this_folder_is_migrated(self, gui, tmp_path, posix):
         posix.mkdir(parents=True)

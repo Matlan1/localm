@@ -293,7 +293,10 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
     from localm import applaunch
     from rich.markup import escape
     res = applaunch.make_launcher(force=force)
-    for note in res.notes:
+    shown = res.notes
+    if quiet:
+        shown = res.problems or ([] if res.ok else res.notes)
+    for note in shown:
         console.print(f"  [dim]-[/dim] {escape(note)}")
     if not res.ok:
         console.print("[yellow]Could not build the native launcher.[/yellow] "
@@ -461,6 +464,14 @@ def _update_list(updater) -> None:
     console.print("[dim]Install one with: localm update --to <version>[/dim]")
 
 
+def _defer_update_steps(version) -> bool:
+    """Whether a terminal update to *version* leaves its runtime and component
+    steps to that version's next start: True unless *version* is older than the
+    running localm (a downgrade), whose steps the update carries out itself."""
+    from localm import _version, updater
+    return updater._direction(str(version or ""), _version.read_version()) != "older"
+
+
 def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> None:
     """Install the release *version* (``localm update --to``)."""
     from localm import _version
@@ -502,7 +513,9 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         try:
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
-                                expect_sha256=expect, say=_say_step)
+                                expect_sha256=expect,
+                                defer_runtime=_defer_update_steps(rel["version"]),
+                                steps_when="at the next start of localm", say=_say_step)
             break
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
@@ -535,8 +548,8 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
                       f"{escape(res['data_backup'])} (to restore it, copy those files back "
                       "into the data folder while localm is stopped)[/dim]")
     if res["klass"] == "setup":
-        console.print("[yellow]This version needs setup.bat re-run (a Python/venv change) "
-                      "before it will start.[/yellow]")
+        console.print(f"[yellow]This version needs {updater.setup_script()} re-run (a "
+                      "Python/venv change) before it will start.[/yellow]")
     else:
         console.print("[bold]Restart localm to load it.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")
@@ -588,9 +601,11 @@ def _say_step(text: str) -> None:
 
 def _print_update_extras(res: dict) -> None:
     """Print what an applied update did to the native runtime and the other
-    components, and on a selected install which parts of the current version
-    the installed one keeps."""
+    components, on a selected install which parts of the current version the
+    installed one keeps, and on a git clone that git lists the replaced files."""
     from rich.markup import escape
+
+    from localm import updater
     note = res.get("runtime_note")
     status = res.get("runtime") or {}
     if note:
@@ -605,6 +620,9 @@ def _print_update_extras(res: dict) -> None:
     for part in res.get("kept_for_updates") or []:
         console.print(f"[dim]Kept from the version you had, so this one can update "
                       f"again: {escape(part)}[/dim]")
+    if res.get("git_clone"):
+        note = updater.GIT_CLONE_NOTE
+        console.print(f"[dim]{note[0].upper()}{escape(note[1:])}.[/dim]")
 
 
 @main.command("update")
@@ -718,17 +736,19 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
-        res = updater.apply(asset["id"], signature=info.get("signature"), say=_say_step)
+        res = updater.apply(asset["id"], signature=info.get("signature"),
+                            defer_runtime=_defer_update_steps(latest),
+                            steps_when="at the next start of localm", say=_say_step)
     except LocalmError as e:
-        # apply() has already rolled back by this point.
+        # The error says whether apply() changed nothing, rolled back, or needs a manual restore.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
         sys.exit(1)
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "
                   f"({updater.class_summary(res['klass'])}).")
     _print_update_extras(res)
     if res["klass"] == "setup":
-        console.print("[yellow]This update needs setup.bat re-run (a Python/venv change) "
-                      "before it will start.[/yellow]")
+        console.print(f"[yellow]This update needs {updater.setup_script()} re-run (a "
+                      "Python/venv change) before it will start.[/yellow]")
     else:
         console.print("[bold]Restart localm to load the new version.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")

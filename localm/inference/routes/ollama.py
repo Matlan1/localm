@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -171,9 +172,39 @@ def _listed_models(registry: dict) -> dict[str, dict]:
     return out
 
 
+# A parameter count in a model file or folder name, in billions or millions:
+# "8B", "0.6B", "8x7B", "135M". A letter or digit right before it ("A3B", "E2B")
+# is not one.
+_PARAM_SIZE_RE = re.compile(r"(?i)(?<![a-z0-9.])((?:\d+x)?\d+(?:\.\d+)?)([bm])(?![a-z0-9])")
+
+
+def _parameter_size(name: str) -> str:
+    """The parameter count in *name* as Ollama writes it ("8B", "135M"): the first
+    count in billions, else the first in millions, else ``""``."""
+    found = [(m.group(1).lower(), m.group(2).upper()) for m in _PARAM_SIZE_RE.finditer(name)]
+    for wanted in ("B", "M"):
+        for count, unit in found:
+            if unit == wanted:
+                return f"{count}{unit}"
+    return ""
+
+
+def _entry_file_name(entry: dict) -> str:
+    """The base name of a registry entry's weights path, or ``""``."""
+    raw = str(entry.get("path") or "").replace("\\", "/").rstrip("/")
+    return raw.rsplit("/", 1)[-1]
+
+
 def _entry_details(entry: dict, fmt: str) -> dict[str, Any]:
+    """Ollama ``details`` for a registry entry. ``parameter_size`` and
+    ``quantization_level`` come from the weights' file or folder name and are
+    ``""`` when the name carries none."""
+    from localm.model_manager.gguf import quant_label
     arch = entry.get("architecture")
-    return P.model_details(fmt=fmt, family=arch if isinstance(arch, str) else "")
+    name = _entry_file_name(entry)
+    return P.model_details(fmt=fmt, family=arch if isinstance(arch, str) else "",
+                           parameter_size=_parameter_size(name),
+                           quantization_level=quant_label(name))
 
 
 def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str]) -> dict:
@@ -449,7 +480,7 @@ def register(app: FastAPI, ctx) -> None:
         except (ValueError, RecursionError):
             return raw.decode("utf-8", "replace")[:500] or "request failed"
         if isinstance(data, dict):
-            return str(data.get("error") or data.get("detail") or "request failed")
+            return str(data.get("detail") or data.get("error") or "request failed")
         return "request failed"
 
     @route("/api/chat", methods=["POST"], dependencies=chat_scope)

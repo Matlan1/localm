@@ -315,10 +315,11 @@ def _repl(agent: Agent) -> None:
                     if attachments:
                         _run_goal_loop(agent, user_input, agent.goal_cmd,
                                        agent.goal_max_iters, agent.cwd,
-                                       attachments=attachments)
+                                       attachments=attachments, interactive=True)
                     else:
                         _run_goal_loop(agent, user_input, agent.goal_cmd,
-                                       agent.goal_max_iters, agent.cwd)
+                                       agent.goal_max_iters, agent.cwd,
+                                       interactive=True)
                 finally:
                     _warn_goal_run_sensitive_changes(agent, before)
             else:
@@ -338,6 +339,12 @@ def _repl(agent: Agent) -> None:
             import traceback
             if agent.verbose:
                 traceback.print_exc()
+
+
+def _project_path(agent: Agent, arg: str) -> Path:
+    """*arg* as a path; a relative one is taken from the project directory."""
+    path = Path(arg).expanduser()
+    return path if path.is_absolute() else agent.cwd / path
 
 
 def _handle_command(raw: str, agent: Agent) -> bool:
@@ -630,8 +637,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             print_info("Usage: /remember <text>")
         else:
             try:
+                from ..memory import is_remembered
+                already = is_remembered(agent.cwd, arg)
                 p = agent.remember(arg)
-                print_success(f"Remembered → {p}")
+                if already:
+                    print_info(f"Already in {p}; nothing changed.")
+                else:
+                    print_success(f"Remembered → {p}")
             except Exception as e:
                 print_error(f"remember failed: {e}")
 
@@ -676,7 +688,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             )
 
     elif cmd == "save":
-        filepath = Path(arg) if arg else Path("conversation.json")
+        filepath = _project_path(agent, arg or "conversation.json")
         if agent.mode == SessionMode.PRIVACY:
             console.print(
                 "[yellow]⚠  Privacy mode is active. "
@@ -694,25 +706,23 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
     elif cmd == "export":
         import time as _time
 
-        if agent.mode == SessionMode.PRIVACY and not arg:
-            console.print(
-                "[yellow]⚠  Privacy mode is active. "
-                "This will write the session transcript to disk.[/yellow]"
-            )
-            if not confirm("  Export session?"):
-                print_info("Cancelled.")
-                return False
-
         if arg:
-            out_path = Path(arg)
+            out_path = _project_path(agent, arg)
         else:
             ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
             out_path = agent.cwd / ".localcoder" / "sessions" / f"{ts_label}.md"
 
+        if agent.mode == SessionMode.PRIVACY:
+            console.print(
+                "[yellow]⚠  Privacy mode is active. "
+                "This will write the session transcript to disk.[/yellow]"
+            )
+            if not confirm(f"  Export session to {out_path}?"):
+                print_info("Cancelled.")
+                return False
+
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            # Force a write via the agent's session-markdown writer
-            agent._audit.close()   # flush any pending audit writes
             md_path = agent._write_session_markdown()
             if arg:
                 # Move to the requested path

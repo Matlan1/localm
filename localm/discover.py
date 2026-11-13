@@ -470,6 +470,13 @@ def _spec_key(model_type: Optional[str], fmt: str):
         (k, tuple(v) if isinstance(v, list) else v) for k, v in frag.items())))
 
 
+def _saved_hf_token() -> Optional[str]:
+    """The saved HF token (credentials file, else its environment fallback), or
+    None."""
+    from localm.model_source_credentials import get_hf_token
+    return get_hf_token()
+
+
 def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf",),
               model_type: Optional[str] = None,
               model_types: Optional[Sequence[str]] = None,
@@ -496,10 +503,12 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
     CLI ``localm search`` / MCP ``search_models`` default) the query shape and
     response are the plain, unscoped ones.
 
-    *token*: optional HF API token, sent as an Authorization header. Raises
-    rate limits and lets gated repos appear in results; omitted, every query
-    runs anonymously exactly as before."""
+    *token*: HF API token, sent as an Authorization header. Raises rate limits
+    and lets gated repos appear in results. None (the default) sends the saved
+    one (``localm config hf_token``, or the environment fallback), if any; ""
+    sends none."""
     _ensure_online()
+    token = _saved_hf_token() if token is None else token
     limit = max(1, min(int(limit), 50))
 
     # Resolve the requested type set. model_types (GUI) wins; else the singular
@@ -608,10 +617,11 @@ def hf_gguf_files(repo: str, token: Optional[str] = None) -> list[dict]:
     is the first part (what ``localm pull repo:file`` expects) and whose
     size is the sum of all parts. Sorted smallest-first.
 
-    *token*: optional HF API token (see hf_search) - required for a gated
-    repo's tree to be visible at all.
+    *token*: HF API token (see hf_search) - required for a gated repo's tree
+    to be visible at all. None sends the saved one, "" sends none.
     """
     _ensure_online()
+    token = _saved_hf_token() if token is None else token
     repo = repo.strip().strip("/")
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         raise DiscoverError(f"Not a HuggingFace repo id: {repo}")

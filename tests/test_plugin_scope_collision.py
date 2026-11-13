@@ -47,10 +47,10 @@ def test_rejects_explicit_scope_matching_builtin_plugin(tmp_path):
 
 def test_rejects_default_scope_matching_builtin_plugin_name(tmp_path):
     # A plugin literally named "rag" (no explicit scope line) defaults its scope
-    # to "rag" too.
+    # to "rag" too; its first-party name is refused before the scope is read.
     src = _write_plugin(tmp_path / "src", "rag")
     mgr = _manager(tmp_path)
-    with pytest.raises(ValueError, match="reserved localm scope"):
+    with pytest.raises(ValueError, match="reserved for a first-party plugin"):
         mgr.set_installed_from_dir(src)
     assert "rag" not in mgr.discover()
 

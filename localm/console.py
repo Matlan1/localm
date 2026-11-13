@@ -33,6 +33,7 @@ into markup also needs ``markup_safe`` (or ``rich.markup.escape``).
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Iterable, Optional
 
@@ -54,8 +55,34 @@ def markup_safe(value: object) -> str:
     return escape(strip_controls(str(value)))
 
 
+PIPED_WIDTH = 200
+
+
 class SafeConsole(Console):
-    """A ``Console`` whose rendered text never carries a terminal control character."""
+    """A ``Console`` whose rendered text never carries a terminal control
+    character, and which lays out at least ``PIPED_WIDTH`` columns when its
+    output is not a terminal and no width is given, where a plain ``Console``
+    assumes 80. A width is given by ``width=``, by ``COLUMNS`` while it is set,
+    or by setting ``width`` or ``size`` after construction; a width Rich took
+    from ``COLUMNS`` at construction counts only while ``COLUMNS`` is set."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._given_width = kwargs.get("width")
+        self._width_at_init = self._width
+
+    @property
+    def size(self):
+        size = super().size
+        given = (self._given_width is not None or os.environ.get("COLUMNS")
+                 or self._width != self._width_at_init)
+        if not given and not self.is_terminal and size.width < PIPED_WIDTH:
+            return size._replace(width=PIPED_WIDTH)
+        return size
+
+    @size.setter
+    def size(self, new_size) -> None:
+        self._width, self._height = new_size
 
     def render(self, renderable: RenderableType,
                options: Optional[ConsoleOptions] = None) -> Iterable[Segment]:

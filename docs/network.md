@@ -104,6 +104,11 @@ If the coder legitimately needs to talk to a local dev server
 localm config net_allow_private true
 ```
 
+Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`,
+`fd00:ec2::/32`, in any embedded IPv6 form) stay refused with it on; a name that
+also resolves to another address (a LAN machine with an `fe80::` address) is
+reached on that other address.
+
 The hostname is resolved and validated once, then the connection is pinned to
 the validated addresses of that lookup, so the connect cannot re-resolve to a
 different address. When the first address cannot be connected to (for example
@@ -181,7 +186,7 @@ addresses (`169.254.x.x`, in any IPv6 form) are refused for the search backend
 too. Do not
 turn on `net_allow_private` for this: it removes the private-address check from
 every model-driven request, including ones to `127.0.0.1` (the localm API
-itself) and `169.254.169.254`.
+itself).
 
 ## Chat: two ways to use the web
 
@@ -273,8 +278,11 @@ coding agent's shell access, so you can grant one without the other.
   subject to the domain lists. With `net_mode` set to `off` it is refused before
   any connection opens, as are the issue list (`localm issues`) and the update
   download (the update check and download follow "Check for updates even when
-  network access is off" instead). The standalone `report-issue` scripts, which
-  run without localm, do not read `net_mode`.
+  network access is off" instead). The standalone `report-issue` reporter (for when
+  localm cannot start) reads `LOCALM_NET_MODE` or `net_mode` from the data
+  directory's `config.json`: `off` sends nothing, and when `config.json` is
+  missing or cannot be read it asks before sending (and sends nothing when no
+  one can answer).
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
   guards instead: a configured `comfy_api_url` (or a media plugin's own
   `comfy.api_url`, the model scan included) that targets a link-local or

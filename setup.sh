@@ -1045,7 +1045,8 @@ if [ -n "$TORCHSPEC" ]; then
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
-  uv pip install -p .venv -e ".[hf,audio]" \
+  .venv/bin/python -m localm.hwdetect torch-pins --out .venv/localm-torch-pins.txt \
+    && uv pip install -p .venv -e ".[hf,audio]" -c .venv/localm-torch-pins.txt \
     || say "  [!] transformers install failed. GGUF chat still works. (see docs/gpu-setup.md)"
 else
   say ""
@@ -1078,7 +1079,7 @@ if [ "$IS_MACOS" = 1 ]; then
   say "  ./localm-launcher.sh or ./localm.sh gui."
 elif [ "$LOCALM_BIN_OK" = 1 ]; then
   say "  Building the LocaLM app launcher ..."
-  .venv/bin/localm make-launcher --force \
+  .venv/bin/localm make-launcher --force --quiet \
     || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
   # make-launcher writes ./LocaLM.desktop on Linux; uninstall removes it.
   if [ -f LocaLM.desktop ]; then LAUNCHER_FILE="$(pwd)/LocaLM.desktop"; fi
@@ -1117,34 +1118,22 @@ case "$mk" in
     step_begin menu-entry
     mkdir -p "$apps"
     SHORTCUT="$apps/localm.desktop"
-    # Prefer the scalable SVG (the freedesktop-friendly format); fall back to
-    # the .ico that ships for the Windows shortcut if it is ever missing.
-    icon="$(pwd)/assets/localm.svg"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
-    # [2] opens the GUI as the branded LocaLM binary when it built, else through
-    # the venv's localm; [1] (and any other answer) opens the graphical launcher.
-    if [ "$mk" = 2 ]; then
-      if [ -x "$(pwd)/.venv/bin/LocaLM" ]; then
-        launch_exec="$(pwd)/.venv/bin/LocaLM -m localm gui"
-      else
-        launch_exec="$(pwd)/.venv/bin/localm gui"
-      fi
+    # [2] opens the GUI (the branded LocaLM binary when it built), [1] the
+    # graphical launcher; localm.setup_spec writes the entry every variant writes.
+    if [ "$mk" = 2 ]; then entry_kind=gui; else entry_kind=launcher; fi
+    if .venv/bin/python -m localm.setup_spec menu-entry "$entry_kind" "$(pwd)" \
+        > "$apps/localm.desktop.tmp" && [ -s "$apps/localm.desktop.tmp" ]; then
+      mv -f -- "$apps/localm.desktop.tmp" "$apps/localm.desktop"
+      say "  Created $apps/localm.desktop"
     else
-      launch_exec="$(pwd)/localm-launcher.sh"
+      rm -f -- "$apps/localm.desktop.tmp"
+      SHORTCUT=""
+      say "  [!] Could not write the menu entry $apps/localm.desktop."
     fi
-    cat > "$apps/localm.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=LocaLM
-Comment=Local LLM - chat, coder, models, images
-Exec=$launch_exec
-Path=$(pwd)
-Icon=$icon
-Terminal=false
-Categories=Utility;Development;Science;
-EOF
-    say "  Created $apps/localm.desktop"
-    .venv/bin/python -m localm.install_manifest record --root . --shortcut "$SHORTCUT" \
-      >/dev/null 2>&1 || true
+    if [ -n "$SHORTCUT" ]; then
+      .venv/bin/python -m localm.install_manifest record --root . --shortcut "$SHORTCUT" \
+        >/dev/null 2>&1 || true
+    fi
     step_done menu-entry
     ;;
   *) say "  No menu entry created." ;;

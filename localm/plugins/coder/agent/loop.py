@@ -641,12 +641,14 @@ class _LoopMixin:
         def _record_typed_request(self, text: str) -> None: ...
 
     def run_task(self, task: str, attachments: str = "", *,
-                 record_request: bool = True) -> str:
+                 record_request: bool = True, interactive: bool = False) -> str:
         """
-        Run a single task to completion (non-interactive).
+        Run a single task to completion (non-interactive unless *interactive*).
 
         *attachments* is appended to what the model receives only, as in
-        :meth:`chat`.
+        :meth:`chat`. *interactive* runs the loop as a terminal session does:
+        tool calls and results are printed, and a call that needs confirmation
+        is asked at the terminal.
 
         Returns the agent's final text response.
         Used by spawn_agent and the CLI `run` command.
@@ -666,9 +668,9 @@ class _LoopMixin:
             self._record_typed_request(task)
         message = self._with_episodes(task)
         self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
-        return self._loop(interactive=False)
+        return self._loop(interactive=interactive)
 
-    def continue_task(self, message: str) -> str:
+    def continue_task(self, message: str, *, interactive: bool = False) -> str:
         """
         Continue the current session with another non-interactive instruction,
         preserving history.
@@ -676,10 +678,11 @@ class _LoopMixin:
         Unlike :meth:`run_task` it does not re-inject episodic recall (already
         injected on the first task). Used by the CLI goal loop to feed a
         verification failure back to the agent for another fix attempt.
+        *interactive* is as for :meth:`run_task`.
         """
         self._last_user_request = message
         self._add_user_with_plan_note(message)
-        return self._loop(interactive=False)
+        return self._loop(interactive=interactive)
 
     def chat(self, user_input: str, attachments: str = "", *,
              record_request: bool = True) -> str:

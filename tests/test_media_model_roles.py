@@ -291,6 +291,91 @@ class TestRegistrySlice:
 
 
 # --------------------------------------------------------------------------- #
+#  per-role lists: only files that can fill the role
+# --------------------------------------------------------------------------- #
+
+MUSIC_ROLES = _roles(
+    ("music-unet", "Diffusion model (UNet)", "diffusion-unet", True),
+    ("music-clip", "Text encoder (CLIP)", "text-encoder", False),
+    ("music-vae", "VAE", "vae", False),
+)
+VIDEO_ROLES = _roles(
+    ("video-unet", "Diffusion model (UNet)", "diffusion-unet", True),
+    ("video-clip", "Text encoder (CLIP)", "text-encoder", False),
+    ("video-vae", "VAE", "vae", False),
+)
+
+
+@pytest.fixture
+def real_files(tmp_path):
+    """Registry entries over real header-only files of each kind."""
+    from tests.test_sdcpp_families import (
+        ACESTEP_DIT, CLIP_L, FLUX_AE, FLUX_DEV, SDXL_CKPT, T5XXL, WAN21_T2V, WAN21_VAE,
+        write_gguf, write_safetensors)
+    files = {
+        "flux": (write_safetensors(tmp_path / "flux1-dev.safetensors", FLUX_DEV), "diffusion-unet"),
+        "sdxl": (write_safetensors(tmp_path / "sdxl.safetensors", SDXL_CKPT), "diffusion-unet"),
+        "wan": (write_safetensors(tmp_path / "wan2.1_t2v.safetensors", WAN21_T2V), "diffusion-unet"),
+        "ace": (write_gguf(tmp_path / "acestep-v15.gguf", ACESTEP_DIT, "acestep-dit"),
+                "diffusion-unet"),
+        "clip_l": (write_safetensors(tmp_path / "clip_l.safetensors", CLIP_L), "text-encoder"),
+        "t5xxl": (write_safetensors(tmp_path / "t5xxl.safetensors", T5XXL), "text-encoder"),
+        "ae": (write_safetensors(tmp_path / "ae.safetensors", FLUX_AE), "vae"),
+        "wanvae": (write_safetensors(tmp_path / "wan_vae.safetensors", WAN21_VAE), "vae"),
+        "unread": (tmp_path / "not_there.safetensors", "text-encoder"),
+    }
+    return {name: {"path": str(path), "model_type": mtype} for name, (path, mtype) in files.items()}
+
+
+def _names_by_role(roles, reg):
+    return {r["role_id"]: [m["name"] for m in r["registry_models"]]
+            for r in media_roles.describe_roles(roles, None, reg)}
+
+
+class TestRoleLists:
+    def test_the_two_image_text_encoder_roles_list_different_files(self, real_files):
+        out = _names_by_role(IMAGE_ROLES, real_files)
+        assert out["image-clip1"] == ["clip_l", "unread"]
+        assert out["image-clip2"] == ["t5xxl", "unread"]
+
+    def test_the_music_model_role_lists_no_image_or_video_file(self, real_files):
+        out = _names_by_role(MUSIC_ROLES, real_files)
+        assert out["music-unet"] == ["ace"]
+        assert out["music-vae"] == []
+
+    def test_the_image_and_video_model_roles_list_no_music_file_and_not_each_other(self, real_files):
+        image = _names_by_role(IMAGE_ROLES, real_files)
+        video = _names_by_role(VIDEO_ROLES, real_files)
+        assert image["image-unet"] == ["flux", "sdxl"]
+        assert image["image-vae"] == ["ae"]
+        assert video["video-unet"] == ["wan"]
+        assert video["video-vae"] == ["wanvae"]
+        assert video["video-clip"] == ["clip_l", "t5xxl", "unread"]
+
+    def test_a_file_whose_header_cannot_be_read_is_kept(self, real_files):
+        out = media_roles.registry_models_for_role(
+            {"role_id": "image-clip1", "model_type": "text-encoder"}, real_files)
+        assert "unread" in [m["name"] for m in out]
+
+    def test_a_role_no_built_in_plugin_declared_is_not_filtered(self, real_files):
+        out = media_roles.registry_models_for_role(
+            {"role_id": "someplugin-te", "model_type": "text-encoder"}, real_files)
+        assert [m["name"] for m in out] == ["clip_l", "t5xxl", "unread"]
+
+    def test_every_role_the_built_in_plugins_declare_has_a_rule(self):
+        import re
+        declared = set()
+        for media in ("image", "music", "video"):
+            src = (Path(media_roles.__file__).parent / "builtin" / media / "plug.py").read_text(
+                encoding="utf-8")
+            declared |= set(re.findall(r'ModelRoleDescriptor\("([a-z0-9-]+)"', src))
+        rules = set(media_roles._role_fits())
+        lora = {r for r in declared if r.endswith("-lora")}
+        assert declared, "no role declarations found"
+        assert declared - lora == rules, (declared - lora) ^ rules
+
+
+# --------------------------------------------------------------------------- #
 #  per-role status
 # --------------------------------------------------------------------------- #
 

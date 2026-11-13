@@ -425,7 +425,7 @@ localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
 
-Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
+Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (1 to 3600, default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (1 to 20, default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
 
 `localm image`, `localm video` and `localm music` need no ComfyUI: with nothing set up
 they use the built-in native backends (stable-diffusion.cpp for images and video, ACE-Step
@@ -646,7 +646,7 @@ Long chats compact automatically before they collide with the ceiling. See [docs
 
 ### Multi-GPU: picking the main device
 
-On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads and where a GGUF model's vision projector goes. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
+On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads, where a GGUF model's vision projector goes and where native music starts (KoboldCpp's CUDA or Vulkan build). `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
 
 ```bash
 localm gpus                        # list detected GPUs
@@ -919,7 +919,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project. Attached to that server while it holds another model, `coder` switches it to `--model` and says so; if the server cannot load it, `coder` says why and its requests still name the model, so the server tries again on the first one.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
-- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
 - `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Plugins > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
@@ -972,8 +972,8 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `run_shell` | Execute a shell command | yes | no |
 | `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
 | `check_shell_job` | Check a background shell job's state and output | no | no |
-| `kill_shell_job` | Stop a background job and its process tree | yes | no |
-| `git_commit` | Stage and commit | yes | no |
+| `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
+| `git_commit` | Stage and commit (without `files`, every change, new untracked files included) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
 | `git_push` | Push the current branch | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
@@ -989,7 +989,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `browser_click` | Click a CSS selector | see below | no |
 | `browser_fill` | Type into a form field | see below | no |
 | `browser_read` | Read the visible page text | no | no |
-| `browser_screenshot` | Save a PNG of the current page | no | no |
+| `browser_screenshot` | Save a PNG of the current page into the project (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `browser_console` | Read the page's console messages | no | no |
 | `browser_network` | List requests the page made and any the network policy refused | no | no |
 | `browser_close` | Close the browser session | no | no |
@@ -1153,9 +1153,9 @@ with `compaction_flush = false` in `.localcoder/config.toml`.
 ```bash
 localm coder --episodes                    # list stored lessons and exit
 localm coder --episodes-archive            # list dropped (merged/evicted/forgotten) lessons and exit
-localm coder --forget-episode ID           # drop one lesson (archived, recoverable) and exit
+localm coder --forget-episode ID           # drop one lesson (archived, recoverable) and exit (1 when no such id)
 localm coder --forget-episodes             # erase ALL episodic memory for this project and exit
-localm coder --restore-episode ID          # bring an archived lesson back into recall and exit
+localm coder --restore-episode ID          # bring an archived lesson back into recall and exit (1 when no such id)
 localm coder --consolidate-episodes        # ask the model to merge related lessons (opt-in, manual only)
 ```
 
@@ -1297,7 +1297,7 @@ localm stop --all                        # stop every running localm instance
 
 `localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
-`localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
+`localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those. A chat reply in progress is not listed either, and a server started with `localm serve` has no activity report. When several servers serve the directory (`--new`), `status` names them all and commands attach to the one started first; `localm stop` without an id then lists them and stops none.
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](rag.md#how-retrieval-works-and-why-its-lexical-first).
 

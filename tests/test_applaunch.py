@@ -341,4 +341,6 @@ class TestLinuxLauncherKeepsTheLocalmCommand:
         assert any("case-insensitive" in n for n in res.notes)
         assert not any("did not start standalone" in n for n in res.notes)
         desktop = (repo / f"{applaunch.APP_NAME}.desktop").read_text(encoding="utf-8")
-        assert f"Exec={Path(sys.executable)} -m localm gui" in desktop
+        from localm import setup_spec
+        want = setup_spec.desktop_exec([str(Path(sys.executable)), "-m", "localm", "gui"])
+        assert f"Exec={want}" in desktop

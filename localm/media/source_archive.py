@@ -37,8 +37,8 @@ SOURCE_RECORD = ".localm-source.json"
 
 # sha256 of the GitHub zip archive of each pinned commit, keyed by commit.
 ARCHIVE_SHA256 = {
-    "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24":
-        "01f381c8330f5c5bec9bd3d4c651e8b53b45ffb70020b9e1e947fc63f93a1548",
+    "989d93d0d968e704c589ce0146bb18c77f6b50cc":
+        "2cf3eef6f4016b234dcc8c2d978abe42e6665121f1ca008ca60acb62fe830c63",
     "6ea2651e7df66d7585f6ffee804b20e92fb38b8a":
         "aad273a0b774684285b4496f6edff7e2293bd29d71ef89926d6861bfdf4947ac",
 }
@@ -98,7 +98,8 @@ def download(url: str, dest: Path) -> None:
         with verified_urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as r, open(dest, "wb") as f:
             shutil.copyfileobj(r, f, 256 * 1024)
     except netpolicy.NetworkPolicyError as e:
-        raise ArchiveError(f"the download was refused by the network policy: {e}") from None
+        from localm.media.runtime_files import refused_download_message
+        raise ArchiveError(refused_download_message(e)) from None
     except (OSError, ValueError, http.client.HTTPException) as e:
         raise ArchiveError(f"downloading {url} failed: {e!r}") from None
 
@@ -220,7 +221,11 @@ def fetch_tree(repo: str, commit: str, dest: Path, *, on_progress: Progress = No
         staging = work / "tree"
         files = _unpack(archive, staging, commit)
         write_record(staging, repo, commit, files)
-        os.replace(staging, dest)
+        from localm.media.runtime_files import move_dir
+        try:
+            move_dir(staging, dest)
+        except OSError as e:
+            raise ArchiveError(f"the downloaded tree could not be moved into {dest}: {e}") from e
         return files
     finally:
         shutil.rmtree(long_path(work), ignore_errors=True)

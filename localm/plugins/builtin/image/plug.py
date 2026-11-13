@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
 import re
 import shutil
@@ -48,6 +47,7 @@ from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import (
     _resolve_disconnect_poll, path_formatter, principal_id,
 )
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
@@ -55,10 +55,12 @@ from localm.media.native_models import (
     check_generation_extras, check_image_inputs, check_request, validate_addons,
     validate_upscaler,
 )
+from localm.plugins.media_config import media_session_is_private, range_refusal
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
+from localm.settings_schema import NATIVE_STEPS_MAX
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
@@ -124,12 +126,16 @@ def _image_path(name: str) -> Path:
     return confined_file(_images_dir(), name, "image")
 
 
-MAX_STEPS = 200
+MAX_STEPS = NATIVE_STEPS_MAX
 MAX_CLIP_SKIP = 12
 
 
 def _validate_sampling(req: ImagineRequest) -> None:
-    """A 400 for steps or clip skip outside ``1..MAX_STEPS`` / ``1..MAX_CLIP_SKIP``."""
+    """A 422 for a denoise outside its ``media_config.REQUEST_RANGES`` range, a 400
+    for steps or clip skip outside ``1..MAX_STEPS`` / ``1..MAX_CLIP_SKIP``."""
+    refused = range_refusal(denoise=req.denoise)
+    if refused:
+        raise HTTPException(422, refused)
     if req.steps is not None and not (1 <= req.steps <= MAX_STEPS):
         raise HTTPException(400, f"Steps must be between 1 and {MAX_STEPS}")
     if req.clip_skip is not None and not (1 <= req.clip_skip <= MAX_CLIP_SKIP):
@@ -155,7 +161,8 @@ _IMAGE_INPUT_KEYS = ("init_image_data", "mask_image", "ref_images", "control_ima
 
 def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                    instance_token, width=None, height=None, in_gallery=True,
-                   native_choice=None, native_loras=None, native_extras=None):
+                   native_choice=None, native_loras=None, native_extras=None,
+                   withhold_on_trace=False):
     """The background-job body for one image generation of ``req`` into
     ``out_path``: backend availability, VRAM handover, generation, and the
     chat-model reload on every exit path. ``width``/``height`` are forwarded to
@@ -163,12 +170,14 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     ``out_path`` as a gallery artifact owned by ``owner``. ``native_choice``
     and ``native_loras`` (from ``native_models.check_request``) and
     ``native_extras`` (``native_models.check_generation_extras``) apply to the
-    native backend only; a ComfyUI job given any of them is refused."""
+    native backend only; a ComfyUI job given any of them is refused.
+    ``withhold_on_trace`` is passed to the backend facade's ``generate``: the
+    file is handed to the caller as it is, so a failed metadata strip or
+    ComfyUI-copy removal fails the job."""
     extras = native_extras or {}
     saved_names: list = []
 
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
@@ -276,7 +285,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             note_other_vram_holders(job, s, "image")
             if _backend.supports(s, "NEEDS_COMFY_SERVER"):
                 job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             size_kwargs = ({"width": width, "height": height}
                            if width is not None and height is not None else {})
 
@@ -323,6 +332,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 **({"on_preview": lambda p: job.push(frame_event(p))}
                    if _backend.supports(s, "SUPPORTS_JOB_OPTIONS") else {}),
                 privacy=is_privacy,
+                withhold_on_trace=withhold_on_trace,
             )
             job.push({"type": "line", "outcome": True, "text": message})
             if ok and not saved_names:
@@ -415,11 +425,12 @@ async def imagine(req: ImagineRequest, request: Request):
 
     job = jobs.start_fn(
         "imagine",
-        _make_generate(req, input_image=input_image, lora_name=lora_name,
-                       out_path=out_path, owner=owner, self_url=self_url,
-                       instance_token=instance_token, width=width, height=height,
-                       native_choice=native_choice, native_loras=native_loras,
-                       native_extras=native_extras),
+        carry_request_privacy(_make_generate(
+            req, input_image=input_image, lora_name=lora_name,
+            out_path=out_path, owner=owner, self_url=self_url,
+            instance_token=instance_token, width=width, height=height,
+            native_choice=native_choice, native_loras=native_loras,
+            native_extras=native_extras)),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 
@@ -545,8 +556,7 @@ def _private_temp_root() -> Path | None:
 
 
 def _is_private_session() -> bool:
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("server") == SessionMode.PRIVACY
+    return media_session_is_private()
 
 
 CANCEL_SETTLE_SECONDS = 30.0
@@ -639,6 +649,12 @@ def _remove_tree(path: Path) -> None:
         ) from e
 
 
+def _outcome_warnings(outcome: str) -> list:
+    """The WARNING lines of a finished job's outcome *outcome*: every
+    non-empty line after the first (the first says where the file was saved)."""
+    return [line.strip() for line in (outcome or "").splitlines()[1:] if line.strip()]
+
+
 @_router.post("/v1/images/generations")
 async def create_image(req: ImageGenerationRequest, request: Request):
     """OpenAI-compatible image generation: runs the same job as ``/api/imagine``
@@ -650,8 +666,11 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     ``b64_json`` when none is, where ``url`` is a 400. In privacy mode nothing
     is kept: the image is generated into a private directory, returned as
     ``b64_json`` (the default there; ``url`` is a 400) and the directory is
-    deleted before the response is sent. When a gallery image's owner could only
-    be held in memory, the response also carries ``warnings``."""
+    deleted before the response is sent. A generated file whose metadata could
+    not be stripped, or whose ComfyUI copy could not be removed, is not
+    returned: the request fails with 502. The response carries ``warnings``
+    for any other warning the generation reported, and when a gallery image's
+    owner could only be held in memory."""
     prompt = req.prompt.strip()
     if not prompt:
         raise HTTPException(400, "Empty prompt")
@@ -695,6 +714,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                              lora_strength_model=None, lora_strength_clip=None)
     width, height = size if size else (None, None)
 
+    show = path_formatter(request)
     private_dir = None
     started_jobs = []
     items = []
@@ -711,10 +731,12 @@ async def create_image(req: ImageGenerationRequest, request: Request):
             out_path = out_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
             job = jobs.start_fn(
                 "imagine",
-                _make_generate(gen_req, input_image=None, lora_name=None,
-                               out_path=out_path, owner=owner, self_url=self_url,
-                               instance_token=instance_token, width=width,
-                               height=height, in_gallery=not private),
+                carry_request_privacy(_make_generate(
+                    gen_req, input_image=None, lora_name=None,
+                    out_path=out_path, owner=owner, self_url=self_url,
+                    instance_token=instance_token, width=width,
+                    height=height, in_gallery=not private,
+                    withhold_on_trace=True)),
                 result_path=out_path.name, owner=owner)
             started_jobs.append(job)
             status, last_line = await _await_job(job, request)
@@ -722,7 +744,9 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                 raise HTTPException(409, "The image generation was cancelled.")
             if status != "done" or not out_path.is_file():
                 raise HTTPException(
-                    502, f"Image generation failed: {last_line or 'no reason was reported'}")
+                    502, "Image generation failed: "
+                         + (show(last_line) if last_line else "no reason was reported"))
+            warnings.extend(show(line) for line in _outcome_warnings(last_line))
             if not private:
                 held = gallery.held_stamp_warning("image", out_path.name)
                 if held:
@@ -816,7 +840,6 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
     ``out_path``: runtime check, VRAM handover, upscaling, and the chat-model
     reload on every exit path."""
     def _upscale(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
@@ -849,7 +872,7 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
             if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
                 say("Could not unload the chat model - the upscaler may run low on VRAM.")
             note_other_vram_holders(job, s, "image")
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             ok, message = native.upscale(
                 s, source, upscaler, out_path, extra_meta=extra_meta,
                 write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
@@ -883,24 +906,18 @@ async def imagine_upscale(name: str, req: UpscaleRequest, request: Request):
     if not self_url:
         raise HTTPException(503, "Upscaling needs this server's own address to free "
                                  "VRAM first, and it could not be determined.")
-    extra_meta = {}
-    sidecar = source.with_suffix(source.suffix + ".json")
-    if sidecar.is_file():
-        try:
-            loaded = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            extra_meta = {k: v for k, v in loaded.items() if k not in _UPSCALE_DROPPED_META}
+    extra_meta = {k: v for k, v in gallery.read_sidecar("image", source).items()
+                  if k not in _UPSCALE_DROPPED_META}
     images_dir = _images_dir()
     out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
     owner = principal_id(request)
     job = jobs.start_fn(
         "imagine",
-        _make_upscale(source=source, upscaler=upscaler, out_path=out_path, owner=owner,
-                      self_url=self_url,
-                      instance_token=getattr(request.app.state, "instance_token", None),
-                      extra_meta=extra_meta),
+        carry_request_privacy(_make_upscale(
+            source=source, upscaler=upscaler, out_path=out_path, owner=owner,
+            self_url=self_url,
+            instance_token=getattr(request.app.state, "instance_token", None),
+            extra_meta=extra_meta)),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 
@@ -916,13 +933,7 @@ async def imagine_history(request: Request):
     if images_dir.is_dir():
         for p in sorted(images_dir.glob("*.png"),
                         key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("image", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "mtime": p.stat().st_mtime})

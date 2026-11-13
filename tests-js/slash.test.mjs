@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadApp, runScript } from "./harness.mjs";
+import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DE = JSON.parse(
@@ -165,6 +165,32 @@ test("an unrecognised command reports 'Unknown command: /<cmd>'", () => {
 });
 
 /* ================================================================ */
+/*  Media commands name the chat surface                             */
+/* ================================================================ */
+
+for (const [runner, route, arg] of [
+  ["runImagineInChat", "/api/imagine", "a cat"],
+  ["runMusicInChat", "/api/music", "lo-fi"],
+  ["runVideoInChat", "/api/video", "a cat"],
+]) {
+  test(`${runner} sends X-Client-Id: chat with ${route}`, async () => {
+    const calls = [];
+    const fetchImpl = async (url, init = {}) => {
+      calls.push({ url: String(url), headers: init.headers || {} });
+      if (String(url) === route) {
+        return { ok: false, status: 500, json: async () => ({ detail: "stop here" }), text: async () => "" };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadApp({ fetchImpl });
+    await window[runner](arg);
+    const sent = calls.filter((c) => c.url === route);
+    assert.equal(sent.length, 1, `${route} was requested once`);
+    assert.equal(sent[0].headers["X-Client-Id"], "chat");
+  });
+}
+
+/* ================================================================ */
 /*  A streaming reply refuses every chat command                     */
 /* ================================================================ */
 
@@ -258,5 +284,130 @@ for (const [run, route] of [["runImagineInChat", "/api/imagine"],
     const text = window.document.getElementById("chat-messages").textContent;
     assert.match(text, /failed: boom/, "the chat shows the error");
     assert.equal(toastText(window), "", "no second copy of the error as a toast");
+  });
+}
+
+/* ================================================================ */
+/*  /generate-image runs the Images page's pick                      */
+/* ================================================================ */
+
+function imagineFetch(active, posts) {
+  return async (url, init = {}) => {
+    const u = String(url);
+    if (u === "/api/imagine/backend") {
+      return { ok: true, status: 200, json: async () => ({ active, choice: active }) };
+    }
+    if (u.startsWith("/api/imagine/native-models")) {
+      return { ok: true, status: 200,
+               json: async () => ({ models: [{ name: "flux-dev" }], slots: {}, loras: [] }) };
+    }
+    if (u === "/api/imagine" && (init.method || "GET") === "POST") {
+      posts.push(JSON.parse(init.body));
+      return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+}
+
+const STORED_IMAGE_PICK = {
+  "localm.nativeModels.image": JSON.stringify(
+    { models: { model: "flux-dev" }, loras: [{ name: "ink", strength: 0.5 }] }),
+};
+
+test("/generate-image sends the Images page's stored native pick on the native backend", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("native", posts),
+                                        seedLocalStorage: STORED_IMAGE_PICK });
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].prompt, "a cat");
+  assert.deepEqual(posts[0].native_models, { model: "flux-dev" });
+  assert.deepEqual(posts[0].loras, [{ name: "ink", strength: 0.5 }]);
+});
+
+test("/generate-image on ComfyUI sends the workflow model picks, never the native pick", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("comfy", posts),
+                                        seedLocalStorage: STORED_IMAGE_PICK });
+  runScript(window, `modelOverrides.image = { "1": { unet_name: "b.gguf" } };`);
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].model_overrides, { "1": { unet_name: "b.gguf" } });
+  assert.ok(!("native_models" in posts[0]), "no native pick on ComfyUI");
+  assert.ok(!("loras" in posts[0]), "no native LoRAs on ComfyUI");
+});
+
+test("/generate-image drops a stored native pick that is no longer registered", async () => {
+  const posts = [];
+  const base = imagineFetch("native", posts);
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/imagine/native-models") && u.includes("model=flux-dev")) {
+      return { ok: false, status: 400, json: async () => ({ detail: "'flux-dev' is not a registered model." }) };
+    }
+    return base(url, init);
+  };
+  const { window } = loadAppWithPages({ fetchImpl, seedLocalStorage: STORED_IMAGE_PICK });
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.ok(!("native_models" in posts[0]), "the unregistered pick is not sent");
+});
+
+test("a media page that refuses to generate stops the chat command before any job", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("native", posts) });
+  runScript(window, "chatPageModelChoice.image = async () => null;");
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 0, "no job is started");
+  assert.match(window.document.getElementById("chat-messages").textContent,
+    /Not generated: the model files it needs are not downloaded/);
+});
+
+test("/generate-music sends the Music page's registered components and drops one no longer listed", async () => {
+  const posts = [];
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    if (u === "/api/music/backend") {
+      return { ok: true, status: 200, json: async () => ({ active: "native", choice: "native" }) };
+    }
+    if (u === "/api/music/native-models") {
+      return { ok: true, status: 200, json: async () => ({
+        components: { dit: [{ name: "acestep-dit", file: "dit.gguf" }], text_encoder: [], vae: [], lm: [] },
+        current: {} }) };
+    }
+    if (u === "/api/music" && (init.method || "GET") === "POST") {
+      posts.push(JSON.parse(init.body));
+      return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadAppWithPages({ fetchImpl, seedLocalStorage: {
+    "localm.nativeModels.music": JSON.stringify({ dit: "acestep-dit", text_encoder: "gone-encoder" }) } });
+  await window.runMusicInChat("lo-fi");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].native_models, { dit: "acestep-dit" });
+  assert.deepEqual(JSON.parse(window.localStorage.getItem("localm.nativeModels.music")), { dit: "acestep-dit" });
+});
+
+for (const [run, media, route, arg] of [["runVideoInChat", "video", "/api/video", "a fox"],
+                                         ["runMusicInChat", "music", "/api/music", "lo-fi"]]) {
+  test(`/generate-${media} on ComfyUI sends the ${media} page's workflow model picks`, async () => {
+    const posts = [];
+    const fetchImpl = async (url, init = {}) => {
+      const u = String(url);
+      if (u === `/api/${media}/backend`) {
+        return { ok: true, status: 200, json: async () => ({ active: "comfy", choice: "comfy" }) };
+      }
+      if (u === route && (init.method || "GET") === "POST") {
+        posts.push(JSON.parse(init.body));
+        return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+    runScript(window, `modelOverrides.${media} = { "7": { ckpt_name: "m.safetensors" } };`);
+    await window[run](arg);
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].model_overrides, { "7": { ckpt_name: "m.safetensors" } });
   });
 }

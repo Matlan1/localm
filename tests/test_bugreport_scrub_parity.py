@@ -295,7 +295,8 @@ def _run_curl_fallback(tmp_path, bash, *, drop_terminal_check):
     (fake / "curl").write_text('#!/bin/sh\ntouch "' + sink.as_posix() + '"\necho 201\n',
                                encoding="utf-8", newline="\n")
     (fake / "curl").chmod(0o755)
-    env = dict(os.environ, LOCALM_BUGREPORT_URL="http://127.0.0.1:9/report")
+    env = dict(os.environ, LOCALM_BUGREPORT_URL="http://127.0.0.1:9/report",
+               LOCALM_NET_MODE="ask")
     proc = subprocess.run(
         [bash, "-c",
          'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '

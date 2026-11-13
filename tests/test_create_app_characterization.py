@@ -397,6 +397,7 @@ _GATE_PROBES = {
 
 
 def test_every_gate_label_is_enforced_with_its_scope():
+    from localm.inference.app_assembly.errors import error_body
     from localm import auth
     no_scope_key = auth.create_key("characterization", [])["key"]
     app = create_app(None)
@@ -413,8 +414,9 @@ def test_every_gate_label_is_enforced_with_its_scope():
             f"{method} {template} no longer starts with the {label} gate")
         url = _concrete(template)
         anonymous = client.request(method, url, json=body)
+        path = url.split("?")[0]
         assert (anonymous.status_code, anonymous.json()) == (
-            401, {"detail": "Invalid or missing API key"}), f"{label}: {method} {url}"
+            401, error_body(path, 401, "Invalid or missing API key")), f"{label}: {method} {url}"
         if label == "auth":
             continue
         refused = client.request(
@@ -422,7 +424,7 @@ def test_every_gate_label_is_enforced_with_its_scope():
         detail = ("This key does not have host filesystem access" if label == "fs_host"
                   else f"Key lacks required scope: {label[len('scope:'):]}")
         assert (refused.status_code, refused.json()) == (
-            403, {"detail": detail}), f"{label}: {method} {url}"
+            403, error_body(path, 403, detail)), f"{label}: {method} {url}"
 
 
 # --------------------------------------------------------------------------- #
@@ -625,15 +627,13 @@ def test_validation_error_shape():
     assert "(got" not in flag_part
 
 
-def test_validation_error_names_max_tokens_zero():
+def test_validation_error_names_max_tokens_like_any_other_field():
     app = _app_with_probe_routes()
     response = TestClient(app).post(
         "/characterize/validate", json={"count": 1, "flag": True, "max_tokens": 0},
         headers=_shell_auth(app))
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "max_tokens must be 1 or more - 0 is not 'no limit'. "
-        "Omit max_tokens entirely to use the model's default")
+    assert response.json()["detail"] == "max_tokens must be greater than or equal to 1 (got 0)"
 
 
 def test_validation_error_renders_a_non_finite_input():

@@ -67,15 +67,10 @@ def plugin_model_roles(app, plugin: str) -> list:
     return [r for r in roles if r.get("plugin_name") == plugin]
 
 
-def registry_models_of_type(model_type: str, registry: Optional[dict] = None) -> list:
-    """Registered models of *model_type*, as ``[{"name", "filename"}, ...]``.
-
-    ``filename`` is the BASENAME of the registered path, because that is the
-    name ComfyUI reports in an ``/object_info`` combo, which is what makes the two
-    lists comparable. The full path is NOT returned. A GGUF text-model LoRA
-    adapter is a ``lora`` entry too but is not a ComfyUI component, and neither
-    is a registered folder (such as a part of a diffusers pipeline): both are
-    left out."""
+def _component_entries(model_type: str, registry: Optional[dict]) -> list:
+    """``[(name, entry, filename), ...]`` for the registered component files of
+    *model_type*, sorted by name. GGUF text-model LoRA adapters, registered
+    folders and entries without a path are left out."""
     from localm.model_manager import _entry_path, is_gguf_adapter_entry
     from localm.model_manager.registry import _entry_is_folder, models_of_type
     out = []
@@ -86,10 +81,81 @@ def registry_models_of_type(model_type: str, registry: Optional[dict] = None) ->
         if epath is None:
             # A malformed entry is skipped rather than crashing the picker.
             continue
-        out.append({
-            "name": name,
-            "filename": epath.replace("\\", "/").rsplit("/", 1)[-1],
-        })
+        out.append((name, entry, epath.replace("\\", "/").rsplit("/", 1)[-1]))
+    return out
+
+
+def registry_models_of_type(model_type: str, registry: Optional[dict] = None) -> list:
+    """Registered models of *model_type*, as ``[{"name", "filename"}, ...]``.
+
+    ``filename`` is the BASENAME of the registered path, because that is the
+    name ComfyUI reports in an ``/object_info`` combo, which is what makes the two
+    lists comparable. The full path is NOT returned. A GGUF text-model LoRA
+    adapter is a ``lora`` entry too but is not a ComfyUI component, and neither
+    is a registered folder (such as a part of a diffusers pipeline): both are
+    left out."""
+    return [{"name": name, "filename": filename}
+            for name, _entry, filename in _component_entries(model_type, registry)]
+
+
+def _not_family(families: frozenset):
+    return lambda info: info.kind != "music" and info.family not in families
+
+
+def _role_fits() -> dict:
+    """``{role_id: test}`` for the roles the built-in media plugins declare;
+    each test takes a classified file (``families.FileInfo``) and says whether
+    it can fill that role."""
+    from localm.media.sdcpp.families import IMAGE_FAMILIES, VIDEO_FAMILIES
+    return {
+        "image-unet": _not_family(VIDEO_FAMILIES),
+        "image-vae": _not_family(VIDEO_FAMILIES),
+        "image-clip1": lambda info: info.kind in ("clip_l", "clip_h"),
+        "image-clip2": lambda info: info.kind in ("t5xxl", "clip_g"),
+        "video-unet": _not_family(IMAGE_FAMILIES),
+        "video-vae": _not_family(IMAGE_FAMILIES),
+        "video-clip": lambda info: info.kind in ("t5xxl", "umt5", "llm", "clip_l"),
+        "music-unet": lambda info: info.kind == "music",
+        "music-clip": lambda info: info.kind in ("music", "umt5", "t5xxl"),
+        "music-vae": lambda info: info.family not in IMAGE_FAMILIES | VIDEO_FAMILIES,
+    }
+
+
+def _entry_info(entry):
+    """The classified file of registry *entry* (``families.FileInfo``), or None
+    when it cannot be read: a network or device path, or a header that names
+    no known kind. Never raises."""
+    from localm.media.sdcpp import families
+    music = families.music_entry(entry)
+    if music is not None:
+        return music
+    from localm.model_manager.registry import _entry_path
+    from localm.pathsafe import is_unc_or_device_path
+    raw = _entry_path(entry)
+    if not raw or is_unc_or_device_path(raw):
+        return None
+    info = families.inspect_file(raw)
+    return None if info.kind == "unknown" else info
+
+
+def registry_models_for_role(role: dict, registry: Optional[dict] = None) -> list:
+    """Registered models that can fill *role*, as ``[{"name", "filename"}, ...]``:
+    the models of the role's ``model_type`` (see :func:`registry_models_of_type`),
+    less the files whose header shows they belong elsewhere (a CLIP-L file for a
+    T5 role, an image checkpoint for the music model role, a music file for an
+    image role). A file whose header cannot be read or classified is kept. A
+    role a built-in media plugin did not declare is not filtered."""
+    mtype = role.get("model_type")
+    if not mtype:
+        return []
+    fits = _role_fits().get(role.get("role_id"))
+    out = []
+    for name, entry, filename in _component_entries(mtype, registry):
+        if fits is not None:
+            info = _entry_info(entry)
+            if info is not None and not fits(info):
+                continue
+        out.append({"name": name, "filename": filename})
     return out
 
 
@@ -182,8 +248,9 @@ def describe_roles(roles: list, slots: Optional[list],
       read and this role has no slot in it.
     * ``installed`` - whether ComfyUI actually has the file the slot names, or
       None when there is no slot to ask about.
-    * ``registry_models`` - this box's registered models of the role's type.
-      Independent of ComfyUI, so it is populated even when ComfyUI is down.
+    * ``registry_models`` - this box's registered models that can fill the
+      role (:func:`registry_models_for_role`). Independent of ComfyUI, so it is
+      populated even when ComfyUI is down.
     * ``registry_only`` - registered models of this type that ComfyUI is NOT
       offering for the slot, and ONLY when the slot is unsatisfied. On a slot
       ComfyUI serves fine this is always empty."""
@@ -201,7 +268,7 @@ def describe_roles(roles: list, slots: Optional[list],
         role_id = role.get("role_id")
         mtype = role.get("model_type")
         slot = slot_by_role.get(role_id)
-        known = registry_models_of_type(mtype, reg) if mtype else []
+        known = registry_models_for_role(role, reg)
         installed = None if slot is None else slot_is_satisfied(slot)
         if installed is not False:
             # registry_only is populated only where ComfyUI has FAILED to serve

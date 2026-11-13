@@ -80,6 +80,34 @@ test("Runtime: check surfaces a different build and reveals 'Update runtime'", a
   assert.equal(btn.textContent, "Update runtime");
 });
 
+test("Runtime: the Backend list offers only the backends the check lists", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, backends: ["auto", "vulkan", "cuda", "cpu"] }],
+  ]) });
+  const doc = window.document;
+  pick(doc, window, "metal");
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const offered = [...doc.getElementById("runtime-backend").options]
+    .filter((o) => !o.hidden && !o.disabled).map((o) => o.value);
+  assert.deepEqual(offered, ["", "auto", "vulkan", "cuda", "cpu"]);
+  assert.equal(doc.getElementById("runtime-backend").value, "",
+    "a pick the check does not list goes back to keeping the installed backend");
+  assert.equal(doc.getElementById("runtime-update-apply").textContent, "Update runtime");
+});
+
+test("Runtime: a check without a backends list offers every backend", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_VULKAN],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const sel = doc.getElementById("runtime-backend");
+  assert.equal([...sel.options].filter((o) => o.hidden || o.disabled).length, 0);
+  assert.equal(sel.options.length, 9);
+});
+
 test("Runtime: up to date hides the button", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([
     ["/api/runtime/check", { ...INSTALLED_VULKAN, current: "b10361", newer: false }],
@@ -616,4 +644,22 @@ test("Runtime: the check names a runtime loaded from an override", async () => {
   const status = doc.getElementById("runtime-update-status").textContent;
   assert.match(status, /Up to date/);
   assert.match(status, /localm loads hip from the llama.cpp binary folder setting/);
+});
+
+test("Runtime: a finished provision keeps 'Runtime provisioned.' in front of the re-check's line", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, newer: false, current: "b10361" }],
+    ["/api/runtime/update", () => ({ job_id: "j1" })],
+  ]) });
+  stubJobStream(window, "done");
+  stubConfirm(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  pick(doc, window, "vulkan");
+  doc.getElementById("runtime-update-apply").click();
+  await flush();
+  await flush();
+  const status = doc.getElementById("runtime-update-status").textContent;
+  assert.match(status, /^Runtime provisioned\. Up to date/);
 });

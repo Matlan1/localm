@@ -302,7 +302,7 @@ METRICS_OWNER_KEYS = {"metrics_enabled"}
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
-    # disables the SSRF guard. The bug-report / update endpoints are the same
+    # relaxes the SSRF guard. The bug-report / update endpoints are the same
     # class of boundary, cors_origins names which browser origins may call the
     # authenticated API, and hf_trust_remote_code lets a downloaded model
     # directory run its OWN Python inside the localm process.
@@ -696,7 +696,18 @@ def _camel(key):
 
 
 def _is_hidden(field):
-    return getattr(field.widget, "value", field.widget) == "hidden"
+    """True for a field the settings page never draws: a HIDDEN widget, or a
+    field marked gui=False (the TTS engine and asset paths)."""
+    return (getattr(field.widget, "value", field.widget) == "hidden"
+            or getattr(field, "gui", True) is False)
+
+
+def test_no_catalog_text_for_a_field_the_page_never_draws():
+    catalog = _gui_catalog()
+    dead = [k for f in ss.TTS_FIELDS if getattr(f, "gui", True) is False
+            for k in (f"settings.field.tts.{_camel(f.key)}.label",
+                      f"settings.field.tts.{_camel(f.key)}.help") if k in catalog]
+    assert not dead, f"catalog texts no page can show: {dead}"
 
 
 def _gui_text_mismatches(fields, scopes_for):

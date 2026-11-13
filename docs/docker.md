@@ -158,6 +158,13 @@ automatically. For a bind mount, make the directory writable by uid 10001
 Session persistence defaults to privacy mode (nothing is saved). Change it with
 `--mode` or in the settings, as on any other install.
 
+## Updating
+
+localm in a container is updated by pulling the newer image and recreating the
+container; `/data` carries over. `localm update`, its rollback and repair, and
+the GUI's Update now refuse inside the image, because a change made inside a
+container is lost when the container is replaced.
+
 ## Certificate
 
 The certificate is signed by a local CA created on first start under
@@ -221,7 +228,7 @@ docker run -d --gpus all -v localm-data:/data -p 8642:8642 ghcr.io/matlan1/local
 
 Pick the tag by GPU generation: `cuda` for every architecture before Blackwell,
 `cuda13` for Blackwell (RTX 50-series, B100/B200). The host driver must support the
-image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.4 or newer for `cuda13`
+image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.5 or newer for `cuda13`
 (`nvidia-smi` prints the version the driver supports).
 
 The image cannot be tested against a GPU while it is built, so the runtime is checked

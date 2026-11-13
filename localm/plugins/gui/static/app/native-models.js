@@ -470,7 +470,8 @@ export function createNativeGenControls({ prefix }) {
   return { populate, suggest, body, set, syncHires, useSuggested };
 }
 
-/** The music picker: one select per ACE-Step component. */
+/** The music picker: one select per ACE-Step component. A refresh drops a
+ *  remembered component the server no longer lists. */
 export function createMusicModelPicker({ mountId }) {
   const storeKey = "localm.nativeModels.music";
   let state = nmLoad(storeKey, {});
@@ -488,8 +489,18 @@ export function createMusicModelPicker({ mountId }) {
       if (!r.ok) return;
       data = await r.json();
     } catch { return; }
-    const box = el("div", "native-models");
     const comps = data.components || {};
+    if (data.components && typeof data.components === "object") {
+      let dropped = false;
+      for (const key of Object.keys(state)) {
+        if (!(comps[key] || []).some((it) => it.name === state[key])) {
+          delete state[key];
+          dropped = true;
+        }
+      }
+      if (dropped) nmSave(storeKey, state);
+    }
+    const box = el("div", "native-models");
     const cur = data.current || {};
     for (const key of Object.keys(NM_MUSIC_KEYS)) {
       const items = comps[key] || [];

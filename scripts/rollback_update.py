@@ -29,6 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # The install root is the parent of this script's scripts/ dir, derived from __file__.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
@@ -135,16 +136,20 @@ def _left_note(left: list) -> str:
             "start of localm with an internet connection returns them to this version's pins")
 
 
-def _record_rollback(updates_dir: Path, install_root: Path, left: list) -> None:
+def _record_rollback(updates_dir: Path, install_root: Path, left: list,
+                     why: Optional[str] = None) -> None:
     """Record the rollback as the last runtime and component update result, the way
     ``localm.updater._record_rollback`` does, so Settings > Updates and ``localm
-    doctor`` do not go on reporting what the rolled-back update did. A file that
-    cannot be written is reported on stderr and does not fail the rollback."""
+    doctor`` do not go on reporting what the rolled-back update did. *why*, when
+    given, is named in the note as the reason. A file that cannot be written is
+    reported on stderr and does not fail the rollback."""
     try:
         version = (install_root / "VERSION").read_text(encoding="utf-8").strip() or None
     except (OSError, ValueError):
         version = None
     note = f"the update was rolled back to localm {version or '(unknown version)'}"
+    if why:
+        note += f" because {why}"
     if left:
         note += "; " + _left_note(left)
     common = {"state": "rolled_back", "note": note, "error": None, "version": version,
@@ -253,10 +258,12 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
     return [p.name for p in backup_dir.iterdir()]
 
 
-def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int:
+def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
+         why: Optional[str] = None) -> int:
     """Run the rollback. *code_root*, when given, is the localm tree of the build
     that applied the update (its update backup); the restore helpers are loaded
-    from it before the install's own."""
+    from it before the install's own. *why*, when given, is the reason recorded
+    with the rollback (:func:`_record_rollback`) and printed."""
     ap = argparse.ArgumentParser(
         description="Restore the previous localm build after a bad update.")
     ap.add_argument("-y", "--yes", action="store_true",
@@ -320,7 +327,9 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
         import shutil
         shutil.rmtree(undo.keep, ignore_errors=True)
     left = _parts_left(updates_dir)
-    _record_rollback(updates_dir, install_root, left)
+    _record_rollback(updates_dir, install_root, left, why)
+    if why:
+        print(f"Rolled back because {why}.")
     print("Rolled back to the previous version" + (" and its packages" if undo else "")
           + ". Start localm again to use it; Settings > Updates shows any other part that "
             "still differs.")

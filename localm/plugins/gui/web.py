@@ -23,7 +23,7 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -49,10 +49,64 @@ class _RevalidatingStatic(StaticFiles):
     ``304`` and a changed one is fetched fresh. It also lets a phone's
     ``serviceWorker.register(...).update()`` see a new ``sw.js``."""
 
+    async def __call__(self, scope, receive, send):
+        """An ``/api/`` or ``/v1/`` request that no route answered gets a JSON
+        404 naming why (a plugin that is not installed or not enabled, else no
+        such endpoint); every other request is served as a static file."""
+        path = scope.get("path", "") if scope.get("type") == "http" else ""
+        if path.startswith(("/api/", "/v1/")):
+            if _route_takes_another_method(scope):
+                resp = JSONResponse(status_code=405,
+                                    content={"detail": "Method Not Allowed"})
+            else:
+                resp = JSONResponse(status_code=404, content={
+                    "detail": await _missing_endpoint_detail(scope, path)})
+            await resp(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
         resp.headers.setdefault("Cache-Control", "no-cache")
         return resp
+
+
+def _route_takes_another_method(scope) -> bool:
+    """True when a route of the app serves this path with another method."""
+    from starlette.routing import Match
+    router = getattr(scope.get("app"), "router", None)
+    for route in getattr(router, "routes", ()):
+        if getattr(route, "methods", None) is None:
+            continue
+        match, _ = route.matches(scope)
+        if match == Match.PARTIAL:
+            return True
+    return False
+
+
+async def _missing_endpoint_detail(scope, path: str) -> str:
+    """The 404 text for an API *path* no route answers. ``/api/<name>/...`` of a
+    catalog plugin that is not active (installed and enabled) names that plugin;
+    anything else is "no such endpoint"."""
+    from localm.plugins import catalog
+    name = path.split("/")[2] if path.startswith("/api/") else ""
+    entry = catalog.get(name) if name else None
+    if entry is None:
+        return f"No such API endpoint: {scope.get('method', 'GET')} {path}"
+    mgr = getattr(getattr(scope.get("app"), "state", None), "plugin_manager", None)
+    active = False
+    if mgr is not None:
+        from starlette.concurrency import run_in_threadpool
+        try:
+            active = bool(await run_in_threadpool(mgr.is_active, name))
+        except Exception:
+            logger.warning("could not check whether plugin %r is active",
+                           name, exc_info=True)
+    if active:
+        return f"No such API endpoint: {scope.get('method', 'GET')} {path}"
+    return (f"The {name} plugin is not installed or not enabled, so {path} is "
+            "not served. Turn it on on the Plugins page (or: localm plugin "
+            f"install {name}, then localm plugin enable {name}).")
 
 
 # The literal that every inline <script> in index.html carries in place of a real
@@ -800,6 +854,8 @@ def attach_gui(
     _routes_doctor.register(app, ctx)
     from .routes import instances as _routes_instances
     _routes_instances.register(app, ctx)
+    from .routes import media_runtimes as _routes_media_runtimes
+    _routes_media_runtimes.register(app, ctx)
 
     # "/api/bug-report" POST lives on the core server (http_server.py) so it works in
     # headless `localm serve`; the GUI button targets that one canonical route.

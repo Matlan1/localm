@@ -195,6 +195,7 @@ def test_results_newest_first(home):
 def test_result_dir_confined_to_jobs_dir(home):
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
+    store.add(_make_job(id="../../etc/evil"))
     # A crafted, traversal-shaped job id is sanitised; nothing escapes the root.
     rid = store.record_result("../../etc/evil", {"status": "ok", "output": "x",
                                                  "started": 0.0, "finished": 0.0})
@@ -898,8 +899,8 @@ def test_jobs_in_catalog():
     from localm.plugins import catalog
     entry = catalog.get("jobs")
     assert entry is not None
-    assert "job" in entry.commands
-    assert catalog.commands().get("job") == "jobs"
+    assert entry.commands == ()
+    assert "job" not in catalog.commands()
 
 
 def test_jobs_client_entry_is_served(home, monkeypatch):
@@ -936,7 +937,7 @@ def test_jobs_available_in_api_state(home, monkeypatch):
     assert "jobs" in names
     jobs = next(p for p in state["plugins"] if p["name"] == "jobs")
     assert jobs["available"] is True       # bundled, not yet installed
-    assert "job" in jobs["commands"]
+    assert jobs["commands"] == []
 
 
 def test_jobs_manifest_parses():

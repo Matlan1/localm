@@ -30,6 +30,7 @@ from typing import Optional
 
 from localm.auth import ct_equal
 from localm.debuglog import logger
+from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT
 
 # Absolute lifetime matches the browser cookie cap (~400 days). Idle lifetime
 # prunes a session unused for that long. On loopback a fresh session is re-minted
@@ -43,7 +44,7 @@ _LOCK = threading.Lock()
 
 # Wait budget, in seconds, for the cross-process lock on the best-effort writes
 # made on the request path (the last_used stamp, the owner-key back-fill).
-_BEST_EFFORT_LOCK_TIMEOUT_S = 0.5
+_BEST_EFFORT_LOCK_TIMEOUT_S = BEST_EFFORT_LOCK_TIMEOUT
 
 # mtime-keyed cache for the hot lookup path; invalidated whenever the file is
 # written.
@@ -146,7 +147,7 @@ def _save(records: list) -> None:
     # the full digest payload, and os.replace carries its ACL onto the
     # destination. atomic_write_private also creates the temp at 0600.
     from localm.storekit import atomic_write_private
-    atomic_write_private(path, json.dumps(records, indent=2))
+    atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:

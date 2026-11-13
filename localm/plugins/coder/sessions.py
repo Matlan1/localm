@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Optional
 
 from localm.audit import SessionMode
-from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
+from .diffutil import (
+    compute_multifile_diff,
+    compute_search_replace_diff,
+    compute_tool_diff,
+    read_old_content,
+)
 from .parser import strip_tool_calls
 from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
 
@@ -50,6 +55,21 @@ def _confirm_timeout() -> Optional[float]:
 # without limit. When full, oldest events are dropped (tokens are recoverable -
 # the final event always carries the full text).
 _QUEUE_MAX = 10_000
+
+
+def _put_dropping_oldest(q: queue.Queue, event: dict) -> None:
+    """Put *event* on *q*, dropping its oldest event first when it is full."""
+    try:
+        q.put_nowait(event)
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(event)
+        except queue.Full:
+            pass
 
 # How long a session may sit with no activity (no message, no token, no tool
 # call/result) before SessionManager.reap_idle() closes it. This is cleanup for
@@ -244,7 +264,12 @@ class CoderSession:
         # successful save clears it. Never set for a restricted or
         # privacy-mode session, since those intentionally skip persistence.
         self.checkpoint_degraded = False
+        # Events pushed while no events stream is open wait here for the next
+        # stream (subscribe() hands them over).
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
+        # One queue per open events stream (subscribe()).
+        self._subscribers: list[queue.Queue] = []
+        self._events_lock = threading.Lock()
         # Bounded replay buffer so a reloaded page can rebuild the feed.
         self.history: list = []
         self.busy = False
@@ -299,7 +324,9 @@ class CoderSession:
             scope=scope,
             dry_run=dry_run,
             patch_mode=patch_mode,
-            disabled_tools=disabled_tools,
+            # Plan-mode tools ask on an approval card; ask_user is off.
+            interactive_tools=True,
+            disabled_tools=frozenset(disabled_tools or ()) | {"ask_user"},
             restricted=restricted,
             browser_enabled=browser_enabled,
             # None -> Agent reads .localcoder/system.md; a GUI-supplied string
@@ -354,22 +381,43 @@ class CoderSession:
         self._push(event)
 
     def _push(self, event: dict) -> None:
-        """Enqueue an event, dropping the oldest when the queue is full."""
+        """Record *event* in the history and put it on every open stream's
+        queue, or on ``events`` when no stream is open, dropping a queue's
+        oldest event when it is full."""
         self.last_activity_at = time.time()
-        self.history.append(event)
-        if len(self.history) > _QUEUE_MAX:
-            del self.history[: _QUEUE_MAX // 10]
-        try:
-            self.events.put_nowait(event)
-        except queue.Full:
-            try:
-                self.events.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.events.put_nowait(event)
-            except queue.Full:
-                pass
+        with self._events_lock:
+            self.history.append(event)
+            if len(self.history) > _QUEUE_MAX:
+                del self.history[: _QUEUE_MAX // 10]
+            for q in (self._subscribers or [self.events]):
+                _put_dropping_oldest(q, event)
+
+    def subscribe(self, replay: bool = False) -> tuple[list, queue.Queue]:
+        """A queue of its own for one events stream, which receives every event
+        pushed after this call. Returns ``(snapshot, queue)``: with *replay* the
+        snapshot is the history so far; without it, the events pushed while no
+        stream was open. Each event reaches the stream once. A stream that
+        subscribes after the session closed also gets a ``closed`` event. Pair
+        with :meth:`unsubscribe`."""
+        q: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
+        with self._events_lock:
+            waiting = []
+            while True:
+                try:
+                    waiting.append(self.events.get_nowait())
+                except queue.Empty:
+                    break
+            snapshot = list(self.history) if replay else waiting
+            if self.closed and not any(e.get("type") == "closed" for e in snapshot):
+                q.put_nowait({"type": "closed"})
+            self._subscribers.append(q)
+        return snapshot, q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        """Stop putting events on *q*. Unknown queues are ignored."""
+        with self._events_lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
 
     def _confirm(self, call, agent: Optional[str] = None) -> bool:
         """
@@ -429,10 +477,8 @@ class CoderSession:
             "timed_out": not answered,
         })
         if not answered:
-            who = f" (sub-agent '{agent}')" if agent else ""
-            self._push({"type": "info",
-                        "text": f"Confirmation for {call.name}{who} timed out "
-                                "- rejected."})
+            from .confirm import mark_unanswered
+            mark_unanswered()
             return False
         return pending.approved
 
@@ -446,6 +492,12 @@ class CoderSession:
             # falls back to a raw JSON dump of the args.
             if call.name == "edit_files":
                 return compute_multifile_diff(self.cwd, call.args.get("edits"))
+            if call.name == "search_replace":
+                return compute_search_replace_diff(
+                    self.cwd, str(call.args.get("pattern", "")),
+                    str(call.args.get("replacement", "")),
+                    str(call.args.get("glob") or "**/*"),
+                    restricted=bool(getattr(self.agent, "restricted", False)))
             path_arg = call.args.get("path", "")
             if not path_arg or call.name not in ("write_file", "edit_file"):
                 return None
@@ -489,6 +541,7 @@ class CoderSession:
             # already have replaced with its own.
             own_result: Optional[dict] = None
             try:
+                before = {f["path"]: f["writes"] for f in self.agent.changed_files()}
                 final = self.agent.run_task(text)
                 payload = {
                     "type": "final",
@@ -499,8 +552,9 @@ class CoderSession:
                     "verify_state": self.agent.last_verify_state,
                     "turns": self.agent.turns,
                     "total_tokens": self.agent.total_tokens,
-                    "changed_files": [f["path"] for f in
-                                      self.agent.changed_files()],
+                    # The files this task wrote, not every file of the session.
+                    "changed_files": [f["path"] for f in self.agent.changed_files()
+                                      if f["writes"] != before.get(f["path"])],
                 }
                 # Latch the same numbers for GET .../result BEFORE pushing, so
                 # a client woken by the event cannot race ahead of the record it
@@ -726,9 +780,15 @@ class CoderSession:
         This goes through the agent rather than writing the file directly
         because a plain file edit never calls reload_memory, so it would not
         reach the running session until the next one.
+
+        The returned memory dict carries ``added``: False when the note was
+        already there and nothing changed.
         """
+        before = self.memory().get("text")
         self.agent.remember(text)
-        return self.memory()
+        out = self.memory()
+        out["added"] = out.get("text") != before
+        return out
 
     def forget(self, pattern: str) -> dict:
         """Drop matching bullets and refresh the prompt.
@@ -946,6 +1006,7 @@ class CoderSession:
             "routing_note": getattr(self.agent.backend, "routing_note", None),
             "mode": self.mode,
             "auto_approve": self.auto_approve,
+            "plan_mode": bool(getattr(self.agent, "plan_mode", False)),
             # The LIVE glob, not the one passed at creation: it is settable
             # mid-session, so a creation-time snapshot would not be what is
             # actually in force.

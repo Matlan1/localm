@@ -288,7 +288,8 @@ def resolve_self_url(app) -> Optional[str]:
 
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None,
-                  instance_token: Optional[str] = None) -> requests.Response:
+                  instance_token: Optional[str] = None,
+                  headers: Optional[dict] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
@@ -314,13 +315,18 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     per-endpoint success/error handling to the caller.
 
     A redirect is never followed: a 3xx is returned to the caller.
+
+    *headers*: extra request headers (``audit.privacy_headers``); the
+    ``Authorization`` header is never taken from them.
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")
     from localm.auth import resolve_bearer_headers
-    headers = resolve_bearer_headers(instance_token)
+    sent = {k: v for k, v in (headers or {}).items()
+            if str(k).lower() != "authorization"}
+    sent.update(resolve_bearer_headers(instance_token))
     from localm import tls as _tls
     url = f"{base_url}{path}"
-    return requests.request(method, url, json=json, headers=headers,
+    return requests.request(method, url, json=json, headers=sent,
                             timeout=timeout, verify=_tls.requests_verify(url),
                             allow_redirects=False)

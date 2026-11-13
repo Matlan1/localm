@@ -33,7 +33,12 @@ def register(app: FastAPI, ctx) -> None:
         and tools can read them, beyond transient chat attachments. Multipart,
         parsed without python-multipart. CONFIG_WRITE (owner/companion-admin)
         because writing host files is privileged - a restricted shared key must
-        not be able to drop files on the host. Capped at _MAX_UPLOAD_BYTES."""
+        not be able to drop files on the host. Capped at _MAX_UPLOAD_BYTES.
+
+        Returns ``uploaded`` (``{name, bytes}`` per saved file) and ``dir``;
+        when a file was not saved (empty, or a name that is not allowed) also
+        ``skipped`` (``{name, reason}`` each) and a ``warning`` sentence. 400
+        when nothing was saved, naming each skipped file."""
         cap_mb = _web._MAX_UPLOAD_BYTES // (1024 * 1024)
         try:
             form = await read_form(
@@ -44,25 +49,39 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(e.status, e.message) from e
         base = _web._uploads_dir()
         saved = []
+        skipped = []        # {"name", "reason"} for every file not saved
         for upload in (u for group in form.files.values() for u in group):
             filename, data = upload.filename, upload.data
+            shown = Path(filename or "").name[:255]
             if not data:
+                skipped.append({"name": shown, "reason": "the file is empty"})
                 continue
-            safe = Path(filename or "").name[:255]
+            safe = shown
             if not _web._name_is_safe(safe):
-                continue            # empty/.. or illegal/control chars (e.g. NTFS ADS)
+                # empty/.. or illegal/control chars (e.g. NTFS ADS)
+                skipped.append({"name": shown,
+                                "reason": "the file name is not allowed"})
+                continue
             target = _web._unique_upload_target(base, safe)
             # Defense in depth: never write outside the uploads dir.
             if not target.resolve().is_relative_to(base.resolve()):
+                skipped.append({"name": shown,
+                                "reason": "the file name is not allowed"})
                 continue
             try:
                 target.write_bytes(data)
             except OSError as e:
                 raise HTTPException(500, f"Could not save {safe}: {e}") from e
             saved.append({"name": target.name, "bytes": len(data)})
+        note = "; ".join(f"{k['name'] or '(no name)'}: {k['reason']}" for k in skipped)
         if not saved:
-            raise HTTPException(400, "No files were uploaded.")
-        return {"uploaded": saved, "dir": path_formatter(request)(base)}
+            raise HTTPException(400, "No files were uploaded."
+                                + (f" Not saved: {note}." if note else ""))
+        out = {"uploaded": saved, "dir": path_formatter(request)(base)}
+        if skipped:
+            out["skipped"] = skipped
+            out["warning"] = (f"{len(skipped)} file(s) not saved: {note}.")
+        return out
 
     @app.get("/api/uploads", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def list_uploads(request: Request):

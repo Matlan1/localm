@@ -290,10 +290,11 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         fn=tool_kill_shell_job,
         description=(
             "Stop a background job and its whole process tree, and report its "
-            "final state and output."
+            "final state and output. A background sub-agent's job id stops that "
+            "sub-agent: it runs no further tool call and ends after its current reply."
         ),
         params={
-            "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
+            "job_id": {"type": "string", "description": "Job id from run_shell_background or spawn_agent_background", "required": True},
         },
         destructive=True,
     ),
@@ -338,7 +339,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         name="grep",
         fn=tool_grep,
         description=(
-            "Search file contents with a regex pattern. Skips noise directories "
+            "Search file contents with a regex pattern, ignoring case. Skips noise directories "
             "(.git, node_modules, ...), binaries, and oversized files, and says "
             "so. Raise max_per_file/max_output_lines when a result says it was "
             "capped."
@@ -514,7 +515,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         name="generate_image",
         fn=tool_generate_image,
         description=(
-            "Generate or refine an image using the local FLUX model. "
+            "Generate or refine an image with the image model chosen in "
+            "Settings > Media > Image. "
             "Without input_image: generates from scratch (txt2img). "
             "With input_image: refines an existing image guided by the prompt (img2img)."
         ),
@@ -585,6 +587,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "output_path": {"type": "string", "description": "Where to save it (default screenshot.png).", "required": False},
             "full_page":   {"type": "bool",   "description": "Capture the whole scrollable page.", "required": False},
         },
+        destructive=True,
     ),
     "browser_console": ToolDef(
         name="browser_console",
@@ -661,7 +664,9 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "git_commit": ToolDef(
         name="git_commit",
         fn=tool_git_commit,
-        description="Stage files and create a git commit. Stages all tracked changes when files is omitted.",
+        description=("Stage files and create a git commit. When files is omitted, "
+                     "stages every change, new untracked files included (files "
+                     "listed in .gitignore stay out)."),
         params={
             "message": {"type": "string", "description": "Commit message", "required": True},
             "files":   {"type": "array",  "description": "Specific files to stage (omit to stage all changes)", "required": False},

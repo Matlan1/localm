@@ -48,6 +48,10 @@ def read_version() -> str:
     return "unknown"
 
 
+# The version on disk when this process first imported this module: the code it runs.
+AT_START = read_version()
+
+
 def normalize(tag: str) -> str:
     """Normalize a release tag / version for comparison: strip a leading ``v``
     (``v0.2.0`` -> ``0.2.0``). Leaves anything else untouched."""

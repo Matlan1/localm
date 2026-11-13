@@ -234,6 +234,11 @@ def torch_spec_for(backend: str) -> tuple:
     return ((out.stdout or "").strip() or None), ""
 
 
+# The constraints file the step after the PyTorch install uses (relative to ROOT;
+# localm.hwdetect.TORCH_PINS_FILE).
+TORCH_PINS_FILE = ".venv/localm-torch-pins.txt"
+
+
 @dataclass
 class Plan:
     """Every decision the installer needs, all collected before any work runs."""
@@ -773,12 +778,13 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             codes = [_run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"),
                           emit, plan, allow_fail=True)]
         else:
-            codes = [
-                _run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
-                     emit, plan, allow_fail=True),
-                _run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]"),
-                     emit, plan, allow_fail=True),
-            ]
+            codes = [_run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
+                          emit, plan, allow_fail=True)]
+            codes.append(_run([str(venv_python(ROOT)), "-m", "localm.hwdetect", "torch-pins",
+                               "--out", TORCH_PINS_FILE], emit, plan, allow_fail=True))
+            codes.append(_run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]",
+                                      "-c", TORCH_PINS_FILE),
+                              emit, plan, allow_fail=True))
         if any(codes):
             raise StepFailed("the PyTorch stack did not install; GGUF chat still "
                              "works, models that need PyTorch will not")
@@ -956,6 +962,10 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
             target, args = str(venv_bin(ROOT) / "localm.exe"), "gui"
         else:
             target, args = str(ROOT / "localm-launcher.bat"), ""
+        opens = ("opens the GUI as LocaLM.exe" if plan.shortcut == "gui" and exe.exists()
+                 else "opens the GUI" if plan.shortcut == "gui" else "opens the launcher")
+        description = ("LocaLM - open the web GUI" if plan.shortcut == "gui"
+                       else "LocaLM - open the launcher")
         ico = ROOT / "assets" / "localm.ico"
         # A single quote inside a PowerShell single-quoted string is doubled.
         # Paths under a name like O'Brien reach here.
@@ -968,34 +978,15 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
             + (f"$s.Arguments = '{q(args)}';" if args else "")
             + f"$s.WorkingDirectory = '{q(ROOT)}';"
             + (f"$s.IconLocation = '{q(ico)}';" if ico.exists() else "")
-            + "$s.Description = 'LocaLM';$s.Save();Write-Output $p"
+            + f"$s.Description = '{q(description)}';$s.Save();Write-Output $p"
         )
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                              check=True, capture_output=True, text=True)
         written = (out.stdout or "").strip().splitlines()
-        emit("Shortcut created on your Desktop.")
+        emit(f"Shortcut created: Desktop\\LocaLM.lnk  ({opens})")
         return written[-1] if written else ""
 
-    branded = venv_bin(ROOT) / "LocaLM"
-    if plan.shortcut == "gui" and os.access(branded, os.X_OK):
-        exec_line = f"{branded} -m localm gui"
-    elif plan.shortcut == "gui":
-        exec_line = f"{venv_bin(ROOT) / 'localm'} gui"
-    else:
-        exec_line = str(ROOT / "localm-launcher.sh")
-    comment = "Local LLM - chat, coder, models, images"
-    svg = ROOT / "assets" / "localm.svg"
-    ico = ROOT / "assets" / "localm.ico"
-    icon = svg if svg.exists() else (ico if ico.exists() else None)
-    text = ("[Desktop Entry]\n"
-            "Type=Application\n"
-            f"Name={APP_NAME}\n"
-            f"Comment={comment}\n"
-            f"Exec={exec_line}\n"
-            + (f"Icon={icon}\n" if icon else "")
-            + f"Path={ROOT}\n"
-            "Terminal=false\n"
-            "Categories=Utility;Development;Science;\n")
+    text = spec.menu_entry("gui" if plan.shortcut == "gui" else "launcher", ROOT)
     d = Path.home() / ".local/share/applications"
     old = d / OLD_MENU_ENTRY
     try:

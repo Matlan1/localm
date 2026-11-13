@@ -88,16 +88,13 @@ def _fmt_since(ts) -> str:
 
 
 def _print_wide_table(table) -> None:
-    """Print a Rich table, giving it more room than Rich's 80-column
-    non-terminal fallback when output is piped or redirected - an 80-column
-    guess is not enough for the 8 columns `key list` carries, and every column
-    would collapse to an ellipsis. A real, attached terminal's actual width is
-    left untouched - only the no-real-terminal fallback changes."""
+    """Print a Rich table at the terminal's width, or at least
+    ``localm.console.PIPED_WIDTH`` columns when output is not a terminal."""
     if console.is_terminal:
         console.print(table)
         return
-    from localm.console import SafeConsole as _Console
-    _Console(width=max(console.size.width, 120)).print(table)
+    from localm.console import PIPED_WIDTH, SafeConsole
+    SafeConsole(width=max(console.size.width, PIPED_WIDTH)).print(table)
 
 
 def _fmt_expires(ts) -> str:

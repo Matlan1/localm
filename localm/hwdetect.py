@@ -457,15 +457,19 @@ _TORCH_BACKEND = {
     "cpu": "cpu",
 }
 
-# AMD's official Windows ROCm preview for RX 7000/9000 (gfx110X/gfx120X) is a
-# flat wheel listing with no per-package "simple" directory layout, reachable
-# only via --find-links with an exact pinned version - never --index-url,
-# --extra-index-url or --torch-backend, which resolve no candidates there.
-# See test_amd_rocm_win_find_links_resolves_live.
-_AMD_ROCM_WIN_FIND_LINKS = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/"
-_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"
-_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.24.1+rocm7.2.1"
-_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.9.1+rocm7.2.1"
+# AMD's Windows ROCm wheels: one PEP 503 index per GPU family, each publishing the
+# same torch release with its family's rocm-sdk-libraries package and torch's
+# dependencies, so an install of them uses that index alone. The `gpu` extra
+# in pyproject.toml pins the same three versions for gfx103X;
+# scripts/bump_amd_wheels_pin.py moves both. See
+# test_every_amd_windows_torch_pin_matches_hwdetect.
+_AMD_ROCM_WIN_INDEX = {"gfx103x": "https://repo.amd.com/rocm/whl/gfx103X-all/",
+                       "gfx110x": "https://repo.amd.com/rocm/whl/gfx110X-all/",
+                       "gfx120x": "https://repo.amd.com/rocm/whl/gfx120X-all/"}
+_AMD_ROCM_WIN_TORCH = "torch==2.11.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"
+_AMD_ROCM_WIN_SDK = "7.13.0"
 
 # Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
 # capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
@@ -513,7 +517,7 @@ def pytorch_index_url(variant: str) -> str | None:
     "rocm-linux" | "cpu"), or None if unknown. Public accessor, so other
     callers (the managed-ComfyUI fresh install picks the ComfyUI torch here)
     share this ONE index table. AMD-on-Windows is NOT among these variants -
-    see amd_rocm_win_torch_packages/amd_rocm_win_find_links.
+    see amd_rocm_win_torch_packages/amd_rocm_win_index.
 
     For "cuda" specifically, this ALSO detects whether any installed NVIDIA GPU
     needs the Blackwell-and-newer wheel line and returns that instead of the
@@ -526,18 +530,24 @@ def pytorch_index_url(variant: str) -> str | None:
 
 def amd_rocm_win_torch_packages() -> tuple[str, str, str]:
     """(torch, torchvision, torchaudio) pinned requirement strings for AMD's
-    official Windows ROCm preview (gfx110X/gfx120X, RX 7000/9000) - the exact
-    build published at amd_rocm_win_find_links(), so this project and a fresh
-    ComfyUI venv both pin the same wheels rather than drifting apart."""
+    Windows ROCm wheels, the same for every family amd_rocm_win_index() names."""
     return (_AMD_ROCM_WIN_TORCH, _AMD_ROCM_WIN_TORCHVISION, _AMD_ROCM_WIN_TORCHAUDIO)
 
 
-def amd_rocm_win_find_links() -> str:
-    """The --find-links URL for AMD's official Windows ROCm preview wheels
-    (gfx110X/gfx120X). Callers MUST pass this via --find-links, never
-    --index-url/--extra-index-url/--torch-backend - see
-    amd_rocm_win_torch_packages and _AMD_ROCM_WIN_FIND_LINKS."""
-    return _AMD_ROCM_WIN_FIND_LINKS
+def amd_rocm_win_index(family: str) -> str:
+    """The PEP 503 index URL of AMD's Windows ROCm wheels for *family*
+    (``"gfx103x"``, ``"gfx110x"`` or ``"gfx120x"``, as amd_gfx_family() names it).
+    Raises KeyError for any other family."""
+    return _AMD_ROCM_WIN_INDEX[family]
+
+
+def amd_rocm_win_sdk_packages(family: str) -> tuple[str, str, str]:
+    """(rocm, rocm-sdk-core, rocm-sdk-libraries-<family>-all) pinned at the
+    rocm-sdk release the gfx103X lock records. Raises KeyError for a family
+    amd_rocm_win_index() does not name."""
+    amd_rocm_win_index(family)
+    return (f"rocm=={_AMD_ROCM_WIN_SDK}", f"rocm-sdk-core=={_AMD_ROCM_WIN_SDK}",
+            f"rocm-sdk-libraries-{family}-all=={_AMD_ROCM_WIN_SDK}")
 
 
 def torch_pip_args(backend: str, det: Detection | None = None) -> str:
@@ -558,7 +568,8 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
                            build, the ``[gpu]`` extra (no upstream Windows wheel for it)
       * rocm, Windows, gfx110X / gfx120X (RX 7000 / 9000) -> AMD's Windows ROCm
-                           wheels (public preview)
+                           wheels and their dependencies from that family's index
+                           alone (amd_rocm_win_index), never PyPI
       * rocm, Windows, other / unknown AMD       -> "" (no verified prebuilt; the
                            installer skips and prints how to add torch by hand)
       * none            -> ""
@@ -578,9 +589,39 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
             return "-e .[gpu]"          # bundled gfx1030 self-contained build
         if fam in ("gfx110x", "gfx120x"):
             torch, torchvision, _ = amd_rocm_win_torch_packages()
-            return f"{torch} {torchvision} --find-links {amd_rocm_win_find_links()}"
+            sdk = " ".join(amd_rocm_win_sdk_packages(fam))
+            # uv reads no project configuration here: the project's setuptools
+            # override cannot be met from AMD's index. See
+            # test_the_amd_torch_args_resolve_without_the_project_configuration.
+            return (f"{torch} {torchvision} {sdk} --index-url {amd_rocm_win_index(fam)} "
+                    "--no-config")
         return ""                        # unknown AMD on Windows: no verified prebuilt
     return ""
+
+
+# The PyTorch packages the step after the PyTorch install must not replace, and
+# the constraints file (relative to the install root) every setup variant and the
+# updater write their installed versions to before that step.
+TORCH_PIN_PACKAGES = ("torch", "torchvision", "torchaudio")
+TORCH_PINS_FILE = ".venv/localm-torch-pins.txt"
+
+
+def torch_pins(installed: dict | None = None) -> list:
+    """``name==version`` for each of :data:`TORCH_PIN_PACKAGES` installed, in that
+    order: from *installed* (canonical name -> version) when given, else from
+    this interpreter's distributions, where a package that is not installed is
+    left out and a distribution that cannot be read raises what
+    ``importlib.metadata`` raises."""
+    if installed is None:
+        from importlib import metadata
+        installed = {}
+        for name in TORCH_PIN_PACKAGES:
+            try:
+                installed[name] = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                continue
+    return [f"{name}=={installed[name]}" for name in TORCH_PIN_PACKAGES
+            if isinstance(installed.get(name), str) and installed[name]]
 
 
 def main(argv=None) -> int:
@@ -596,8 +637,29 @@ def main(argv=None) -> int:
 
     ``python -m localm.hwdetect backends`` -> prints the backends with a
     prebuilt build for this machine (``prebuilt_backends``), space-separated,
-    or "none"."""
+    or "none".
+
+    ``python -m localm.hwdetect torch-pins [--out FILE]`` -> :func:`torch_pins`
+    for this interpreter, one per line (nothing when none is installed): the
+    constraints of the install step after the PyTorch install. With ``--out``
+    they are written to FILE (empty when none) instead of printed; exit 1 with
+    the reason on stderr when FILE cannot be written."""
     args = [] if argv is None else list(argv)
+    if args and args[0] == "torch-pins":
+        text = "".join(f"{line}\n" for line in torch_pins())
+        if "--out" not in args[1:]:
+            sys.stdout.write(text)
+            return 0
+        i = args.index("--out", 1)
+        if i + 1 >= len(args):
+            print("torch-pins: --out needs a file", file=sys.stderr)
+            return 2
+        try:
+            Path(args[i + 1]).write_text(text, encoding="utf-8")
+        except OSError as e:
+            print(f"torch-pins: could not write {args[i + 1]}: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args and args[0] == "backends":
         print(" ".join(prebuilt_backends()) or "none")
         return 0

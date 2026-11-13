@@ -7,10 +7,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
-from localm.inference.http_server import require_scope
+from localm.inference.http_server import caller_is_operator, require_scope
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 
@@ -30,17 +30,40 @@ def _total_ram() -> int:
         return 0
 
 
+def _hf_credential(request: Request) -> dict:
+    """Keyword arguments for the HF helpers: none for the owner (the saved token
+    is sent), ``token=""`` for any other caller (nothing is sent)."""
+    return {} if caller_is_operator(request) else {"token": ""}
+
+
+def _civitai_credential(request: Request) -> dict:
+    """As :func:`_hf_credential`, for the CivitAI helpers' ``api_key``."""
+    return {} if caller_is_operator(request) else {"api_key": ""}
+
+
 def register(app: FastAPI, context: ModelRouteContext) -> None:
     # Search HuggingFace or CivitAI and show per-quant/per-file "fits your VRAM"
     # (HF) or license/NSFW/scan-status (CivitAI) badges. net_mode=off blocks it.
 
     def _discover_status(e: Exception) -> int:
-        msg = str(e)
-        if "net_mode" in msg:
-            return 403          # blocked by the network kill switch
-        if "request failed" in msg:
-            return 502          # HF/CivitAI unreachable
-        return 422              # bad repo / no files / bad format token / bad type
+        """403 for a request the network policy refused (net_mode off included),
+        502 for a request to HuggingFace or CivitAI that failed (the error is
+        raised from the transport or parse error, a host that did not resolve
+        included), 422 for everything else (bad repo, no files, bad format
+        token, bad type, and an error raised from another discovery error, such
+        as a repo HuggingFace answered 401, 403 or 404 for). Decided by the
+        error's attributes and cause, never by its text."""
+        from localm.discover import DiscoverError
+        from localm.model_manager.sources import ModelSourceError
+        from localm.netpolicy import NetworkPolicyError, UnresolvableHost
+        cause = e.__cause__
+        if getattr(e, "off", False):
+            return 403
+        if cause is None or isinstance(cause, (DiscoverError, ModelSourceError)):
+            return 422
+        if isinstance(cause, NetworkPolicyError) and not isinstance(cause, UnresolvableHost):
+            return 403
+        return 502
 
     async def _run_discover(fn):
         """Run *fn* off the event loop; map DiscoverError/ModelSourceError to its
@@ -73,7 +96,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         return vram, vram.get("total")
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf",
+    async def discover_search(request: Request, q: str = "", limit: int = 20,
+                               formats: str = "gguf",
                                types: str = "", source: str = "hf",
                                nsfw: bool = False):
         # `source` picks the provider; everything else keeps its existing meaning
@@ -85,7 +109,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             wanted_types = [t.strip() for t in types.split(",") if t.strip()]
             data = await _run_discover(
                 lambda: civitai_search(q, limit=limit,
-                                        types=wanted_types or None, nsfw=nsfw))
+                                        types=wanted_types or None, nsfw=nsfw,
+                                        **_civitai_credential(request)))
             return {"query": q, "source": "civitai", "results": data["items"],
                     "next_cursor": data.get("next_cursor")}
         # `formats` is a CSV of {gguf, hf} and `types` a CSV of MODEL_TYPES, both from
@@ -98,7 +123,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         wanted_types = [t.strip().lower() for t in types.split(",") if t.strip()]
         model_types = wanted_types or None
         results = await _run_discover(
-            lambda: hf_search(q, limit=limit, formats=wanted, model_types=model_types))
+            lambda: hf_search(q, limit=limit, formats=wanted, model_types=model_types,
+                              **_hf_credential(request)))
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata); GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown,
@@ -114,16 +140,17 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "hf_backend_available": hf_backend_available()}
 
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_files(repo: str, source: str = "hf",
+    async def discover_files(request: Request, repo: str, source: str = "hf",
                               legacy_formats: bool = False):
         # For source=civitai, `repo` is a CivitAI model VERSION id, not a repo.
         if source == "civitai":
             from localm.model_manager.sources import civitai_list_files
             files = await _run_discover(
-                lambda: civitai_list_files(repo, include_legacy_formats=legacy_formats))
+                lambda: civitai_list_files(repo, include_legacy_formats=legacy_formats,
+                                           **_civitai_credential(request)))
             return {"repo": repo.strip(), "source": "civitai", "files": files}
         from localm.discover import fit_label, hf_gguf_files
-        files = await _run_discover(lambda: hf_gguf_files(repo))
+        files = await _run_discover(lambda: hf_gguf_files(repo, **_hf_credential(request)))
         vram, total = await _vram_total()
         models = []
         mmprojs = []

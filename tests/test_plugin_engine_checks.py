@@ -121,8 +121,14 @@ def test_a_third_party_plugin_that_asked_for_protection_can_still_be_disabled_an
 
 def test_a_first_party_manifest_keeps_its_flags():
     from localm.plugins.engine import parse_spec
-    spec = parse_spec(ROOT / "localm" / "plugins" / "builtin" / "chat")
+    spec = parse_spec(ROOT / "localm" / "plugins" / "builtin" / "chat", builtin=True)
     assert spec.protected is True and spec.default_enabled is True
+
+
+def test_a_copy_of_a_first_party_manifest_parsed_as_third_party_has_no_flags():
+    from localm.plugins.engine import parse_spec
+    spec = parse_spec(ROOT / "localm" / "plugins" / "builtin" / "chat")
+    assert spec.protected is False and spec.default_enabled is False
 
 
 # ---- scope checks at discovery --------------------------------------------------

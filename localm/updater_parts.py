@@ -67,26 +67,66 @@ def note_kept_record(root, previous: Optional[str], version: str) -> None:
         updater._apply_warn("could not record the kept install record: %s", e)
 
 
-def _source_checkout(root: Path) -> bool:
-    return (root / ".git").exists()
-
-
 def _deps_extras() -> list:
     """The extras the dependency step installs (``_apply_update.DEPS_EXTRAS``)."""
     from localm import _apply_update as au
     return list(au.DEPS_EXTRAS)
 
 
+def _editable_here(site: Path, root: Path) -> bool:
+    """True when localm's install record in *site* is an editable install of
+    *root* (its ``direct_url.json`` names *root* with ``editable`` true).
+    False when there is no such record or it cannot be read."""
+    import json
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+    for info in site.glob("localm-*.dist-info"):
+        try:
+            data = json.loads((info / "direct_url.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not (isinstance(data, dict) and isinstance(data.get("dir_info"), dict)
+                and data["dir_info"].get("editable") is True):
+            continue
+        url = urlparse(str(data.get("url", "")))
+        if url.scheme != "file":
+            continue
+        try:
+            here = Path(url2pathname(unquote(url.netloc + url.path))).resolve()
+            if here == Path(root).resolve():
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _venv_dir(root: Path) -> Path:
+    """The venv of the install at *root*: ``<root>/.venv``, or, inside the localm
+    container image (``updater.in_container_image``) for the running install
+    when that folder does not exist, the venv this process runs from
+    (``sys.prefix``)."""
+    import sys
+
+    from localm import updater
+    venv = root / ".venv"
+    if (updater.in_container_image() and not venv.exists()
+            and root.resolve() == updater.repo_root().resolve()):
+        return Path(sys.prefix)
+    return venv
+
+
 def _deps(root: Path) -> dict:
-    """The venv half: ``{"venv", "record", "problems"}``. ``venv`` is whether
-    the install has a venv, ``record`` the version of localm's install record
-    in it (None when there is none), ``problems`` each dependency the venv does
-    not satisfy, of the declared ones and of the extras the dependency step
-    installs."""
+    """The venv half: ``{"venv", "record", "editable_here", "problems"}``.
+    ``venv`` is whether the install has a venv, ``record`` the version of
+    localm's install record in it (None when there is none), ``editable_here``
+    whether that record is an editable install of *root*
+    (:func:`_editable_here`), ``problems`` each dependency the venv does not
+    satisfy, of the declared ones and of the extras the dependency step
+    installs. The venv is :func:`_venv_dir`."""
     from localm import updater, updater_components as uc
-    site = uc.site_packages(root / ".venv")
+    site = uc.site_packages(_venv_dir(root))
     if site is None:
-        return {"venv": False, "record": None, "problems": []}
+        return {"venv": False, "record": None, "editable_here": False, "problems": []}
     installed = uc.dists(site)
     record = (installed.get("localm") or {}).get("version")
     data = updater._read_toml(root / "pyproject.toml")
@@ -96,7 +136,8 @@ def _deps(root: Path) -> dict:
     for extra in _deps_extras():
         reqs += [str(r) for r in extras.get(extra, []) or []
                  if not str(r).startswith("localm")]
-    return {"venv": True, "record": record, "problems": uc.unsatisfied(reqs, installed)}
+    return {"venv": True, "record": record, "editable_here": _editable_here(site, root),
+            "problems": uc.unsatisfied(reqs, installed)}
 
 
 def installed_parts(root=None) -> dict:
@@ -107,11 +148,14 @@ def installed_parts(root=None) -> dict:
     "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
     "last_steps"}``:
     ``app`` the code's version, ``install_record`` the venv's localm record
-    version (None when there is none to compare: no venv, a source checkout,
-    or a pip install) and whether it is ``app`` (False also when the venv has
+    version (None when there is none to compare: no venv, or a pip install;
+    a git clone with a venv is compared like any install) and whether it is
+    ``app`` (False also when the venv has
     no record at all). A record of another version is a problem
     (``install_record_problem``) unless an update that kept the dependencies
-    left it (:func:`note_kept_record`),
+    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
+    present) whose record is an editable install of *root* and whose
+    dependencies are all satisfied,
     ``deps_problems`` each dependency the venv does not satisfy (a problem),
     ``runtime``
     ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
@@ -127,7 +171,7 @@ def installed_parts(root=None) -> dict:
     problems: list = []
     record, record_matches, deps_problems = None, None, []
     record_problem = False
-    if not _source_checkout(root) and not updater.is_site_packages_install(root):
+    if not updater.is_site_packages_install(root):
         d = {"venv": False}
         try:
             d = _deps(root)
@@ -141,6 +185,9 @@ def installed_parts(root=None) -> dict:
         elif record is not None:
             record_matches = _norm_version(record) == _norm_version(app)
             record_problem = not record_matches and _kept_records().get(app) != record
+            if (record_problem and (root / ".git").exists() and d.get("editable_here")
+                    and not deps_problems):
+                record_problem = False
             if record_problem:
                 problems.append(f"the venv's install record is localm {record}, but localm "
                                 f"{app} is installed")
@@ -265,10 +312,13 @@ def repair(*, installed=None, defer: bool = False, runner: Optional[Callable] = 
     "restart_needed"}``: the parts before the repair, one line per step taken,
     and whether a restart must carry out or load what was changed. Raises
     LocalmError when a step fails (the dependencies are put back as they
-    were)."""
+    were), and, with *installed* None, inside the localm container image
+    before anything (``updater.refuse_in_container_image``)."""
     from localm import _version, updater, updater_components as uc, updater_runtime
     from localm.bugreport import LocalmError
     say = say or (lambda _m: None)
+    if installed is None:
+        updater.refuse_in_container_image("repair")
     root = Path(installed) if installed else updater.repo_root()
     if updater.is_site_packages_install(root):
         raise LocalmError("this localm was installed with pip, so it cannot repair itself",
@@ -291,7 +341,7 @@ def repair(*, installed=None, defer: bool = False, runner: Optional[Callable] = 
                 status = updater_runtime.finish_pending(root=root, runner=runner, say=say)
                 if status is not None:
                     notes.append(status["note"])
-                    if status["state"] not in ("updated", "current"):
+                    if updater_runtime.failed(status):
                         raise LocalmError("the native runtime could not be repaired",
                                           reason=status["note"])
         plans = uc.plan(root, root, deep=not defer)

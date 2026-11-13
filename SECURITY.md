@@ -422,8 +422,12 @@ this section states the security properties and, more importantly, their edges.
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service
   reachable on a globally-routable address is not "internal" to this guard.
-  Setting `net_allow_private` true removes both the pre-flight check and the
-  pin-time re-check, not just the former, for every request. The one narrower
+  Setting `net_allow_private` true narrows both the pre-flight check and the
+  pin-time re-check, for every request, to link-local addresses (`169.254.0.0/16`,
+  which holds the common cloud metadata address `169.254.169.254`, and
+  `fe80::/10`) and the `fd00:ec2::/32` metadata range, in any embedded IPv6
+  form, which stay refused; a name that also resolves to another address is
+  dialled on that address only. The one narrower
   exception is the search backend: when the configured `net_search_url` names
   a local host (an IP address, `localhost`, a dotless name or a local-network
   suffix), the SearXNG search reaches a loopback or private address on exactly
@@ -474,10 +478,11 @@ and search snippets are untrusted input to the model, and
   the moment they exist (on Windows, where a file mode sets no ACL, they are
   created inside the already-restricted `tls` folder), then restricted to the current user: `chmod` on
   POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
-  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
+  user the server process runs as, named by the SID in its process token, never by the
+  `USERNAME` variable, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
-  applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
+  applied (a non-NTFS volume, a process token whose user cannot be read, `icacls` itself absent).
 - **Trusting the CA.** Clients need the generated CA to validate the connection.
   `GET /localm-ca.crt` serves it, and that route is deliberately public.
 - **A self-call caveat.** When the CA file is missing, localm's own internal
