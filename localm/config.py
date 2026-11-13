@@ -1404,9 +1404,11 @@ _rmw_lock = threading.RLock()
 # LOOP_READ_WAIT_S; a read that takes longer is answered from the last complete
 # read of the same file (the kept read), and the file is then marked slow: every
 # later call on the loop gets the kept read at once, with a fresh read queued
-# behind, until a read finishes within LOOP_READ_WAIT_S again. The reader
+# behind, until a read finishes within LOOP_READ_WAIT_S again. A kept read is
+# served only while it is at most LOOP_KEPT_MAX_AGE_S old (counted from when
+# that read completed); past that the loop waits for the fresh read. The reader
 # threads share _io_lock, so a read stuck on the disk holds the other files'
-# reads too; the loop still waits at most LOOP_READ_WAIT_S per file. A write made by
+# reads too. A write made by
 # this process through save_config, update_config, save_registry or
 # update_registry reads every kept file again on the writing thread before it
 # returns, so a call on the loop that starts after the write returned never gets
@@ -1415,6 +1417,7 @@ _rmw_lock = threading.RLock()
 # off the loop always read on the calling thread. LOCK ORDER: _loop_reads_lock
 # is a leaf: nothing is acquired and no file is read while it is held.
 LOOP_READ_WAIT_S = 0.5
+LOOP_KEPT_MAX_AGE_S = 2.0
 
 _loop_reads_lock = threading.Lock()
 _loop_reads_epoch = 0
@@ -1481,7 +1484,7 @@ def _run_loop_read(job: _LoopRead) -> None:
         if _loop_inflight.get(job.name) is job:
             del _loop_inflight[job.name]
         if job.ran and job.error is None and job.epoch == _loop_reads_epoch:
-            _loop_kept[job.name] = (job.key, snapshot, job.fn)
+            _loop_kept[job.name] = (job.key, snapshot, job.fn, time.monotonic())
             if took <= LOOP_READ_WAIT_S and job.name in _loop_slow:
                 recovered = time.monotonic() - _loop_slow.pop(job.name)
     job.done.set()
@@ -1566,16 +1569,18 @@ def _refill_after_write() -> None:
                 if value is None:
                     _loop_kept.pop(name, None)
                 else:
-                    _loop_kept[name] = (key, value, fn)
+                    _loop_kept[name] = (key, value, fn, time.monotonic())
     finally:
         _loop_refilling.active = False
 
 
 def _loop_safe_read(name: str, fn: Callable):
-    """``fn()`` (a read of *name*), never blocking a running event loop for more
-    than LOOP_READ_WAIT_S once a complete read of *name* is kept. Off the loop,
-    or with no kept read yet, it is ``fn()`` on the calling thread. Every caller
-    gets its own copy. Raises what ``fn`` raises."""
+    """``fn()`` (a read of *name*). On a running event loop with a kept read of
+    *name* at most LOOP_KEPT_MAX_AGE_S old, the loop waits at most
+    LOOP_READ_WAIT_S and is otherwise answered from that kept read; with an
+    older kept read it waits for the fresh read. Off the loop, or with no kept
+    read yet, it is ``fn()`` on the calling thread. Every caller gets its own
+    copy. Raises what ``fn`` raises."""
     if not _on_event_loop_thread() or _holds_store_lock():
         return fn()
     key = _store_paths()
@@ -1589,7 +1594,8 @@ def _loop_safe_read(name: str, fn: Callable):
             job = _LoopRead(name, key, _loop_reads_epoch, fn)
             _loop_inflight[name] = job
             _submit_loop_read(job)
-        if kept is not None and name in _loop_slow:
+        usable = kept is not None and time.monotonic() - kept[3] <= LOOP_KEPT_MAX_AGE_S
+        if usable and name in _loop_slow:
             return copy.deepcopy(kept[1])
         epoch = _loop_reads_epoch
     if kept is None:
@@ -1597,23 +1603,29 @@ def _loop_safe_read(name: str, fn: Callable):
         snapshot = copy.deepcopy(value)
         with _loop_reads_lock:
             if epoch == _loop_reads_epoch:
-                _loop_kept[name] = (key, snapshot, fn)
+                _loop_kept[name] = (key, snapshot, fn, time.monotonic())
         return value
-    remaining = LOOP_READ_WAIT_S - (time.monotonic() - job.started)
-    if job.done.wait(max(0.0, remaining)) and job.ran:
-        if job.error is not None:
-            raise job.error
-        return copy.deepcopy(job.value)
-    with _loop_reads_lock:
-        first = name not in _loop_slow
-        if first:
-            _loop_slow[name] = job.started
-    if first:
-        _logger().warning(
-            "reading %s has taken over %.1f s (a busy disk?); requests on the "
-            "server's event loop use the last complete read until a read is "
-            "fast again.", name, LOOP_READ_WAIT_S)
-    return copy.deepcopy(kept[1])
+    if usable:
+        remaining = LOOP_READ_WAIT_S - (time.monotonic() - job.started)
+        job.done.wait(max(0.0, remaining))
+        if not job.done.is_set() and time.monotonic() - kept[3] <= LOOP_KEPT_MAX_AGE_S:
+            with _loop_reads_lock:
+                first = name not in _loop_slow
+                if first:
+                    _loop_slow[name] = job.started
+            if first:
+                _logger().warning(
+                    "reading %s has taken over %.1f s (a busy disk?); requests on "
+                    "the server's event loop are answered from the last complete "
+                    "read, at most %.0f s old, until a read is fast again.",
+                    name, LOOP_READ_WAIT_S, LOOP_KEPT_MAX_AGE_S)
+            return copy.deepcopy(kept[1])
+    job.done.wait()
+    if not job.ran:
+        return fn()
+    if job.error is not None:
+        raise job.error
+    return copy.deepcopy(job.value)
 
 
 def _holds_unparseable_json(path: Path) -> bool:

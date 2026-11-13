@@ -193,6 +193,62 @@ def test_a_slow_registry_read_does_not_hold_the_loop_for_config_reads(monkeypatc
     assert took < config.LOOP_READ_WAIT_S + 0.5, took
 
 
+def test_a_change_by_another_process_is_in_force_within_the_kept_read_bound(monkeypatch):
+    monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 1.0)
+    _write_config({"temperature": 0.25})
+    gate = _Gate()
+
+    async def scenario():
+        config.load_config()
+        kept_at = time.monotonic()
+        monkeypatch.setattr(config, "_read_json_checked", gate.wrap(config._read_json_checked))
+        _write_config({"temperature": 0.9})
+        threading.Timer(1.8, gate.release.set).start()
+        answers = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            t0 = time.monotonic()
+            value = config.load_config()["temperature"]
+            answers.append((time.monotonic() - kept_at, value, time.monotonic() - t0))
+            if value == 0.9:
+                break
+            time.sleep(0.02)
+        return answers
+
+    try:
+        answers = asyncio.run(scenario())
+    finally:
+        gate.release.set()
+    old = [a for a in answers if a[1] == 0.25]
+    assert old, answers
+    assert max(a[0] for a in old) <= 1.0 + 0.2, old[-3:]
+    assert answers[-1][1] == 0.9, answers[-3:]
+    assert max(a[2] for a in answers) >= 0.5, "past the bound the loop did not wait"
+
+
+def test_past_the_bound_the_loop_waits_for_the_fresh_read(monkeypatch):
+    monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 0.3)
+    _write_config({"temperature": 0.25})
+    gate = _Gate()
+
+    async def scenario():
+        config.load_config()
+        time.sleep(0.4)
+        monkeypatch.setattr(config, "_read_json_checked", gate.wrap(config._read_json_checked))
+        _write_config({"temperature": 0.9})
+        threading.Timer(0.8, gate.release.set).start()
+        t0 = time.monotonic()
+        value = config.load_config()["temperature"]
+        return value, time.monotonic() - t0
+
+    try:
+        value, took = asyncio.run(scenario())
+    finally:
+        gate.release.set()
+    assert value == 0.9
+    assert took >= 0.7, took
+
+
 def test_a_change_made_by_another_process_is_read_fresh_on_the_loop():
     _write_config({"temperature": 0.25})
 
