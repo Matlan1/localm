@@ -110,7 +110,7 @@ def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
     assert spec.variant == "rocm"
     assert "torch==2.11.0+rocm7.13.0" in spec.packages
     assert "torchvision==0.26.0+rocm7.13.0" in spec.packages
-    assert "rocm-sdk-libraries-gfx103x-all" in spec.packages
+    assert any(p.startswith("rocm-sdk-libraries-gfx103x-all==") for p in spec.packages)
     assert spec.index_url == "https://repo.amd.com/rocm/whl/gfx103X-all/"
 
 
