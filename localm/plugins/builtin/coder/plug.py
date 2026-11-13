@@ -220,6 +220,8 @@ class SessionSettingsRequest(BaseModel):
     verify: str | None = None
     # True re-detects the project's own check (the REPL's `/verify auto`).
     auto_verify: bool | None = None
+    # False leaves plan mode (the REPL's `/plan off`); True enters it.
+    plan_mode: bool | None = None
 
 
 class SessionCwdRequest(BaseModel):
@@ -1267,6 +1269,9 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
         except SessionUnavailable as e:
             raise HTTPException(409, str(e)) from e
         changed.append("verify")
+    if "plan_mode" in sent and req.plan_mode is not None:
+        session.agent.set_plan_mode(req.plan_mode)
+        changed.append("plan_mode")
     # info() reports the EFFECTIVE state, so the caller reads back what actually
     # took rather than an echo of what it asked for - a re-detect that found no
     # check is the case that must not look like a check was set.

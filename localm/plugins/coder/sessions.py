@@ -264,9 +264,10 @@ class CoderSession:
         # successful save clears it. Never set for a restricted or
         # privacy-mode session, since those intentionally skip persistence.
         self.checkpoint_degraded = False
+        # Events pushed while no events stream is open wait here for the next
+        # stream (subscribe() hands them over).
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
-        # One queue per open events stream (subscribe()); _push puts every
-        # event on each of them and on self.events.
+        # One queue per open events stream (subscribe()).
         self._subscribers: list[queue.Queue] = []
         self._events_lock = threading.Lock()
         # Bounded replay buffer so a reloaded page can rebuild the feed.
@@ -380,26 +381,35 @@ class CoderSession:
         self._push(event)
 
     def _push(self, event: dict) -> None:
-        """Record *event* in the history and put it on ``events`` and on every
-        subscribed stream's queue, dropping a queue's oldest event when it is
-        full."""
+        """Record *event* in the history and put it on every open stream's
+        queue, or on ``events`` when no stream is open, dropping a queue's
+        oldest event when it is full."""
         self.last_activity_at = time.time()
         with self._events_lock:
             self.history.append(event)
             if len(self.history) > _QUEUE_MAX:
                 del self.history[: _QUEUE_MAX // 10]
-            for q in (self.events, *self._subscribers):
+            for q in (self._subscribers or [self.events]):
                 _put_dropping_oldest(q, event)
 
     def subscribe(self, replay: bool = False) -> tuple[list, queue.Queue]:
         """A queue of its own for one events stream, which receives every event
-        pushed after this call, and (with *replay*) the history up to it.
-        Returns ``(history snapshot, queue)``; the snapshot is empty without
-        *replay*. Each event is in exactly one of the two. Pair with
-        :meth:`unsubscribe`."""
+        pushed after this call. Returns ``(snapshot, queue)``: with *replay* the
+        snapshot is the history so far; without it, the events pushed while no
+        stream was open. Each event reaches the stream once. A stream that
+        subscribes after the session closed also gets a ``closed`` event. Pair
+        with :meth:`unsubscribe`."""
         q: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
         with self._events_lock:
-            snapshot = list(self.history) if replay else []
+            waiting = []
+            while True:
+                try:
+                    waiting.append(self.events.get_nowait())
+                except queue.Empty:
+                    break
+            snapshot = list(self.history) if replay else waiting
+            if self.closed and not any(e.get("type") == "closed" for e in snapshot):
+                q.put_nowait({"type": "closed"})
             self._subscribers.append(q)
         return snapshot, q
 
@@ -530,8 +540,8 @@ class CoderSession:
             # returns, which a second task started after busy clears could
             # already have replaced with its own.
             own_result: Optional[dict] = None
-            before = {f["path"]: f["writes"] for f in self.agent.changed_files()}
             try:
+                before = {f["path"]: f["writes"] for f in self.agent.changed_files()}
                 final = self.agent.run_task(text)
                 payload = {
                     "type": "final",
@@ -996,6 +1006,7 @@ class CoderSession:
             "routing_note": getattr(self.agent.backend, "routing_note", None),
             "mode": self.mode,
             "auto_approve": self.auto_approve,
+            "plan_mode": bool(getattr(self.agent, "plan_mode", False)),
             # The LIVE glob, not the one passed at creation: it is settable
             # mid-session, so a creation-time snapshot would not be what is
             # actually in force.

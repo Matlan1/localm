@@ -1170,7 +1170,11 @@ class _ExecutionMixin:
                 else:
                     approved = self._confirm_tool(call)
             consume_confirm_always()
-            return None if approved else "the user declined to run it"
+            if approved:
+                return None
+            if consume_unanswered():
+                return "nobody answered the approval request before it timed out"
+            return "the user declined to run it"
         return _permit
 
     def _verify_refusal(self, label: str, interactive: bool) -> Optional[str]:

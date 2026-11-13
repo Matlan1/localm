@@ -61,6 +61,61 @@ def test_every_subscriber_gets_every_event_and_replay_has_no_duplicates(tmp_path
         assert b.empty()
 
 
+def test_events_pushed_with_no_stream_open_reach_the_next_stream(tmp_path, monkeypatch):
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        s = _session(app, client, owner, proj)
+        _, first = s.subscribe()
+        s.unsubscribe(first)
+        s._push({"type": "info", "text": "while away"})
+        waiting, again = s.subscribe()
+        assert [e.get("text") for e in waiting] == ["while away"]
+        s._push({"type": "info", "text": "live"})
+        assert again.get_nowait()["text"] == "live"
+
+
+def test_a_stream_opened_after_the_session_closed_ends(tmp_path, monkeypatch):
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        s = _session(app, client, owner, proj)
+        _, other = s.subscribe()
+        s.close()
+        _, late = s.subscribe()
+        assert late.get_nowait()["type"] == "closed"
+
+
+def test_an_old_timeout_never_rewords_a_later_refusal():
+    from localm.plugins.coder.confirm import (
+        consume_unanswered,
+        invoke_confirm,
+        mark_unanswered,
+    )
+    mark_unanswered()
+    assert invoke_confirm(lambda call: False, object()) is False
+    assert consume_unanswered() is False
+
+
+def test_plan_mode_can_be_turned_off_from_the_settings_route(tmp_path, monkeypatch):
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        sid = _start(client, owner, proj)
+        r = client.post(f"/api/coder/sessions/{sid}/settings", headers=owner,
+                        json={"plan_mode": True})
+        assert r.status_code == 200 and r.json()["plan_mode"] is True
+        r = client.post(f"/api/coder/sessions/{sid}/settings", headers=owner,
+                        json={"plan_mode": False})
+        assert r.status_code == 200 and r.json()["plan_mode"] is False
+
+
+def test_the_gui_plan_note_does_not_offer_ask_user(tmp_path, monkeypatch):
+    from localm.plugins.coder.tools.interact import tool_enter_plan_mode
+    app, proj, owner = _owner(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        s = _session(app, client, owner, proj)
+        res = tool_enter_plan_mode(proj, _session=s.agent, _interactive=False)
+        assert "plan mode" in res.output and "ask_user" not in res.output
+
+
 def test_an_unanswered_approval_is_not_reported_as_a_refusal(tmp_path, monkeypatch):
     app, proj, owner = _owner(tmp_path, monkeypatch)
     monkeypatch.setattr("localm.plugins.coder.sessions._confirm_timeout", lambda: 0.01)

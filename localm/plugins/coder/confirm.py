@@ -34,7 +34,8 @@ _UNANSWERED: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 def mark_unanswered() -> None:
     """Record that the confirmation the calling thread asked for got no answer
-    (it timed out). The handler then returns False."""
+    (it timed out). The handler then returns False. :func:`invoke_confirm`
+    clears the flag before each call, so it always describes the latest one."""
     _UNANSWERED.set(True)
 
 
@@ -77,8 +78,10 @@ def invoke_confirm(handler: Any, call: Any, agent: Optional[str] = None) -> bool
     None, so the call shape depends only on the handler's signature and
     ``def handler(call, agent)`` (no default) works on every confirmation.
 
-    Inspection runs per call and is never cached.
+    Inspection runs per call and is never cached. The unanswered flag
+    (:func:`mark_unanswered`) is cleared before the handler runs.
     """
+    _UNANSWERED.set(False)
     if handler_accepts_agent(handler):
         return handler(call, **{_AGENT_KW: agent})
     return handler(call)
