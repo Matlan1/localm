@@ -198,7 +198,9 @@ def test_routes_put_keeps_facts_added_after_the_dialog_opened(client):
 
 def test_routes_put_without_a_base_is_refused(client):
     client.post("/api/memory/append", json={"text": "keep me"})
-    assert client.put("/api/memory", json={"text": ""}).status_code == 422
+    r = client.put("/api/memory", json={"text": ""})
+    assert r.status_code == 422
+    assert [(d["loc"], d["msg"]) for d in r.json()["detail"]] == [(["body", "base"], "Field required")]
     assert {it["text"] for it in client.get("/api/memory").json()["items"]} == {"keep me"}
 
 
