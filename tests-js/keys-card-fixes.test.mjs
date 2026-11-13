@@ -125,14 +125,28 @@ test("the server's grant warnings are shown under the new key", async () => {
   assert.equal(warn.textContent, "scope 'image': the image plugin is not installed");
 });
 
-test("the first key says an owner key was set too and re-reads the Owner key card", async () => {
-  const calls = [];
-  const { window } = await createKey(
-    { id: "n", name: "phone", scopes: ["chat"], key: "K", owner_key_seeded: true }, {}, calls);
+test("the first key says an owner key was set too and shows the Owner key card", async () => {
+  let seeded = false;
+  const { window } = await open({
+    "GET /v1/keys": () => ({ status: 200,
+      body: { keys: [], is_owner: seeded, open_mode: !seeded } }),
+    "POST /v1/keys": () => {
+      seeded = true;
+      return { status: 200,
+        body: { id: "n", name: "phone", scopes: ["chat"], key: "K", owner_key_seeded: true } };
+    },
+  });
+  await window.refreshKeysPanel();
+  await window.refreshOwnerKeyPanel();
+  const card = window.document.getElementById("owner-key-card");
+  assert.ok(card.classList.contains("sec-hidden"), "no Owner key card before the first key");
+  window.document.getElementById("key-name").value = "phone";
+  [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "chat").checked = true;
+  await window.document.getElementById("key-create").onclick();
   assert.match(window.document.getElementById("key-secret").textContent,
     /now also has an owner key/);
-  assert.ok(await waitFor(() => !window.document.getElementById("owner-key-card")
-    .classList.contains("sec-hidden")), "the Owner key card is shown without a reload");
+  assert.ok(await waitFor(() => !card.classList.contains("sec-hidden")),
+    "the Owner key card is shown without a reload");
 });
 
 test("a later key does not claim an owner key was set", async () => {
