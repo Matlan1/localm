@@ -468,6 +468,7 @@ _AMD_ROCM_WIN_INDEX = {"gfx103x": "https://repo.amd.com/rocm/whl/gfx103X-all/",
 _AMD_ROCM_WIN_TORCH = "torch==2.11.0+rocm7.13.0"
 _AMD_ROCM_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"
 _AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"
+_AMD_ROCM_WIN_SDK = "7.13.0"
 
 # Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
 # capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
@@ -540,13 +541,12 @@ def amd_rocm_win_index(family: str) -> str:
 
 
 def amd_rocm_win_sdk_packages(family: str) -> tuple[str, str, str]:
-    """(rocm, rocm-sdk-core, rocm-sdk-libraries-<family>-all) pinned at the ROCm
-    release of amd_rocm_win_torch_packages(). Raises KeyError for a family
+    """(rocm, rocm-sdk-core, rocm-sdk-libraries-<family>-all) pinned at the
+    rocm-sdk release the gfx103X lock records. Raises KeyError for a family
     amd_rocm_win_index() does not name."""
     amd_rocm_win_index(family)
-    release = _AMD_ROCM_WIN_TORCH.rsplit("+rocm", 1)[1]
-    return (f"rocm=={release}", f"rocm-sdk-core=={release}",
-            f"rocm-sdk-libraries-{family}-all=={release}")
+    return (f"rocm=={_AMD_ROCM_WIN_SDK}", f"rocm-sdk-core=={_AMD_ROCM_WIN_SDK}",
+            f"rocm-sdk-libraries-{family}-all=={_AMD_ROCM_WIN_SDK}")
 
 
 def torch_pip_args(backend: str, det: Detection | None = None) -> str:

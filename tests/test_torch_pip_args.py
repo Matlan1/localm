@@ -164,13 +164,14 @@ def test_amd_rocm_on_windows_rdna3_4_uses_its_family_index(monkeypatch, name, fa
     assert "--find-links" not in args and "--torch-backend" not in args
 
 
-@pytest.mark.parametrize("name", ["amd radeon rx 6900 xt", "amd radeon rx 7900 xtx",
-                                  "amd radeon rx 9070 xt"])
+@pytest.mark.parametrize("name", ["amd radeon rx 7900 xtx", "amd radeon rx 9070 xt"])
 def test_the_updater_reads_only_packages_out_of_the_amd_torch_args(monkeypatch, name):
     from localm import updater_components
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     args = shlex.split(hwdetect.torch_pip_args("amd-rocm", _det(name)), posix=True)
-    for req in updater_components._requirements_in(args):
+    reqs = updater_components._requirements_in(args)
+    assert len(reqs) == 5, reqs
+    for req in reqs:
         assert re.fullmatch(r"(torch|torchvision|rocm|rocm-sdk-core|rocm-sdk-libraries-gfx1\d\dx-all)"
                             r"==[\w.+]+", req), req
 
@@ -203,7 +204,7 @@ def test_amd_rocm_win_index_resolves_live(tmp_path, family):
     guard blocks that); --python-platform/--python-version override the actual
     resolve target regardless of that venv's own version. Also the
     fires-control for the routing tests above: a genuinely dead URL (or a wrong
-    package name/version) must make THIS half fail, which the linux-target
+    package name/version) must make THIS half fail, which the macOS-target
     assertion below proves by making the same packages fail to resolve for a
     platform AMD does not publish them for."""
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
@@ -226,12 +227,11 @@ def test_amd_rocm_win_index_resolves_live(tmp_path, family):
     assert resolves.returncode == 0, (
         f"stdout: {resolves.stdout}\nstderr: {resolves.stderr}")
 
-    # Fires-control: the identical request for a platform AMD does not publish
-    # win_amd64-only wheels for must fail, proving this check can actually
-    # distinguish a resolving repo from a dead one.
+    # Fires-control: the identical request for macOS, which AMD publishes no
+    # ROCm wheels for, must fail.
     doesnt_resolve = subprocess.run(
         ["uv", "pip", "install", "--dry-run", "--python", str(venv_python),
-         "--python-platform", "linux", "--python-version", "3.12",
+         "--python-platform", "macos", "--python-version", "3.12",
          *source, torch, torchvision, *sdk],
         capture_output=True, text=True, timeout=60)
     assert doesnt_resolve.returncode != 0

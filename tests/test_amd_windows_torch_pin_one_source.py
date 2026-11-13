@@ -12,7 +12,6 @@ import re
 import sys
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -80,7 +79,7 @@ def test_the_managed_comfyui_installs_the_hwdetect_wheels_of_each_family(monkeyp
                                                                         family):
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
-    det = SimpleNamespace(vendors=["amd"], gpu_names=[card], gpu_state="found", probe_ok=True)
+    det = hwdetect.Detection(vendors=["amd"], gpu_names=card.lower(), probe_ok=True)
     spec = fresh.comfy_torch_spec(det)
     assert spec.variant == "rocm"
     assert spec.packages == (hwdetect.amd_rocm_win_torch_packages()

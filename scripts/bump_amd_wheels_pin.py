@@ -86,6 +86,8 @@ HWDETECT_REL = "localm/hwdetect.py"
 HWDETECT_CONSTANTS = {"torch": "_AMD_ROCM_WIN_TORCH",
                       "torchvision": "_AMD_ROCM_WIN_TORCHVISION",
                       AUDIO: "_AMD_ROCM_WIN_TORCHAUDIO"}
+# hwdetect.py's rocm-sdk release (rocm, rocm-sdk-core and each family's libraries).
+HWDETECT_SDK = "_AMD_ROCM_WIN_SDK"
 # The other GPU family indexes hwdetect installs the same wheels from.
 OTHER_FAMILIES = ("gfx110X-all", "gfx120X-all")
 
@@ -238,6 +240,9 @@ def verify_on_index(wanted: dict, moves: dict, fetch_text_fn=fetch_text) -> None
             want = wheel_name(package, version)
             if want not in index_filenames(package, fetch_text_fn, base):
                 raise Refused(f"AMD's {family} index lists no {want} for {package}")
+        if (any(p in moves for p in ROCM_SDK)
+                and f"rocm-{sdk}.tar.gz" not in index_filenames("rocm", fetch_text_fn, base)):
+            raise Refused(f"AMD's {family} index lists no rocm-{sdk}.tar.gz for the rocm package")
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +267,10 @@ def _pin_re(package: str) -> re.Pattern:
 def _url_re(package: str) -> re.Pattern:
     return re.compile(rf'(?P<pre>url = "{re.escape(INDEX_BASE)}/{re.escape(package)}-)'
                       r'(?P<ver>[^"/]+?)(?P<post>-cp312-cp312-win_amd64\.whl")')
+
+
+def _hw_sdk_re() -> re.Pattern:
+    return re.compile(rf'^(?P<pre>{HWDETECT_SDK} = ")(?P<ver>[^"\s]+)(?P<post>")', re.M)
 
 
 def _hw_re(package: str) -> re.Pattern:
@@ -312,6 +321,10 @@ def read_current(pyproject: str, lock_text: str, hwdetect: str) -> dict:
             raise Refused(f"{package}: uv.lock records {len(versions)} versions, expected one")
         check_shape(package, versions[0])
         current[package] = versions[0]
+    hw_sdk = _only(_hw_sdk_re(), hwdetect, f"{HWDETECT_REL} {HWDETECT_SDK}").group("ver")
+    if hw_sdk != current[ROCM_SDK[0]]:
+        raise Refused(f"{HWDETECT_REL} names rocm-sdk {hw_sdk} but uv.lock records "
+                      f"{current[ROCM_SDK[0]]}; the tree is inconsistent")
     return current
 
 
@@ -330,13 +343,15 @@ def rewrite_pyproject(text: str, wanted: dict) -> str:
 
 
 def rewrite_hwdetect(text: str, wanted: dict) -> str:
-    """*text* (hwdetect.py) with the gfx103X torch, torchvision and torchaudio
-    constants set to *wanted* (torchaudio at torch's version)."""
+    """*text* (hwdetect.py) with the torch, torchvision and torchaudio constants
+    set to *wanted* (torchaudio at torch's version) and the rocm-sdk release to
+    *wanted*'s rocm-sdk-core."""
     full = with_audio(wanted)
     for package in PINNED_WHEELS:
         m = _only(_hw_re(package), text, f"{HWDETECT_REL} {HWDETECT_CONSTANTS[package]}")
         text = text[:m.start("ver")] + full[package] + text[m.end("ver"):]
-    return text
+    m = _only(_hw_sdk_re(), text, f"{HWDETECT_REL} {HWDETECT_SDK}")
+    return text[:m.start("ver")] + wanted[ROCM_SDK[0]] + text[m.end("ver"):]
 
 
 # --------------------------------------------------------------------------- #

@@ -107,6 +107,7 @@ HWDETECT = """_AMD_ROCM_WIN_INDEX = {"gfx103x": "https://repo.amd.com/rocm/whl/g
 _AMD_ROCM_WIN_TORCH = "torch==2.10.0+rocm7.13.0"
 _AMD_ROCM_WIN_TORCHVISION = "torchvision==0.25.0+rocm7.13.0"
 _AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.10.0+rocm7.13.0"
+_AMD_ROCM_WIN_SDK = "7.13.0"
 """
 
 NEW = {"torch": "2.11.0+rocm7.13.0", "torchvision": "0.26.0+rocm7.13.0",
@@ -317,6 +318,8 @@ def test_a_tree_that_is_not_in_the_edited_shape_is_refused(bump, mutate, fragmen
      "localm/hwdetect.py names 2.9.0"),
     (HWDETECT.replace('_AMD_ROCM_WIN_TORCHVISION = ', '_AMD_ROCM_VISION = '),
      "_AMD_ROCM_WIN_TORCHVISION: expected exactly one match, found 0"),
+    (HWDETECT.replace('_AMD_ROCM_WIN_SDK = "7.13.0"', '_AMD_ROCM_WIN_SDK = "7.12.0"'),
+     "names rocm-sdk 7.12.0 but uv.lock records 7.13.0"),
 ])
 def test_a_hwdetect_pin_that_disagrees_with_pyproject_is_refused(bump, hwdetect, fragment):
     with pytest.raises(bump.Refused, match=fragment):
@@ -336,7 +339,10 @@ def test_the_hwdetect_rewrite_moves_the_three_constants_and_nothing_else(bump):
     assert '_AMD_ROCM_WIN_TORCH = "torch==2.11.0+rocm7.13.0"' in new
     assert '_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"' in new
     assert '_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"' in new
+    assert '_AMD_ROCM_WIN_SDK = "7.13.0"' in new
     assert new.split("\n")[0] == HWDETECT.split("\n")[0]
+    sdk_move = bump.rewrite_hwdetect(HWDETECT, dict(NEW, **{"rocm-sdk-core": "7.14.0"}))
+    assert '_AMD_ROCM_WIN_SDK = "7.14.0"' in sdk_move
     assert len(new.split("\n")) == len(HWDETECT.split("\n"))
 
 
