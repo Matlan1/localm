@@ -751,8 +751,8 @@
       <div class="page">
         <h2 data-i18n="knowledge.title">Knowledge</h2>
         <div class="sub" data-i18n-rich="knowledge.intro">Index folders or files into collections, then pick a collection in
-        the chat parameters drawer - replies get grounded in the most relevant excerpts,
-        with citations. Retrieval is BM25 (always works offline); when an embedding model is
+        the chat parameters drawer - replies get grounded in the most relevant excerpts;
+        the excerpts used are listed under the reply as its sources. Retrieval is BM25 (always works offline); when an embedding model is
         set up, semantic (vector) search is blended in. Collections live in the
         localm data directory under <code>rag/</code>.</div>
         <div class="card">
@@ -766,7 +766,7 @@
             <select id="kb-embed-model" style="max-width:340px"></select>
             <button class="btn-primary" id="kb-embed-apply" data-i18n="knowledge.embed.setupApply">Set up / apply</button>
             <button class="btn-secondary" id="kb-embed-download" style="display:none"
-              title="One-time download of the configured model, blocked so far by the network policy. Changes no settings."
+              title="One-time download of the configured model. Changes no settings."
               data-i18n-title="knowledge.embed.downloadHint" data-i18n="knowledge.embed.downloadModelNow">Download model now</button>
           </div>
           <pre id="kb-embed-log" class="job-log" style="display:none"></pre>
