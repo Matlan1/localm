@@ -807,6 +807,7 @@ export const I18N_EN = {
   "cmdk.exportConversation": "Export conversation",
   "cmdk.goTo": "Go to {view}",
   "cmdk.manageKeys": "Manage keys & devices",
+  "cmdk.noMatch": "No command matches",
   "cmdk.placeholder": "Type a command…  (↑↓ to move · Enter to run · Esc to close)",
   "cmdk.toggleTheme": "Toggle light/dark theme",
 

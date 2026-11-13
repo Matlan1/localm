@@ -27,6 +27,15 @@ test("palette hides the keys jump when the panel is gated-hidden (non-manager)",
     "a key that cannot manage keys gets no dead-end command");
 });
 
+test("palette hides the keys jump while Settings is hidden for this key", () => {
+  const { window } = loadApp({ fetchImpl: safe });
+  window.document.getElementById("keys-card").classList.remove("sec-hidden");
+  window.applyCoreTabVisibility({ chat: true, models: false, plugins: false, settings: false });
+  const labels = window.cmdkCommands().map((c) => c.label);
+  assert.ok(!labels.includes("Manage keys & devices"),
+    "a key without Settings gets no row that opens a page it cannot read");
+});
+
 test("the keys jump opens Settings without throwing (app-only: helper guarded)", () => {
   const { window } = loadApp({ fetchImpl: safe });
   window.document.getElementById("keys-card").classList.remove("sec-hidden");
