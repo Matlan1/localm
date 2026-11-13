@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar, cast
 
 from localm import mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
@@ -1574,7 +1574,10 @@ def _refill_after_write() -> None:
         _loop_refilling.active = False
 
 
-def _loop_safe_read(name: str, fn: Callable):
+_T = TypeVar("_T")
+
+
+def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
     """``fn()`` (a read of *name*). On a running event loop with a kept read of
     *name* at most LOOP_KEPT_MAX_AGE_S old, the loop waits at most
     LOOP_READ_WAIT_S and is otherwise answered from that kept read; with an
@@ -1588,14 +1591,14 @@ def _loop_safe_read(name: str, fn: Callable):
         kept = _loop_kept.get(name)
         if kept is not None and kept[0] != key:
             kept = None
-        job = _loop_inflight.get(name)
+        job: Optional[_LoopRead] = _loop_inflight.get(name)
         if kept is not None and (job is None or job.key != key
                                  or job.epoch != _loop_reads_epoch):
             job = _LoopRead(name, key, _loop_reads_epoch, fn)
             _loop_inflight[name] = job
             _submit_loop_read(job)
         usable = kept is not None and time.monotonic() - kept[3] <= LOOP_KEPT_MAX_AGE_S
-        if usable and name in _loop_slow:
+        if kept is not None and usable and name in _loop_slow:
             return copy.deepcopy(kept[1])
         epoch = _loop_reads_epoch
     if kept is None:
@@ -1605,6 +1608,7 @@ def _loop_safe_read(name: str, fn: Callable):
             if epoch == _loop_reads_epoch:
                 _loop_kept[name] = (key, snapshot, fn, time.monotonic())
         return value
+    job = cast(_LoopRead, job)
     if usable:
         remaining = LOOP_READ_WAIT_S - (time.monotonic() - job.started)
         job.done.wait(max(0.0, remaining))
@@ -1625,7 +1629,7 @@ def _loop_safe_read(name: str, fn: Callable):
         return fn()
     if job.error is not None:
         raise job.error
-    return copy.deepcopy(job.value)
+    return cast(_T, copy.deepcopy(job.value))
 
 
 def _holds_unparseable_json(path: Path) -> bool:
