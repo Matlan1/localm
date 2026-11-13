@@ -2117,8 +2117,7 @@ def test_delete_data_reports_an_older_data_folder_as_left_in_place(env):
     src, old, new = _legacy_with_old_and_new_data(env)
     mgr = PluginManager(None)
     mgr.set_installed_from_dir(src)
-    assert mgr.uninstall("legacy", delete_data=True) is True
-    assert mgr.last_data_left_in_place == old
+    assert tuple(mgr.uninstall_report("legacy", delete_data=True)) == (True, old)
     assert (old / "notes.txt").read_text(encoding="utf-8") == "keep"
     assert not new.exists()
 
@@ -2150,3 +2149,69 @@ def test_the_mcp_uninstall_names_the_folder_left_in_place(env):
     assert str(old) in text or str(old).replace("\\", "\\\\") in text
     assert "left in place, not removed" in text
     assert (old / "notes.txt").exists() and not new.exists()
+
+
+def test_two_uninstalls_each_report_their_own_old_folder(env):
+    import threading
+
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(None)
+    olds = {}
+    for name in ("one", "two"):
+        old = env / f"{name}_data"
+        old.mkdir()
+        olds[name] = old
+        mgr.set_installed_from_dir(_make_plugin(
+            env / "src", name, _ping(name), toml_extra=f'data_subdir = "{name}_data"\n'))
+    got = {}
+    start = threading.Barrier(2)
+
+    def run(name):
+        start.wait()
+        got[name] = mgr.uninstall_report(name, delete_data=True).left_in_place
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in olds]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert got == olds
+
+
+_TAB_SWAP_PLUGIN = """
+from localm.plugins.contract import Surface
+
+HOST = []
+
+def register(host):
+    HOST.append(host)
+
+def unregister():
+    pass
+"""
+
+
+def test_a_later_register_tab_serves_its_own_assets_and_an_unloaded_host_mounts_nothing(env):
+
+    from localm.plugins.contract import Surface
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    pdir = _make_plugin(plugins, "swap", _TAB_SWAP_PLUGIN,
+                        toml_extra='[surface]\nassets_dir = "a"\nclient_entry = "a.js"\n')
+    for folder, fname in (("a", "a.js"), ("b", "b.js")):
+        (pdir / folder).mkdir()
+        (pdir / folder / fname).write_text("export {}\n", encoding="utf-8")
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("swap")
+    host = mgr._loaded["swap"][2]
+    host.register_tab(Surface(assets_dir="b", client_entry="b.js"))
+    with TestClient(app) as c:
+        assert c.get("/plugins/swap/b.js").status_code == 200
+        assert c.get("/plugins/swap/a.js").status_code == 404
+    mgr.disable("swap")
+    routes_after_disable = len(app.router.routes)
+    host.register_tab(Surface(assets_dir="a", client_entry="a.js"))
+    assert len(app.router.routes) == routes_after_disable
+    with TestClient(app) as c:
+        assert c.get("/plugins/swap/a.js").status_code == 404

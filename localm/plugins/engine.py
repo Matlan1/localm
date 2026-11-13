@@ -24,7 +24,7 @@ import sys
 import threading
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -174,6 +174,14 @@ def _write_store_install(dest: Path, src: Path) -> None:
         json.dumps({"source": "store", "package": True}), encoding="utf-8")
 
 
+class UninstallResult(NamedTuple):
+    """What ``PluginManager.uninstall_report`` did: ``complete`` as
+    ``uninstall`` returns it, and ``left_in_place``, the older data folder of a
+    third-party plugin a delete-data uninstall left untouched, else None."""
+    complete: bool
+    left_in_place: Optional[Path]
+
+
 def _old_data_folder(spec: PluginSpec) -> Optional[Path]:
     """``<data dir>/<data_subdir>`` of third-party plugin *spec* when that
     folder exists and is not its current data folder, else None."""
@@ -266,14 +274,15 @@ def _log_backend_eviction(plugin_name: str, fut) -> None:
         return
     for result in fut.result():
         model = result.get("model")
+        if result.get("status") == "error":
+            continue
         if result.get("status") in ("unloaded", "already_unloaded"):
             _log.info("plugin %s: unloaded model %s, which ran on its inference "
                       "backend", plugin_name, model)
         else:
             _log.warning("plugin %s: model %s, which runs on its inference "
-                         "backend, is still loaded (%s%s)", plugin_name, model,
-                         result.get("status"),
-                         f": {result['detail']}" if result.get("detail") else "")
+                         "backend, is still loaded (%s)", plugin_name, model,
+                         result.get("status"))
 
 
 def _purge_plugin_modules(uniq: str) -> None:
@@ -707,6 +716,7 @@ class PluginHost:
         self._stoppers.append(stop_callable)
 
     def unmount(self) -> None:
+        self._surface_assets_mounted = False
         stoppers, self._stoppers = self._stoppers, []
         for stop in reversed(stoppers):
             try:
@@ -790,16 +800,38 @@ class PluginHost:
         loaded; the manifest's ``[surface]`` applies again once it is unloaded.
         Its ``assets_dir`` is served like a manifest one, confined to the
         plugin's folder; a call made after the engine mounted the surface
-        assets mounts its assets_dir at once unless ``/plugins/<name>`` is
-        already served. Raises TypeError for anything but a
+        assets serves the new assets_dir at ``/plugins/<name>`` at once,
+        replacing the previous one. Raises TypeError for anything but a
         ``contract.Surface``."""
         if not isinstance(surface, Surface):
             raise TypeError(
                 f"plugin {self._spec.name!r}: register_tab() takes a Surface (see "
                 f"localm.plugins.contract), got {type(surface).__name__}")
+        previous = self.surface
         self.surface = surface
-        if self._surface_assets_mounted:
-            self.mount_surface_assets()
+        if not self._surface_assets_mounted:
+            return
+        prefix = f"/plugins/{self._spec.name}"
+        if (previous is not None and previous.assets_dir != surface.assets_dir
+                and prefix in self._static_prefixes):
+            self._unmount_static(prefix)
+        self.mount_surface_assets()
+
+    def _unmount_static(self, prefix: str) -> None:
+        """Remove the static mount this host serves at *prefix*."""
+        keep = []
+        for r in self._routes:
+            if getattr(r, "path", None) == prefix and hasattr(r, "app") \
+                    and not hasattr(r, "endpoint"):
+                try:
+                    self._app.router.routes.remove(r)
+                except ValueError:
+                    pass
+            else:
+                keep.append(r)
+        self._routes = keep
+        self._static_prefixes.discard(prefix)
+        self._app.openapi_schema = None
 
     def register_model_role(self, descriptor) -> None:
         from localm.model_manager.registry import MODEL_TYPES
@@ -1004,9 +1036,6 @@ class PluginManager:
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
         self._unload_errors: dict[str, str] = {}     # unregister() failures; cleared by a later load
         self.last_refresh_failures: dict[str, str] = {}
-        # Set by uninstall(delete_data=True): an older data folder of a
-        # third-party plugin that was left in place, else None.
-        self.last_data_left_in_place: Optional[Path] = None
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
         # Serializes discover(), which may run on a worker thread
@@ -2211,7 +2240,17 @@ class PluginManager:
         self._set_enabled(name, on)
 
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
-        """Uninstall a plugin: unload it, disable it, and DELETE its directory from
+        """``uninstall_report(name, delete_data=...).complete``."""
+        return self.uninstall_report(name, delete_data=delete_data).complete
+
+    def uninstall_report(self, name: str, *,
+                         delete_data: bool = False) -> UninstallResult:
+        """Uninstall a plugin and return an ``UninstallResult``: ``complete`` is
+        the bool described below and ``left_in_place`` the older data folder of
+        a third-party plugin a delete-data uninstall left untouched
+        (``<data dir>/<data_subdir>``), else None.
+
+        Uninstall a plugin: unload it, disable it, and DELETE its directory from
         the installed folder (it reverts to being merely available in the store).
         User content is kept unless *delete_data*, in which case its data
         directory is deleted too; the on_uninstall hook runs first. Returns True
@@ -2269,13 +2308,13 @@ class PluginManager:
         self._unload(name)
         self._set_enabled(name, False)
         data_deleted = not (delete_data and hook_failed)
-        self.last_data_left_in_place = None
+        left_in_place = None
         if delete_data and spec and spec.data_subdir:
             data_deleted = self._delete_plugin_data(spec) and data_deleted
-            self.last_data_left_in_place = _old_data_folder(spec)
-            if self.last_data_left_in_place is not None:
-                _log.warning("plugin %s: %s", name, data_left_in_place_message(
-                    name, self.last_data_left_in_place))
+            left_in_place = _old_data_folder(spec)
+            if left_in_place is not None:
+                _log.warning("plugin %s: %s", name,
+                             data_left_in_place_message(name, left_in_place))
         removed = self._remove_installed_dir(name)    # delete from the installed folder
         existed = was_installed or on_disk
         if existed and not removed:
@@ -2290,7 +2329,7 @@ class PluginManager:
                 "rather than a bare success", name)
         if existed and removed:
             self._record_event("plugin_uninstalled", name)
-        return existed and removed and data_deleted
+        return UninstallResult(existed and removed and data_deleted, left_in_place)
 
     def _delete_plugin_data(self, spec: PluginSpec) -> bool:
         """Delete the plugin's data_subdir. Returns True iff it is confirmed gone
@@ -2515,14 +2554,13 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         # directory is something uninstall() below can still act on.
         existed = manager.is_installed_or_on_disk(name)
         try:
-            complete = manager.uninstall(name, delete_data=delete_data)
+            complete, left = manager.uninstall_report(name, delete_data=delete_data)
         except KeyError as exc:
             raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}") from e
-        left = manager.last_data_left_in_place
         if complete:
             if left is not None:
                 return {"status": "uninstalled", "name": name,

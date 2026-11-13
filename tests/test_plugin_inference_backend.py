@@ -646,3 +646,19 @@ class TestEvictionEdges:
             ("bad", "error"), ("good", "unloaded")]
         assert "worker would not stop" in results[0]["detail"]
         assert good.loaded is False
+
+
+def test_a_pinned_request_does_not_reload_a_model_on_a_disabled_plugins_backend(tmp_path):
+    from localm.inference.engine import Engine
+    from localm.plugins.engine import PluginManager
+    root = tmp_path / "installed"
+    _make_backend_plugin(root, source=LOADABLE_BACKEND_PLUGIN)
+    mgr = PluginManager(FastAPI(), installed_root=root, builtin_root=None)
+    mgr.install("fakeexl")
+    exl = Engine(str(_exl2_dir(tmp_path)))
+    exl.load()
+    exl.unload()
+    mgr.disable("fakeexl")
+    with pytest.raises(RuntimeError, match="is disabled"):
+        exl.embed(["hello"])
+    assert exl.loaded is False

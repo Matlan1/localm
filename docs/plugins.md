@@ -178,7 +178,7 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
 | `data_dir()` | The plugin's own data folder as a `Path`, created on first call: `<data dir>/plugin-data/<name>/<data_subdir>` for a third-party plugin. Keep the plugin's data there and never build `<data dir>/<data_subdir>` yourself: an uninstall that deletes the plugin's data removes this folder and nothing else. Raises `ValueError` when the manifest declares no `data_subdir`. |
-| `register_tab(surface)` | Replace the plugin's `[surface]` (tab, label, icon, group, settings group, `assets_dir`, `client_entry`) with a `Surface` while the plugin is loaded; the GUI's plugin listing shows it and its `assets_dir` is served at `/plugins/<name>` like a manifest one. Once the plugin is unloaded the manifest's `[surface]` applies again. |
+| `register_tab(surface)` | Replace the plugin's `[surface]` (tab, label, icon, group, settings group, `assets_dir`, `client_entry`) with a `Surface` while the plugin is loaded; the GUI's plugin listing shows it and its `assets_dir` is served at `/plugins/<name>` like a manifest one, replacing a folder served there before. Once the plugin is unloaded the manifest's `[surface]` applies again. |
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
 | `caller_is_owner(request)` | Inside a route: `True` when the caller is the owner (open mode, or the owner key or session). |
@@ -502,8 +502,10 @@ def register(host):
   of third-party plugins, each group in the order they registered.
 - Disabling or uninstalling the plugin removes the backend, and the model's
   refusal returns unchanged. In a running server it also unloads every model
-  loaded on that backend (it waits for requests in flight, then stops them), and
-  a load still running on it is undone when it finishes.
+  the server holds loaded on that backend (it waits for requests in flight,
+  then stops them); a load still running on it is undone when it finishes, and
+  an unloaded model is not loaded on it again. A scheduled job that already
+  loaded its own model on that backend keeps it until that run ends.
 - Run the model in its own child process. Core's
   `localm.inference.backends._hf_runner.HFRunner(worker_target=(file, class))`
   hosts your worker class in the same isolated process the HF backend uses

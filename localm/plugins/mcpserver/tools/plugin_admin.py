@@ -113,7 +113,7 @@ def build() -> dict[str, dict]:
         existed = mgr.is_installed_or_on_disk(plugin)
         with _quiet_stdout():
             try:
-                removed = mgr.uninstall(plugin, delete_data=delete_data)
+                removed, left = mgr.uninstall_report(plugin, delete_data=delete_data)
             except KeyError:
                 return _text_result(f"No such plugin: {plugin}", is_error=True)
             except ValueError as e:
@@ -128,7 +128,6 @@ def build() -> dict[str, dict]:
                     " delete_data was requested and this uninstall did not "
                     "complete, so do not assume its stored data is gone.")
             return _text_result(detail, is_error=True)
-        left = getattr(mgr, "last_data_left_in_place", None)
         if left is not None:
             from localm.plugins.engine import data_left_in_place_message
             return _text_result(f"Plugin '{plugin}' uninstalled. "

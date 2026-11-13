@@ -265,6 +265,12 @@ def _resolve_ctx_reserve(cfg: dict, override: Optional[int]) -> int:
 _BACKEND_PLUGINS: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
 
 
+def _plugin_backend_registered(plugin_name: str) -> bool:
+    """True while *plugin_name* has an inference backend registered."""
+    from localm.inference import backend_registry
+    return backend_registry.has_plugin(plugin_name)
+
+
 def backend_plugin_of(backend: Any) -> Optional[str]:
     """The plugin whose registered inference backend built *backend*
     (``create_backend``), or None for a built-in backend."""
@@ -598,15 +604,24 @@ class Engine:
         for path, scale in getattr(self._backend, "adapters", None) or ():
             console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
                           f"(scale {scale:g})[/dim]")
-        self._backend.load()
+        self._load_backend()
+
+    def _load_backend(self) -> None:
+        """Load the current backend. When an inference backend a plugin
+        registered built it, raises RuntimeError instead of loading when that
+        plugin no longer has the backend registered (disabled or uninstalled),
+        and unloads it again and raises when that happened during the load."""
         plugin = self.backend_plugin
-        if plugin is not None:
-            from localm.inference import backend_registry
-            if not backend_registry.has_plugin(plugin):
-                self._backend.unload()
-                raise RuntimeError(
-                    f"{self.display_name} was not kept loaded: plugin {plugin!r}, "
-                    f"whose backend runs it, was disabled while it loaded")
+        if plugin is not None and not _plugin_backend_registered(plugin):
+            raise RuntimeError(
+                f"{self.display_name} was not loaded: plugin {plugin!r}, whose "
+                f"backend runs it, is disabled")
+        self._backend.load()
+        if plugin is not None and not _plugin_backend_registered(plugin):
+            self._backend.unload()
+            raise RuntimeError(
+                f"{self.display_name} was not kept loaded: plugin {plugin!r}, "
+                f"whose backend runs it, was disabled while it loaded")
 
     def _attach_registered_adapters(self) -> None:
         """Give a GGUF backend the LoRA adapters currently attached to this
@@ -1052,7 +1067,7 @@ class Engine:
         if not self._backend.loaded:
             with self._load_guard():
                 if not self._backend.loaded:
-                    self._backend.load()
+                    self._load_backend()
                     _livefeed.kick("model loaded")
         if getattr(self._backend, "can_embed", True) is False:
             # Only knowable now (HF): the loaded checkpoint is a chat decoder,
@@ -1154,7 +1169,7 @@ class Engine:
                         f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
                     )
                     self._attach_registered_adapters()
-                    self._backend.load()
+                    self._load_backend()
                     _livefeed.kick("model loaded")
 
         cfg = load_config()
