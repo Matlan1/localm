@@ -524,11 +524,13 @@ def _plain_yaml_scalar(raw: str) -> Optional[str]:
     return raw
 
 
-def user_extra_model_paths_sections(workdir: Path) -> list[str]:
+def user_extra_model_paths_sections(workdir: Path,
+                                    problems: Optional[list] = None) -> list[str]:
     """The sections of ``<workdir>/extra_model_paths.yaml`` (the user's own
     ComfyUI model locations, e.g. StabilityMatrix's shared models folder) as
     lines for the managed ComfyUI's file, or ``[]`` when there is none or it
-    cannot be copied faithfully (then a warning is logged).
+    cannot be copied faithfully (then a warning is logged and the reason, a
+    sentence naming the file, is appended to *problems* when given).
 
     Each top-level section is renamed ``user_extra_<name>`` and carries an
     absolute ``base_path``: a relative one (after expanding ``~`` and environment
@@ -544,11 +546,15 @@ def user_extra_model_paths_sections(workdir: Path) -> list[str]:
     except (OSError, UnicodeDecodeError) as e:
         logger.warning("managed ComfyUI: could not read %s (%s); its model "
                        "locations are not shared", src, e)
+        if problems is not None:
+            problems.append(f"{src} could not be read ({e})")
         return []
 
     def _skip(reason: str) -> list[str]:
         logger.warning("managed ComfyUI: %s in %s; its model locations are not "
                        "shared with localm's ComfyUI", reason, src)
+        if problems is not None:
+            problems.append(f"{src} has {reason}, which localm cannot copy")
         return []
 
     lines = text.splitlines()
@@ -613,9 +619,12 @@ def _yaml_squote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def render_extra_model_paths(cfg: Optional[dict] = None) -> str:
+def render_extra_model_paths(cfg: Optional[dict] = None,
+                             problems: Optional[list] = None) -> str:
     """Render the extra_model_paths.yaml TEXT from build_extra_model_paths_config.
-    Hand-rolled (no PyYAML): two levels of mapping, all string scalars quoted."""
+    Hand-rolled (no PyYAML): two levels of mapping, all string scalars quoted.
+    Why the user's own extra_model_paths.yaml was not copied is appended to
+    *problems* when given (``user_extra_model_paths_sections``)."""
     config = build_extra_model_paths_config(cfg)
     lines = [
         "# extra_model_paths.yaml - written by localm (managed ComfyUI, stage S1).",
@@ -637,18 +646,21 @@ def render_extra_model_paths(cfg: Optional[dict] = None) -> str:
         lines.append("")
     workdir = (cfg if cfg is not None else load_config()).get("comfy_workdir")
     if workdir:
-        copied = user_extra_model_paths_sections(Path(workdir))
+        copied = user_extra_model_paths_sections(Path(workdir), problems)
         if copied:
             lines.append("# Copied from your ComfyUI's own extra_model_paths.yaml:")
             lines.extend(copied)
     return "\n".join(lines)
 
 
-def write_extra_model_paths(cfg: Optional[dict] = None) -> Path:
+def write_extra_model_paths(cfg: Optional[dict] = None,
+                            problems: Optional[list] = None) -> Path:
     """Write extra_model_paths.yaml into the managed ComfyUI dir and return its
     path. The install dir must already exist (S2/S3 create it); this writer only
-    drops the file in. Overwrites any prior generated file."""
+    drops the file in. Overwrites any prior generated file. *problems*: see
+    ``render_extra_model_paths``."""
     paths = managed_comfy_paths()
     paths.root.mkdir(parents=True, exist_ok=True)
-    paths.extra_model_paths.write_text(render_extra_model_paths(cfg), encoding="utf-8")
+    paths.extra_model_paths.write_text(render_extra_model_paths(cfg, problems),
+                                       encoding="utf-8")
     return paths.extra_model_paths

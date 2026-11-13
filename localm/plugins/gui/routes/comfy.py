@@ -146,8 +146,8 @@ def register(app: FastAPI, ctx) -> None:
             "updatable": updatable,
             "update_blocked_reason": (
                 "" if updatable else
-                "This managed ComfyUI has no recorded source commit (it was installed via the "
-                "non-git copy fallback), so a pinned-version update is not possible. "
+                "This managed ComfyUI has no recorded source commit (its source record is "
+                "missing or unreadable), so a pinned-version update is not possible. "
                 "Remove it and set it up again to move to the version localm ships."),
         }
 

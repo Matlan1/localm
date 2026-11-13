@@ -25,6 +25,12 @@ MAX_NODES = 2000
 WIDGETS = {
     "UNETLoader": ("unet_name", "weight_dtype"),
     "UnetLoaderGGUF": ("unet_name",),
+    "UnetLoaderGGUFAdvanced": ("unet_name", "dequant_dtype", "patch_dtype", "patch_on_device"),
+    "SamplerCustom": ("add_noise", "noise_seed", "control_after_generate", "cfg"),
+    "KSamplerSelect": ("sampler_name",),
+    "BasicScheduler": ("scheduler", "steps", "denoise"),
+    "CFGGuider": ("cfg",),
+    "RandomNoise": ("noise_seed", "control_after_generate"),
     "CheckpointLoaderSimple": ("ckpt_name",),
     "DualCLIPLoader": ("clip_name1", "clip_name2", "type", "device"),
     "TripleCLIPLoader": ("clip_name1", "clip_name2", "clip_name3"),
@@ -65,11 +71,13 @@ IMPLICIT = frozenset({
     "PrimitiveNode", "ConditioningZeroOut",
 })
 
-MODEL_LOADERS = ("UNETLoader", "UnetLoaderGGUF", "CheckpointLoaderSimple")
+MODEL_LOADERS = ("UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
+                 "CheckpointLoaderSimple")
 CLIP_LOADERS = {"DualCLIPLoader": ("clip_name1", "clip_name2"),
                 "TripleCLIPLoader": ("clip_name1", "clip_name2", "clip_name3"),
                 "CLIPLoader": ("clip_name",)}
-SAMPLERS = ("KSampler", "KSamplerAdvanced")
+SAMPLERS = ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced")
+CUSTOM_SAMPLERS = ("SamplerCustom", "SamplerCustomAdvanced")
 LATENTS = ("EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo")
 
 SAMPLER_NAMES = {
@@ -265,6 +273,53 @@ class _Graph:
                       key=lambda x: (len(x), x))
 
 
+def _sampler_view(g: _Graph, sampler: str, notes: list) -> dict:
+    """The sampling settings of the sampler node *sampler* wherever the graph
+    keeps them: ``{"steps", "cfg", "sampler_name", "scheduler", "denoise"}`` as
+    ``(node id, value)`` pairs (node id None when absent), ``"positive"`` and
+    ``"negative"`` (the conditioning links or None) and ``"parts"`` (the helper
+    nodes read). A ``KSampler`` holds them itself; a ``SamplerCustom`` or
+    ``SamplerCustomAdvanced`` reads the steps, scheduler and denoise from its
+    ``BasicScheduler``, the sampler from its ``KSamplerSelect``, and the CFG and
+    prompts from its ``CFGGuider`` or ``BasicGuider`` (no CFG)."""
+    node = g.nodes[sampler]
+    inp = node["inputs"]
+    view = {k: (None, None) for k in ("steps", "cfg", "sampler_name", "scheduler", "denoise")}
+    view.update(positive=inp.get("positive"), negative=inp.get("negative"), parts=[])
+    if node["class_type"] not in CUSTOM_SAMPLERS:
+        for key in ("steps", "cfg", "sampler_name", "scheduler"):
+            view[key] = (sampler, g.value(sampler, key, notes))
+        view["denoise"] = (sampler, inp.get("denoise"))
+        return view
+
+    def _linked(name: str, classes: tuple) -> Optional[str]:
+        v = inp.get(name)
+        if isinstance(v, _Link) and g.nodes.get(v.node, {}).get("class_type") in classes:
+            view["parts"].append(v.node)
+            return v.node
+        return None
+
+    sched = _linked("sigmas", ("BasicScheduler",))
+    if sched is not None:
+        for key in ("steps", "scheduler", "denoise"):
+            view[key] = (sched, g.value(sched, key, notes))
+    picked = _linked("sampler", ("KSamplerSelect",))
+    if picked is not None:
+        view["sampler_name"] = (picked, g.value(picked, "sampler_name", notes))
+    if node["class_type"] == "SamplerCustom":
+        view["cfg"] = (sampler, g.value(sampler, "cfg", notes))
+        return view
+    guider = _linked("guider", ("CFGGuider", "BasicGuider"))
+    if guider is not None:
+        ginp = g.nodes[guider]["inputs"]
+        if g.nodes[guider]["class_type"] == "CFGGuider":
+            view["cfg"] = (guider, g.value(guider, "cfg", notes))
+            view.update(positive=ginp.get("positive"), negative=ginp.get("negative"))
+        else:
+            view["positive"] = ginp.get("conditioning")
+    return view
+
+
 def _clip_slot(filename: str, clip_type) -> Optional[str]:
     n = filename.lower().replace("\\", "/").rsplit("/", 1)[-1]
     if "umt5" in n or "t5" in n:
@@ -394,8 +449,8 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
                          "are picked automatically.")
     else:
         loaders = g.of(MODEL_LOADERS)
-        main = (g.upstream(sampler, ("model",), MODEL_LOADERS) if sampler else None) or (
-            loaders[0] if loaders else None)
+        main = (g.upstream(sampler, ("model", "guider"), MODEL_LOADERS)
+                if sampler else None) or (loaders[0] if loaders else None)
         for nid in loaders:
             node = g.nodes[nid]
             field = "ckpt_name" if node["class_type"] == "CheckpointLoaderSimple" else "unet_name"
@@ -459,10 +514,13 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
 
     if sampler is not None:
         node = g.nodes[sampler]
-        _set_param("steps", _number(g.value(sampler, "steps", notes)), sampler)
-        _set_param("cfg", _number(g.value(sampler, "cfg", notes)), sampler)
-        sname = g.value(sampler, "sampler_name", notes)
-        sched = g.value(sampler, "scheduler", notes)
+        view = _sampler_view(g, sampler, notes)
+        for key in ("steps", "cfg"):
+            src, value = view[key]
+            if src is not None:
+                _set_param(key, _number(value), src)
+        sname = view["sampler_name"][1]
+        sched = view["scheduler"][1]
         if media == "music":
             if sname not in (None, "euler") or sched not in (None, "simple", "normal"):
                 notes.append(f"{g.label(sampler)}: the native music backend has no sampler or "
@@ -480,7 +538,7 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
                 else:
                     notes.append(f"{g.label(sampler)}: scheduler '{sched}' has no native "
                                  "equivalent; the model's default is used.")
-        denoise = _number(node["inputs"].get("denoise"))
+        denoise = _number(view["denoise"][1])
         if denoise is not None and denoise < 0.999:
             notes.append(f"{g.label(sampler)}: denoise {denoise:g} (image to image) was not kept.")
         if node["class_type"] == "KSamplerAdvanced":
@@ -495,10 +553,14 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
                     notes.append(f"{g.label(sampler)}: {field} '{value}' was not kept.")
         notes.append("The seed was not kept; each run picks one unless the page sets it.")
         _map(sampler, "steps, CFG, sampler, scheduler")
+        for part in view["parts"]:
+            _map(part, "sampling settings")
+        for noise in g.of(("RandomNoise",)):
+            used.add(noise)
         for side, key in (("positive", "prompt"), ("negative", "negative_prompt")):
             if media == "music":
                 break
-            v = node["inputs"].get(side)
+            v = view[side]
             if not isinstance(v, _Link):
                 continue
             src = v.node if g.nodes.get(v.node, {}).get("class_type") in (
@@ -514,7 +576,7 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
             if isinstance(text, str):
                 _set_param(key, text, src)
                 _map(src, key.replace("_", " "))
-        guide = g.upstream(sampler, ("positive",), ("FluxGuidance",))
+        guide = g.upstream(sampler, ("positive", "guider", "conditioning"), ("FluxGuidance",))
         guides = g.of(("FluxGuidance",))
         guide = guide or (guides[0] if guides else None)
         if guide is not None:

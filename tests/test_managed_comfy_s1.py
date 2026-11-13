@@ -457,3 +457,22 @@ def test_cli_remove_refuses_while_another_process_holds_the_lock(cli_runner):
     assert res.exit_code != 0, res.output
     assert str(os.getpid()) in res.output, res.output
     assert lock.exists(), "a refused remove must not disturb the holder's lock"
+
+
+
+def test_why_the_users_extra_model_paths_were_not_copied_is_returned(home, tmp_path):
+    user_comfy = tmp_path / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    (user_comfy / "extra_model_paths.yaml").write_text(
+        "odd:\n\tbase_path: /somewhere\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(user_comfy)})
+    mc.managed_comfy_paths().root.mkdir(parents=True, exist_ok=True)
+    problems: list = []
+    mc.write_extra_model_paths(problems=problems)
+    assert len(problems) == 1
+    assert "tab indentation" in problems[0] and "extra_model_paths.yaml" in problems[0]
+    (user_comfy / "extra_model_paths.yaml").write_text(
+        "mine:\n  base_path: /models\n  vae: vae\n", encoding="utf-8")
+    clean: list = []
+    mc.write_extra_model_paths(problems=clean)
+    assert clean == []
