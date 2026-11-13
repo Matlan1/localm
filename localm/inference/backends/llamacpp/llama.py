@@ -3751,25 +3751,26 @@ class LlamaCpp:
             self._reset_kv_for_image()
         self._vision_kv = None
 
-        say = None
+        say: Optional[Callable[[str], None]] = None
         if on_status:
             said: list[Optional[str]] = [None]
 
-            def say(text: str) -> None:
+            def say_once(text: str) -> None:
                 if text != said[0]:
                     said[0] = text
                     on_status(text)
+            say = say_once
             encoding = {
                 chunk.kind for chunk, start in zip(vprompt.chunks, starts, strict=True)
                 if chunk.tokens is None and start >= keep
                 and not self._mtmd.has_embedding(chunk.key)}
             noun = "audio" if encoding == {"audio"} else "image"
             if not encoding:
-                say("Processing prompt...")
+                say_once("Processing prompt...")
             elif self._mtmd.on_gpu:
-                say(f"Encoding {noun} (GPU)...")
+                say_once(f"Encoding {noun} (GPU)...")
             else:
-                say(f"Encoding {noun} (CPU)...")
+                say_once(f"Encoding {noun} (CPU)...")
 
         n_ctx = api.llama_n_ctx(self._ctx_ptr)
         n_batch = min(n_ctx, 2048) if n_ctx else 512
