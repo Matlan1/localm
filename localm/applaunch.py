@@ -109,12 +109,21 @@ def _base_interpreter() -> Optional[Path]:
 class LauncherResult:
     """Outcome of a launcher build. ``notes`` carries the human-readable surface of
     what happened (and why a best-effort step did not), so a caller can print it and
-    a failure is never silent."""
+    a failure is never silent. ``problems`` holds the notes that report something
+    that did not work (each is also in ``notes``), for a caller that prints only
+    problems."""
     ok: bool
     path: Optional[Path] = None
     icon_stamped: bool = False
     desktop_file: Optional[Path] = None
     notes: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+
+def _problem(notes: list, problems: list, text: str) -> None:
+    """Record *text* as a note that reports a problem."""
+    notes.append(text)
+    problems.append(text)
 
 
 def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> list[str]:
@@ -199,6 +208,12 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
     is harmless and is cleared on the NEXT successful rebuild."""
     try:
         shutil.copy2(src, dst)
+        stale = dst.with_name(dst.name + ".old")
+        try:
+            if stale.exists():
+                stale.unlink()
+        except OSError:
+            pass
         return False
     except OSError as copy_err:
         old = dst.with_name(dst.name + ".old")
@@ -225,16 +240,17 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
     ``--force`` to refresh the copy). Self-checks the result. Never raises."""
     base = _base_interpreter()
     if base is None:
-        return LauncherResult(ok=False,
-                              notes=["could not locate the base interpreter to copy; "
-                                     "cannot build LocaLM.exe"])
+        text = "could not locate the base interpreter to copy; cannot build LocaLM.exe"
+        return LauncherResult(ok=False, notes=[text], problems=[text])
     dst = windows_launcher_path()
     notes: list[str] = []
+    problems: list[str] = []
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not force and dst.is_file():
             notes.append(f"{dst.name} already present (use --force to refresh)")
-            return LauncherResult(ok=True, path=dst, notes=notes)
+            _ensure_bare_start(notes, problems)
+            return LauncherResult(ok=True, path=dst, notes=notes, problems=problems)
         # When rebuilding via --force from the already-running LocaLM.exe, dst is
         # this process's own executing image, so the copy needs the running-exe
         # fallback, not a plain shutil.copy2.
@@ -244,32 +260,101 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
                      + (" (it was running; renamed the old copy aside to replace it)"
                         if replaced_running else ""))
     except OSError as e:
-        return LauncherResult(ok=False, path=dst,
-                              notes=[f"could not build {dst.name}: {e}"])
+        text = f"could not build {dst.name}: {e}"
+        return LauncherResult(ok=False, path=dst, notes=[text], problems=[text])
 
     stamped = False
     ico = ico_path()
     if ico:
         stamped = _stamp_exe_icon(dst, ico)
-        notes.append("stamped the LocaLM icon into the exe" if stamped else
+        if stamped:
+            notes.append("stamped the LocaLM icon into the exe")
+        else:
+            _problem(notes, problems,
                      "could not stamp the exe icon (the LocaLM icon still shows on "
                      "the taskbar, shortcut and tray at runtime)")
     else:
-        notes.append("no localm.ico found; skipped icon stamping")
+        _problem(notes, problems, "no localm.ico found; skipped icon stamping")
 
     # Verify the final artifact actually runs venv-aware before claiming success -
     # never ship a broken launcher (do-not-hide-problems).
     if not _self_check(dst):
-        notes.append("the built launcher did not start correctly; removed it. "
-                     "`localm gui` still works (Task Manager may then show "
-                     "python.exe). Please report this.")
+        _problem(notes, problems,
+                 "the built launcher did not start correctly; removed it. "
+                 "`localm gui` still works (Task Manager may then show "
+                 "python.exe). Please report this.")
         try:
             dst.unlink()
         except OSError:
             pass
-        return LauncherResult(ok=False, path=dst, icon_stamped=stamped, notes=notes)
+        return LauncherResult(ok=False, path=dst, icon_stamped=stamped, notes=notes,
+                              problems=problems)
 
-    return LauncherResult(ok=True, path=dst, icon_stamped=stamped, notes=notes)
+    _ensure_bare_start(notes, problems)
+    return LauncherResult(ok=True, path=dst, icon_stamped=stamped, notes=notes,
+                          problems=problems)
+
+
+# A .pth file in the venv's site-packages: started with no arguments at all
+# (a double-click in Explorer), LocaLM.exe opens the GUI instead of a Python prompt.
+BARE_START_PTH = "localm_app_bare_start.pth"
+BARE_START_LINE = (
+    "import os, sys; sys.orig_argv[1:] or os.path.basename(sys.executable).lower() "
+    "!= 'localm.exe' or __import__('localm.applaunch').applaunch.start_gui_from_bare_exe()\n")
+
+
+def _venv_site_packages() -> Optional[Path]:
+    """This venv's site-packages folder, or None."""
+    win = _venv_root() / "Lib" / "site-packages"
+    if win.is_dir():
+        return win
+    for p in sorted((_venv_root() / "lib").glob("python3*/site-packages")):
+        return p
+    return None
+
+
+def _ensure_bare_start(notes: list, problems: list) -> None:
+    """Write BARE_START_PTH into the venv's site-packages when it is missing or
+    differs, recording a note, or a problem when it cannot be written."""
+    site = _venv_site_packages()
+    if site is None:
+        _problem(notes, problems, "no site-packages folder found, so LocaLM.exe started "
+                                  "with no arguments opens a Python prompt")
+        return
+    pth = site / BARE_START_PTH
+    try:
+        if pth.is_file() and pth.read_text(encoding="utf-8") == BARE_START_LINE:
+            return
+        pth.write_text(BARE_START_LINE, encoding="utf-8")
+        notes.append("LocaLM.exe started with no arguments now opens the GUI")
+    except OSError as e:
+        _problem(notes, problems, f"could not write {pth}: {e}; LocaLM.exe started with "
+                                  "no arguments opens a Python prompt")
+
+
+def bare_start_command() -> tuple:
+    """``(argv, env)`` that a LocaLM.exe started with no arguments runs: this
+    interpreter with ``-m localm gui``, owning the console it was given (so the
+    GUI can hide it) unless LOCALM_DEBUG is set."""
+    env = dict(os.environ)
+    if not env.get("LOCALM_DEBUG"):
+        env.setdefault("LOCALM_OWN_CONSOLE", "1")
+    return [sys.executable, "-m", "localm", "gui"], env
+
+
+def start_gui_from_bare_exe(run=None, exit_now=None) -> None:
+    """Run :func:`bare_start_command` and end this process with its exit code.
+    Called from BARE_START_PTH while the interpreter starts; never returns. A
+    child that cannot be started is reported on stderr with exit code 1."""
+    run = run or subprocess.call
+    exit_now = exit_now or os._exit
+    argv, env = bare_start_command()
+    try:
+        rc = run(argv, env=env)
+    except OSError as e:
+        print(f"LocaLM could not start the GUI: {e}", file=sys.stderr)
+        rc = 1
+    exit_now(int(rc))
 
 
 # ---- PE icon stamping (ctypes UpdateResource, no dependency) --------------- #
@@ -454,23 +539,41 @@ def linux_launcher_path() -> Path:
 
 def _desktop_entry_text(*, exec_path: Path, workdir: Path,
                         icon: Optional[str]) -> str:
-    """The freedesktop .desktop launcher text for LocaLM. Pure (no I/O) so it is
-    unit-testable on any platform."""
+    """The freedesktop .desktop launcher text for LocaLM, every value escaped
+    per the Desktop Entry Specification (setup_spec.desktop_exec). Pure (no
+    I/O) so it is unit-testable on any platform."""
+    from localm import setup_spec
     lines = [
         "[Desktop Entry]",
         "Type=Application",
         f"Name={APP_NAME}",
-        "Comment=Local AI, offline",
-        f"Exec={exec_path} -m localm gui",
-        f"Path={workdir}",
+        f"Comment={setup_spec.MENU_ENTRY_COMMENT}",
+        f"Exec={setup_spec.desktop_exec([str(exec_path), '-m', 'localm', 'gui'])}",
+        f"Path={setup_spec.desktop_string(str(workdir))}",
         # Terminal=false matches setup.sh's menu entry: the GUI opens in the
         # browser, so no terminal window is needed.
         "Terminal=false",
-        "Categories=Utility;Development;",
+        "Categories=Utility;Development;Science;",
     ]
     if icon:
-        lines.insert(5, f"Icon={icon}")
+        lines.insert(5, f"Icon={setup_spec.desktop_string(icon)}")
     return "\n".join(lines) + "\n"
+
+
+def _menu_entry_installed() -> Optional[Path]:
+    """The application menu entry setup wrote for this install
+    (``~/.local/share/applications/localm.desktop`` whose Path= is this clone),
+    or None."""
+    from localm import setup_spec
+    entry = Path.home() / ".local" / "share" / "applications" / setup_spec.MENU_ENTRY_FILE
+    want = "Path=" + setup_spec.desktop_string(_repo_root().as_posix())
+    try:
+        if entry.is_file() and want in entry.read_text(encoding="utf-8",
+                                                       errors="replace").splitlines():
+            return entry
+    except OSError:
+        return None
+    return None
 
 
 def make_linux_launcher(*, force: bool = False) -> LauncherResult:
@@ -481,10 +584,11 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
     raises."""
     base = _base_interpreter()
     if base is None:
-        return LauncherResult(ok=False,
-                              notes=["no interpreter found to copy for bin/LocaLM"])
+        text = "no interpreter found to copy for bin/LocaLM"
+        return LauncherResult(ok=False, notes=[text], problems=[text])
     dst = linux_launcher_path()
     notes: list[str] = []
+    problems: list[str] = []
     built_ok = False
     try:
         entrypoint = _venv_root() / "bin" / "localm"
@@ -517,14 +621,15 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
                     dst.unlink()
                 except OSError:
                     pass
-                notes.append("the copied launcher did not start standalone (its runtime "
+                _problem(notes, problems,
+                         "the copied launcher did not start standalone (its runtime "
                              "libs are not resolvable next to it); the .desktop will use "
                              "the venv python instead, so it still works but a process "
                              "monitor shows python. An AppImage is the robust path - see "
                              "docs/native-app.md.")
     except OSError as e:
-        notes.append(f"could not build {dst.name}: {e}; the .desktop will use the "
-                     "venv python instead")
+        _problem(notes, problems, f"could not build {dst.name}: {e}; the .desktop will "
+                                  "use the venv python instead")
 
     exec_path = dst if built_ok else Path(sys.executable)
     repo_root = _repo_root()
@@ -536,12 +641,17 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
                                 icon=svg_icon_path()),
             encoding="utf-8")
         written = desktop
-        notes.append(f"wrote {desktop.name} (copy it to "
-                     "~/.local/share/applications/ to add it to your menu)")
+        menu = _menu_entry_installed()
+        if menu is not None:
+            notes.append(f"wrote {desktop.name} (your application menu already has "
+                         f"LocaLM: {menu})")
+        else:
+            notes.append(f"wrote {desktop.name} (copy it to "
+                         "~/.local/share/applications/ to add it to your menu)")
     except OSError as e:
-        notes.append(f"could not write {desktop.name}: {e}")
+        _problem(notes, problems, f"could not write {desktop.name}: {e}")
     return LauncherResult(ok=True, path=(dst if built_ok else None),
-                          desktop_file=written, notes=notes)
+                          desktop_file=written, notes=notes, problems=problems)
 
 
 # --------------------------------------------------------------------------- #
@@ -556,7 +666,6 @@ def make_launcher(*, force: bool = False) -> LauncherResult:
         return make_windows_launcher(force=force)
     if sys.platform.startswith("linux"):
         return make_linux_launcher(force=force)
-    return LauncherResult(
-        ok=False,
-        notes=[f"no native launcher for platform {sys.platform!r} yet; "
-               "run 'localm gui' directly"])
+    text = (f"no native launcher for platform {sys.platform!r} yet; "
+            "run 'localm gui' directly")
+    return LauncherResult(ok=False, notes=[text], problems=[text])

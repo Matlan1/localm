@@ -293,7 +293,7 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
     from localm import applaunch
     from rich.markup import escape
     res = applaunch.make_launcher(force=force)
-    for note in res.notes:
+    for note in (res.problems if quiet else res.notes):
         console.print(f"  [dim]-[/dim] {escape(note)}")
     if not res.ok:
         console.print("[yellow]Could not build the native launcher.[/yellow] "
