@@ -1417,29 +1417,15 @@ class _ExecutionMixin:
         return self._capture_changes([(path_arg, new_text)])
 
     def _capture_edit_files(self, edits: object) -> Optional[str]:
-        """Capture an ``edit_files`` batch: every edit composes onto the overlay
-        content of its file, and one unmatched edit rejects the whole batch,
-        like the real tool."""
-        if not isinstance(edits, list) or not edits:
+        """Capture an ``edit_files`` batch: the tool's own planner composes
+        every edit onto the overlay content of its file, and a batch the tool
+        would refuse captures nothing."""
+        from ..tools.files import plan_edit_files
+        plan = plan_edit_files(self.cwd, edits, read=self._patch_overlay.read)
+        if isinstance(plan, str):
             return None
-        texts: dict[str, str] = {}
-        paths: dict[str, str] = {}
-        for item in edits:
-            if not isinstance(item, dict):
-                return None
-            path_arg = str(item.get("path") or "")
-            old_str = str(item.get("old") or "")
-            new_str = str(item.get("new") or "")
-            if not path_arg or not old_str:
-                return None
-            key = str((self.cwd / path_arg).resolve())
-            if key not in texts:
-                texts[key] = self._patch_overlay.read(path_arg)
-                paths[key] = path_arg
-            if old_str not in texts[key]:
-                return None
-            texts[key] = texts[key].replace(old_str, new_str, 1)
-        return self._capture_changes([(paths[k], t) for k, t in texts.items()])
+        return self._capture_changes(
+            [(plan.labels[p], plan.after[p]) for p in plan.targets])
 
     def _capture_changes(self, changes: list) -> Optional[str]:
         """Record ``(path, new_text)`` pairs in the overlay. Returns the diff

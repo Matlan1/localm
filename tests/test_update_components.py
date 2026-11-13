@@ -486,6 +486,32 @@ def test_a_uv_that_cannot_be_installed_leaves_the_old_one_and_the_code(tmp_path,
     assert _v(inst) == "0.3.1"
 
 
+def test_a_uv_swap_that_is_refused_keeps_the_installed_uv(tmp_path, home,
+                                                          fake_uv_version, monkeypatch):
+    from localm import folder_swap
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
+    _contained_uv(inst, "0.13.4")
+    monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap())
+    real_move = folder_swap.move_dir
+    moves = []
+
+    def refuse_new_uv(src, dst):
+        moves.append((Path(src).name, Path(dst).name))
+        if Path(src).name == ".uv-update":
+            raise PermissionError(32, "in use by another process")
+        real_move(src, dst)
+    monkeypatch.setattr(folder_swap, "move_dir", refuse_new_uv)
+    data, sig = _release(_files("0.3.2", uv="0.13.6"))
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: 0)
+    assert any(src == ".uv-update" for src, _dst in moves)
+    assert "could not swap in the new uv" in ei.value.reason
+    assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
+    assert not (inst / ".uv-update").exists()
+    assert not [d.name for d in inst.iterdir() if ".previous-" in d.name]
+
+
 def test_a_running_uv_refuses_the_update_with_nothing_changed(tmp_path, home,
                                                               fake_uv_version, monkeypatch):
     inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))

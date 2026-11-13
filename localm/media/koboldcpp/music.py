@@ -133,11 +133,14 @@ def _ensure_runtime(backend: str, say: Progress,
 def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = True,
                  lowvram: bool = False, timeout: float = 3600.0,
                  on_progress: Optional[Progress] = None,
-                 cancel_check: Optional[CancelCheck] = None) -> tuple[bytes, str]:
+                 cancel_check: Optional[CancelCheck] = None,
+                 gpus: Optional[Callable[[], list]] = None) -> tuple[bytes, str]:
     """Generate one track. Returns (WAV bytes, backend that produced it).
     Under ``auto`` a backend that crashed while loading is remembered as not
     working here (``runtime.record_backend``) only when a later backend then
-    produced the track, so a broken model file marks no backend."""
+    produced the track, so a broken model file marks no backend. *gpus*
+    (``discover.list_gpus``) lists the GPUs the configured main GPU is
+    counted among (:func:`server.device_for`)."""
     say = on_progress or (lambda _m: None)
     order = backend_order(choice)
     resolved = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
@@ -157,7 +160,7 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
         try:
             data = server.run(rt, backend, models, work_dir(), prepare=plan,
                               request=request, timeout=timeout, lowvram=lowvram,
-                              device=server.device_for(backend, main_gpu),
+                              device=server.device_for(backend, main_gpu, gpus),
                               on_progress=say, cancel_check=cancel_check)
         except StartError as e:
             if auto and e.crashed:
