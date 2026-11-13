@@ -1099,6 +1099,45 @@ class TestPull:
         assert gui_web.consume_pull_grant(gui.app, self.SPEC, q["pull_token"])
 
 
+class TestApiModePullAndLanding:
+    SPEC = "org/Some-Model-GGUF:some-model.Q4_K_M.gguf"
+
+    def _fake_pull(self, gui, calls, ok=True):
+        def _pull(spec, name, **_kw):
+            calls.append(spec)
+            if ok:
+                gui.register_model("pulled")
+            return ok
+
+        gui.mp.setattr("localm.model_manager.pull_model", _pull)
+
+    def test_a_failed_api_mode_pull_starts_no_server(self, gui):
+        calls = []
+        self._fake_pull(gui, calls, ok=False)
+        r = gui.invoke("--api-mode", "--no-browser", "--pull", self.SPEC)
+        assert r.exit_code == 1, r.output
+        assert calls == [self.SPEC]
+        assert gui.served == []
+
+    def test_api_mode_pull_downloads_before_the_server_starts(self, gui):
+        calls = []
+        self._fake_pull(gui, calls)
+        r = gui.invoke("--api-mode", "--no-browser", "--pull", self.SPEC)
+        assert r.exit_code == 0, r.output
+        assert calls == [self.SPEC]
+        assert "Download starting" not in r.flat
+        assert gui.engine.kwargs["display_name"] == "pulled"
+
+    def test_an_api_only_server_sends_a_browser_to_the_docs(self, gui):
+        from fastapi.testclient import TestClient
+        r = gui.invoke("--api-mode", "--no-model", "--no-browser")
+        assert r.exit_code == 0, r.output
+        with TestClient(gui.app) as c:
+            landing = c.get("/", follow_redirects=False)
+        assert landing.status_code in (302, 303, 307), landing.status_code
+        assert landing.headers["location"].endswith("/docs")
+
+
 # ------------------------------------------------------------------ #
 #  Tray / status window                                               #
 # ------------------------------------------------------------------ #

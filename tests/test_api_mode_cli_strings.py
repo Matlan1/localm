@@ -91,9 +91,9 @@ class TestEmptyRegistryHint:
             "api_mode does not serve a Models page - must not point at one")
         assert "No models registered yet" in hint
 
-    def test_api_mode_with_pull_spec_still_notes_the_download(self):
+    def test_api_mode_with_pull_spec_promises_no_download(self):
         hint = _empty_registry_hint(True, "org/repo:file.gguf")
-        assert "Download starting" in hint
+        assert "download" not in hint.lower()
 
 
 class TestNoLoadableModelHint:

@@ -145,6 +145,38 @@ def set_console_title(title: str) -> bool:
         return False  # cosmetic hardening must never block startup
 
 
+_SHELL_IMAGES = frozenset({"cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe",
+                           "wsl.exe", "nu.exe", "tcc.exe"})
+
+
+def _console_process_names() -> list:
+    """Lower-cased image names of every process attached to this process's
+    console (Windows), or [] when there is none or they cannot be read."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+
+        import psutil
+        pids = (ctypes.c_uint32 * 64)()
+        n = ctypes.windll.kernel32.GetConsoleProcessList(pids, 64)
+        names = []
+        for pid in pids[:min(n, 64)]:
+            try:
+                names.append(psutil.Process(pid).name().lower())
+            except Exception:
+                continue
+        return names
+    except Exception:
+        return []
+
+
+def console_has_a_shell() -> bool:
+    """True when a command shell (cmd, PowerShell, bash, ...) shares this
+    process's console, which makes it a person's own console window."""
+    return any(name in _SHELL_IMAGES for name in _console_process_names())
+
+
 def hide_console() -> bool:
     """Hide THIS process's own console window (Windows), so a launcher-spawned
     server runs like a background app - just its tray + status window, no raw

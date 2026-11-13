@@ -97,11 +97,22 @@ def _no_model_flag_hint(api_mode: bool) -> str:
 def _empty_registry_hint(api_mode: bool, pull_spec) -> str:
     """Console line for an empty model registry at startup."""
     if api_mode:
-        return ("[yellow]No models registered yet.[/yellow]"
-                + (" Download starting…" if pull_spec else ""))
+        return "[yellow]No models registered yet.[/yellow]"
     return ("[yellow]No models registered yet.[/yellow] "
             "Opening the GUI - add one on the Models page"
             + (" (download starting)…" if pull_spec else "."))
+
+
+def _pull_before_api_start(pull_spec: str) -> None:
+    """Download *pull_spec* with the same ``model_manager.pull_model`` call
+    ``localm pull SPEC`` makes, in this process, before an API-only server
+    starts (it has no GUI page to download from). Exits 1 when the download
+    fails."""
+    from localm.model_manager import pull_model
+    from localm.model_manager.pull import forget_stopped_download
+    forget_stopped_download()
+    if not pull_model(pull_spec, None):
+        sys.exit(1)
 
 
 def _no_loadable_model_hint(api_mode: bool) -> str:
@@ -270,17 +281,16 @@ def _console_close_cleanup() -> None:
             pass
 
 
-def _gui_bind_warning(host: str):
-    """Warning text when the GUI binds past loopback without auth, or None when
-    the bind is safe. Builds on the server's check, then escalates for the GUI:
-    it also exposes the coder agent (shell + file edits). Traffic itself is
-    encrypted by built-in TLS on a network bind; the warning is about the coder
-    agent's reach, not about cleartext.
+def _gui_bind_warning(host: str, *, api_mode: bool = False):
+    """Warning text when the server binds past loopback without auth, or None
+    when the bind is safe. Builds on the server's check; with the GUI mounted
+    (not *api_mode*) it adds that the GUI also serves the coder agent (shell +
+    file edits). Traffic itself is encrypted by built-in TLS on a network bind.
     """
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
-    if base is None:
-        return None
+    if base is None or api_mode:
+        return base
     return (
         base
         + "\n  The GUI also exposes the coder agent, which can run shell "
@@ -763,7 +773,8 @@ def _select_startup_model(console, model, *, no_model: bool, pull_spec,
     return registry, model, model_less
 
 
-def _resolve_gui_bind(console, host, *, insecure: bool) -> _BindPlan:
+def _resolve_gui_bind(console, host, *, insecure: bool,
+                      api_mode: bool = False) -> _BindPlan:
     """Resolve the effective bind host and apply the network-bind guards.
 
     The host is an explicit -H, else the 'bind_host' config key, else loopback
@@ -773,20 +784,21 @@ def _resolve_gui_bind(console, host, *, insecure: bool) -> _BindPlan:
     from localm.cli import _resolve_bind_host
     host, host_from_config = _resolve_bind_host(host)
     plan = _BindPlan(host=host, from_config=host_from_config)
-    _guard_unauthenticated_bind(console, plan, insecure=insecure)
+    _guard_unauthenticated_bind(console, plan, insecure=insecure, api_mode=api_mode)
     if plan.from_config and plan.fallback is None:
         _check_config_bind_is_bindable(console, plan)
     return plan
 
 
-def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> None:
+def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool,
+                                api_mode: bool = False) -> None:
     """Refuse a bind past loopback without a strong API key (_gui_bind_warning).
 
     With --insecure (a command-line flag only; it has no config form), prints
     the warning and proceeds. Otherwise a config-sourced host is replaced by
     127.0.0.1, with the warning printed and logged and the reason recorded in
     plan.fallback; an explicit -H prints the refusal and exits 2."""
-    bind_warning = _gui_bind_warning(plan.host)
+    bind_warning = _gui_bind_warning(plan.host, api_mode=api_mode)
     if bind_warning and not insecure and plan.from_config:
         from localm.auth import any_key_configured
         _why = ("no API key is set" if not any_key_configured()
@@ -794,8 +806,7 @@ def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> 
         plan.fallback = (
             f"The configured bind address ({plan.host}) was not applied: {_why}. "
             f"The server is on 127.0.0.1 (this computer only). Set a long, "
-            f"random API key (Settings > Security > Owner key, or run: localm "
-            f"key generate), then restart the server.")
+            f"random API key (run: localm key generate), then restart the server.")
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print(
             "[bold yellow]  Ignoring the configured bind address and binding "
@@ -987,7 +998,7 @@ def _build_app(engine, make_engine, plan: _BindPlan, *, api_mode: bool):
     Returns the app."""
     from localm.inference import http_server as hs
     from .web import attach_gui
-    app = hs.create_app(engine)
+    app = hs.create_app(engine, api_landing=api_mode)
 
     async def switch_model(name: str, *, force: bool = False, activate: bool = True,
                            keep_others: bool = False) -> dict:
@@ -1188,7 +1199,8 @@ def _start_launch_surface(open_url: str, plan: _BindPlan, *, no_browser: bool) -
 def _mark_ready_when_listening(app_face, self_host: str, port: int) -> None:
     """Poll ``(self_host, port)`` every 0.25 s for up to 160 attempts, then mark
     *app_face* ready either way. When LOCALM_OWN_CONSOLE is set (a launcher
-    started this process with its own console), hide that console."""
+    started this process with its own console), hide that console, unless a
+    shell is attached to it (a person's own console window)."""
     import os
     import socket
     for _ in range(160):
@@ -1199,8 +1211,9 @@ def _mark_ready_when_listening(app_face, self_host: str, port: int) -> None:
             time.sleep(0.25)
     app_face.set_ready()
     if os.environ.get("LOCALM_OWN_CONSOLE"):
-        from localm.winconsole import hide_console
-        hide_console()
+        from localm.winconsole import console_has_a_shell, hide_console
+        if not console_has_a_shell():
+            hide_console()
 
 
 def _start_app_face(plan: _BindPlan, *, on_restart, on_stop, no_browser: bool):
@@ -1335,9 +1348,11 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
                    "mode. Same as Settings > Privacy & data > Keep diagnostics for "
                    "bug reports, for this run.")
 @click.option("--insecure", is_flag=True,
-              help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
-                   "exposes the unauthenticated coder agent (shell + file edits) "
-                   "to the network - only on a trusted, isolated network.")
+              help="Allow binding past loopback WITHOUT an API key. Anyone on the "
+                   "network can then use the inference API (chat, completions, "
+                   "embeddings, rerank, speech, transcription, image generation "
+                   "and the model list) with no key; management, plugin and coder "
+                   "routes stay refused to them. Only on a trusted, isolated network.")
 @click.option("--no-tls", is_flag=True,
               help="Serve plain HTTP even on a network bind. Built-in TLS is on "
                    "by default past loopback; this disables it (the API key then "
@@ -1395,9 +1410,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         return
 
     _sync_models_folder(console)
+    if api_mode and pull_spec:
+        _pull_before_api_start(pull_spec)
+        pull_spec = None
     registry, model, model_less = _select_startup_model(
         console, model, no_model=no_model, pull_spec=pull_spec, api_mode=api_mode)
-    plan = _resolve_gui_bind(console, host, insecure=insecure)
+    plan = _resolve_gui_bind(console, host, insecure=insecure, api_mode=api_mode)
     info, model_path, display_name = _resolve_startup_model_file(
         console, model, registry, model_less=model_less)
     _resolve_gui_tls(console, plan, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)

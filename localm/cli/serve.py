@@ -35,10 +35,11 @@ from ._core import (
 @click.option("--tls-key", type=click.Path(exists=True, dir_okay=False), default=None,
               help="Private key (PEM) for --tls-cert.")
 @click.option("--insecure", is_flag=True,
-              help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
-                   "serves the API (and any enabled plugin routes) "
-                   "unauthenticated to the whole network - only on a trusted, "
-                   "isolated network.")
+              help="Allow binding past loopback WITHOUT an API key. Anyone on the "
+                   "network can then use the inference API (chat, completions, "
+                   "embeddings, rerank, speech, transcription, image generation "
+                   "and the model list) with no key; management, plugin and coder "
+                   "routes stay refused to them. Only on a trusted, isolated network.")
 @click.option("--project", default=None, type=click.Path(file_okay=False),
               help="Project root that keys this instance [default: nearest "
                    ".git/.localcoder above the current directory].")

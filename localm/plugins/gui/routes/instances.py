@@ -63,7 +63,8 @@ def register(app: FastAPI, ctx) -> None:
         nowhere (http_server.py gates its coordination entry on exactly this
         condition), and reading a registry it does not write would let a run
         documented as invisible to discovery both see and probe every other
-        localm on the box.
+        localm on the box. An `--isolated` server reads neither source and lists
+        no instance; its stop route stops none.
 
         ``root_dir`` (a host path) is shown to the operator only (open mode or
         an owner key); for any other caller it is None on every row."""
@@ -72,8 +73,10 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import home_dir
         self_id = getattr(app.state, "instance_id", None)
         home = home_dir()
+        if getattr(app.state, "instance_isolated", False):
+            return {"instances": []}
         rows = [dict(r, same_install=True) for r in instances.snapshot(home)]
-        if self_id and not getattr(app.state, "instance_isolated", False):
+        if self_id:
             rows += instances.list_machine_peers(home)
         operator = caller_is_operator(request)
         out = []
@@ -121,6 +124,10 @@ def register(app: FastAPI, ctx) -> None:
         from localm.debuglog import logger
         from localm.selfclient import self_request
 
+        if getattr(app.state, "instance_isolated", False):
+            raise HTTPException(
+                404, "An --isolated server does not see other servers, so it "
+                     "stops none of them.")
         timeout = 10.0
         home = home_dir()
         # Removes only entries whose process is gone; the code below reports
