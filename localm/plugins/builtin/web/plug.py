@@ -43,7 +43,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from localm.inference.errors import route_errors
-from localm.netpolicy import NetworkPolicyError
+from localm.netpolicy import NetworkPolicyError, UnresolvableHost
 from localm.executor import get_plugin_executor
 from localm.textguard import neutralise
 
@@ -121,6 +121,14 @@ def _search_reason(exc: BaseException) -> str:
     return search_failure_text(exc)
 
 
+def _search_detail(exc: BaseException) -> str:
+    """The 502 text for a failed search: the search chain's own sentence when
+    it already says the search failed, else "Search failed: <reason>"."""
+    from localm.web_retrieval.contracts import SearchProviderError
+    reason = _search_reason(exc)
+    return reason if isinstance(exc, SearchProviderError) else f"Search failed: {reason}"
+
+
 class WebSearchRequest(BaseModel):
     query: str
     max_results: int = 5
@@ -137,6 +145,7 @@ class WebRetrieveRequest(BaseModel):
 
 @_router.post("/api/web/retrieve")
 @route_errors({
+    UnresolvableHost: lambda e: (502, f"Retrieval failed: {_reason(e)}"),
     NetworkPolicyError: 403,
     Exception: lambda e: (502, f"Retrieval failed: {_reason(e)}"),
 })
@@ -165,8 +174,9 @@ async def web_retrieve_endpoint(req: WebRetrieveRequest):
 
 @_router.post("/api/web/search")
 @route_errors({
+    UnresolvableHost: lambda e: (502, _search_detail(e)),
     NetworkPolicyError: 403,
-    Exception: lambda e: (502, f"Search failed: {_search_reason(e)}"),
+    Exception: lambda e: (502, _search_detail(e)),
 })
 async def web_search_endpoint(req: WebSearchRequest):
     from localm.debuglog import logger
@@ -188,6 +198,7 @@ async def web_search_endpoint(req: WebSearchRequest):
 
 @_router.post("/api/web/fetch")
 @route_errors({
+    UnresolvableHost: lambda e: (502, f"Fetch failed: {_reason(e)}"),
     NetworkPolicyError: 403,
     Exception: lambda e: (502, f"Fetch failed: {_reason(e)}"),
 })
@@ -208,8 +219,12 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     try:
         final_url, text, truncated = await loop.run_in_executor(
             get_plugin_executor(), _fetch_and_defang)
-    except NetworkPolicyError:
-        raise
+    except NetworkPolicyError as exc:
+        if not isinstance(exc, UnresolvableHost):
+            raise
+        logger.info("web fetch: host did not resolve")
+        raise HTTPException(
+            502, f"Fetch failed: {_reason(exc, req.url)}") from exc
     except Exception as exc:
         logger.info("web fetch: failed (%s)", type(exc).__name__)
         raise HTTPException(
