@@ -376,7 +376,9 @@ jobs:
     # Never on push; unconditional for workflow_dispatch and schedule. On a
     # pull_request: both hosts with the `full-ci` label; without it, the Linux
     # host only and only when the change touches the GUI or its tests (the
-    # scope step below), the Windows host skips its steps.
+    # scope step below: every repository file a tests-js test reads, checked by
+    # test_every_file_a_gui_test_reads_is_inside_the_gui_tests_scope), the
+    # Windows host skips its steps.
     if: github.event_name != 'push'
     strategy:
       fail-fast: false
@@ -403,7 +405,7 @@ jobs:
             echo "::notice::Unlabelled pull request: GUI tests run on the Linux host only."
             exit 0
           fi
-          if git diff --name-only HEAD^1 HEAD | grep -qE '^(localm/plugins/gui/static/|tests-js/|package\.json|package-lock\.json|\.github/workflows/ci\.yml)'; then
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(localm/plugins/gui/static/|localm/plugins/builtin/[^/]+/static/|localm/plugins/builtin/[^/]+/[^/]+\.(toml|json)$|localm/settings_schema\.py$|CHANGELOG\.md$|tests-js/|package\.json|package-lock\.json|\.github/workflows/ci\.yml)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

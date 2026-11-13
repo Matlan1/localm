@@ -77,8 +77,9 @@ test function itself; or a GUI script reading the response.
 
 `scripts/affected_tests.py` prints the test files a change affects: the
 changed tests, every test importing a changed module, every test naming a
-route path a changed module registers, and every test naming a changed
-module or file. It reads the change from git (the branch's diff from
+route path a changed module registers (or a module that imports a changed
+one, since a request to the route runs the request models and helpers its
+module imports), and every test naming a changed module or file. It reads the change from git (the branch's diff from
 `origin/master` plus uncommitted work) and prints one path per line, so the
 selection substitutes straight into a pytest command:
 
@@ -86,7 +87,11 @@ selection substitutes straight into a pytest command:
 
 `--why` prints the reason next to each file, `--files` takes an explicit
 list instead of git, and `--depth 1` also follows the modules that import a
-changed one. The substitution above can never hand pytest an empty or a
+changed one. When following them would take the selection past a quarter of
+the suite, the importer that the most test files import (a hub such as the
+app factory or the config module) is left out, then the next, until the
+selection fits; the narrow paths to the change stay in, and stderr names
+each importer left out. The substitution above can never hand pytest an empty or a
 whole-suite argument list: when nothing is affected the script prints
 `tests/NO_TEST_FILE_IS_AFFECTED`; when the selection exceeds a quarter of
 the suite it prints `tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR`
@@ -127,7 +132,8 @@ it ran; skipped is neutral then) and, on a PR without the `full-ci` label,
 a release (`VERSION` unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
 succeeded. `gui-tests` runs on both hosts on a pull request that
 carries the label; without it, on the Linux host only, and only when the
-change touches the GUI or its tests. The two-platform matrix runs at release, not on
+change touches the GUI, its tests, or a file they read (a built-in plugin's
+`static/` folder or manifest, `localm/settings_schema.py`, `CHANGELOG.md`). The two-platform matrix runs at release, not on
 an ordinary pull request: a release PR without the label fails
 `merge-policy` with the label named, and every other PR merges on the four
 cheap jobs. Adding the label to an open PR leaves the earlier unlabelled
