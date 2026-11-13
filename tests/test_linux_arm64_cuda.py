@@ -12,11 +12,14 @@ import click
 import pytest
 
 from localm import hwdetect, setup_llama as sl
+from localm.setup_llama.pins import _CUDA_TOOLKIT
+
 
 PIN = sl._PINNED_TAG
+U13 = _CUDA_TOOLKIT["ubuntu"]["cuda-13"]
 UPSTREAM = "ggml-org/llama.cpp"
-BUILD = f"llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
-CUDART = f"cudart-llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
+BUILD = f"llama-{PIN}-bin-ubuntu-cuda-{U13}-arm64.tar.gz"
+CUDART = f"cudart-llama-{PIN}-bin-ubuntu-cuda-{U13}-arm64.tar.gz"
 REAL_NAMES = sorted(n for n in sl._PINNED_FALLBACK_SHA256
                     if n.startswith(f"llama-{PIN}-") or n.startswith(f"cudart-llama-{PIN}-"))
 
@@ -182,7 +185,7 @@ def test_arm64_provision_fetches_the_build_then_its_runtime_bundle(provision):
 
 
 def test_arm64_provision_writes_the_nvidia_notice_beside_the_bundle(provision, tmp_path):
-    """Upstream's cudart-llama-*-bin-ubuntu-cuda-13.4-arm64.tar.gz carries the
+    """Upstream's cudart-llama-*-bin-ubuntu-cuda-<13.x>-arm64.tar.gz carries the
     three NVIDIA libraries and no license file, so the notice is written."""
     provision()
     assert ((tmp_path / "LICENSE.nvidia-cuda").read_text(encoding="utf-8")

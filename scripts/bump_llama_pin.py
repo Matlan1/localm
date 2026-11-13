@@ -336,6 +336,8 @@ def checklist(tag: str) -> str:
         "  6. CHANGELOG.md, [Unreleased]: one bullet, the shipped runtime build moved",
         "  7. python scripts/check_llama_pin.py --gate",
         "       must report the pin as current",
+        "  8. python scripts/gen_models_page.py",
+        "       docs/models.md records the pinned tag and its architecture list",
     ])
 
 
