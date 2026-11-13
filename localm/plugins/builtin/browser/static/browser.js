@@ -212,6 +212,11 @@ export function register(ctx) {
 
   let jobId = null;
   let abort = null;
+  // The one pending poll() tick, so a second open or watch never starts a
+  // second chain of polls.
+  let pollTimer = null;
+  // The agent-offer refresh timer, running while the Browser view is shown.
+  let offerTimer = null;
   // "idle" nothing open, "own" this tab's own browser, "agent" watching the
   // one the coding agent drives. Only "own" is drivable: /api/browser/navigate
   // resolves the caller's OWN gui- session, never the agent's, so an address
@@ -428,10 +433,13 @@ export function register(ctx) {
       onFrame: showFrame,
       onLine: (text) => { lastLine = text; status.textContent = text; },
       onEnd: (ev) => {
+        // The job is over: nothing more to poll or stream for it.
+        if (jobId === id) jobId = null;
         setMode("idle");
         const failed = ev.status && ev.status !== "done" && ev.status !== "cancelled";
         if (failed) {
-          status.textContent = lastLine || ("Browser stopped: " + ev.status);
+          status.textContent = lastLine.replace(/^job error:\s*/i, "")
+            || ("Browser stopped: " + ev.status);
           toast(status.textContent, true);
           refreshEngine();
         } else {
@@ -521,7 +529,9 @@ export function register(ctx) {
       if (data.ok) {
         status.textContent = "Opened " + (data.url || target);
       } else {
-        status.textContent = "Refused: " + (data.refused || data.error || target);
+        status.textContent = data.refused
+          ? "Refused: " + data.refused
+          : "Could not load " + (data.url || target) + ": " + (data.error || "unknown error");
         toast(status.textContent, true);
       }
     } catch (e) {
@@ -540,6 +550,7 @@ export function register(ctx) {
   /** Refresh the refusal list, so a blocked destination is visible rather than
    *  showing only as a page that did not load. */
   async function poll() {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     if (!jobId) return;
     try {
       const r = await fetch(API + "/state", { headers: authHeaders() });
@@ -549,7 +560,7 @@ export function register(ctx) {
         for (const b of st.blocked || []) addRefusal(b.url + "  -  " + b.reason);
       }
     } catch (e) { /* transient; the next tick retries */ }
-    if (jobId) setTimeout(poll, 2000);
+    if (jobId && !pollTimer) pollTimer = setTimeout(poll, 2000);
   }
 
   async function refreshAgentOffer() {
@@ -721,12 +732,33 @@ export function register(ctx) {
   url.onkeydown = (e) => { if (e.key === "Enter" && !go.disabled) submit(); };
   setMode("idle");
 
+  /** A browser this key still has open on the server (after a reload, or
+   *  after the tab was closed and reopened) is taken back as this tab's own:
+   *  Go drives it and Stop closes it. */
+  async function reattach() {
+    if (mode !== "idle" || busy) return;
+    try {
+      const r = await fetch(API + "/state", { headers: authHeaders() });
+      if (!r.ok) return;
+      const st = await r.json();
+      if (st.open && mode === "idle") {
+        setMode("own");
+        status.textContent = "A browser is already open for this key. "
+          + "Go sends it to another address; Stop closes it.";
+      }
+    } catch (e) { /* transient; the next visit retries */ }
+  }
+
   const prev = window.onViewShown;
   window.onViewShown = (name) => {
     if (prev) prev(name);
+    if (offerTimer) { clearInterval(offerTimer); offerTimer = null; }
     if (name === "browser") {
       refreshAgentOffer();
+      // The agent can open or close its browser while this view is in front.
+      offerTimer = setInterval(refreshAgentOffer, 5000);
       refreshEngine();
+      reattach();
       if (jobId) poll();
     }
   };

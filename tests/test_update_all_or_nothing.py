@@ -921,6 +921,74 @@ def test_installed_parts_names_an_install_record_of_another_version(install, mon
     assert any("click missing" in p for p in parts["problems"])
 
 
+def _stale_editable_record(inst, site, points_at):
+    import json
+    _uninstall(site, "localm")
+    _localm_dist(site, "0.3.0")
+    (site / "localm-0.3.0.dist-info" / "direct_url.json").write_text(json.dumps(
+        {"url": Path(points_at).resolve().as_uri(), "dir_info": {"editable": True}}),
+        encoding="utf-8")
+
+
+def test_a_git_clone_with_a_stale_editable_record_and_its_dependencies_is_consistent(
+        install, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    (inst / ".git").mkdir()
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    _stale_editable_record(inst, site, inst)
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record"] == "0.3.0"
+    assert parts["install_record_problem"] is False
+    assert not any("install record" in p for p in parts["problems"])
+
+
+def test_a_stale_record_outside_a_git_clone_is_still_a_problem(install, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    _stale_editable_record(inst, site, inst)
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record_problem"] is True
+    assert any("install record is localm 0.3.0" in p for p in parts["problems"])
+
+
+def test_a_git_clone_whose_record_is_another_folders_is_still_a_problem(
+        install, tmp_path, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    (inst / ".git").mkdir()
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    _stale_editable_record(inst, site, tmp_path / "elsewhere")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record_problem"] is True
+
+
+def test_a_git_clone_with_a_stale_record_and_a_missing_dependency_is_a_problem(
+        install, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    (inst / ".git").mkdir()
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    _stale_editable_record(inst, site, inst)
+    _uninstall(site, "click")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record_problem"] is True and parts["consistent"] is False
+    assert any("click missing" in p for p in parts["problems"])
+
+
+def test_a_git_clone_install_still_gets_its_dependencies_checked(install, monkeypatch):
+    from localm import updater_parts
+    inst, site = install
+    (inst / ".git").mkdir()
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    assert updater_parts.installed_parts(inst)["install_record"] == "0.3.1"
+    _uninstall(site, "click")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["consistent"] is False
+    assert any("click missing" in p for p in parts["problems"])
+
+
 def test_installed_parts_names_a_component_at_another_pin(install, home):
     from localm import updater_parts
     inst, _site = install

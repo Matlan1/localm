@@ -504,10 +504,10 @@ def test_requests_verify_loopback_without_ca_is_false():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
 def test_windows_tls_key_acl_matches_documented_principals(tmp_path):
-    import os
     import subprocess
     tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
-    user = os.environ["USERNAME"].lower()
+    from tests._win_acl import token_user_name
+    user = token_user_name().lower()
     allowed = {"nt authority\\system", "builtin\\administrators"}
     for name in ("ca.key", "server.key"):
         out = subprocess.run(

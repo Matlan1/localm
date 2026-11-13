@@ -369,8 +369,8 @@ class TestResync:
         res = c.resync(on_progress=said.append)
         assert sorted(res) == sorted([
             "added", "updated", "skipped", "failed", "chunks", "roots",
-            "unavailable_roots", "blocked_roots", "missing", "restored", "pruned",
-            "missing_total", "vector_degrade_reason"])
+            "unavailable_roots", "blocked_roots", "missing", "still_missing",
+            "restored", "pruned", "missing_total", "vector_degrade_reason"])
         b_key = str((folder / "sub" / "b.md").resolve())
         assert (res["added"], res["updated"]) == (1, 1)
         assert res["missing"] == [b_key] and res["missing_total"] == 1

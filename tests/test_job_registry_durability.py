@@ -257,7 +257,8 @@ class TestPersistence:
             # the call path was taken rather than reading the ACL back.
             out = subprocess.run(["icacls", str(m._store.path)],
                                  capture_output=True, text=True).stdout
-            user = os.environ.get("USERNAME", "")
+            from tests._win_acl import token_user_name
+            user = token_user_name()
             assert user and user.lower() in out.lower(), out
             assert "BUILTIN\\Users" not in out, (
                 "inherited ACEs were not dropped; the owner key digest in this "

@@ -474,10 +474,11 @@ and search snippets are untrusted input to the model, and
   the moment they exist (on Windows, where a file mode sets no ACL, they are
   created inside the already-restricted `tls` folder), then restricted to the current user: `chmod` on
   POSIX, `icacls` on Windows (inherited entries dropped; explicit full control for the
-  current user, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
+  user the server process runs as, named by the SID in its process token, never by the
+  `USERNAME` variable, plus SYSTEM and Administrators, which already control the machine). Both are best-effort - a failure is logged as a
   warning rather than blocking startup, and the data directory's own access
   control is the fallback boundary if the OS-level restriction cannot be
-  applied (a non-NTFS volume, a missing `USERNAME`, `icacls` itself absent).
+  applied (a non-NTFS volume, a process token whose user cannot be read, `icacls` itself absent).
 - **Trusting the CA.** Clients need the generated CA to validate the connection.
   `GET /localm-ca.crt` serves it, and that route is deliberately public.
 - **A self-call caveat.** When the CA file is missing, localm's own internal

@@ -1961,7 +1961,8 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
                 on_progress=(lambda t: _emit_stage(on_progress, t))
                 if on_progress is not None else None)
         if not path:
-            _emit_stage(on_progress, "No embedding model is configured or available.")
+            _emit_stage(on_progress, last_error()
+                        or "No embedding model is configured or available.")
             return None
         from localm.config import load_config
         _cfg = load_config()
