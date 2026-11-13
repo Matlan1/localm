@@ -353,29 +353,73 @@ def real_repo(tmp_path):
     return repo, old
 
 
-def test_requirements_changed_true_when_it_differs(confirm, real_repo):
+def _files(by_commit: dict):
+    calls = []
+
+    def fetch(repo, commit, rel):
+        calls.append((repo, commit, rel))
+        value = by_commit[commit]
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return fetch, calls
+
+
+def test_requirements_changed_true_when_it_differs(confirm):
+    fetch, calls = _files({"a" * 40: b"torch\n", "b" * 40: b"torch\nnumpy\n"})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is True
+    assert calls == [("https://github.com/o/r.git", "a" * 40, "requirements.txt"),
+                     ("https://github.com/o/r.git", "b" * 40, "requirements.txt")]
+
+
+def test_requirements_changed_false_when_it_does_not(confirm):
+    fetch, _calls = _files({"a" * 40: b"torch\n", "b" * 40: b"torch\n"})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is False
+
+
+def test_requirements_changed_none_when_it_cannot_be_determined(confirm):
+    fetch, _calls = _files({"a" * 40: b"torch\n", "b" * 40: OSError("unreachable")})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is None
+
+
+def test_fetch_repo_file_refuses_a_repository_that_is_not_on_github(confirm):
+    with pytest.raises(ValueError, match="not a GitHub repository"):
+        confirm._fetch_repo_file("https://example.invalid/o/r.git", "a" * 40, "requirements.txt")
+
+
+# --------------------------------------------------------------------------- #
+#  _tag_commit: against a REAL git repo, through git ls-remote                #
+# --------------------------------------------------------------------------- #
+
+def test_a_lightweight_tag_resolves_to_its_commit(confirm, real_repo):
     repo, old = real_repo
-    (repo / "requirements.txt").write_text("torch\nnumpy\n", encoding="utf-8")
-    _git(["commit", "-aq", "-m", "new"], repo)
-    new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                         capture_output=True, text=True, check=True).stdout.strip()
-    assert confirm._requirements_changed(repo, old, new) is True
+    _git(["tag", "v1.0.0"], repo)
+    assert confirm._tag_commit(str(repo), "v1.0.0") == (old, "")
 
 
-def test_requirements_changed_false_when_it_does_not(confirm, real_repo):
+def test_an_annotated_tag_resolves_to_the_commit_not_the_tag_object(confirm, real_repo):
     repo, old = real_repo
-    (repo / "other.txt").write_text("x\n", encoding="utf-8")
-    _git(["add", "other.txt"], repo)
-    _git(["commit", "-q", "-m", "unrelated"], repo)
-    new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                         capture_output=True, text=True, check=True).stdout.strip()
-    assert confirm._requirements_changed(repo, old, new) is False
+    _git(["tag", "-a", "v1.1.0", "-m", "annotated"], repo)
+    tag_object = subprocess.run(["git", "rev-parse", "refs/tags/v1.1.0"], cwd=repo,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert tag_object != old
+    assert confirm._tag_commit(str(repo), "v1.1.0") == (old, "")
 
 
-def test_requirements_changed_none_when_it_cannot_be_determined(confirm, tmp_path):
-    not_a_repo = tmp_path / "not-a-repo"
-    not_a_repo.mkdir()
-    assert confirm._requirements_changed(not_a_repo, "a" * 40, "b" * 40) is None
+def test_a_missing_tag_is_reported_not_guessed(confirm, real_repo):
+    repo, _old = real_repo
+    commit, why = confirm._tag_commit(str(repo), "v9.9.9")
+    assert commit is None
+    assert "has no tag v9.9.9" in why
+
+
+def test_an_unreadable_repository_is_reported(confirm, tmp_path):
+    commit, why = confirm._tag_commit(str(tmp_path / "absent"), "v1.0.0")
+    assert commit is None
+    assert "git ls-remote exited" in why
 
 
 # --------------------------------------------------------------------------- #
