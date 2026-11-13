@@ -3766,7 +3766,8 @@ class LlamaCpp:
                 say_once("Processing prompt...")
             else:
                 noun = "audio" if encoding[0] == "audio" else "image"
-                say_once(f"Encoding {noun} ({'GPU' if self._mtmd.on_gpu else 'CPU'})...")
+                where = "GPU" if getattr(self._mtmd, "on_gpu", False) else "CPU"
+                say_once(f"Encoding {noun} ({where})...")
 
         n_ctx = api.llama_n_ctx(self._ctx_ptr)
         n_batch = min(n_ctx, 2048) if n_ctx else 512
