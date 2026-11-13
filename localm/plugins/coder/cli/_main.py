@@ -911,6 +911,19 @@ def _url_typed_on_command_line() -> bool:
             and ctx.get_parameter_source("url") == ParameterSource.COMMANDLINE)
 
 
+def _attach_credential(api_key: str, explicit: bool, instance_token) -> str:
+    """The bearer credential a coder run sends to a discovered localm server,
+    for the model switch and every chat request alike: *api_key* when the user
+    gave one (*explicit*: ``--api-key`` or ``$LOCALM_API_KEY``), otherwise
+    ``auth.resolve_bearer_token(instance_token)`` (the owner key when one is
+    configured, else the instance's attach token in open mode), else
+    *api_key*."""
+    if explicit:
+        return api_key
+    from localm.auth import resolve_bearer_token
+    return resolve_bearer_token(instance_token) or api_key
+
+
 def _serve_on_attached(base_url: str, token, model: str, *, machine_output: bool,
                        starting: bool = False) -> str:
     """Make the localm server at *base_url* (its ``/v1`` root) answer with
@@ -1037,16 +1050,8 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
             except Exception:
                 _tgt = None
             if _tgt:
-                # Authenticate with the user's EXPLICIT key (--api-key /
-                # $LOCALM_API_KEY) when they gave one; otherwise resolve the same
-                # credential localm run uses for its own attach: the owner key when
-                # this install has one configured, else the discovered instance's
-                # own attach token in open mode. The placeholder "localm" 401s
-                # against any keyed server.
-                attach_key = api_key
-                if not _api_key_explicit:
-                    from localm.auth import resolve_bearer_token
-                    attach_key = resolve_bearer_token(_tgt.get("token")) or api_key
+                attach_key = _attach_credential(api_key, _api_key_explicit,
+                                                _tgt.get("token"))
                 served = model if probe_only else _serve_on_attached(
                     _tgt["base_url"], attach_key, model, machine_output=machine_output)
                 attached = HTTPBackend(_tgt["base_url"], served, api_key=attach_key,
@@ -1197,11 +1202,8 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                                 break
                     if _tgt:
                         _discard_autostart_log(child_log_path)
-                        attach_key = api_key
-                        if not _api_key_explicit:
-                            from localm.auth import resolve_bearer_token
-                            attach_key = (resolve_bearer_token(_tgt.get("token"))
-                                         or api_key)
+                        attach_key = _attach_credential(
+                            api_key, _api_key_explicit, _tgt.get("token"))
                         served = _serve_on_attached(
                             _tgt["base_url"], attach_key, model,
                             machine_output=machine_output, starting=True)

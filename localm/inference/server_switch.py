@@ -37,8 +37,9 @@ class ServedModel:
 def switch_server_model(base_url: str, token: Optional[str],
                         model: str) -> tuple[Optional[str], Optional[str]]:
     """Ask the localm server at *base_url* (its ``/v1`` root) to load *model*
-    and make it the active model, through ``POST /v1/models/load``. The
-    Authorization header is ``auth.resolve_bearer_headers(token)``.
+    and make it the active model, through ``POST /v1/models/load``. *token* is
+    sent as given as the bearer credential (no Authorization header when it is
+    empty or None); the caller decides which credential its command uses.
 
     Returns ``(name, None)`` on success, where *name* is the name the server
     reports for the model (address requests by it), or ``(None, reason)`` when
@@ -48,10 +49,9 @@ def switch_server_model(base_url: str, token: Optional[str],
     import requests
 
     from localm import tls
-    from localm.auth import resolve_bearer_headers
     from localm.jsonreply import response_json
     url = f"{base_url.rstrip('/')}/models/load"
-    headers = resolve_bearer_headers(token)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         resp = requests.post(url, json={"model": model}, headers=headers,
                              timeout=SWITCH_TIMEOUT_S, allow_redirects=False,
@@ -81,7 +81,8 @@ def serve_requested_model(base_url: str, token: Optional[str], model: str, *,
                           starting: bool = False,
                           say: Optional[Callable[[str], None]] = None) -> ServedModel:
     """Make the localm server at *base_url* (its ``/v1`` root) answer with
-    *model*, using *token* for the probe and the switch.
+    *model*. *token* is the bearer credential of the calling command, sent as
+    given on every request this makes (the probes and the switch).
 
     *load_options*: the load flags the user typed (``--ctx``, ...). The
     server's load route takes only a model name, so a switch never applies

@@ -136,6 +136,33 @@ def test_the_old_refusal_texts_are_gone():
     assert hits == []
 
 
+CREDENTIAL_RESOLVERS = {"resolve_bearer_token", "resolve_bearer_headers",
+                        "get_api_key"}
+
+
+def test_the_switch_sends_the_credential_its_caller_gives():
+    src = (LOCALM / "inference/server_switch.py").read_text(encoding="utf-8")
+    assert CREDENTIAL_RESOLVERS & _called_names(ast.parse(src)) == set()
+
+
+def test_the_coder_resolves_its_attach_credential_in_one_function():
+    tree = ast.parse((LOCALM / "plugins/coder/cli/_main.py").read_text(
+        encoding="utf-8"))
+    parent = {child: node for node in ast.walk(tree)
+              for child in ast.iter_child_nodes(node)}
+    where = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (
+                getattr(node.func, "id", None) == "resolve_bearer_token"
+                or getattr(node.func, "attr", None) == "resolve_bearer_token"):
+            fn = parent.get(node)
+            while fn is not None and not isinstance(
+                    fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fn = parent.get(fn)
+            where.append(getattr(fn, "name", None))
+    assert where == ["_attach_credential"]
+
+
 def test_the_scan_sees_a_planted_attach_and_load_request():
     tree = ast.parse(
         'def f():\n'
