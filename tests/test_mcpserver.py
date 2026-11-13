@@ -17,14 +17,6 @@ from localm.plugins.mcpserver.server import (
 
 
 @pytest.fixture(autouse=True)
-
-def _uninstall_degraded():
-    from localm.plugins.engine import UninstallResult
-    return UninstallResult(False, None)
-
-
-_UNINSTALL_DEGRADED = _uninstall_degraded()
-
 def _first_party_plugins_available(monkeypatch):
     """Every first-party plugin counts as installed and enabled, so code that
     reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
@@ -1951,6 +1943,12 @@ class TestMcpCliWiring:
         assert "unexpected error" not in r.output.lower()
 
 
+
+def _uninstall_degraded():
+    from localm.plugins.engine import UninstallResult
+    return UninstallResult(False, None)
+
+
 class TestNewToolCalls:
     def test_setup_embeddings(self):
         """The happy path now needs a REAL model identity: over MCP the `model`
@@ -2112,7 +2110,7 @@ class TestNewToolCalls:
         server, _ = _server()
         with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
              patch("localm.plugins.engine.PluginManager.uninstall_report",
-                   return_value=_UNINSTALL_DEGRADED) as mock_uninstall:
+                   return_value=_uninstall_degraded()) as mock_uninstall:
             resp = _req(server, "tools/call",
                         {"name": "uninstall_plugin", "arguments": {"plugin": "coder"}})
         assert resp["result"]["isError"] is True
@@ -2134,7 +2132,7 @@ class TestNewToolCalls:
         server, _ = _server()
         with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
              patch("localm.plugins.engine.PluginManager.uninstall_report",
-                   return_value=_UNINSTALL_DEGRADED) as mock_uninstall:
+                   return_value=_uninstall_degraded()) as mock_uninstall:
             resp = _req(server, "tools/call",
                         {"name": "uninstall_plugin",
                          "arguments": {"plugin": "coder", "delete_data": True}})
