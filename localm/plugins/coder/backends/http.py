@@ -604,7 +604,7 @@ class HTTPBackend(BaseLLMBackend):
         previous_routed = getattr(self, "_routed_to", None)
         self._routed_to = routed_to
         if routed_to and routed_to != previous_routed and self.on_routing_note is not None:
-            requested = data.get("requested") or self._model
+            requested = (data.get("requested") if isinstance(data, dict) else None) or self._model
             self.on_routing_note(
                 f"This reply came from {routed_to}, not {requested}: the server "
                 "picked a model that can serve this request. Pin the model to "
