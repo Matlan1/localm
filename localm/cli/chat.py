@@ -75,6 +75,11 @@ def _serve_requested_model(base_url: str, token: Optional[str], model: str, *,
     return served.name, served.note
 
 
+def _terminal() -> bool:
+    """Whether stdin and stdout are both a terminal, so a question can be asked."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 @dataclass(frozen=True)
 class _ServerDecision:
     """The part of an attached server's routing decision the terminal shows:
@@ -667,7 +672,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     else:
         router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
                              pinned=pin_model)
-    if sys.stdin.isatty() and sys.stdout.isatty():
+    if _terminal():
         router._confirm = router.ask
 
     cfg = load_config()

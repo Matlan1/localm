@@ -898,3 +898,43 @@ def test_reset_routing_state_drops_every_kind_of_routing_state(monkeypatch):
     assert hs._routing_reading_cache is None
     assert not hs._routing_loaded and not hs._loads_in_flight
     assert hs._routing_latch.failure("x") is None
+
+
+# --------------------------------------------------------------------------- #
+#  Why a candidate would run on the CPU only                                  #
+# --------------------------------------------------------------------------- #
+
+class TestCpuOnlyReason:
+    """A real GGUF backend, sized by ``assess``: with n_gpu_layers set to 0
+    the reason names that setting; with room for no layer under auto sizing
+    it says no layer fits."""
+
+    def _fit(self, tmp_path, free, **kw):
+        from tests.test_moe_auto_placement import _backend, _dense_model, _Vram
+        backend = _backend(_dense_model(tmp_path), **kw)
+        with _Vram(free):
+            return routing_fit.assess(
+                ["v"], residents={}, build=lambda n: backend,
+                reading=_reading(free=free), ram_available=_BIG, ram_total=_BIG,
+                unload_policy="always")["v"]
+
+    def test_n_gpu_layers_zero_names_the_setting(self, tmp_path):
+        fit = self._fit(tmp_path, 1 << 40, n_gpu_layers=0)
+        assert fit.cls == cr.FIT_CPU_ONLY and fit.configured_layers == 0
+        assert fit.ask_reason() == ("it would run on the CPU only, because the GPU "
+                                    "layers setting (n_gpu_layers) is 0")
+
+    def test_n_gpu_layers_zero_with_auto_off_names_the_setting(self, tmp_path):
+        fit = self._fit(tmp_path, 1 << 40, n_gpu_layers=0, n_gpu_layers_auto=False)
+        assert fit.configured_layers == 0 and "n_gpu_layers" in fit.ask_reason()
+
+    def test_no_room_under_auto_says_no_layer_fits(self, tmp_path):
+        fit = self._fit(tmp_path, 1)
+        assert fit.cls == cr.FIT_CPU_ONLY and fit.configured_layers is None
+        assert fit.ask_reason() == ("it would run on the CPU only, because no layer "
+                                    "fits on the GPU")
+
+    def test_a_backend_that_does_not_report_its_setting_says_no_layer_fits(self):
+        fit = _assess(["v"], need=_BIG)["v"]
+        assert fit.cls == cr.FIT_CPU_ONLY and fit.configured_layers is None
+        assert "no layer fits" in fit.ask_reason()
