@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime as _dt
+import importlib.util
 import json
 import os
 import re
@@ -212,8 +213,11 @@ def _read_const(rel: str, pattern: str) -> str:
 #  Upstream lookups                                                           #
 # --------------------------------------------------------------------------- #
 
-def _github_releases(repo: str) -> list[tuple[str, _dt.datetime]]:
-    """Published, non-draft, non-prerelease releases of *repo* as (tag, date)."""
+def _github_releases(repo: str, keep: Callable[[dict], bool] | None = None,
+                     dropped: list | None = None) -> list[tuple[str, _dt.datetime]]:
+    """Published, non-draft, non-prerelease releases of *repo* as (tag, date). With
+    *keep*, only the releases whose API entry it accepts; the tags of the others are
+    appended to *dropped* when given."""
     data = _get_json(f"https://api.github.com/repos/{repo}/releases?per_page=100")
     if not isinstance(data, list):
         raise FetchError(f"{repo}: unexpected releases response shape")
@@ -224,8 +228,36 @@ def _github_releases(repo: str) -> list[tuple[str, _dt.datetime]]:
         date = _parse_date(rel.get("published_at"))
         tag = rel.get("tag_name")
         if date is not None and isinstance(tag, str):
+            if keep is not None and not keep(rel):
+                if dropped is not None:
+                    dropped.append(tag)
+                continue
             out.append((tag, date))
     return out
+
+
+_SDCPP_BUMP = None
+
+
+def _sdcpp_runs_on_the_docker_ubuntu(rel: dict) -> bool:
+    """Whether every Linux archive of the stable-diffusion.cpp release *rel* (a GitHub
+    API release entry) is built on an Ubuntu no newer than the Docker image's, by
+    scripts/bump_sdcpp_pin.py's own check. Raises LocalReadError when that check
+    cannot read docker/Dockerfile."""
+    global _SDCPP_BUMP
+    if _SDCPP_BUMP is None:
+        spec = importlib.util.spec_from_file_location(
+            "bump_sdcpp_pin", Path(__file__).resolve().parent / "bump_sdcpp_pin.py")
+        _SDCPP_BUMP = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_SDCPP_BUMP)
+    names = [a.get("name") for a in rel.get("assets") or [] if isinstance(a, dict)]
+    try:
+        _SDCPP_BUMP.check_linux_build_os([n for n in names if isinstance(n, str)])
+    except _SDCPP_BUMP.UnsupportedLinuxBuild:
+        return False
+    except _SDCPP_BUMP.Refused as e:
+        raise LocalReadError(str(e)) from e
+    return True
 
 
 def _npm_releases(package: str) -> list[tuple[str, _dt.datetime]]:
@@ -304,15 +336,22 @@ def _unknown(name: str, group: str, advancer: str, err: Exception, pinned: str =
 # --------------------------------------------------------------------------- #
 
 def _check_github_tag_pin(name, group, advancer, repo, pin_file, pin_pattern, key,
-                          tolerance=DEFAULT_TOLERANCE_DAYS):
+                          tolerance=DEFAULT_TOLERANCE_DAYS, keep=None, dropped_why=""):
     def check(now):
         pinned = ""
+        dropped: list = []
         try:
             pinned = _read_const(pin_file, pin_pattern)
-            releases = _github_releases(repo)
+            releases = _github_releases(repo, keep, dropped)
         except FetchError as e:
             return _unknown(name, group, advancer, e, pinned)
-        return _assess_releases(name, group, advancer, pinned, releases, key, tolerance, now)
+        pin_key = key(pinned)
+        newer_dropped = [t for t in dropped
+                         if pin_key is not None and (key(t) or ()) > pin_key]
+        detail = (f"{len(newer_dropped)} newer release(s) left out ({dropped_why}), newest "
+                  f"{max(newer_dropped, key=key)}" if newer_dropped else "")
+        return _assess_releases(name, group, advancer, pinned, releases, key, tolerance, now,
+                                detail=detail)
     return check
 
 
@@ -1127,7 +1166,9 @@ def build_registry() -> list[PinSpec]:
             "localm/media/koboldcpp/pins.py", r'^TAG = "([^"]+)"', _semver_key)),
         PinSpec("stable-diffusion.cpp", "media", "pin_weekly.py", _check_github_tag_pin(
             "stable-diffusion.cpp", "media", "pin_weekly.py", "leejet/stable-diffusion.cpp",
-            "localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"', _sdcpp_key)),
+            "localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"', _sdcpp_key,
+            keep=_sdcpp_runs_on_the_docker_ubuntu,
+            dropped_why="Linux archives built on a newer Ubuntu than the Docker image")),
         PinSpec("ComfyUI-GGUF node", "comfyui", "pin_weekly.py (review PR)", _check_gguf_node),
         PinSpec("uv (installers + Docker)", "tooling", "pin_weekly.py", _check_uv),
         PinSpec("Docker base image", "tooling", "pin_weekly.py (review PR)", _check_docker_base),

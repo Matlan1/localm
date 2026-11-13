@@ -838,3 +838,22 @@ def test_resolve_copy_custom_nodes_interactive_confirm():
         None, n_nodes=2, interactive=True, confirm=lambda: True) is True
     assert prov.resolve_copy_custom_nodes(
         None, n_nodes=2, interactive=True, confirm=lambda: False) is False
+
+
+def test_provision_says_when_the_users_model_locations_are_not_shared(home, fake_user_comfy,
+                                                                     monkeypatch):
+    """An extra_model_paths.yaml of the user's own ComfyUI that cannot be copied is
+    named in the progress log and the success message."""
+    from localm.media import managed_comfy_provision as prov
+
+    monkeypatch.setattr(prov, "read_user_freeze", lambda venv_python: [])
+    (fake_user_comfy.workdir / "extra_model_paths.yaml").write_text(
+        "odd:\n\tbase_path: /somewhere\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+    stack = prov.discover_user_comfy()
+    result = prov.provision_by_copy(stack, copy_custom_nodes=False)
+
+    assert result.ok, result.message
+    assert "not shared with localm's ComfyUI" in result.log
+    assert "tab indentation" in result.log
+    assert "are not shared" in result.message and "tab indentation" in result.message

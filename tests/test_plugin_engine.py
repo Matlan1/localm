@@ -325,8 +325,8 @@ def test_api_state_exposes_catalog_commands_and_suggest_flag(env):
     state = mgr.api_state()
     assert state["suggest_plugins"] is True
     by_name = {p["name"]: p for p in state["plugins"]}
-    # the (available, not installed) image plugin advertises its renamed verb
-    assert by_name["image"]["commands"] == ["generate-image"]
+    # the (available, not installed) image plugin advertises its chat commands
+    assert by_name["image"]["commands"] == ["generate-image", "imagine"]
     assert by_name["image"]["active"] is False
 
     save_config({"suggest_plugins": False})

@@ -134,7 +134,7 @@ class TestTheScriptItself:
 
     def test_an_artifact_outside_the_folder_is_announced_before_it_is_created(self):
         menu = self.text.index('jr intend shortcut "$apps/localm.desktop"')
-        assert menu < self.text.index('cat > "$apps/localm.desktop"')
+        assert menu < self.text.index('-m localm.setup_spec menu-entry')
         cmd = self.text.index('jr intend command "$HOME/.local/bin/localm"')
         assert cmd < self.text.index("-m localm.globalcmd install")
 

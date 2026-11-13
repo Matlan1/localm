@@ -146,7 +146,7 @@ def _save(records: list) -> None:
     # the full digest payload, and os.replace carries its ACL onto the
     # destination. atomic_write_private also creates the temp at 0600.
     from localm.storekit import atomic_write_private
-    atomic_write_private(path, json.dumps(records, indent=2))
+    atomic_write_private(path, json.dumps(records, indent=2), retrying=True)
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:

@@ -138,6 +138,67 @@ def test_default_formats_is_gguf(gui_app, monkeypatch):
     assert r.json()["hf_backend_available"] is True
 
 
+@pytest.mark.parametrize("source", ["hf", "civitai"])
+@pytest.mark.parametrize("raised,status", [
+    (ConnectionError("the remote host closed the connection"), 502),
+    (TimeoutError("timed out"), 502),
+    (ValueError("not JSON"), 502),
+    ("deny", 403),
+    ("unresolvable", 502),
+])
+def test_search_status_follows_the_failure_not_its_wording(gui_app, monkeypatch,
+                                                         source, raised, status):
+    from localm.netpolicy import NetworkPolicyError, UnresolvableHost
+    app, disc = gui_app
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    if raised == "deny":
+        raised = NetworkPolicyError("'example.org' is on the deny list (net_deny). ")
+    elif raised == "unresolvable":
+        raised = UnresolvableHost("'huggingface.co' could not be resolved")
+
+    def _fail(url, **kw):
+        raise raised
+
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _fail)
+    with TestClient(app) as c:
+        r = c.get(f"/api/discover/search?q=x&source={source}", headers=_hdr())
+    assert r.status_code == status, r.text
+
+
+@pytest.mark.parametrize("http_status", [401, 403, 404])
+def test_a_repo_the_hub_does_not_show_is_422(gui_app, monkeypatch, http_status):
+    app, disc = gui_app
+
+    class _Answer:
+        status_code = http_status
+
+    class _HttpError(Exception):
+        response = _Answer()
+
+    def _fail(url, **kw):
+        raise _HttpError(f"{http_status} from the Hub")
+
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _fail)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/files?repo=org/missing", headers=_hdr())
+    assert r.status_code == 422, r.text
+    assert "was not found" in r.json()["detail"]
+
+
+def test_a_discover_error_without_a_cause_is_422_whatever_it_says(gui_app, monkeypatch):
+    from localm.discover import DiscoverError
+    app, disc = gui_app
+
+    def _refuse(*a, **kw):
+        raise DiscoverError("request failed: net_mode words in a validation error")
+
+    monkeypatch.setattr(disc, "hf_search", _refuse)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 422, r.text
+
+
 def test_bad_format_token_is_422(gui_app, monkeypatch):
     app, disc = gui_app
     # Real hf_search: an all-invalid formats CSV raises DiscoverError -> 422.

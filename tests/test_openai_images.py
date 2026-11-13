@@ -50,6 +50,7 @@ class _Backend:
         self.calls = []
         self.result = None
         self.fail = None
+        self.warning = None
 
     def settings(self, cfg):
         return {"reload_after": True, "warning": "",
@@ -64,7 +65,8 @@ class _Backend:
             return False, self.fail
         w, h = kw.get("width", 8), kw.get("height", 8)
         out_path.write_bytes(self.result or _png(w, h))
-        return True, f"Image saved to {out_path.name} (seed 1)"
+        saved = f"Image saved to {out_path.name} (seed 1)"
+        return True, f"{saved}\n{self.warning}" if self.warning else saved
 
 
 @pytest.fixture
@@ -617,3 +619,32 @@ class TestRemoveTreeWhenIdle:
         d = self._tree(tmp_path)
         plug._remove_tree_when_idle(d, [])
         assert not d.exists()
+
+
+class TestTheResponseIsHandedOutAsItIs:
+    """The file goes to the caller as it is, so the generation runs strict and
+    the response names every warning it reported."""
+
+    def test_the_generation_is_strict(self, client, backend):
+        r = client.post(URL, json={"prompt": "a cat"})
+        assert r.status_code == 200, r.text
+        assert backend.calls[0]["withhold_on_trace"] is True
+
+    def test_a_generation_warning_reaches_the_response(self, client, backend, log_mode):
+        backend.warning = "WARNING: ComfyUI's own console reported: lora missing"
+        r = client.post(URL, json={"prompt": "a cat", "response_format": "b64_json"})
+        assert r.status_code == 200, r.text
+        assert r.json()["warnings"] == [backend.warning]
+
+    def test_a_non_owner_caller_gets_no_host_path_in_a_502(
+            self, client, backend, home):
+        from localm import auth
+        key = auth.create_key("i", ["image"])["key"]
+        backend.fail = ("Output withheld: WARNING: generated file is not PNG The file "
+                        f"could not be removed; delete {home / 'scratch' / 'x.png'} by hand.")
+        r = client.post(URL, json={"prompt": "a cat"},
+                        headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "Output withheld: WARNING: generated file is not PNG" in detail
+        assert str(home) not in detail

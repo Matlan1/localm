@@ -23,6 +23,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from localm.settings_schema import NATIVE_CFG_MAX, NATIVE_FLOW_SHIFT_MAX, NATIVE_STEPS_MAX
+
 FORMAT = "localm-native-workflow"
 VERSION = 1
 MEDIA_TYPES = ("image", "video", "music")
@@ -60,7 +62,7 @@ def is_number(value) -> bool:
         return False
 
 
-_COMMON = {"steps": _num("int", 1, 150), "cfg": _num("float", 0.0, 30.0),
+_COMMON = {"steps": _num("int", 1, NATIVE_STEPS_MAX), "cfg": _num("float", 0.0, NATIVE_CFG_MAX),
            "sample_method": ("sampler",), "scheduler": ("scheduler",)}
 
 PARAMS = {
@@ -70,9 +72,9 @@ PARAMS = {
     "video": dict(_COMMON, prompt=_TEXT, negative_prompt=_TEXT,
                   width=_num("int", 64, 2048), height=_num("int", 64, 2048),
                   seconds=_num("float", 0.1, 20.0), fps=_num("int", 1, 60),
-                  flow_shift=_num("float", 0.0, 100.0)),
+                  flow_shift=_num("float", 0.0, NATIVE_FLOW_SHIFT_MAX)),
     "music": {"tags": _TEXT, "lyrics": _TEXT, "duration_seconds": _num("float", 1.0, 3600.0),
-              "steps": _num("int", 1, 150), "cfg": _num("float", 0.0, 30.0),
+              "steps": _num("int", 1, NATIVE_STEPS_MAX), "cfg": _num("float", 0.0, NATIVE_CFG_MAX),
               "shift": _num("float", 0.0, 100.0)},
 }
 

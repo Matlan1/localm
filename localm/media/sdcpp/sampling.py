@@ -75,6 +75,52 @@ def check_scheduler(name: Optional[str]) -> Optional[str]:
     return name
 
 
+def check_steps(steps) -> Optional[int]:
+    """*steps* as an int when it is a whole number in ``1..NATIVE_STEPS_MAX``,
+    None for None. Raises ``ValueError`` otherwise."""
+    from localm.settings_schema import NATIVE_STEPS_MAX
+    if steps is None:
+        return None
+    if isinstance(steps, bool) or not isinstance(steps, int) or not (
+            1 <= steps <= NATIVE_STEPS_MAX):
+        raise ValueError(f"Steps must be between 1 and {NATIVE_STEPS_MAX} (got {steps!r}).")
+    return steps
+
+
+def settings_refusal(blk: dict, media: str, steps=None) -> Optional[str]:
+    """Why the native settings block *blk* of *media* (``"image"`` or
+    ``"video"``) or a job's *steps* cannot be used: the sampler set in Settings
+    or the block's scheduler is unknown (the reason lists the accepted names),
+    or *steps* is outside ``1..NATIVE_STEPS_MAX``. None when they can."""
+    try:
+        check_steps(steps)
+        check_scheduler(blk.get("scheduler"))
+    except ValueError as e:
+        return str(e)
+    try:
+        check_sample_method(blk.get("sample_method"))
+    except ValueError as e:
+        return f"{_SAMPLER_FIELD[media]}: {e}"
+    return None
+
+
+_SAMPLER_FIELD = {"image": "Settings > Media > Image > Native sampler",
+                  "video": "Settings > Media > Video > Native sampler"}
+
+
+def resize_note(source: tuple, target: tuple, what: str) -> Optional[str]:
+    """The job line for an input picture of size *source* (width, height) that
+    is resized to *target*, naming it as *what*: scaled when the aspect ratio
+    stays within 1 %, stretched otherwise. None when the sizes are equal."""
+    (sw, sh), (tw, th) = source, target
+    if (sw, sh) == (tw, th):
+        return None
+    if sw and sh and th and abs((sw / sh) / (tw / th) - 1.0) <= 0.01:
+        return f"The {what} ({sw}x{sh}) is scaled to {tw}x{th}."
+    return (f"The {what} ({sw}x{sh}) is stretched to {tw}x{th}; its aspect ratio "
+            "is not kept.")
+
+
 def hires_side(side: int, scale: float) -> int:
     """The hires target for one *side* at *scale*, rounded up to a multiple of 16,
     the widest alignment the library applies to a hires target."""

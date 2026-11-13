@@ -53,12 +53,14 @@ def _chat(client, **extra):
 
 
 # --------------------------------------------------------------------------- #
-# max_tokens <= 0
+# max_tokens < 0 (0 is no request cap)
 # --------------------------------------------------------------------------- #
 
-def test_max_tokens_zero_rejected_chat():
-    r = _chat(_client(), max_tokens=0)
-    assert r.status_code == 422, r.text
+def test_max_tokens_zero_is_no_request_cap_chat():
+    """0 reads as an omitted cap (the configured default applies); it never
+    reaches the engine as its <= 0 unlimited sentinel."""
+    r = _chat(_client(), max_tokens=0, stream=False)
+    assert r.status_code == 200, r.text
 
 
 def test_max_tokens_negative_rejected_chat():
@@ -73,9 +75,9 @@ def test_max_tokens_one_is_allowed():
     assert r.status_code == 200, r.text
 
 
-def test_max_tokens_zero_rejected_completions():
+def test_max_tokens_negative_rejected_completions():
     client = _client()
-    r = client.post("/v1/completions", json={"model": "m", "prompt": "hi", "max_tokens": 0})
+    r = client.post("/v1/completions", json={"model": "m", "prompt": "hi", "max_tokens": -1})
     assert r.status_code == 422, r.text
 
 
@@ -235,7 +237,7 @@ def test_a_binary_non_json_body_is_422_not_500():
 
 def test_an_ordinary_validation_error_is_still_readable():
     """No overcorrection: the handler's real job is unchanged."""
-    r = _chat(_client(), max_tokens=0)
+    r = _chat(_client(), max_tokens=-5)
     assert r.status_code == 422
     assert "max_tokens" in r.json()["detail"]
     assert "elided" not in r.text

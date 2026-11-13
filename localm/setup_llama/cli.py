@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from rich.markup import escape
 
 from localm.debuglog import logger
 from localm.setup_llama._common import _net_allowed, _require_network_allowed, console
@@ -301,7 +302,7 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             # library filenames.
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
-            console.print(f"[green]Already provisioned[/green]{label} at {target}")
+            console.print(f"[green]Already provisioned[/green]{escape(label)} at {escape(str(target))}")
             newer = _release_build_when_stale(target, have, build)
             if newer:
                 console.print(f"[yellow]This release ships build {newer}; the installed "
@@ -417,7 +418,7 @@ class _NoLibrary(Exception):
 def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
     """Install the libraries of a local build directory (``--from``)."""
     src = Path(from_dir)
-    console.print(f"Copying binaries from [bold]{src}[/bold] ...")
+    console.print(f"Copying binaries from [bold]{escape(str(src))}[/bold] ...")
     def _fill(staging: Path) -> int:
         copied = _sl._copy_binaries(src, staging)
         if not (staging / lib_name).exists():
@@ -658,7 +659,7 @@ def _verify() -> None:
         from localm.inference.backends.llamacpp._loader import runtime_binary_dir
         d = runtime_binary_dir()
         if d:
-            console.print(f"[bold green]Native runtime ready[/bold green] -> {d}")
+            console.print(f"[bold green]Native runtime ready[/bold green] -> {escape(str(d))}")
             console.print("Try it:  [bold]localm run <model>[/bold]")
             _warn_if_overridden()
         else:

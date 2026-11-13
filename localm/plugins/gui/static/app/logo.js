@@ -75,7 +75,7 @@ export function renderLogoPicker() {
     tile.type = "button";
     tile.className = "logo-tile" + (style.id === current ? " active" : "");
     tile.dataset.style = style.id;
-    tile.title = t("appearance.logoStyle.tile", { name: style.white + style.blue });
+    tile.title = t("appearance.logoStyle.tile", { name: style.white + style.blue, blue: style.blue });
     drawWordmark(tile, style);
     tile.onclick = () => setLogoStyle(style.id);
     wrap.appendChild(tile);

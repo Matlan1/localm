@@ -22,17 +22,19 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from localm import procid, sysprog
 
 logger = logging.getLogger("localm")
 
 
-def atomic_write(path: Path, data: str | Iterable[str]) -> None:
+def atomic_write(path: Path, data: str | Iterable[str], *, errors: str = "strict") -> None:
     """Write *data* to *path* atomically: write a unique per-writer temp
     file, then replace *path* with it. *data* is a string, or an iterable of
-    strings written one after another.
+    strings written one after another, encoded as UTF-8 with the codec error
+    handler *errors* (``"surrogateescape"`` writes back bytes that were read
+    with the same handler).
 
     The temp name is unique per (pid, thread), so two independent writers
     never collide on the same temp file even outside a lock (e.g. a sidecar
@@ -48,9 +50,9 @@ def atomic_write(path: Path, data: str | Iterable[str]) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         if isinstance(data, str):
-            tmp.write_text(data, encoding="utf-8")
+            tmp.write_text(data, encoding="utf-8", errors=errors)
         else:
-            with open(tmp, "w", encoding="utf-8") as fh:
+            with open(tmp, "w", encoding="utf-8", errors=errors) as fh:
                 for piece in data:
                     fh.write(piece)
         for attempt in range(5):
@@ -106,9 +108,65 @@ def _perm_warn(path: Path, why: str) -> None:
                  "directory's own scoping still applies", path.name, why)
 
 
+def current_user_sid() -> Optional[str]:
+    """The string SID (``S-1-5-21-...``) of the user this process runs as, read
+    from the process token; ``None`` off Windows or when it cannot be read. The
+    USERNAME and USER environment variables are never consulted."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        token_query, token_user = 0x0008, 1
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), token_query,
+                                         ctypes.byref(token)):
+            return None
+        try:
+            size = wintypes.DWORD(0)
+            advapi32.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
+            if not size.value:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if not advapi32.GetTokenInformation(token, token_user, buf, size,
+                                                ctypes.byref(size)):
+                return None
+            # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first field is the PSID.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            text = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+                return None
+            try:
+                sid = text.value or ""
+            finally:
+                kernel32.LocalFree(text)
+        finally:
+            kernel32.CloseHandle(token)
+    except (OSError, AttributeError, ValueError) as e:
+        logger.debug("could not read the process token's user SID: %r", e)
+        return None
+    if not sid.startswith("S-1-") or not sid[4:].replace("-", "").isdigit():
+        return None
+    return sid
+
+
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
-    Windows icacls - which grants the user full control regardless of *mode*,
+    Windows icacls - which grants the user of the process token, named by its
+    SID (see :func:`current_user_sid`), full control regardless of *mode*,
     since ACLs do not encode POSIX bits; inherited entries are dropped, and a
     file created without inherited entries keeps its default SYSTEM and
     Administrators ACEs). Returns True when the tightening is believed
@@ -137,19 +195,20 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             os.chmod(path, mode)
         else:
             import subprocess
-            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-            if not user:
-                _perm_warn(path, "no USERNAME/USER in the environment")
+            sid = current_user_sid()
+            if not sid:
+                _perm_warn(path, "the process token's user SID could not be read")
                 return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
-            # /grant:r replaces any existing grant for this user, so the user
-            # holds an explicit full-control ACE (SYSTEM and Administrators may remain).
+            # /grant:r replaces any existing grant for the token's user (named by
+            # SID, "*S-1-..."), so that user holds an explicit full-control ACE
+            # (SYSTEM and Administrators may remain).
             icacls = sysprog.find("icacls")
             if not icacls:
                 _perm_warn(path, "icacls was not found in the Windows system folder")
                 return False
             r = subprocess.run(
-                [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                [icacls, str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
                 capture_output=True, check=False)
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable
@@ -177,12 +236,16 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     *retrying* selects the final replace: False (default) is a bare
     ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
     backoff (up to ~1 s) over a transient Windows sharing violation, such as a
-    concurrent reader's open handle. Pass True only when the caller serializes
-    every writer of *path* across processes (a cross-process lock held for the
-    whole write or read-modify-write). The callers that pass True are
-    ``auth.set_api_key`` (auth.key), ``auth._save_keystore`` (auth.json) and
-    ``model_source_credentials._write_all`` (model_source_credentials.json);
-    every other caller uses the bare replace.
+    concurrent reader's open handle. Pass True only when no other process
+    writes *path* at the same time: a cross-process lock held for the whole
+    write or read-modify-write, or a file only one process ever writes. Every
+    caller passes True: ``auth.set_api_key`` (auth.key),
+    ``auth._save_keystore`` (auth.json), ``model_source_credentials._write_all``,
+    ``sessions._save`` and ``issue_tracker.record_filed`` under the file's
+    cross-process lock; ``instances._write_entry`` and the job manager's
+    activity store, whose files only their own process writes; the owner-KDF
+    writer while it holds its cross-process lock (False when that lock could not
+    be taken). See test_every_private_store_write_rides_out_a_reader.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -215,9 +278,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
-    With *retrying* False the replace is a bare ``os.replace``; some of those
-    callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run on the asyncio event loop.
+    Some callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run on the asyncio event loop, where a retry sleeps on the
+    loop while another handle holds *path*.
 
     ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
     TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
@@ -299,9 +362,11 @@ def _is_transient_permission_error(e: OSError) -> bool:
     return getattr(e, "winerror", None) in (5, 32, None)
 
 
-def replace_atomic(src: Path, dst: Path) -> None:
+def replace_atomic(src: Path, dst: Path, *,
+                   on_retry: Optional[Callable[[int, OSError], None]] = None) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
-    sharing violation.
+    sharing violation. *on_retry*, when given, is called with the number of
+    the refused attempt (from 1) and its error before each retry.
 
     os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
     when another handle has *dst* open at that instant: a second localm process
@@ -320,6 +385,8 @@ def replace_atomic(src: Path, dst: Path) -> None:
         except PermissionError as e:
             if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
+            if on_retry is not None:
+                on_retry(attempt + 1, e)
             _transient_backoff(attempt)
 
 

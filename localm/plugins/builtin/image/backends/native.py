@@ -334,16 +334,22 @@ def _upright(im):
     return ImageOps.exif_transpose(im)
 
 
-def _load_init_image(src, width: Optional[int], height: Optional[int]) -> dict:
+def _load_init_image(src, width: Optional[int], height: Optional[int],
+                     say: Optional[Callable[[str], None]] = None) -> dict:
     """The base image *src* (a path or encoded bytes) as RGB pixels at
     *width* x *height*, or at its own size fitted by ``fit_size`` when either
-    is None."""
+    is None. A resize to a requested size is said through *say*
+    (``sampling.resize_note``)."""
     from PIL import Image
     with _open_image(src) as im:
         im = _upright(im).convert("RGB")
+        requested = width is not None and height is not None
         if width is None or height is None:
             width, height = fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
+            note = sampling.resize_note((im.width, im.height), (width, height), "input image")
+            if requested and note and say is not None:
+                say(note)
             im = im.resize((width, height), Image.Resampling.LANCZOS)
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
@@ -406,6 +412,11 @@ NO_REFERENCES = ("{model} ({family}) does not take reference images. They work w
 
 CONTROL_STRENGTH = 0.9
 
+FLUX1_REFERENCES = ("Reference images are made for FLUX.1 Kontext. The file of a FLUX.1 model "
+                    "does not say whether it is Kontext, so with any other FLUX.1 model "
+                    "(FLUX.1 dev, schnell) the references may be ignored or followed "
+                    "poorly.")
+
 NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference images reach the "
                  "image model only and the edit follows them less closely. Register the "
                  "matching Qwen2.5-VL mmproj file (type mmproj) and pick it as the LLM vision "
@@ -438,7 +449,11 @@ def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=N
     image, an image that does not decode or an empty mask:
     ``image_data_refusal``), or None. A model set that does not resolve is left
     to ``ensure_available``, which reports it. Checked before any VRAM
-    handover."""
+    handover. An unknown sampler in Settings is refused here too
+    (``sampling.settings_refusal``)."""
+    bad = sampling.settings_refusal(_native_block(s), "image")
+    if bad:
+        return bad
     if mask_image is not None and init_image_data is None and input_image is None:
         return "A mask needs a base image: set the input image first."
     bad = image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
@@ -872,6 +887,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     blk = _native_block(s)
     rec = models["recommended"]
     defaults = models.get("defaults")
+    refused = sampling.settings_refusal(blk, "image", steps)
+    if refused:
+        return False, refused
     if mask_image is not None and init_image_data is None and input_image is None:
         return False, "A mask needs a base image: set the input image first."
     refused = (image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
@@ -905,6 +923,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 + ", ".join(unused) + ".")
     if ref_images and _lacks_llm_vision(models):
         say(NO_LLM_VISION)
+    if ref_images and models.get("family") == "flux":
+        say(FLUX1_REFERENCES)
     if mask_image is not None and (models.get("capabilities") or {}).get("inpaint"):
         say("Inpainting with a dedicated inpainting model.")
     if any(c.get("auto") for c in (models.get("components") or {}).values()):
@@ -933,6 +953,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()
+        cancelled = False
         try:
             ctx = load_ctx(models["ctx"], rt.backend)
             key = (models["key"], rt.backend)
@@ -955,7 +976,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             source = init_image_data if init_image_data is not None else (
                 Path(input_image) if input_image is not None else None)
             if source is not None:
-                init = _load_init_image(source, width, height)
+                init = _load_init_image(source, width, height, say)
                 width, height = init["width"], init["height"]
             if width is None or height is None:
                 width, height = _default_size(info.get("version", ""), rec, blk, defaults)
@@ -1096,6 +1117,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 if on_saved is not None:
                     on_saved(path)
         except SdCancelled:
+            cancelled = True
             return False, partial("Cancelled.")
         except SdWorkerError as e:
             return False, partial(f"Native image generation failed: {e}")
@@ -1103,8 +1125,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return False, partial(f"Native image generation failed: {e}")
         finally:
             relay.flush()
-            if runner.is_alive():
-                shared.arm_idle_timer()
+            shared.after_job(cancelled)
     elapsed = time.monotonic() - batch_started
     if batch == 1:
         return True, (f"Saved {saved[0].name} ({result['width']}x{result['height']}, "
@@ -1193,6 +1214,7 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()
+        cancelled = False
         try:
             say(f"Upscaling {pixels['width']}x{pixels['height']} with {display_name(upscaler)} "
                 f"(stable-diffusion.cpp, {rt.backend})...")
@@ -1201,13 +1223,13 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
                  "max_output_side": MAX_UPSCALE_OUTPUT_SIDE}, rt.path,
                 extra_dirs=rt.extra_dirs, on_event=relay, cancel_check=cancel_check)
         except SdCancelled:
+            cancelled = True
             return False, "Cancelled."
         except SdWorkerError as e:
             return False, f"Native upscaling failed: {e}"
         finally:
             relay.flush()
-            if runner.is_alive():
-                shared.arm_idle_timer()
+            shared.after_job(cancelled)
     record = dict(extra_meta)
     record.update({
         "width": result["width"], "height": result["height"],

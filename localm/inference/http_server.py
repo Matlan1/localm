@@ -2476,7 +2476,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
     A load that raises is recorded in ``_routing_latch`` (a cancelled or
     superseded one is not) and a load that succeeds clears the model's record.
     The load fingerprint the record is made under is computed off the event
-    loop, before ``engine.load`` starts."""
+    loop, before ``engine.load`` starts. Called inside an
+    ``audit.request_privacy`` block, the load runs inside one too."""
     global _switch_cancel, _switch_loading
     fingerprint = None
     cancel = threading.Event()
@@ -2490,7 +2491,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
             return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
-        await loop.run_in_executor(None, _load_for_switch, engine, reading)
+        await loop.run_in_executor(None, carry_request_privacy(
+            functools.partial(_load_for_switch, engine, reading)))
     except ModelLoadCancelled as e:
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}

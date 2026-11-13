@@ -39,6 +39,10 @@ from localm.pathsafe import is_unc_or_device_path
 # (outer) -> jobs.json.lock (inner, JobStore._locked).
 _STORE_LOCK = threading.RLock()
 
+# How long record_result waits for the cross-process lock before it saves a result
+# without checking that its job still exists.
+_RESULT_CHECK_WAIT_S = 2.0
+
 
 # --------------------------------------------------------------------------- #
 #  Job definition                                                             #
@@ -310,16 +314,16 @@ class JobStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     @contextlib.contextmanager
-    def _locked(self):
+    def _locked(self, timeout: Optional[float] = None):
         """Hold ``_STORE_LOCK`` and the cross-process lock on jobs.json for a
         read-modify-write, so a writer in another process (``localm jobs ...``
         against a running server's scheduler) cannot undo it. Creates the jobs
-        dir. Raises ``TimeoutError`` when another process holds the lock past the
-        config default wait."""
+        dir. Raises ``TimeoutError`` when another process holds the lock past
+        *timeout* seconds (None: the config default wait)."""
         from localm.config import _cross_process_lock
         with _STORE_LOCK:
             self._ensure_root()
-            with _cross_process_lock(self._defs_file):
+            with _cross_process_lock(self._defs_file, timeout=timeout):
                 yield
 
     def _read_all(self) -> dict:
@@ -518,15 +522,56 @@ class JobStore:
         return True
 
     # ---- results -----------------------------------------------------------
-    def record_result(self, job_id: str, result: dict) -> str:
+    def record_result(self, job_id: str, result: dict) -> Optional[str]:
         """Persist one run *result* for *job_id* and return its result id (the
         iso-ts file stem). Also stamps the job's last_run / last_status /
         last_result_id. Results are saved in every privacy mode (explicit user
-        data). A timestamp collision is disambiguated with a counter suffix."""
+        data). A timestamp collision is disambiguated with a counter suffix.
+
+        Returns None and writes nothing when *job_id* is no longer defined (it
+        was removed while it ran), so a removed job's results folder is not
+        created again. Checked and written under the store lock that ``remove``
+        takes. When that check cannot be made (the lock stays held elsewhere past
+        ``_RESULT_CHECK_WAIT_S``, or jobs.json cannot be read), the result is
+        saved anyway and a debug line says why."""
+        from localm.debuglog import logger
         d = self._result_dir(job_id)
-        d.mkdir(parents=True, exist_ok=True)
         stamp = _iso_stamp(result.get("finished") or result.get("started")
                            or time.time())
+        result_id = None
+        try:
+            with self._locked(timeout=_RESULT_CHECK_WAIT_S):
+                if job_id not in self._load()[0]:
+                    self._drop_held_for(job_id)
+                    logger.debug("jobs: result for job %s not saved: the job was "
+                                 "removed while it ran", job_id)
+                    return None
+                result_id = self._write_result_file(d, stamp, job_id, result)
+        except (TimeoutError, RuntimeError, UnicodeDecodeError) as e:
+            if result_id is not None:
+                raise
+            logger.debug("jobs: could not check that job %s still exists (%s); "
+                         "saving its result anyway", job_id, e)
+            result_id = self._write_result_file(d, stamp, job_id, result)
+        # Stamp the job def (best-effort: a run for a now-deleted job is fine).
+        try:
+            self._stamp_result(job_id, result, result_id)
+        except Exception as e:
+            # The result file IS persisted (result_id above); only the job's
+            # last_run/last_status stamp failed, so the API will under-report
+            # this run until the next successful write.
+            self._drop_held_for(job_id)
+            from localm.debuglog import logger
+            logger.warning(
+                "jobs: result %s for job %s is persisted but its metadata "
+                "stamp failed (%s); last_run will under-report this run",
+                result_id, job_id, e)
+        return result_id
+
+    def _write_result_file(self, d: Path, stamp: str, job_id: str, result: dict) -> str:
+        """Write *result* as a new file in *d* and return its result id: *stamp*,
+        or *stamp* with a counter suffix when that name is taken."""
+        d.mkdir(parents=True, exist_ok=True)
         n = 0
         while True:
             result_id = stamp if n == 0 else f"{stamp}_{n}"
@@ -535,25 +580,15 @@ class JobStore:
             try:
                 with open(path, "x", encoding="utf-8") as fh:
                     fh.write(json.dumps(record, indent=2, ensure_ascii=False))
-                break
+                return result_id
             except FileExistsError:
                 n += 1
-        # Stamp the job def (best-effort: a run for a now-deleted job is fine).
-        try:
-            self._stamp_result(job_id, result, result_id)
-        except Exception as e:
-            # The result file IS persisted (result_id above); only the job's
-            # last_run/last_status stamp failed, so the API will under-report
-            # this run until the next successful write.
-            with _HELD_CLAIMS_LOCK:
-                for tok in [t for t, j in _HELD_CLAIMS.items() if j == job_id]:
-                    del _HELD_CLAIMS[tok]
-            from localm.debuglog import logger
-            logger.warning(
-                "jobs: result %s for job %s is persisted but its metadata "
-                "stamp failed (%s); last_run will under-report this run",
-                result_id, job_id, e)
-        return result_id
+
+    @staticmethod
+    def _drop_held_for(job_id: str) -> None:
+        with _HELD_CLAIMS_LOCK:
+            for tok in [t for t, j in _HELD_CLAIMS.items() if j == job_id]:
+                del _HELD_CLAIMS[tok]
 
     def _stamp_result(self, job_id: str, result: dict, result_id: str) -> None:
         """Record *result_id* as *job_id*'s latest run (last_run, last_status,

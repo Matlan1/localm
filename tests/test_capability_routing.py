@@ -316,7 +316,7 @@ def _serve(monkeypatch, registry):
     hs._engines_lru.clear()
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
-    hs._routing_loaded.clear()
+    _rf.reset_routing_state()
     hs._active_model_name = None
     hs._engine = None
     hs._inference_sem = None
@@ -599,7 +599,7 @@ def vision_server(tmp_path, monkeypatch):
     hs._engines_lru.clear()
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
-    hs._routing_loaded.clear()
+    _rf.reset_routing_state()
     hs._active_model_name = None
     hs._engine = None
     hs._inference_sem = None

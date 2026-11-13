@@ -344,6 +344,12 @@ def _legacy_bullets() -> list:
             if _strip_bullet(ln)]
 
 
+def _legacy_marker(store) -> Path:
+    """The file whose presence records that the legacy chat-memory.md was imported
+    into *store*."""
+    return store.path.with_suffix(".legacy-imported")
+
+
 def _migrate_legacy(store, before_embed=None) -> None:
     """Import the legacy flat chat-memory.md into the structured store ONCE.
     *before_embed*, when given, is called once just before the embedder is
@@ -362,7 +368,7 @@ def _migrate_legacy(store, before_embed=None) -> None:
 
     The embedder is resolved only when a bullet actually needs embedding: an
     absent, empty or already-imported legacy file loads no model."""
-    marker = store.path.with_suffix(".legacy-imported")
+    marker = _legacy_marker(store)
     if marker.exists() or not _persist_enabled():
         return
     try:
@@ -440,11 +446,13 @@ def _forgotten_item(entry: dict) -> dict:
 
 def _rendered_text(store) -> str:
     """The store's facts as a markdown bullet list (what the memory modal textarea
-    shows). Falls back to the legacy flat file when the structured store is still
-    empty so existing memory stays visible."""
+    shows). Falls back to the legacy flat file only while the structured store is
+    empty and that file has not been imported into it yet."""
     recs = store.all()
     if recs:
         return "\n".join(f"- {r.text}" for r in recs)
+    if _legacy_marker(store).exists():
+        return ""
     try:
         return _read_memory().strip()
     except OSError:
@@ -549,22 +557,21 @@ async def memory_append(req: MemoryAppend, request: Request = None):
         raise HTTPException(400, "Nothing to remember")
     store = _request_store(request)
 
-    from localm.memory import N_MAX, MemoryRecord
+    from localm.memory.store import N_MAX
 
     # Off the loop: _migrate_legacy and store.add both resolve the embedder
     # (_embed_fn -> get_embedder), which must not run on the event-loop thread.
     def _do_append():
         _migrate_legacy(store)
-        # Refuse to append past the cap rather than accept a fact the next prune
-        # would evict.
-        if len(store) >= N_MAX:
-            raise HTTPException(
-                413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
-                     "adding another.")
-        return store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                                      importance=0.8), embed_fn=_embed_fn())
+        return add_user_fact(store, fact, _embed_fn())
 
-    rec = await _off_loop(_do_append)
+    status, rec = await _off_loop(_do_append)
+    if status == "full":
+        raise HTTPException(
+            413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
+                 "adding another.")
+    if status == "exists":
+        return {"status": "exists", "id": rec.id}
     return {"status": "appended", "id": rec.id}
 
 
@@ -578,6 +585,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
         fields["text"] = req.text
     if req.importance is not None:
         fields["importance"] = req.importance
+    if isinstance(fields.get("text"), str) and not _strip_bullet(fields["text"]):
+        raise HTTPException(400, "Nothing to remember")
     # Off the loop: store.update -> _embed_fn -> get_embedder.
     rec = (await _off_loop(lambda: store.update(mem_id, embed_fn=_embed_fn(), **fields))
            if fields else store.get(mem_id))
@@ -1716,17 +1725,36 @@ def _add_requested_facts(principal: str | None, messages) -> list[str]:
 def _add_explicit_fact(store, fact: str, embed_fn) -> str:
     """Add *fact* as a user-typed record unless the store already holds it or is at
     its cap. Returns "saved", "exists" or "full". Blocking (embedder)."""
-    from localm.memory import N_MAX, MemoryRecord
-    key = " ".join(fact.casefold().split())
+    return add_user_fact(store, fact, embed_fn)[0]
+
+
+def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
+                  importance: float = 0.8) -> tuple:
+    """Add *fact* as a user-typed record unless the store already holds the same
+    text (case and spacing ignored) or is at its cap. Returns ``(status, record)``:
+    ``("saved", the new record)``, ``("exists", the stored record)`` or
+    ``("full", None)``. A stored record with the same text that a person did not
+    add (synthesised, imported) becomes a user record, and the answer is
+    ``("saved", that record)``. Blocking (embedder). Every place a person adds a
+    fact (the chat's "remember that", ``/remember``, ``localm memory add``) goes
+    through here."""
+    from localm.memory import MemoryRecord
+    from localm.memory import store as _store_mod
+    key = " ".join(fact[:_store_mod.MAX_TEXT_LEN].casefold().split())
     with store.lock():
         store._load()
-        if any(" ".join(r.text.casefold().split()) == key for r in store.all()):
-            return "exists"
-        if len(store) >= N_MAX:
-            return "full"
-        store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                               importance=0.8), embed_fn=embed_fn)
-        return "saved"
+        same = next((r for r in store.all()
+                     if " ".join(r.text.casefold().split()) == key), None)
+        if same is not None:
+            if same.source == "user":
+                return "exists", same
+            return "saved", store.update(same.id, source="user",
+                                         importance=max(same.importance, importance))
+        if len(store) >= _store_mod.N_MAX:
+            return "full", None
+        rec = store.add(MemoryRecord(text=fact, kind=kind, source="user",
+                                     importance=importance), embed_fn=embed_fn)
+        return "saved", rec
 
 
 def _remember_explicit(messages, ctx, before_embed=None) -> None:
