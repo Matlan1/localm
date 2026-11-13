@@ -1611,13 +1611,13 @@ export function labelledRefusal(detail, controls) {
   return `${label}: ${detail.slice(m[0].length)}`;
 }
 
-/** Save the controls of section *secId* (only those inside *within*, when
- *  given) whose value differs from the value they show as saved. Returns true
- *  when the server holds the shown values afterwards (saved now, or nothing
- *  changed), false when nothing was saved. */
-export async function saveSettingsSection(secId, within) {
+/** The edits in section *secId* (only those inside *within*, when given):
+ *  ``{updates, saved}``, where *updates* maps each setting key whose control
+ *  differs from the value it shows as saved to its new value and *saved* lists
+ *  the ``[control, value]`` pairs. Null when the section is not on the page. */
+export function settingsSectionEdits(secId, within) {
   const panel = $("settings-sec-" + secId);
-  if (!panel) return;
+  if (!panel) return null;
   const box = within || panel;
   const updates = {};
   const saved = [];
@@ -1629,6 +1629,17 @@ export async function saveSettingsSection(secId, within) {
     updates[ctrl.field.key] = value;
     saved.push([ctrl, value]);
   }
+  return { updates, saved };
+}
+
+/** Save the controls of section *secId* (only those inside *within*, when
+ *  given) whose value differs from the value they show as saved. Returns true
+ *  when the server holds the shown values afterwards (saved now, or nothing
+ *  changed), false when nothing was saved. */
+export async function saveSettingsSection(secId, within) {
+  const edits = settingsSectionEdits(secId, within);
+  if (!edits) return;
+  const { updates, saved } = edits;
   if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return true; }
   // A request that cannot reach the server says so and saves nothing.
   const patch = async (body) => {
@@ -2025,7 +2036,12 @@ export async function refreshSettingsPage() {
       saveReload.dataset.sec = sec.id;
       saveReload.hidden = !modelCache.active;
       saveReload.onclick = () => whileBusy(saveReload, t("settings.saveReload.working"), async () => {
-        if (await saveSettingsSection(sec.id)) await reloadActiveModelAfterSave();
+        const edits = settingsSectionEdits(sec.id);
+        if (edits && !Object.keys(edits.updates).length) {
+          await reloadActiveModelAfterSave({ saved: false });
+        } else if (await saveSettingsSection(sec.id)) {
+          await reloadActiveModelAfterSave();
+        }
       });
       actions.appendChild(saveReload);
     }
