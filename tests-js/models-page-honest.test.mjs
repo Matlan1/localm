@@ -123,18 +123,19 @@ test("Update now that does not restart raises no overlay", async () => {
   assert.match(win.document.getElementById("update-status").textContent, /setup\.sh on Linux and macOS/);
 });
 
-test("a LoRA is offered only the chat models of its own architecture", () => {
+test("a LoRA is offered every chat model the attach route accepts by architecture", () => {
   const { window: win } = setup();
   runScript(win, `_modelsSnapshot = [
     { name: "llama-base", model_type: "llm", architecture: "llama" },
     { name: "qwen-base", model_type: "llm", architecture: "qwen2" },
     { name: "hf-folder", model_type: "llm", architecture: "LlamaForCausalLM" },
+    { name: "no-arch-base", model_type: "llm" },
     { name: "lora", model_type: "lora", architecture: "llama", adapter: true },
   ];
   globalThis.__bases = adapterBaseCandidates({ name: "lora", architecture: "llama" }).map((m) => m.name);
   globalThis.__any = adapterBaseCandidates({ name: "lora" }).map((m) => m.name);`);
-  assert.deepEqual([...win.__bases], ["llama-base"]);
-  assert.deepEqual([...win.__any], ["llama-base", "qwen-base", "hf-folder"]);
+  assert.deepEqual([...win.__bases], ["llama-base", "no-arch-base"]);
+  assert.deepEqual([...win.__any], ["llama-base", "qwen-base", "hf-folder", "no-arch-base"]);
 });
 
 test("CivitAI 'credit required' reads unknown when CivitAI sends null", () => {

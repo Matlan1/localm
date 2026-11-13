@@ -646,7 +646,7 @@ Long chats compact automatically before they collide with the ceiling. See [docs
 
 ### Multi-GPU: picking the main device
 
-On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads and where a GGUF model's vision projector goes. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
+On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads, where a GGUF model's vision projector goes and where native music starts (KoboldCpp's CUDA or Vulkan build). `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
 
 ```bash
 localm gpus                        # list detected GPUs
