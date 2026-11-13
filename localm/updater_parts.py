@@ -100,6 +100,21 @@ def _editable_here(site: Path, root: Path) -> bool:
     return False
 
 
+def _venv_dir(root: Path) -> Path:
+    """The venv of the install at *root*: ``<root>/.venv``, or, inside the localm
+    container image (``updater.in_container_image``) for the running install
+    when that folder does not exist, the venv this process runs from
+    (``sys.prefix``)."""
+    import sys
+
+    from localm import updater
+    venv = root / ".venv"
+    if (updater.in_container_image() and not venv.exists()
+            and root.resolve() == updater.repo_root().resolve()):
+        return Path(sys.prefix)
+    return venv
+
+
 def _deps(root: Path) -> dict:
     """The venv half: ``{"venv", "record", "editable_here", "problems"}``.
     ``venv`` is whether the install has a venv, ``record`` the version of
@@ -107,9 +122,9 @@ def _deps(root: Path) -> dict:
     whether that record is an editable install of *root*
     (:func:`_editable_here`), ``problems`` each dependency the venv does not
     satisfy, of the declared ones and of the extras the dependency step
-    installs."""
+    installs. The venv is :func:`_venv_dir`."""
     from localm import updater, updater_components as uc
-    site = uc.site_packages(root / ".venv")
+    site = uc.site_packages(_venv_dir(root))
     if site is None:
         return {"venv": False, "record": None, "editable_here": False, "problems": []}
     installed = uc.dists(site)
@@ -297,10 +312,13 @@ def repair(*, installed=None, defer: bool = False, runner: Optional[Callable] = 
     "restart_needed"}``: the parts before the repair, one line per step taken,
     and whether a restart must carry out or load what was changed. Raises
     LocalmError when a step fails (the dependencies are put back as they
-    were)."""
+    were), and, with *installed* None, inside the localm container image
+    before anything (``updater.refuse_in_container_image``)."""
     from localm import _version, updater, updater_components as uc, updater_runtime
     from localm.bugreport import LocalmError
     say = say or (lambda _m: None)
+    if installed is None:
+        updater.refuse_in_container_image("repair")
     root = Path(installed) if installed else updater.repo_root()
     if updater.is_site_packages_install(root):
         raise LocalmError("this localm was installed with pip, so it cannot repair itself",

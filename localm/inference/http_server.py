@@ -5983,6 +5983,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
     _mark_fds_noninheritable()
+    _set_restart_env()
 
     if update_watchdog and rolled_back:
         from localm.debuglog import logger as _dbg
@@ -5997,7 +5998,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             updater.spawn_health_watchdog(
                 host=update_watchdog["host"], port=update_watchdog["port"],
                 scheme=update_watchdog.get("scheme", "http"),
-                expect_version=update_watchdog["expect_version"])
+                expect_version=update_watchdog["expect_version"],
+                relaunch_argv=_restart_argv(port))
         except Exception as e:
             # spawn_health_watchdog() already never raises; this is
             # belt-and-suspenders so even a malformed dict here can never block
@@ -6008,7 +6010,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             except Exception:
                 pass
 
-    _set_restart_env()
     _execv_restart(port, instance_id, update_steps_done=not deferred)
 
 
