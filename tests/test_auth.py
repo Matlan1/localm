@@ -725,6 +725,7 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
         # a persistent OWNER key was seeded so the local owner keeps full access
         owner = auth.get_api_key()
         assert owner is not None and auth.verify(owner) == {S.ADMIN}
+        assert r.json()["owner_key_created"] is True
         # the response established the browser session (opaque session cookie; CSRF
         # is derived from the session, not a cookie)
         set_cookies = " ".join(r.headers.get_list("set-cookie"))
@@ -750,6 +751,7 @@ def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
                         headers={"Authorization": "Bearer ownersecret"})
         assert r.status_code == 200
         assert not r.headers.get_list("set-cookie")   # no session seeded
+        assert "owner_key_created" not in r.json()
         # the env owner key is untouched; no auth.key was written
         assert auth._read_key_file() is None
 
