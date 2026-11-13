@@ -30,6 +30,8 @@ WHAT IT CHECKS BEFORE WRITING:
   * the release listing carries a size and a sha256 digest for every asset, and
     the commit and the asset table the receipt recorded equal what the API says
     now (a release that was re-uploaded after the confirm is refused);
+  * no Linux archive is built on a newer Ubuntu than the one docker/Dockerfile's
+    UBUNTU_IMAGE names (a newer build needs a newer glibc and does not load there);
   * each edited region is found exactly once, and nothing else in the tree (outside
     CHANGELOG) still names the old tag, commit or short commit.
 
@@ -101,6 +103,13 @@ EXTRA_PATTERNS = {
     ("windows", "cuda"): [r"cudart-sd-bin-win-cu\d+-x64\.zip"],
 }
 
+# The Docker image's base, whose Ubuntu release is the newest one a Linux archive
+# may be built on: an archive built on a newer Ubuntu needs a newer glibc than that
+# image (and the Ubuntu LTS it names) carries, and does not load there.
+DOCKERFILE = REPO / "docker" / "Dockerfile"
+_UBUNTU_IMAGE_RE = re.compile(r"^ARG UBUNTU_IMAGE=ubuntu:(\d+(?:\.\d+)*)(?:@|\s|$)", re.M)
+_UBUNTU_IN_NAME_RE = re.compile(r"-Linux-Ubuntu-(\d+(?:\.\d+)*)-")
+
 # Files that may legitimately name an old release.
 _STALE_SCAN_SKIP = ("CHANGELOG.md", "CHANGELOG-FULL.md")
 _STALE_SCAN_DIRS = ("localm", "tests", "tests-js", "docs", "scripts", "docker", "installer")
@@ -120,6 +129,10 @@ class UpstreamUnreadable(Refused):
 
 class IncompleteRelease(Refused):
     """The release lacks an archive localm installs."""
+
+
+class UnsupportedLinuxBuild(Refused):
+    """A Linux archive of the release is built on a newer Ubuntu than localm supports."""
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +267,42 @@ def classify_assets(short: str, names, asset_keys, extra_keys) -> dict:
     return out
 
 
+def _version_key(text: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in text.split("."))
+
+
+def linux_build_ceiling(dockerfile: Path | None = None) -> str:
+    """The Ubuntu release of ``UBUNTU_IMAGE`` in *dockerfile* (default
+    :data:`DOCKERFILE`), e.g. ``"24.04"``. Raises Refused when it cannot be read."""
+    path = dockerfile or DOCKERFILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise Refused(f"could not read {path} for the Ubuntu release of the Docker "
+                      f"image: {e}") from e
+    found = _UBUNTU_IMAGE_RE.findall(text)
+    if len(found) != 1:
+        raise Refused(f"{path} does not name exactly one 'ARG UBUNTU_IMAGE=ubuntu:<release>'")
+    return found[0]
+
+
+def check_linux_build_os(names, dockerfile: Path | None = None) -> None:
+    """Raise UnsupportedLinuxBuild when an archive in *names* is built on a newer
+    Ubuntu than :func:`linux_build_ceiling`."""
+    ceiling = linux_build_ceiling(dockerfile)
+    newer = []
+    for name in names:
+        m = _UBUNTU_IN_NAME_RE.search(name)
+        if m and _version_key(m.group(1)) > _version_key(ceiling):
+            newer.append(name)
+    if newer:
+        raise UnsupportedLinuxBuild(
+            f"built on a newer Ubuntu than {ceiling} (the release docker/Dockerfile's "
+            f"UBUNTU_IMAGE names), so they need a glibc that release lacks: "
+            f"{', '.join(sorted(newer))}. Pick a release whose Linux archives are built on "
+            f"Ubuntu {ceiling} or older.")
+
+
 def build_tables(release: dict, current_assets: dict, current_extra: dict) -> tuple[dict, dict]:
     """(ASSETS, EXTRA_ASSETS) for *release*, with exactly the keys, in the order, of
     the current tables. Raises Refused when an archive is missing or ambiguous."""
@@ -267,6 +316,7 @@ def build_tables(release: dict, current_assets: dict, current_extra: dict) -> tu
         raise IncompleteRelease(
             f"{release['tag']} has no archive for: " + ", ".join(found["missing"])
             + ". Not bumping to a release that drops something localm installs.")
+    check_linux_build_os(found["assets"].values())
     assets = {k: (found["assets"][k], release["assets"][found["assets"][k]]["sha256"])
               for k in current_assets}
     extra = {k: [(n, release["assets"][n]["sha256"]) for n in found["extra"][k]]

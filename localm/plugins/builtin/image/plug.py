@@ -48,6 +48,7 @@ from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import (
     _resolve_disconnect_poll, path_formatter, principal_id,
 )
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
@@ -55,6 +56,7 @@ from localm.media.native_models import (
     check_generation_extras, check_image_inputs, check_request, validate_addons,
     validate_upscaler,
 )
+from localm.plugins.media_config import media_session_is_private
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
@@ -168,7 +170,6 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     saved_names: list = []
 
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
@@ -276,7 +277,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             note_other_vram_holders(job, s, "image")
             if _backend.supports(s, "NEEDS_COMFY_SERVER"):
                 job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             size_kwargs = ({"width": width, "height": height}
                            if width is not None and height is not None else {})
 
@@ -415,11 +416,12 @@ async def imagine(req: ImagineRequest, request: Request):
 
     job = jobs.start_fn(
         "imagine",
-        _make_generate(req, input_image=input_image, lora_name=lora_name,
-                       out_path=out_path, owner=owner, self_url=self_url,
-                       instance_token=instance_token, width=width, height=height,
-                       native_choice=native_choice, native_loras=native_loras,
-                       native_extras=native_extras),
+        carry_request_privacy(_make_generate(
+            req, input_image=input_image, lora_name=lora_name,
+            out_path=out_path, owner=owner, self_url=self_url,
+            instance_token=instance_token, width=width, height=height,
+            native_choice=native_choice, native_loras=native_loras,
+            native_extras=native_extras)),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 
@@ -545,8 +547,7 @@ def _private_temp_root() -> Path | None:
 
 
 def _is_private_session() -> bool:
-    from localm.audit import SessionMode, effective_mode
-    return effective_mode("server") == SessionMode.PRIVACY
+    return media_session_is_private()
 
 
 CANCEL_SETTLE_SECONDS = 30.0
@@ -711,10 +712,11 @@ async def create_image(req: ImageGenerationRequest, request: Request):
             out_path = out_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
             job = jobs.start_fn(
                 "imagine",
-                _make_generate(gen_req, input_image=None, lora_name=None,
-                               out_path=out_path, owner=owner, self_url=self_url,
-                               instance_token=instance_token, width=width,
-                               height=height, in_gallery=not private),
+                carry_request_privacy(_make_generate(
+                    gen_req, input_image=None, lora_name=None,
+                    out_path=out_path, owner=owner, self_url=self_url,
+                    instance_token=instance_token, width=width,
+                    height=height, in_gallery=not private)),
                 result_path=out_path.name, owner=owner)
             started_jobs.append(job)
             status, last_line = await _await_job(job, request)
@@ -816,7 +818,6 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
     ``out_path``: runtime check, VRAM handover, upscaling, and the chat-model
     reload on every exit path."""
     def _upscale(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
@@ -849,7 +850,7 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
             if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
                 say("Could not unload the chat model - the upscaler may run low on VRAM.")
             note_other_vram_holders(job, s, "image")
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             ok, message = native.upscale(
                 s, source, upscaler, out_path, extra_meta=extra_meta,
                 write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
@@ -897,10 +898,11 @@ async def imagine_upscale(name: str, req: UpscaleRequest, request: Request):
     owner = principal_id(request)
     job = jobs.start_fn(
         "imagine",
-        _make_upscale(source=source, upscaler=upscaler, out_path=out_path, owner=owner,
-                      self_url=self_url,
-                      instance_token=getattr(request.app.state, "instance_token", None),
-                      extra_meta=extra_meta),
+        carry_request_privacy(_make_upscale(
+            source=source, upscaler=upscaler, out_path=out_path, owner=owner,
+            self_url=self_url,
+            instance_token=getattr(request.app.state, "instance_token", None),
+            extra_meta=extra_meta)),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 

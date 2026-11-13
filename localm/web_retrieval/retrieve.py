@@ -54,7 +54,7 @@ from .contracts import (
 )
 from .errors import describe_failure, failure_kind
 from .extract import extract_page
-from .providers import observe_requests, provider_from_config
+from .providers import is_policy_refusal, observe_requests, provider_from_config
 from .sites import read_url
 
 #: ``fetch(url, timeout=...) -> (final_url, content_type, text)``.
@@ -178,7 +178,9 @@ def _read_pages(to_fetch: list[Source], fetch: Fetcher, timeout: float,
             try:
                 page = fut.result()
             except netpolicy.NetworkPolicyError as exc:
-                source.mark_failed(f"refused by policy: {exc}"[:_ERROR_TEXT_CAP])
+                source.mark_failed(
+                    (f"refused by policy: {exc}" if is_policy_refusal(exc)
+                     else describe_failure(exc, source.url))[:_ERROR_TEXT_CAP])
             except Exception as exc:
                 logger.debug("web retrieval: page read failed (%s)",
                              type(exc).__name__)
@@ -274,8 +276,13 @@ def retrieve(
     try:
         with observe_requests(on_endpoint):
             results = provider.search(query, requested)
-    except netpolicy.NetworkPolicyError:
-        raise
+    except netpolicy.NetworkPolicyError as exc:
+        if is_policy_refusal(exc):
+            raise
+        logger.debug("web retrieval: search host did not resolve")
+        bundle.search_status = SEARCH_FAILED
+        bundle.search_error = search_failure_text(exc, provider)
+        return bundle
     except Exception as exc:
         logger.debug("web retrieval: search failed (%s)", type(exc).__name__)
         bundle.search_status = SEARCH_FAILED

@@ -108,7 +108,7 @@ def test_auto_on_a_fresh_home_is_native_with_a_note(no_comfy):
 
 
 @pytest.mark.parametrize("cfg", [
-    {"comfy_target": "user"},
+    {"comfy_target": "user", "comfy_api_url": "http://127.0.0.1:8190"},
     {"comfy_api_url": "http://127.0.0.1:8188"},
     {"plugins": {"music": {"comfy": {"workdir": "D:/path/to/ComfyUI"}}}},
 ])
@@ -224,7 +224,11 @@ def test_instrumental_and_a_random_seed_when_none_is_given(tmp_path, fake_genera
 @pytest.mark.parametrize("kwargs,match", [
     ({"model_overrides": {"1": {"ckpt_name": "a"}}}, "Workflow model choices apply to ComfyUI"),
     ({"sampler_name": "euler"}, "sampler setting applies to the ComfyUI workflow"),
-    ({"scheduler": "karras", "lyrics_strength": 1.2}, "scheduler, lyrics strength"),
+    ({"scheduler": "karras", "lyrics_strength": 1.2},
+     "The scheduler and lyrics strength settings apply to the ComfyUI workflow only; "
+     "leave them unset"),
+    ({"sampler_name": "euler", "scheduler": "karras", "lyrics_strength": 1.2},
+     "The sampler, scheduler and lyrics strength settings apply"),
 ])
 def test_comfyui_only_inputs_are_refused_before_any_work(tmp_path, fake_generate, kwargs,
                                                         match):

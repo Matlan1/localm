@@ -184,6 +184,8 @@ def test_flagging_is_idempotent_across_runs(base, docs):
     assert len(first["missing"]) == 1
     assert second["missing"] == []          # already flagged, not re-reported
     assert second["missing_total"] == 1     # but still honestly counted
+    assert first["still_missing"] == []
+    assert second["still_missing"] == first["missing"]
 
 
 def test_a_returning_file_clears_its_missing_flag(base, docs):

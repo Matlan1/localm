@@ -500,6 +500,19 @@ def _family_label(family: Optional[str]) -> str:
             or str(family))
 
 
+def _lora_by_name(loras: dict, want: str, entry_path) -> Optional[dict]:
+    """The entry of *loras* (registry name -> entry) named *want*, by registry
+    name, else by file name (read with *entry_path*) with or without
+    ``.safetensors``; None for none."""
+    entry = loras.get(want)
+    if entry is not None:
+        return entry
+    low = want.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return next((e for e in loras.values()
+                 if str(entry_path(e) or "").replace("\\", "/").rsplit("/", 1)[-1]
+                 .lower() in (low, low + ".safetensors")), None)
+
+
 def resolve_loras(entries: list, family: Optional[str],
                   reg: Optional[dict] = None) -> tuple[list, list]:
     """``(loras, notes)`` for *entries* (``[{"name", "strength"}]``): each
@@ -515,21 +528,22 @@ def resolve_loras(entries: list, family: Optional[str],
     from localm.model_manager.registry import _entry_path
     from localm.pathsafe import is_unc_or_device_path
     reg = load_registry() if reg is None else reg
-    loras = {n: e for n, e in reg.items() if isinstance(e, dict)
-             and e.get("model_type") == "lora" and not is_gguf_adapter_entry(e)}
+    every = {n: e for n, e in reg.items() if isinstance(e, dict)
+             and e.get("model_type") == "lora"}
+    loras = {n: e for n, e in every.items() if not is_gguf_adapter_entry(e)}
     out, notes = [], []
     for item in entries:
         want = str(item.get("name") or "").strip()
         if not want:
             continue
-        entry = loras.get(want)
-        if entry is None:
-            low = want.replace("\\", "/").rsplit("/", 1)[-1].lower()
-            entry = next((e for e in loras.values()
-                          if str(_entry_path(e) or "").replace("\\", "/").rsplit("/", 1)[-1]
-                          .lower() in (low, low + ".safetensors")), None)
+        entry = _lora_by_name(loras, want, _entry_path)
         raw = _entry_path(entry) if entry else None
         if not raw:
+            if _lora_by_name(every, want, _entry_path) is not None:
+                raise ModelFileError(
+                    f"The LoRA '{want}' is a chat-model adapter (a GGUF LoRA), which "
+                    "image and video models cannot use. Add an image or video LoRA "
+                    "(.safetensors) on the Models page (type LoRA).")
             raise ModelFileError(f"The LoRA '{want}' is not a registered LoRA. Add it on the "
                                  "Models page (type LoRA) first.")
         if is_unc_or_device_path(raw):

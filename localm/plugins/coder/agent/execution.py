@@ -29,7 +29,7 @@ from ..diffutil import (
     compute_multifile_diff,
     read_old_content_checked, resolve_new_content,
 )
-from ..confirm import invoke_confirm
+from ..confirm import consume_unanswered, invoke_confirm
 from .. import data_guard, shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
@@ -56,6 +56,22 @@ from .scope import _scope_pattern
 _SESSION_ALLOWED_LOCK = threading.Lock()
 _CALL_CONTEXT = threading.local()
 _CALL_SEQUENCE = itertools.count(1)
+
+
+# The most characters of a tool's output a tool_result event carries.
+_EVENT_OUTPUT_MAX = 4000
+
+
+def _event_output(text: str) -> str:
+    """*text* for a tool_result event: whole when it fits, else its head and
+    its tail (where truncation notes and read_output ids are) with a line
+    naming what was left out."""
+    if len(text) <= _EVENT_OUTPUT_MAX:
+        return text
+    tail = _EVENT_OUTPUT_MAX // 4
+    head = _EVENT_OUTPUT_MAX - tail
+    return (text[:head] + f"\n[... {len(text) - head - tail} characters not shown here ...]\n"
+            + text[-tail:])
 
 
 def current_call_id() -> Optional[str]:
@@ -484,6 +500,8 @@ class _ExecutionMixin:
                 f"'{call.name}' is disabled for this session and was not run.")
             if interactive:
                 print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: disabled for this session")
             return result
 
         # Second hard gate: a skill loaded with use_skill restricts this turn to
@@ -632,7 +650,7 @@ class _ExecutionMixin:
             # _patch_mode_intercept does the diffing work, so the elapsed time is
             # a fact about this call.
             self._emit("tool_result", tool=call.name, ok=result.ok,
-                       summary=result.summary, output=result.output[:4000],
+                       summary=result.summary, output=_event_output(result.output),
                        duration_s=duration_s)
             return result
 
@@ -881,10 +899,15 @@ class _ExecutionMixin:
                 return result
             if not approved:
                 reject_reason = consume_reject_reason()
-                err_msg = (
-                    f"Rejected by user: {reject_reason}"
-                    if reject_reason else "Rejected by user."
-                )
+                if consume_unanswered():
+                    err_msg = (
+                        f"{call.name} was not run: nobody answered the approval "
+                        "request before it timed out. The user did not refuse "
+                        "it; do not report that they did.")
+                elif reject_reason:
+                    err_msg = f"Rejected by user: {reject_reason}"
+                else:
+                    err_msg = "Rejected by user."
                 result = ToolResult.error(err_msg)
                 if interactive:
                     print_tool_result(call.name, result, verbose=False)
@@ -1012,7 +1035,7 @@ class _ExecutionMixin:
                 elapsed=duration_s, args=call.args,
             )
         self._emit("tool_result", tool=call.name, ok=result.ok,
-                   summary=result.summary, output=result.output[:4000],
+                   summary=result.summary, output=_event_output(result.output),
                    duration_s=duration_s)
 
         # Incremental map refresh after file-mutating tools
@@ -1147,7 +1170,11 @@ class _ExecutionMixin:
                 else:
                     approved = self._confirm_tool(call)
             consume_confirm_always()
-            return None if approved else "the user declined to run it"
+            if approved:
+                return None
+            if consume_unanswered():
+                return "nobody answered the approval request before it timed out"
+            return "the user declined to run it"
         return _permit
 
     def _verify_refusal(self, label: str, interactive: bool) -> Optional[str]:

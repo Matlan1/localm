@@ -98,14 +98,13 @@ def test_vectors_clear_the_low_coverage_degrade(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _write_unreadable_namespace(root: Path, agent: str = "chat") -> Path:
-    """A namespace file whose bytes are not valid UTF-8, so MemoryStore._load's
-    ``self._file.read_text(encoding="utf-8")`` raises UnicodeDecodeError before
-    the per-line tolerant JSON parsing (which only guards json.loads) ever
-    runs."""
+    """A namespace file stamped with a format version newer than this build reads,
+    so MemoryStore._load raises StoreFormatTooNew: the store refuses it rather
+    than carrying the line (a line it merely cannot parse is carried)."""
     ns_dir = root / agent
     ns_dir.mkdir(parents=True, exist_ok=True)
     bad_path = ns_dir / ("0" * 16 + ".jsonl")
-    bad_path.write_bytes(b'{"id":"a"}\n\xff\xfe not utf-8\n')
+    bad_path.write_bytes(b'{"v": 99999, "id": "a", "text": "from a newer localm"}\n')
     return bad_path
 
 
@@ -116,7 +115,8 @@ def test_unreadable_namespace_fault_actually_fires(tmp_path):
     with the bug fully in place."""
     root = tmp_path / "memory"
     bad_path = _write_unreadable_namespace(root)
-    with pytest.raises(UnicodeDecodeError):
+    from localm.storeformat import StoreFormatTooNew
+    with pytest.raises(StoreFormatTooNew):
         MemoryStore.open_file(bad_path)
 
 

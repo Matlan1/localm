@@ -7,6 +7,7 @@ model, so it cannot declare premature success."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import localm.plugins.coder.cli as _cli
 from ..agent import Agent
@@ -38,9 +39,13 @@ def _goal_task_wrap(task: str, until_cmd: str) -> str:
 
 
 def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
-                   work_dir: Path, attachments: str = "") -> tuple[bool, str]:
+                   work_dir: Path, attachments: str = "",
+                   interactive: bool = False) -> tuple[bool, str]:
     """Iterate: run the task, run the verify command, feed failures back, until it
     exits 0 or the iteration cap is hit. Returns (success, last_response).
+
+    *interactive* (the REPL's /goal) runs each iteration as a terminal turn:
+    tool calls are shown and a call that needs confirmation is asked.
 
     Success is judged solely by the command's exit code, so the model cannot
     declare a premature success; on exhaustion it reports failure honestly rather
@@ -52,11 +57,13 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
         f"Goal mode: iterating on the task until `{until_cmd}` exits 0 "
         f"(max {max_iters} iteration(s)).")
     agent._note_typed_request(task)
+    mode: dict[str, Any] = {"interactive": True} if interactive else {}
     if attachments:
         response = agent.run_task(_goal_task_wrap(task, until_cmd),
-                                  attachments=attachments, record_request=False)
+                                  attachments=attachments, record_request=False, **mode)
     else:
-        response = agent.run_task(_goal_task_wrap(task, until_cmd), record_request=False)
+        response = agent.run_task(_goal_task_wrap(task, until_cmd), record_request=False,
+                                  **mode)
     for attempt in range(1, max_iters + 1):
         outcome = _run_verify(until_cmd, work_dir)
         code, output = outcome
@@ -92,5 +99,5 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
         print_warning(
             f"Verification failed (exit {code}); fixing and retrying "
             f"({attempt}/{max_iters})...")
-        response = agent.continue_task(_goal_feedback(until_cmd, code, output))
+        response = agent.continue_task(_goal_feedback(until_cmd, code, output), **mode)
     return False, response

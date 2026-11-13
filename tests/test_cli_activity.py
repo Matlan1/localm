@@ -163,14 +163,14 @@ def test_no_failure_path_ever_claims_nothing_is_running(monkeypatch, capsys,
     _patch(monkeypatch, resp=resp, exc=exc)
     _print_activity("http", 1234)
     out = _out(capsys).lower()
-    assert "nothing running" not in out, f"{kind} printed an idle claim: {out!r}"
+    assert "no background operation running" not in out, f"{kind} printed an idle claim: {out!r}"
     assert out.strip(), f"{kind} printed nothing at all"
 
 
 def test_the_idle_case_says_so_plainly(monkeypatch, capsys):
     _patch(monkeypatch, resp=_Resp(200, {"now": 1.0, "operations": []}))
     _print_activity("http", 1234)
-    assert "nothing running" in _out(capsys).lower()
+    assert "no background operation running" in _out(capsys).lower()
 
 
 def test_a_running_operation_is_listed_with_its_label(monkeypatch, capsys):

@@ -124,7 +124,8 @@ class TestQuarantineRedactsTheDigest:
         if os.name == "nt":
             out = subprocess.run(["icacls", str(b)], capture_output=True,
                                  text=True, check=False).stdout
-            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+            from tests._win_acl import token_user_name
+            user = token_user_name()
             assert f"{user}:(F)" in out, out
             assert "BUILTIN\\Users" not in out, out
         else:

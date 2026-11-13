@@ -1129,3 +1129,16 @@ def test_clip_text_matches_clip_lowercasing(family):
 @pytest.mark.parametrize("family", ["flux", "sd3", "wan2.1", "qwen-image", None])
 def test_clip_text_leaves_case_sensitive_encoders_alone(family):
     assert families.clip_text("Ein großer ÖLBAUM", family) == "Ein großer ÖLBAUM"
+
+
+def test_a_chat_model_gguf_lora_is_named_as_such_not_as_unregistered(tmp_path):
+    adapter = tmp_path / "smollm2-behaviortree-lora-f16.gguf"
+    adapter.write_bytes(b"GGUF")
+    reg = {"behaviortree-lora": {"path": str(adapter), "model_type": "lora"}}
+    for name in ("behaviortree-lora", "smollm2-behaviortree-lora-f16.gguf"):
+        with pytest.raises(ModelFileError) as info:
+            pairing.resolve_loras([{"name": name}], "flux", reg)
+        assert "is a chat-model adapter (a GGUF LoRA)" in str(info.value)
+        assert "not a registered LoRA" not in str(info.value)
+    with pytest.raises(ModelFileError, match="not a registered LoRA"):
+        pairing.resolve_loras([{"name": "something-else"}], "flux", reg)

@@ -63,6 +63,8 @@ _GUI_ROUTES = {
     ('api', 'POST', '/api/instances/{instance_id}/stop'): ('scope:admin',),
     ('api', 'GET', '/api/live'): ('auth',),
     ('api', 'POST', '/api/logs/export'): ('scope:config:write', 'fs_host'),
+    ('api', 'GET', '/api/media/runtimes'): ('scope:models:read',),
+    ('api', 'POST', '/api/media/runtimes/unload'): ('scope:models:write',),
     ('api', 'POST', '/api/media/{kind}/preflight'): ('scope:models:write',),
     ('api', 'GET', '/api/models'): ('scope:models:read',),
     ('api', 'POST', '/api/models/adapters/attach'): ('scope:models:write',),

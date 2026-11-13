@@ -4047,7 +4047,7 @@ class TestDiscoverEndpoints:
         app, _ = gui_app
 
         def blocked(q, limit=20, formats=("gguf",), model_types=None):
-            raise DiscoverError("Network access is disabled (net_mode=off).")
+            raise DiscoverError("Network access is disabled (net_mode=off).", off=True)
         monkeypatch.setattr("localm.discover.hf_search", blocked)
         with TestClient(app) as client:
             r = client.get("/api/discover/search?q=x")
@@ -4058,7 +4058,7 @@ class TestDiscoverEndpoints:
         app, _ = gui_app
 
         def down(repo):
-            raise DiscoverError("HuggingFace request failed: timeout")
+            raise DiscoverError("HuggingFace request failed: timeout") from TimeoutError("timeout")
         monkeypatch.setattr("localm.discover.hf_gguf_files", down)
         with TestClient(app) as client:
             assert client.get("/api/discover/files?repo=a/b").status_code == 502
@@ -4152,7 +4152,7 @@ class TestDiscoverEndpoints:
         from localm.model_manager.sources import CivitAIError
 
         def down(q, limit=20, types=None, nsfw=False, api_key=None):
-            raise CivitAIError("CivitAI request failed: timeout")
+            raise CivitAIError("CivitAI request failed: timeout") from TimeoutError("timeout")
         app, _ = gui_app
         monkeypatch.setattr("localm.model_manager.sources.civitai_search", down)
         with TestClient(app) as client:

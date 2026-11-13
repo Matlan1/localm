@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
-import { $, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, refuseWithoutModel, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
@@ -61,7 +61,7 @@ export async function runImagineInChat(promptText) {
       return;
     }
     const r = await fetch("/api/imagine", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();
@@ -89,7 +89,6 @@ export async function runImagineInChat(promptText) {
     }
   } catch (e) {
     body.textContent = t("slash.imageFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
@@ -159,7 +158,7 @@ export async function runMusicInChat(tags) {
       return;
     }
     const r = await fetch("/api/music", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ tags }),
     });
     const data = await r.json();
@@ -184,7 +183,6 @@ export async function runMusicInChat(tags) {
     }
   } catch (e) {
     body.textContent = t("slash.musicFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
@@ -206,7 +204,7 @@ export async function runVideoInChat(promptText) {
       return;
     }
     const r = await fetch("/api/video", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();
@@ -231,15 +229,24 @@ export async function runVideoInChat(promptText) {
     }
   } catch (e) {
     body.textContent = t("slash.videoFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
+/** Other names a chat command answers to, mapped to its CHAT_COMMANDS name. */
+export const CHAT_ALIASES = { imagine: "generate-image", music: "generate-music", video: "generate-video" };
+
+/** Run chat command *cmd* with *arg*. Returns false for a name that is not a
+ *  chat command. While a reply streams every command is refused with the
+ *  "wait for the current reply" toast, whether it was typed and sent or picked
+ *  from the slash menu. */
 export function execChatCommand(cmd, arg) {
+  cmd = CHAT_ALIASES[cmd] || cmd;
+  if (!CHAT_COMMANDS.some((c) => c.cmd === cmd)) return false;
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return true; }
   switch (cmd) {
-    case "generate-image": case "imagine": runImagineInChat(arg); return true;
-    case "generate-music": case "music": runMusicInChat(arg); return true;
-    case "generate-video": case "video": runVideoInChat(arg); return true;
+    case "generate-image": runImagineInChat(arg); return true;
+    case "generate-music": runMusicInChat(arg); return true;
+    case "generate-video": runVideoInChat(arg); return true;
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
@@ -254,9 +261,12 @@ export function execChatCommand(cmd, arg) {
     case "compact": $("compact-conv").onclick(); return true;
     case "export": exportConversation(); return true;
     case "rename": {
+      if (!arg) { toast(t("slash.usage.rename"), true); return true; }
+      if (!currentConv()) newConversation();
       const conv = currentConv();
-      if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
-      else toast(t("slash.usage.rename"), true);
+      conv.title = arg;
+      saveConversations(conv);
+      renderConvList();
       return true;
     }
     case "remember": rememberFact(arg); return true;
@@ -400,13 +410,15 @@ export function attachSlashMenu(textarea, commands, execute) {
   });
 }
 
-/** Intercept "/cmd arg" on submit. Returns true when handled (not for the model). */
+/** Intercept "/cmd arg" on submit. Returns true when handled (not for the model).
+ *  The "needs the X plugin" hint is given only to the chat composer
+ *  (*execute* is execChatCommand), for the command an alias stands for. */
 export function handleSlashSubmit(text, execute) {
   if (!text.startsWith("/")) return false;
   const space = text.indexOf(" ");
   const cmd = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
   const arg = space === -1 ? "" : text.slice(space + 1).trim();
-  const hint = pluginSuggestion(cmd);   // known plugin, just not active yet
+  const hint = execute === execChatCommand ? pluginSuggestion(CHAT_ALIASES[cmd] || cmd) : null;
   if (hint) { toast(hint, true); return true; }
   if (!execute(cmd, arg)) {
     toast(t("slash.unknownCommand", { cmd }), true);

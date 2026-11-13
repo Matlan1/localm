@@ -24,6 +24,7 @@ connection is not caught.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Iterable, Optional
 
 from localm import netpolicy
@@ -44,6 +45,36 @@ WEBSOCKET_SCHEMES = {"ws": "http", "wss": "https"}
 def _scheme_of(url: str) -> str:
     head, sep, _ = url.partition(":")
     return head.lower() if sep else ""
+
+
+#: Every scheme :func:`decide` knows by name.
+_KNOWN_SCHEMES = INERT_SCHEMES | NETWORK_SCHEMES | frozenset(WEBSOCKET_SCHEMES)
+
+#: A port right after the first colon: "host:8080", "host:8080/path".
+_PORT_START_RE = re.compile(r"\d+(?:[/?#]|$)")
+
+#: An IPv4 literal in 127.0.0.0/8.
+_IPV4_LOOPBACK_RE = re.compile(r"127(?:\.\d{1,3}){3}")
+
+
+def with_default_scheme(url: str) -> str:
+    """*url* with ``https://`` in front when it carries no scheme, as a browser
+    address bar reads ``example.com``; a loopback host (``localhost:8080``,
+    ``127.0.0.1``, ``[::1]``) gets ``http://``. Anything with a scheme is
+    returned unchanged and meets the gate as written: a URL with ``://``, and
+    any ``name:`` that is not a host followed by a port (``mailto:``,
+    ``javascript:``, ``C:\\``, ``file:``)."""
+    text = (url or "").strip()
+    if not text or "://" in text or text.startswith("["):
+        if text.startswith("[::1]"):
+            return "http://" + text
+        return text
+    _head, sep, rest = text.partition(":")
+    if sep and (_scheme_of(text) in _KNOWN_SCHEMES or not _PORT_START_RE.match(rest)):
+        return text
+    host = re.split(r"[:/?#]", text.lower(), maxsplit=1)[0]
+    loopback = host == "localhost" or _IPV4_LOOPBACK_RE.fullmatch(host) is not None
+    return ("http://" if loopback else "https://") + text
 
 
 def _policy_url(url: str, scheme: str) -> str:

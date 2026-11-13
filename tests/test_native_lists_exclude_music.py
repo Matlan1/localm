@@ -119,10 +119,11 @@ def test_every_music_entry_is_classified_as_music_by_the_one_classifier(reg):
     assert {n for n, e in reg.items() if families.music_entry(e) is not None} == MUSIC
 
 
-def test_the_music_list_names_the_v1_files_it_cannot_run(reg):
-    out = native_models.unsupported_music(reg)
-    assert [u["name"] for u in out] == ["ace_step_transformer", "ace_step_v1_3.5b.safetensors"]
-    assert all(u["reason"] == native_models.ACESTEP_V1_REASON for u in out)
+def test_the_music_list_names_the_safetensors_files_it_cannot_run(reg):
+    out = {u["name"]: u["reason"] for u in native_models.unsupported_music(reg)}
+    assert out == {"ace_step_transformer": native_models.ACESTEP_V1_REASON,
+                   "ace_step_v1_3.5b.safetensors": native_models.ACESTEP_V1_REASON,
+                   "acestep-v15-dit-safetensors": native_models.ACESTEP_15_SAFETENSORS_REASON}
 
 
 def test_the_image_route_excludes_the_music_checkpoint(reg, monkeypatch):

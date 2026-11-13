@@ -129,7 +129,7 @@ def test_net_mode_off_refuses_before_any_connection(monkeypatch):
     monkeypatch.setattr(netpolicy, "pinned_request", no_network)
     monkeypatch.setattr(http_ssl, "verified_urlopen", no_network)
     ran = []
-    with pytest.raises(runtime.DownloadError, match="network policy"):
+    with pytest.raises(runtime.DownloadError, match="Network access is off"):
         runtime.install("nocuda", unpack=_fake_unpack(ran), version_of=_version)
     assert calls == [] and ran == []
     assert not runtime.runtime_dir("nocuda").exists()
