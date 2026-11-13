@@ -193,6 +193,9 @@ def rag_repair(collection, embed, url, yes):
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {escape(collection)}")
+        sys.exit(1)
     paths = coll.documents()
     if not paths:
         if coll.corrupt:
@@ -231,6 +234,15 @@ def rag_repair(collection, embed, url, yes):
             console.print(f"[yellow]skipping {escape(p)}: {escape(reason)}[/yellow]")
         else:
             paths.append(p)
+    from pathlib import Path as _Path
+    gone = [p for p in paths if not _Path(p).is_file()]
+    if gone:
+        console.print(f"[yellow]{len(gone)} source file(s) no longer exist and are "
+                      "not re-indexed (they stay in the index; 'localm rag resync "
+                      f"{escape(collection)} --prune-missing' removes them):[/yellow]")
+        for p in gone[:10]:
+            console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
+        paths = [p for p in paths if p not in gone]
     if not paths:
         console.print(f"[yellow]'{escape(collection)}' has no document source that "
                       "may be re-indexed.[/yellow]")
@@ -268,6 +280,15 @@ def rag_repair(collection, embed, url, yes):
             if not proceed:
                 raise click.Abort()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
+    if embed_fn is not None:
+        why = _embedder_unreachable(embed_fn)
+        if why:
+            console.print(
+                f"[red]No embeddings can be computed ({escape(why)}), so the repair "
+                "would leave every re-indexed document lexical-only; nothing was "
+                "changed.[/red] Start a server (localm serve or localm gui) or pass "
+                "--url, or pass --yes without --embed to repair lexical-only.")
+            sys.exit(1)
     # See `rag add`: record the model this repair actually re-embeds with.
     model_name = None
     if embed:
@@ -368,6 +389,13 @@ def rag_resync(collection, embed, url, prune_missing):
             f"to delete them from the index:[/yellow]")
         for p in result["missing"][:10]:
             console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
+    if result.get("still_missing"):
+        console.print(
+            f"[yellow]{len(result['still_missing'])} document(s) flagged earlier are "
+            f"still not on disk and still searchable - re-run with --prune-missing "
+            f"to delete them from the index:[/yellow]")
+        for p in result["still_missing"][:10]:
+            console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
     if result["pruned"]:
         console.print(f"[yellow]pruned {len(result['pruned'])} entr"
                       f"{'y' if len(result['pruned']) == 1 else 'ies'} (file gone "
@@ -443,6 +471,18 @@ def rag_reembed(collection, url, yes):
         f"{res['dim']} dimensions with {escape(model)}.")
 
 
+def _embedder_unreachable(embed_fn) -> str:
+    """Embed one short text with *embed_fn*; "" when that worked, else a short
+    reason it did not."""
+    try:
+        vecs = embed_fn(["localm embedding check"])
+    except Exception as e:  # noqa: BLE001 - the reason is returned to the caller
+        return f"{type(e).__name__}: {e}"[:200]
+    if not vecs or not vecs[0]:
+        return "the server returned no embedding"
+    return ""
+
+
 def _cli_rag_embed_fn(url):
     """Build a query embedder that calls a running localm server's
     /v1/embeddings (for `rag query --embed`).
@@ -499,7 +539,8 @@ def _cli_rag_embed_fn(url):
 @rag_group.command("query")
 @click.argument("collection")
 @click.argument("text")
-@click.option("-k", default=4, show_default=True, help="Number of results.")
+@click.option("-k", default=4, show_default=True, type=click.IntRange(min=1),
+              help="Number of results (1 or more).")
 @click.option("--embed", is_flag=True,
               help="Embed the query via a running localm server for hybrid "
                    "(vector+lexical) retrieval, matching the GUI. Degrades to "
