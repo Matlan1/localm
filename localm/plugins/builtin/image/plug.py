@@ -55,11 +55,12 @@ from localm.media.native_models import (
     check_generation_extras, check_image_inputs, check_request, validate_addons,
     validate_upscaler,
 )
-from localm.plugins.media_config import media_session_is_private
+from localm.plugins.media_config import media_session_is_private, range_refusal
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
+from localm.settings_schema import NATIVE_STEPS_MAX
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
@@ -73,7 +74,7 @@ class ImagineRequest(BaseModel):
     guidance: float | None = Field(None, allow_inf_nan=False)
     cfg: float | None = Field(None, allow_inf_nan=False)          # negative-prompt CFG scale; no effect without one
     input_image: str | None = None    # path on this machine (img2img)
-    denoise: float | None = Field(None, ge=0.0, le=1.0, allow_inf_nan=False)
+    denoise: float | None = Field(None, allow_inf_nan=False)
     steps: int | None = None                  # native backend only; None keeps the model default
     clip_skip: int | None = None              # native backend only; None keeps the model default
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
@@ -125,12 +126,16 @@ def _image_path(name: str) -> Path:
     return confined_file(_images_dir(), name, "image")
 
 
-MAX_STEPS = 200
+MAX_STEPS = NATIVE_STEPS_MAX
 MAX_CLIP_SKIP = 12
 
 
 def _validate_sampling(req: ImagineRequest) -> None:
-    """A 400 for steps or clip skip outside ``1..MAX_STEPS`` / ``1..MAX_CLIP_SKIP``."""
+    """A 422 for a denoise outside its ``media_config.REQUEST_RANGES`` range, a 400
+    for steps or clip skip outside ``1..MAX_STEPS`` / ``1..MAX_CLIP_SKIP``."""
+    refused = range_refusal(denoise=req.denoise)
+    if refused:
+        raise HTTPException(422, refused)
     if req.steps is not None and not (1 <= req.steps <= MAX_STEPS):
         raise HTTPException(400, f"Steps must be between 1 and {MAX_STEPS}")
     if req.clip_skip is not None and not (1 <= req.clip_skip <= MAX_CLIP_SKIP):

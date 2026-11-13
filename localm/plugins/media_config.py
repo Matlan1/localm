@@ -375,6 +375,39 @@ def media_session_is_private() -> bool:
     return request_is_privacy() or not automatic_write_allowed("server")
 
 
+#: The generation arguments with a fixed range, by argument name:
+#: ``(lowest, highest, refusal text)``. ``denoise`` is the image-to-image
+#: strength, ``duration_seconds`` a music track's length, ``seconds`` a video
+#: clip's length.
+REQUEST_RANGES = {
+    "denoise": (0.0, 1.0, "Denoise must be between 0 and 1"),
+    "duration_seconds": (1.0, 3600.0, "Duration must be between 1 and 3600 seconds"),
+    "seconds": (1.0, 20.0, "Duration must be between 1 and 20 seconds"),
+}
+
+
+def range_refusal(**kwargs) -> Optional[str]:
+    """The refusal text of the first argument in *kwargs* named in
+    :data:`REQUEST_RANGES` whose value is not a finite number inside its range,
+    or None when every such argument is None or in range. A number written as
+    text is read as that number; a bool or any other value is out of range.
+    Other arguments are ignored. Never raises."""
+    import math
+    for name, (low, high, text) in REQUEST_RANGES.items():
+        value = kwargs.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return text
+        try:
+            number = float(value)
+        except ValueError:
+            return text
+        if not math.isfinite(number) or not low <= number <= high:
+            return text
+    return None
+
+
 def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
                    on_progress=None, before_generate=None,
                    **kwargs) -> tuple[bool, str, Path]:
@@ -389,8 +422,9 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
     (``prepare_for_job``). Returns ``(ok, message, path)`` where *path* is
     *out_path* with the backend's ``OUTPUT_SUFFIX`` when it declares one.
     *on_progress* receives every status line and is handed to the backend as
-    given (not passed when None). A backend that cannot honour the
-    request, or is given ``steps`` / ``clip_skip`` without the matching
+    given (not passed when None). An argument outside its
+    :data:`REQUEST_RANGES` range (:func:`range_refusal`), a backend that cannot
+    honour the request, or ``steps`` / ``clip_skip`` given without the matching
     capability, returns ``(False, <reason>, path)`` before anything is loaded."""
 
     def say(text: str) -> None:
@@ -403,6 +437,9 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
             say(note)
     impl = backend._impl(s)
     path = out_path.with_suffix(getattr(impl, "OUTPUT_SUFFIX", out_path.suffix))
+    out_of_range = range_refusal(**kwargs)
+    if out_of_range:
+        return False, out_of_range, path
     unsupported = [name for name, capability in (("steps", "SUPPORTS_STEPS"),
                                                  ("clip_skip", "SUPPORTS_CLIP_SKIP"))
                    if kwargs.get(name) is not None
