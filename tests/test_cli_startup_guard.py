@@ -76,7 +76,8 @@ def update_calls(monkeypatch):
 
 
 @pytest.mark.parametrize("argv", [
-    ["serve", "-h"], ["gui", "--help"], ["doctor", "-h"], ["image", "-h"], ["rag", "add", "-h"],
+    ["serve", "-h"], ["gui", "--help"], ["run", "-h"], ["doctor", "-h"], ["image", "-h"],
+    ["rag", "add", "-h"],
 ], ids=lambda a: " ".join(a))
 def test_a_help_request_runs_no_pending_update(update_calls, argv):
     from localm.cli import main
@@ -84,6 +85,35 @@ def test_a_help_request_runs_no_pending_update(update_calls, argv):
     assert result.exit_code == 0, result.output
     assert "Usage:" in result.output
     assert update_calls == []
+
+
+@pytest.mark.parametrize("path", [["run"], ["rag", "add"], ["key", "list"]], ids=" ".join)
+def test_h_is_help_whether_the_command_was_first_invoked_on_its_own_or_through_localm(path):
+    from localm.cli import main
+    cmd = main
+    for name in path:
+        cmd = cmd.commands[name]
+    CliRunner().invoke(cmd, ["-h"])
+    for argv in (["-h"], ["--help"]):
+        alone = CliRunner().invoke(cmd, argv)
+        assert alone.exit_code == 0 and "Usage:" in alone.output, alone.output
+    through = CliRunner().invoke(main, [*path, "-h"])
+    assert through.exit_code == 0, through.output
+    assert "No such option" not in through.output
+
+
+def test_every_localm_command_names_h_as_help():
+    from localm.cli import main
+    from localm.cli._core import HELP_OPTION_NAMES
+
+    def walk(cmd, path):
+        yield path, cmd
+        for name, sub in getattr(cmd, "commands", {}).items():
+            yield from walk(sub, f"{path} {name}")
+
+    missing = [p for p, c in walk(main, "localm")
+               if c.context_settings.get("help_option_names") != HELP_OPTION_NAMES]
+    assert missing == []
 
 
 def test_a_command_still_runs_the_pending_update_first(update_calls):

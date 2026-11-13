@@ -41,6 +41,7 @@ from ._core import (  # noqa: F401
     main, console_main, console, _GracefulGroup, _read_version_for_cli,
     _bind_preflight_error, _exposed_bind_warning, _resolve_bind_host,
     _resolve_tls, _setup_tls_or_exit, _complete_model_name,
+    _own_help_names,
 )
 
 # Command submodules imported for their import-time side effect: registering
@@ -61,6 +62,9 @@ from . import (  # noqa: F401
     rerank as _rerank,
     speak as _speak,
 )
+
+# Commands added to groups after their registration get the help options too.
+_own_help_names(main)
 
 # Re-export the names tests (and other callers) import directly from localm.cli.
 run = _chat.run

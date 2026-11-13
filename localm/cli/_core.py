@@ -272,6 +272,15 @@ def _stdout_is_a_pipe() -> bool:
 
 
 HELP_REQUESTED = "localm.help_requested"
+HELP_OPTION_NAMES = ["-h", "--help"]
+
+
+def _own_help_names(cmd: click.Command) -> None:
+    """Give *cmd* and every command nested in it ``HELP_OPTION_NAMES`` unless
+    it names its own help options."""
+    cmd.context_settings.setdefault("help_option_names", list(HELP_OPTION_NAMES))
+    for sub in getattr(cmd, "commands", {}).values():
+        _own_help_names(sub)
 
 
 class _GracefulGroup(click.Group):
@@ -286,6 +295,14 @@ class _GracefulGroup(click.Group):
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
+
+    def add_command(self, cmd, name=None) -> None:
+        """Register *cmd* with ``-h`` and ``--help`` as its own help options,
+        and those of every command inside it, so its help option is the same
+        whether it is first invoked through this group or on its own (Click
+        builds a command's help option once, from the first context)."""
+        _own_help_names(cmd)
+        super().add_command(cmd, name)
 
     def resolve_command(self, ctx, args):
         """Resolve the subcommand and record in ``ctx.meta[HELP_REQUESTED]``
@@ -512,7 +529,7 @@ def _read_version_for_cli() -> str:
 
 
 
-@click.group(cls=_GracefulGroup, context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(cls=_GracefulGroup, context_settings={"help_option_names": HELP_OPTION_NAMES})
 @click.version_option(_read_version_for_cli(), prog_name="localm")
 def main() -> None:
     """Run local LLMs offline - HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
