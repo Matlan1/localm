@@ -31,14 +31,21 @@ def test_cli_verbs_are_not_chat_commands():
 
 
 def _gui_chat_commands() -> set:
-    """The commands the GUI chat composer handles (execChatCommand's cases)."""
+    """The commands the GUI chat composer handles: execChatCommand's cases and the
+    CHAT_ALIASES it maps onto one of them."""
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "static"
            / "app" / "slash.js").read_text(encoding="utf-8")
     body = src[src.index("export function execChatCommand"):]
     body = body[:body.index("\n}\n")]
-    return set(re.findall(r'case "([a-z-]+)"', body))
+    handled = set(re.findall(r'case "([a-z-]+)"', body))
+    aliases = re.search(r"export const CHAT_ALIASES = \{([^}]*)\}", src)
+    if aliases and "CHAT_ALIASES[cmd]" in body:
+        for alias, target in re.findall(r'([a-z-]+):\s*"([a-z-]+)"', aliases.group(1)):
+            if target in handled:
+                handled.add(alias)
+    return handled
 
 
 def test_every_catalog_command_is_a_command_the_chat_composer_handles():
