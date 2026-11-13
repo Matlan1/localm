@@ -6,9 +6,9 @@ A memory row is a durable, session-derived trace, so EVERY write to it (add,
 update, delete, reinforcement bump, consolidation, the legacy migration import)
 must be gated on the effective session mode, exactly like chat history and coder
 episodes. ``writes_allowed(surface)`` is the single decision point callers use
-before writing; reads/recall of memories from earlier non-privacy sessions stay
-allowed ("no new traces", not amnesia). A blocked write must surface a skip, never
-report success.
+before writing. Reads are not gated here: whether a privacy-mode chat recalls
+memories is decided by the memory plugin's ``memory_recall_in_privacy`` setting (off
+by default). A blocked write must surface a skip, never report success.
 
 The ``localm memory forget`` and ``clear`` commands remove stored data without
 consulting this gate, so they work in privacy mode; ``DELETE /api/memory/{id}``
