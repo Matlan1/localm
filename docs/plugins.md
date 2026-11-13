@@ -410,7 +410,7 @@ Scope and limits:
   nothing. The built-in chat plugin's two inlets (a style note asking the model
   to answer directly and to speak of itself as "I", and the `<think>` note for
   reasoning models) apply only to `chat`; an API caller's messages reach the
-  model unchanged. The `chat_style_note` setting (Settings > Chat) turns the
+  model unchanged. The `chat_style_note` setting (Settings > Model > Add the chat style note) turns the
   style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
