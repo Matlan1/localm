@@ -371,6 +371,7 @@ export function register(ctx) {
           ? (r.error || "(error, no detail)")
           : (r.output || "(no output)");
         item.appendChild(pre);
+        if (r.routing) item.appendChild(el("div", "job-meta sub job-routing", r.routing));
         body.appendChild(item);
       }
     } catch (e) {

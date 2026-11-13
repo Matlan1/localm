@@ -251,6 +251,28 @@ def carry_request_privacy(fn):
     return run
 
 
+def project_mode(cwd) -> Optional[SessionMode]:
+    """The mode the project's ``.localcoder/config.toml`` above *cwd* pins, or
+    None when it pins none. A project config that exists but cannot be read or
+    parsed, or a project directory that cannot be searched for one, resolves to
+    privacy."""
+    from localm.plugins.coder.project_config import (
+        ProjectConfigUnreadable,
+        load_project_config,
+    )
+    try:
+        pmode = load_project_config(Path(cwd)).get("mode")
+    except ProjectConfigUnreadable:
+        return SessionMode.PRIVACY
+    except Exception as e:
+        logger.warning("could not look for a project config under %s (%s); "
+                       "using privacy mode", cwd, e)
+        return SessionMode.PRIVACY
+    if isinstance(pmode, str) and pmode.strip().lower() in _VALID_MODES:
+        return SessionMode(pmode.strip().lower())
+    return None
+
+
 def effective_mode(surface: str, cwd=None) -> SessionMode:
     """
     Resolve the active session mode for *surface* ("chat" | "coder" | "server").
@@ -269,23 +291,9 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     # A project-local .localcoder/config.toml mode overrides the global
     # coder_mode; it applies only when the caller passes cwd.
     if surface == "coder" and cwd is not None:
-        try:
-            from localm.plugins.coder.project_config import (
-                ProjectConfigUnreadable,
-                load_project_config,
-            )
-            pmode = load_project_config(Path(cwd)).get("mode")
-            if isinstance(pmode, str) and pmode.strip().lower() in _VALID_MODES:
-                return SessionMode(pmode.strip().lower())
-        except ProjectConfigUnreadable:
-            # The project file did not parse, so its mode is unknown. Fail safe
-            # to privacy rather than write a transcript for a session that may
-            # have been marked private.
-            return SessionMode.PRIVACY
-        except Exception as e:
-            logger.warning("could not look for a project config under %s (%s); "
-                           "using privacy mode", cwd, e)
-            return SessionMode.PRIVACY
+        pinned = project_mode(cwd)
+        if pinned is not None:
+            return pinned
 
     try:
         from localm.config import load_config, load_config_checked

@@ -90,9 +90,13 @@ def server(monkeypatch):
     monkeypatch.setattr("localm.inference.http_engine.HttpEngine", engine_spy)
     monkeypatch.setattr("localm.audit.effective_mode",
                         lambda *a, **k: SessionMode.LOG)
-    monkeypatch.setattr(
-        "subprocess.Popen",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("server started")))
+    started = []
+
+    def _no_background_server(*a, **k):
+        started.append(a)
+        raise OSError("a background server was started")
+
+    monkeypatch.setattr("subprocess.Popen", _no_background_server)
 
     def make(active, loadable=(FIRST, SECOND)):
         srv = _Server(active, set(loadable))
@@ -104,6 +108,7 @@ def server(monkeypatch):
     yield make
     if "srv" in holder:
         holder["srv"].close()
+    assert started == [], "a background server was started"
 
 
 def _flat(output: str) -> str:
