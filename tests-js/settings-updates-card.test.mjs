@@ -137,9 +137,8 @@ test("the toggles save the same keys through the App update block's Save button"
   await drain();
 
   assert.equal(patches.length, 1, "exactly one PATCH was sent");
-  assert.deepEqual(patches[0],
-    { update_allow_prerelease: true, update_ignore_net_policy: false },
-    "both settings keys, and only those, reach the PATCH body");
+  assert.deepEqual(patches[0], { update_allow_prerelease: true },
+    "the changed settings key, and only it, reaches the PATCH body");
 });
 
 test("Ctrl+S from inside the merged card saves the toggles, never the pending app update", async () => {
