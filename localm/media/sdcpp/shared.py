@@ -125,7 +125,7 @@ def free(cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     try:
         cancel_idle_timer()
         runner.shutdown()
-        return not runner.is_alive()
+        return worker_pid() is None
     finally:
         lock.release()
 
@@ -139,7 +139,7 @@ def free_if_idle() -> Optional[bool]:
     try:
         cancel_idle_timer()
         runner.shutdown()
-        return not runner.is_alive()
+        return worker_pid() is None
     finally:
         lock.release()
 
@@ -150,6 +150,9 @@ def is_busy() -> bool:
 
 
 def worker_pid() -> Optional[int]:
-    """The live worker's process id, or None."""
+    """The live worker's process id; else the id of an earlier worker that kept
+    running after it was killed, while it runs; else None."""
     pid = runner.pid
-    return pid if pid is not None and runner.is_alive() else None
+    if pid is not None and runner.is_alive():
+        return pid
+    return runner.survivor_pid()
