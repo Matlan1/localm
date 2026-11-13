@@ -13,6 +13,7 @@ import json as _json
 from typing import Optional
 
 from localm.bugreport import LocalmError
+from localm.bugreport.transport import refuse_when_network_off
 
 
 def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
@@ -41,15 +42,19 @@ def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
                           reason=str(getattr(e, "reason", e))) from None
 
 
-def request(base: str, path: str, *, method: str = "GET", token: Optional[str] = None,
-            body=None, timeout: float = 15.0, opener=None):
+def request(base: str, path: str, *, net_exempt: bool, method: str = "GET",
+            token: Optional[str] = None, body=None, timeout: float = 15.0,
+            opener=None):
     """Call ``<base><path>`` on the proxy and return the parsed JSON dict.
 
-    Adds the ``X-Localm-Token`` shared-secret header when *token* is set. Raises
-    LocalmError on any non-2xx / transport / non-JSON result."""
+    Refuses before any connection when ``net_mode`` is ``off``, unless
+    *net_exempt* (required: every caller states whether the off switch applies
+    to it). Adds the ``X-Localm-Token`` shared-secret header when *token* is
+    set. Raises LocalmError on any non-2xx / transport / non-JSON result."""
     if not base:
         raise LocalmError("no proxy endpoint is configured",
                           reason="set the upload/update URL in config")
+    refuse_when_network_off("nothing was sent to the localm proxy", exempt=net_exempt)
     url = base.rstrip("/") + path
     headers = {"User-Agent": "localm"}
     if token:

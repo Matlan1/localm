@@ -138,7 +138,7 @@ def settings(full_config: dict) -> dict:
             full_config.get("reload_llm_after_imagine", True))),
         # Opt-in output containment: per-plugin "delete_outputs" wins, else the
         # global comfy_delete_outputs (default False = keep ComfyUI's own copy).
-        # Privacy mode forces deletion separately, in plug.py.
+        # The backend facade forces it on in privacy mode.
         "delete_outputs": bool(comfy_blk.get(
             "delete_outputs", full_config.get("comfy_delete_outputs", False))),
         "float_type": float_type,
@@ -252,9 +252,8 @@ def _comfy_generate(s: dict, tags: str, out_path: Path, *,
                     cancel_check=None,
                     delete_outputs: Optional[bool] = None,
                     **kwargs) -> tuple[bool, str]:
-    # delete_outputs lets the caller (plug.py) fold privacy mode into the
-    # configured value; default to the resolved per-plugin/global setting when
-    # the caller does not pass one, so a direct caller still honours the config.
+    # delete_outputs: the backend facade passes the configured value, or True
+    # in privacy mode; a direct call without it uses the configured value.
     if delete_outputs is None:
         delete_outputs = s.get("delete_outputs", False)
     # generate_music has no comfy_output_dir param; feed the per-plugin value

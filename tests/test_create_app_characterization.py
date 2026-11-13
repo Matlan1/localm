@@ -441,7 +441,8 @@ _MIDDLEWARE_STACK = (
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
-_INNERMOST = (("ClientLeftMiddleware", None), ("RequestPrivacyMiddleware", None))
+_INNERMOST = (("CredentialRecheckMiddleware", None), ("ClientLeftMiddleware", None),
+              ("RequestPrivacyMiddleware", None))
 
 
 def _middleware_stack(app) -> tuple:
