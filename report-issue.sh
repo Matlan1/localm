@@ -198,6 +198,7 @@ if [ -n "$url" ] && [ "$net_mode" = "unknown" ]; then
   echo "  localm's Network access setting could not be read: ${net_why}. Sending connects to the bug-report server."
   printf '  Send it anyway? [y/N]: '
   if ! IFS= read -r ans; then ans=""; echo ""; fi
+  ans="$(printf '%s' "$ans" | tr -d '\r[:space:]')"
   case "$ans" in
     [Yy]|[Yy][Ee][Ss]) ;;
     *) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;;

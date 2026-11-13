@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 from pathlib import Path
 
@@ -257,80 +256,63 @@ def test_powershell_ask_and_allow_send(tmp_path, recorder, mode):
     assert "Sent to the maintainer" in out
 
 
-def _sh_case(tmp_path, recorder, config_text, answers):
-    """Run report-issue.sh's curl fallback in a terminal (a pty) with no Python on
-    PATH, typing *answers*."""
-    import pty
-    import select
-
-    url, hits = recorder
+def _sh_case(tmp_path, config_text, answers):
+    """Run report-issue.sh's curl fallback (its terminal check dropped) with a fake
+    curl that records a call, typing *answers*."""
+    bash = shutil.which("bash")
+    if not bash or "system32" in bash.lower() or not shutil.which("perl"):
+        pytest.skip("no bash with perl on PATH")
+    text = (_REPO / "report-issue.sh").read_text(encoding="utf-8")
+    fallback = text[text.index("# --- No Python at all"):]
+    assert fallback.count("if [ ! -t 0 ]; then") == 1
+    fallback = fallback.replace("if [ ! -t 0 ]; then", "if false; then")
     work = tmp_path / "clone"
-    work.mkdir()
-    shutil.copy(_REPO / "report-issue.sh", work)
+    fake = work / "bin"
+    fake.mkdir(parents=True)
+    (work / "fallback.sh").write_text(fallback, encoding="utf-8", newline="\n")
+    sink = work / "curl_called"
+    (fake / "curl").write_text('#!/bin/sh\ntouch "' + sink.as_posix() + '"\necho 201\n',
+                               encoding="utf-8", newline="\n")
+    (fake / "curl").chmod(0o755)
     data = tmp_path / "data"
     data.mkdir()
     if config_text is not None:
         (data / "config.json").write_text(config_text, encoding="utf-8")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for tool in ("bash", "perl", "curl", "sed", "tr", "awk", "head", "uname", "cat",
-                 "dirname", "env"):
-        found = shutil.which(tool)
-        if not found:
-            pytest.skip(f"{tool} is not installed")
-        (bin_dir / tool).symlink_to(found)
-    env = _clean_env(tmp_path, url, data)
-    env["PATH"] = str(bin_dir)
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(work)
-        os.execve(str(bin_dir / "bash"), ["bash", "report-issue.sh"], env)
-    out = b""
-    pending = list(answers)
-    while True:
-        r, _, _ = select.select([fd], [], [], 30)
-        if not r:
-            break
-        try:
-            chunk = os.read(fd, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        out += chunk
-        if pending and (out.rstrip().endswith(b"?") or out.rstrip().endswith(b":")):
-            os.write(fd, pending.pop(0).encode() + b"\n")
-    _, status = os.waitpid(pid, 0)
-    text = " ".join(out.decode("utf-8", "replace").split())
-    return os.waitstatus_to_exitcode(status), text, hits
+    env = {k: v for k, v in os.environ.items() if k != "LOCALM_NET_MODE"}
+    env["LOCALM_BUGREPORT_URL"] = "http://127.0.0.1:9/report"
+    proc = subprocess.run(
+        [bash, "-c",
+         'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
+         'export LOCALM_HOME="$(cygpath -u "$3" 2>/dev/null || printf %s "$3")"; '
+         'PATH="$p:$PATH"; cd "$2" && bash fallback.sh',
+         "_", fake.as_posix(), work.as_posix(), data.as_posix()],
+        input="".join(a + "\n" for a in answers), capture_output=True, text=True,
+        timeout=120, env=env)
+    return proc.returncode, " ".join((proc.stdout + proc.stderr).split()), sink.exists()
 
 
-_POSIX = pytest.mark.skipif(sys.platform == "win32",
-                            reason="needs a pty and a POSIX shell")
-
-
-@_POSIX
-def test_bash_fallback_off_sends_nothing(tmp_path, recorder):
-    rc, out, hits = _sh_case(tmp_path, recorder, '{"net_mode": "off"}', ["x"])
-    assert hits == []
+def test_bash_fallback_off_sends_nothing(tmp_path):
+    rc, out, sent = _sh_case(tmp_path, '{"net_mode": "off"}', ["x", "y"])
+    assert not sent, out
     assert rc == 1, out
     assert REFUSAL in out
 
 
-@_POSIX
-@pytest.mark.parametrize("answer, sends", [("y", True), ("", False)])
-def test_bash_fallback_unreadable_setting_asks_and_defaults_to_no(tmp_path, recorder,
+@pytest.mark.parametrize("config_text", [None, "{not json", "[]"])
+@pytest.mark.parametrize("answer, sends", [("y", True), ("", False), ("n", False)])
+def test_bash_fallback_unreadable_setting_asks_and_defaults_to_no(tmp_path, config_text,
                                                                    answer, sends):
-    rc, out, hits = _sh_case(tmp_path, recorder, "{not json", ["x", answer])
-    assert hits == (["/report"] if sends else []), out
-    assert "is not valid JSON" in out
+    rc, out, sent = _sh_case(tmp_path, config_text, ["x", answer])
+    assert sent is sends, out
+    assert "Network access setting could not be read" in out
     assert "Send it anyway? [y/N]" in out
     assert "Send this to the maintainer now?" not in out
 
 
-@_POSIX
-def test_bash_fallback_ask_sends_after_the_usual_confirm(tmp_path, recorder):
-    rc, out, hits = _sh_case(tmp_path, recorder, '{"net_mode": "ask"}', ["x", ""])
-    assert hits == ["/report"], out
+@pytest.mark.parametrize("mode", ["ask", "allow"])
+def test_bash_fallback_ask_and_allow_send_after_the_usual_confirm(tmp_path, mode):
+    rc, out, sent = _sh_case(tmp_path, json.dumps({"net_mode": mode}), ["x", ""])
+    assert sent, out
     assert rc == 0, out
+    assert "Send this to the maintainer now? [Y/n]" in out
     assert "Sent to the maintainer" in out
