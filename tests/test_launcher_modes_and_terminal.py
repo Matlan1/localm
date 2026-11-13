@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The Tk launcher reads the session modes from config.json, the one place
-every surface reads them from, writes them back there, and passes no --mode
-(which a running server counts as a conflict) unless that write failed. On
-POSIX the terminal modes open a terminal window to run in."""
+every surface reads them from, writes them back there, and says when that write
+failed. On POSIX the terminal modes open a terminal window to run in."""
 
 from __future__ import annotations
 
@@ -90,14 +89,14 @@ def _launch_capture(mod, monkeypatch, app, *, mode="gui"):
     return calls[-1]
 
 
-def test_a_launch_keeps_the_mode_in_config_and_passes_no_mode_flag(mod, monkeypatch, tmp_path):
+def test_a_launch_keeps_the_mode_in_config(mod, monkeypatch, tmp_path):
     _set_config(mode="full")
     app = _app(mod, monkeypatch, tmp_path)
     try:
         cmd, _ = _launch_capture(mod, monkeypatch, app)
     finally:
         app.destroy()
-    assert "--mode" not in cmd
+    assert cmd[cmd.index("--mode") + 1] == "full"
     from localm.config import load_config
     assert load_config().get("mode") == "full"
 

@@ -398,6 +398,14 @@ def save_settings(data: dict) -> str | None:
     return None
 
 
+def surface_mode(mode: str, glob: str, chat: str, coder: str) -> str:
+    """The session mode of the surface launch *mode* starts: the chat or coder
+    choice when it is not USE_GLOBAL, else the global one (privacy when empty)."""
+    glob = glob or "privacy"
+    own = {"chat": chat, "coder": coder}.get(mode, USE_GLOBAL)
+    return own if own and own != USE_GLOBAL else glob
+
+
 def config_privacy_modes() -> tuple | None:
     """``(global, chat, coder)`` session modes from localm's config.json, with
     USE_GLOBAL for a surface that has no mode of its own, or None when the
@@ -1012,8 +1020,11 @@ class Launcher(tk.Tk):
         port = self.port.get().strip()
         if port:
             cmd += ["-p", port]
-        if self._save_privacy_config():
-            cmd += ["--mode", self.privacy_global.get() or "privacy"]
+        cmd += ["--mode", self.privacy_global.get() or "privacy"]
+        problem = self._save_privacy_config()
+        if problem:
+            self.status_msg(f"Your privacy choice applies to this download only: {problem}",
+                            error=True)
         try:
             _spawn_detached(cmd, cwd=str(REPO_DIR))
         except Exception as e:
@@ -1190,19 +1201,14 @@ class Launcher(tk.Tk):
             if self.coder_yes.get():
                 cmd += ["--yes"]
             # coder has no --debug flag; the env var below covers it
+        cmd += ["--mode", surface_mode(mode, self.privacy_global.get(),
+                                       self.privacy_chat.get(), self.privacy_coder.get())]
         return cmd
-
-    def _surface_mode(self) -> str:
-        """The session mode of the surface the chosen mode launches."""
-        glob_mode = self.privacy_global.get() or "privacy"
-        own = {"chat": self.privacy_chat.get(),
-               "coder": self.privacy_coder.get()}.get(self.mode.get(), USE_GLOBAL)
-        return own if own and own != USE_GLOBAL else glob_mode
 
     def _save_privacy_config(self) -> str | None:
         """Persist the privacy choices in localm's config.json, the one place
         every surface reads them from. Returns None on success, else why it
-        failed (the caller then passes --mode instead)."""
+        failed."""
         try:
             sys.path.insert(0, str(REPO_DIR))
             from localm.config import update_config
@@ -1300,8 +1306,6 @@ class Launcher(tk.Tk):
             "privacy_coder": self.privacy_coder.get(),
         })
         config_problem = self._save_privacy_config()
-        if config_problem:
-            cmd += ["--mode", self._surface_mode()]
 
         try:
             _spawn_detached(cmd, cwd=str(REPO_DIR), env=env,
