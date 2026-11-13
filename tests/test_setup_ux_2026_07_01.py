@@ -34,7 +34,18 @@ def test_require_venv_passes_inside_venv(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/proj/.venv")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
+    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
     vg.require_venv()   # must not raise
+
+
+def test_require_venv_exits_in_another_projects_venv_without_the_deps(monkeypatch):
+    import localm._venvguard as vg
+    monkeypatch.setattr(vg.sys, "prefix", "/other/.venv")
+    monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
+    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        vg.require_venv()
+    assert "virtual environment" in str(exc.value.code)
 
 
 def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
@@ -45,6 +56,30 @@ def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
     monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
     vg.require_venv()   # must not raise
+
+
+def test_the_guard_checks_every_core_dependency_but_pywin32():
+    import importlib.metadata as md
+    import re
+    import tomllib
+    from pathlib import Path
+
+    import localm._venvguard as vg
+    root = Path(__file__).resolve().parent.parent
+    deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["dependencies"]
+    modules: dict = {}
+    for module, dists in md.packages_distributions().items():
+        for dist in dists:
+            modules.setdefault(dist.lower().replace("_", "-"), set()).add(module)
+    missing = []
+    for dep in deps:
+        name = re.split(r"[<>=!~;\[ ]", dep, maxsplit=1)[0].strip().lower()
+        if name == "pywin32":
+            continue
+        if not modules.get(name, set()) & set(vg._CORE_DEPS):
+            missing.append(name)
+    assert missing == []
 
 
 def test_runtime_deps_present_true_in_this_env():

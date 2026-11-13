@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import sys
 
-# localm's core runtime dependencies - always installed with the package (these
-# are core requires, not optional extras). If they resolve, this really is a
+# The import names of localm's core runtime dependencies (pyproject.toml
+# [project] dependencies, not optional extras), less pywin32, whose absence
+# localm reports instead of failing on. If they all resolve, this really is a
 # localm environment that can run, whatever the interpreter's directory is named.
-_CORE_DEPS = ("click", "fastapi", "rich")
+_CORE_DEPS = ("click", "rich", "requests", "certifi", "uv", "regex",
+              "huggingface_hub", "pydantic", "fastapi", "starlette", "uvicorn",
+              "cryptography", "qrcode", "zeroconf", "PIL", "pypdf")
 
 
 def _runtime_deps_present() -> bool:
@@ -42,13 +45,12 @@ def _runtime_deps_present() -> bool:
 
 def require_venv() -> None:
     """Exit with a friendly message ONLY when localm is run from an interpreter
-    that lacks its runtime dependencies. A virtualenv, or ANY environment where
-    the deps are already installed (pipx / container / system-wide / cold install
-    / CI editable install), runs normally."""
-    if sys.prefix != sys.base_prefix:
-        return                       # inside a virtualenv
+    that lacks its runtime dependencies, inside a virtualenv (another project's
+    venv) or not. ANY environment where the deps are installed (localm's venv,
+    pipx / container / system-wide / cold install / CI editable install) runs
+    normally."""
     if _runtime_deps_present():
-        return                       # installed outside a venv, deps present
+        return
     sys.exit(
         "Error: localm must be run from its virtual environment. Use "
         "'.venv\\Scripts\\localm' (Windows) or '.venv/bin/localm' "
