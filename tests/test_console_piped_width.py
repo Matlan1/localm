@@ -12,8 +12,8 @@ from rich.table import Table
 
 from localm.console import PIPED_WIDTH, SafeConsole
 
-_LONG_NAME = "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-with-a-longer-suffix"
-_LONG_PATH = "D:/models/some/deeply/nested/folder/for/the/download/" + _LONG_NAME + ".gguf"
+_LONG_NAME = "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL"
+_LONG_PATH = "D:/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/" + _LONG_NAME + ".gguf"
 
 
 def _table() -> Table:
@@ -41,7 +41,22 @@ def test_an_explicit_width_and_columns_still_decide(monkeypatch):
     monkeypatch.delenv("COLUMNS", raising=False)
     assert SafeConsole(file=io.StringIO(), width=60).width == 60
     monkeypatch.setenv("COLUMNS", "90")
-    assert SafeConsole(file=io.StringIO()).width == 90
+    console = SafeConsole(file=io.StringIO())
+    assert console.width == 90 - console.legacy_windows
+
+
+def test_columns_seen_only_at_construction_does_not_narrow_later_output(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "60")
+    console = SafeConsole(file=io.StringIO())
+    monkeypatch.delenv("COLUMNS")
+    assert console.width == PIPED_WIDTH
+
+
+def test_a_size_set_by_hand_is_kept(monkeypatch):
+    monkeypatch.delenv("COLUMNS", raising=False)
+    console = SafeConsole(file=io.StringIO())
+    console.size = (70, 20)
+    assert (console.width, console.height) == (70 - console.legacy_windows, 20)
 
 
 def test_a_terminal_keeps_its_own_width(monkeypatch):
