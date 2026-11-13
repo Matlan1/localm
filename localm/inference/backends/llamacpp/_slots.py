@@ -195,6 +195,7 @@ class _Slot:
         self.order = 0                    # admission order
         self.last_used = 0.0
         self.prompt_len = 0               # tokens in the last prompt this slot prefilled
+        self.progress_at = 0.0            # monotonic time of the last prompt-progress status
         self.rate_ok = False              # the reply's decode rate is reported when it ends
         self.rate_steps = 0               # decode steps it ran alone
         self.rate_s = 0.0                 # their native seconds
@@ -858,6 +859,7 @@ class SlotScheduler:
         cut = len(stream.prompt) - CHECKPOINT_TAIL
         slot.ck_at = cut if keep < cut and self._ops.checkpoints_wanted() else -1
         slot.todo = list(stream.prompt[keep:])
+        slot.progress_at = time.monotonic()
         slot.pending = None
         slot.generated = 0
         slot.first = True
@@ -959,6 +961,22 @@ class SlotScheduler:
                 slot.todo = slot.todo[len(part):]
                 if slot.ck_at == len(slot.kv):
                     self._save_checkpoint(slot)
+                self._report_prefill(slot)
+
+    def _report_prefill(self, slot: Any) -> None:
+        """Send *slot*'s reply ``protocol.prefill_progress_status`` for the
+        prompt tokens in its cache while prompt tokens remain, at most once per
+        ``protocol.PREFILL_PROGRESS_INTERVAL_S`` seconds."""
+        stream = slot.stream
+        if stream is None or not slot.todo:
+            return
+        from localm.inference import protocol
+        now = time.monotonic()
+        if now - slot.progress_at < protocol.PREFILL_PROGRESS_INTERVAL_S:
+            return
+        slot.progress_at = now
+        stream._put(_Status(protocol.prefill_progress_status(
+            len(slot.kv), len(slot.kv) + len(slot.todo))))
 
     def _sample(self, rows: dict[int, int]) -> None:
         for seq, row in rows.items():

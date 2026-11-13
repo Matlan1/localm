@@ -394,6 +394,9 @@ class StatusText(str):
         obj.args = dict(args)
         return obj
 
+    def __reduce__(self):
+        return (StatusText, (str(self), self.code, self.args))
+
 
 def status_code_of(text: str) -> Optional[str]:
     """The stable code of status *text*: a StatusText's own code, otherwise its
@@ -404,6 +407,17 @@ def status_code_of(text: str) -> Optional[str]:
 
 # Emitted while the prompt is tokenized and evaluated, before the first token.
 PROCESSING_PROMPT_STATUS = "Processing prompt..."
+
+
+# Seconds between two prompt-progress statuses of one reply.
+PREFILL_PROGRESS_INTERVAL_S = 5.0
+
+
+def prefill_progress_status(done: int, total: int) -> StatusText:
+    """The status for a prompt *done* of *total* tokens into its evaluation."""
+    args = {"done": str(done), "total": str(total)}
+    return StatusText(f"Processing prompt... ({done} of {total} tokens)",
+                      "processing_progress", args)
 
 # Emitted by the SSE route while it summarises older messages to fit the
 # context window, before the reply starts.
@@ -453,6 +467,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
 # StatusText), each with the names of the ``status_args`` it carries.
 STATUS_ARGS_BY_CODE: dict[str, tuple[str, ...]] = {
     "loading_beside": ("model", "resident"),
+    "processing_progress": ("done", "total"),
 }
 
 

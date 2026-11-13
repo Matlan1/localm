@@ -1169,6 +1169,8 @@ setup toggle, which reports back when the server cannot honour it) and
 
 Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, the project-memory file, which holds facts **you** add with `/remember` and drop with `/forget`; the agent does not write it itself (its own close-time reflection is stored in the localm data dir, not in your repo).
 
+A `memory_file = "docs/notes.md"` key in `.localcoder/config.toml` makes that one file the project memory instead of `LOCALCODER.md` and `.localcoder/memory.md`. The path is relative to the project folder (the one holding `.localcoder`) and must stay inside it: an absolute path, a `..`, or a link that leads outside is refused with a warning and the default files are used. Like `auto_approve`, `verify` and `model`, it takes effect only once the project is trusted. A restricted (scoped-key) session cannot change the file.
+
 Both files are injected into every system prompt, so both are capped at 3000 characters each to leave room for the repo map and the conversation. Going over is not silent: the agent prints which file was over budget and by how much, and the prompt itself carries a note saying the file was cut. Normal-sized files are injected verbatim.
 
 **Tool hooks.** Run your own commands before and after the agent's tool calls, declared in

@@ -4300,7 +4300,8 @@ class TestAssistantMemory:
             assert data["text"] == "" and data["writable"] is True
 
             assert client.put("/api/memory",
-                              json={"text": "- likes terse answers"}).status_code == 200
+                              json={"text": "- likes terse answers",
+                                    "base": data["text"]}).status_code == 200
             client.post("/api/memory/append", json={"text": "runs an RX 6800"})
             got = client.get("/api/memory").json()
             text, items = got["text"], got["items"]
@@ -4311,7 +4312,7 @@ class TestAssistantMemory:
                                                     "runs an RX 6800"}
 
             # clearing empties the store
-            client.put("/api/memory", json={"text": ""})
+            client.put("/api/memory", json={"text": "", "base": got["text"]})
             assert client.get("/api/memory").json()["items"] == []
 
     def test_privacy_blocks_writes_allows_reads(self, persist_app, tmp_path,
@@ -4326,7 +4327,7 @@ class TestAssistantMemory:
             assert data["text"].strip() == "- earlier fact"   # read OK
             assert data["writable"] is False
             assert client.put("/api/memory",
-                              json={"text": "x"}).status_code == 403
+                              json={"text": "x", "base": ""}).status_code == 403
             assert client.post("/api/memory/append",
                                json={"text": "x"}).status_code == 403
 

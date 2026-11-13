@@ -313,8 +313,8 @@ def _mount_remote_gui(entry: dict) -> str | None:
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
-    except Exception:
-        verify = False
+    except Exception as e:
+        return f"could not determine TLS verification ({type(e).__name__})"
     try:
         r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
                           timeout=5, verify=verify)

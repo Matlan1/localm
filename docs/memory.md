@@ -127,7 +127,7 @@ Over the HTTP API (the routes the memory plugin mounts; see
 | Route | Purpose |
 |---|---|
 | `GET /api/memory` | The current facts (text + per-item metadata) and whether writes are allowed. |
-| `PUT /api/memory` | Bulk edit. A line matching an existing fact keeps that record; new lines are added; omitted lines are deleted. |
+| `PUT /api/memory` | Bulk edit. Body `{"text", "base"}`: `text` is the edited list, `base` the `text` that `GET /api/memory` returned when the edit started. A line matching an existing fact keeps that record; new lines are added; a fact in `base` that is no longer in `text` is deleted; a fact added since `base` was read is kept. `base` is required: a request without it is refused with `422` (`"loc": ["body", "base"], "msg": "Field required"`) and changes nothing. |
 | `POST /api/memory/append` | Add one fact. |
 | `PATCH /api/memory/{id}` | Edit one record's text or importance. |
 | `DELETE /api/memory/{id}` | Delete one record. |

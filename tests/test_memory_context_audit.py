@@ -23,6 +23,7 @@ from tests._shared_model_guard import (  # noqa: F401
 # Mock pydantic models for request bodies
 class MemoryUpdate(BaseModel):
     text: str
+    base: str = ""
 
 class MemoryAppend(BaseModel):
     text: str
