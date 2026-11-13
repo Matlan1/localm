@@ -504,24 +504,40 @@ def test_sweep_that_cannot_list_the_inbox_says_so(share_client, tmp_path, monkey
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the folder listing is denied with a Windows ACL")
 def test_an_inbox_denied_by_its_acl_is_reported_not_read_as_empty(share_client, tmp_path, caplog):
-    import getpass
+    import csv
     import logging
     import subprocess
 
+    from localm import sysprog
     from localm.plugins.gui.routes import share as share_routes
     inbox = tmp_path / ".localm" / "share_inbox"
     share_client.post("/share-target", files={"files": ("old.png", _PNG, "image/png")})
     old = next(inbox.glob("*__old.png"))
     _age(old, 16)
-    user = getpass.getuser()
-    subprocess.run(["icacls", str(inbox), "/deny", f"{user}:(RD)"], check=True,
+    whoami = subprocess.run([sysprog.require("whoami"), "/user", "/fo", "csv", "/nh"],
+                            check=True, capture_output=True, text=True).stdout
+    account, sid = next(csv.reader([whoami.strip()]))
+    icacls = sysprog.require("icacls")
+    subprocess.run([icacls, str(inbox), "/deny", f"*{sid}:(RD)"], check=True,
                    capture_output=True)
     try:
+        try:
+            list(os.scandir(inbox))
+            denied = False
+        except PermissionError:
+            denied = True
+        if not denied:
+            privs = subprocess.run([sysprog.require("whoami"), "/priv", "/fo", "csv", "/nh"],
+                                   capture_output=True, text=True).stdout
+            backup = [line for line in privs.splitlines() if "SeBackupPrivilege" in line]
+            pytest.fail(
+                f"the deny for the process token ({account}, {sid}) did not stop listing "
+                f"the inbox; USERNAME={os.environ.get('USERNAME')!r}; {backup or 'no SeBackupPrivilege'}")
         with caplog.at_level(logging.WARNING, logger="localm"):
             share_routes._sweep_expired(share_client.app, inbox)
             pending = share_client.get("/api/share/pending")
     finally:
-        subprocess.run(["icacls", str(inbox), "/remove:d", user], check=True,
+        subprocess.run([icacls, str(inbox), "/remove:d", f"*{sid}"], check=True,
                        capture_output=True)
     assert old.exists()
     assert pending.status_code == 200

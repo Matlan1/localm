@@ -253,9 +253,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         if rec["request"].get("dest_dir") or _spec_names_a_host_path(spec):
             require_fs_host(request)
         if network_mode() == "off" and not downloads_allowed_when_off():
+            from localm.config import net_off_download_refusal
             raise HTTPException(
-                403, "Network access is off. Resuming is a download: set Network "
-                     "access to Ask or Allow in Settings, or allow model downloads.")
+                403, net_off_download_refusal("the download was not resumed"))
         if _pull_running(spec):
             raise HTTPException(409, f"Already downloading {spec}.")
         note = ""

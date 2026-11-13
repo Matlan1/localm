@@ -102,10 +102,7 @@ _SPLIT_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf
 class DiscoverError(Exception):
     """Discovery failed - network off, HF unreachable, or repo unusable.
 
-    *off* is True specifically for the net_mode=off refusal, so a caller that
-    shows this to a GUI/API surface (a browser has no CLI to run) can
-    substitute its own remedy instead of this message's CLI-flavored one -
-    see ``localm/plugins/gui/routes/models/discovery.py``'s ``_run_discover``."""
+    *off* is True specifically for the net_mode=off refusal."""
 
     def __init__(self, message: str, *, off: bool = False):
         super().__init__(message)
@@ -115,11 +112,8 @@ class DiscoverError(Exception):
 def _ensure_online() -> None:
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():
-        raise DiscoverError(
-            "Network access is disabled (net_mode=off). Enable it with: "
-            "localm config net_mode ask - or allow just downloads: "
-            "localm config net_allow_model_downloads true",
-            off=True)
+        from localm.config import net_off_download_refusal
+        raise DiscoverError(net_off_download_refusal("nothing was searched"), off=True)
 
 
 def _hf_auth_headers(token: Optional[str]) -> Optional[dict]:

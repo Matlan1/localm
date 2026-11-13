@@ -415,9 +415,25 @@ def rc_files_with_mark() -> list:
 #  CLI (invoked by setup.sh / setup.bat)                                        #
 # --------------------------------------------------------------------------- #
 
+CHOICES = ("priority", "keep", "skip")
+
+
+def _stdin_interactive() -> bool:
+    """Whether stdin is a terminal a question can be answered at."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def ask_conflict(conflict: str, clone_root, assume_yes: bool = False,
-                 ask=None) -> str:
+                 ask=None, choice: Optional[str] = None,
+                 report: Optional[dict] = None) -> str:
     """Ask which ``localm`` should run. Returns 'priority' | 'keep' | 'skip'.
+    A *choice* of CHOICES (asked by the caller, the graphical installer) is
+    returned without asking. When *report* is given, ``report["asked"]`` is
+    set to whether the answer is the person's (False for the default taken
+    with nothing asked).
 
     The DEFAULT is 'keep', so pressing Enter changes nothing about a command
     that already works. A non-interactive caller gets 'keep' too, and is told
@@ -425,12 +441,16 @@ def ask_conflict(conflict: str, clone_root, assume_yes: bool = False,
     out = []
     out.append("  [!] A different 'localm' command already exists:")
     out.append(f"        {conflict}")
+    if report is None:
+        report = {}
+    report["asked"] = False
+    if choice in CHOICES:
+        for line in out:
+            print(line)
+        report["asked"] = True
+        return choice
     if ask is None:
-        try:
-            interactive = sys.stdin is not None and sys.stdin.isatty()
-        except (AttributeError, ValueError, OSError):
-            interactive = False
-        ask = input if interactive else None
+        ask = input if _stdin_interactive() else None
     if ask is None:
         out.append("      Leaving it in charge and adding this install behind it")
         out.append("      (nothing to ask - this is not an interactive terminal).")
@@ -459,6 +479,7 @@ def ask_conflict(conflict: str, clone_root, assume_yes: bool = False,
     except (EOFError, KeyboardInterrupt):
         print()
         return "keep"
+    report["asked"] = True
     return {"1": "priority", "3": "skip"}.get(answer, "keep")
 
 
@@ -473,6 +494,13 @@ def main(argv=None) -> int:
     i.add_argument("--yes", action="store_true",
                    help="do not prompt on a conflict; keep the existing command "
                         "in charge and add this install behind it")
+    i.add_argument("--choice", choices=CHOICES, default=None,
+                   help="the answer to the conflict question, already asked by "
+                        "the caller (the graphical installer)")
+
+    c = sub.add_parser("conflict", help="print the other localm command on PATH "
+                                        "(exit 0), or nothing (exit 1)")
+    c.add_argument("--root", default=".")
 
     u = sub.add_parser("uninstall", help="remove the global `localm` command")
     u.add_argument("--path-dir", default="")
@@ -490,6 +518,17 @@ def main(argv=None) -> int:
     if args.cmd == "shim":
         print(shim_path(args.root))
         return 0
+    if args.cmd == "conflict":
+        try:
+            found = existing_localm(shim_path(args.root), args.root)
+        except Exception:
+            found = None
+        if not found:
+            return 1
+        print(found)
+        if conflict_outranks_user_path(found):
+            print("system-path")
+        return 0
     if args.cmd == "install":
         # Detect the conflict and ask before touching anything: precedence is
         # decided by the answer.
@@ -498,8 +537,10 @@ def main(argv=None) -> int:
         except Exception:
             conflict = None
         precedence = "append"
+        asked_report: dict = {}
         if conflict:
-            choice = ask_conflict(conflict, args.root, assume_yes=args.yes)
+            choice = ask_conflict(conflict, args.root, assume_yes=args.yes,
+                                  choice=args.choice, report=asked_report)
             if choice == "skip":
                 print("      Nothing added. Your existing 'localm' is untouched, "
                       "and this install is still usable via its own folder.")
@@ -529,7 +570,9 @@ def main(argv=None) -> int:
                 print("  This install's 'localm' now takes priority. Open a NEW "
                       "terminal to use it.")
         elif res.get("conflict"):
-            print(f"  Kept {res['conflict']} in charge, as you chose. This "
+            how = ("as you chose" if asked_report.get("asked", True)
+                   else "since nothing was asked here")
+            print(f"  Kept {res['conflict']} in charge, {how}. This "
                   "install was added behind it, so typing 'localm' still runs "
                   "the existing one.")
         if res.get("path_modified"):

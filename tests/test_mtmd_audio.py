@@ -155,14 +155,15 @@ class TestEvalAndCache:
         rig.llm._mtmd.on_gpu = on_gpu
         statuses = []
         rig.prefill(f"user {MARKER} hi", [_clip(0.2)], on_status=statuses.append)
-        assert statuses == [f"Encoding audio ({label})..."]
+        assert statuses == [f"Encoding audio ({label})...", "Processing prompt..."]
 
     def test_status_names_image_when_an_image_is_encoded_too(self):
         rig = _Rig()
         statuses = []
         rig.prefill(f"user {MARKER} {MARKER} hi", [_clip(0.2), solid_image(9)],
                     on_status=statuses.append)
-        assert statuses == ["Encoding image (GPU)..."]
+        assert statuses == ["Encoding audio (GPU)...", "Processing prompt...",
+                            "Encoding image (GPU)...", "Processing prompt..."]
 
     def test_a_failed_gpu_audio_encode_is_retryable_and_says_audio(self):
         rig = _Rig()
