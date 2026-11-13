@@ -498,3 +498,22 @@ test("speak(): net_mode=ask with the model cached synthesises without a second p
   const r = await speakWithCachedModel({ netMode: "ask" });
   assert.deepEqual(r.streams, ["af_heart"]);
 });
+
+
+test("ready(): a load that fails rejects with the toasted reason, marked shown, and toasts once", async () => {
+  const win = installModalShell();
+  installFetchEnv(win, { netMode: "allow" });
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+  const provider = calls.registerTTS[0];
+  let err = null;
+  await provider.ready().catch((e) => { err = e; });
+  assert.ok(err, "the failed load must reject");
+  const errToasts = calls.toasts.filter((t) => t.isError);
+  assert.equal(errToasts.length, 1, "one toast for one failed load");
+  assert.equal(err.shown, true);
+  assert.ok(errToasts[0].msg.startsWith(err.message + "; using the browser voice"),
+    `the rejection carries the toasted reason, got ${JSON.stringify(err.message)}`);
+  assert.ok(err.cause, "the original error stays reachable as the cause");
+});
