@@ -1240,7 +1240,8 @@ directory without a `plugin.toml`, or a rejected plugin is a 400.
 `plugins:admin` scope. Installs a plugin's pip extras on this host (the HTTP
 sibling of `localm plugin install-deps NAME`). The POST starts the install in the
 background and returns `{"status": "running"|"done"|"error", "name", "missing",
-"lines"}`; an unknown plugin is a 404. Both routes are a 403 on a server bound
+"lines"}`; an unknown plugin is a 404 and a plugin that is not installed is a
+409. Both routes are a 403 on a server bound
 beyond loopback, because a remote client may never trigger a server-side pip.
 The events route replays the whole log and then follows it as server-sent events:
 `data: {"type": "log", "line": "..."}` per line, then `data: {"type": "end", "ok",
