@@ -11,6 +11,17 @@ original source files."""
 from click.testing import CliRunner
 
 
+class _FakeEmbedder:
+    def embed(self, texts):
+        return [[0.1, 0.2] for _ in texts]
+
+
+def _stub_embedder(monkeypatch):
+    """The load and self-test of the installed model, stubbed (no real model)."""
+    monkeypatch.setattr("localm.inference.embedder.get_embedder",
+                        lambda *a, **k: _FakeEmbedder())
+
+
 def test_setup_embeddings_message_scopes_the_rag_claim(monkeypatch, tmp_path):
     from localm.cli.maintenance import setup_embeddings
 
@@ -20,6 +31,7 @@ def test_setup_embeddings_message_scopes_the_rag_claim(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "localm.inference.embedder.resolve_embedding_model_path",
         lambda allow_download=True: str(fake))
+    _stub_embedder(monkeypatch)
 
     result = CliRunner().invoke(setup_embeddings, [])
     assert result.exit_code == 0, result.output
@@ -52,6 +64,7 @@ def _stub_install(monkeypatch, tmp_path, name="new-model.gguf"):
     monkeypatch.setattr(
         "localm.inference.embedder.resolve_embedding_model_path",
         lambda allow_download=True: str(fake))
+    _stub_embedder(monkeypatch)
     return fake
 
 

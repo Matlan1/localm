@@ -130,63 +130,50 @@ def setup_embeddings(model, yes=False):
 
     from ..config import load_config, update_config
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
-                                      KNOWN_EMBEDDING_MODELS,
-                                      reranker_as_embedding_model,
+                                      KNOWN_EMBEDDING_MODELS, get_embedder, last_error,
                                       resolve_embedding_model_path)
+    from ._embedding import check_embedding_switch
     # Whether the ready banner below prints its "existing collections stay
     # lexical" reminder. See
     # TestSetupEmbeddingsPreSwitchConfirm.test_switch_to_model_matching_existing_collection_skips_reembed_note.
     reembed_hint = True
+    previous = load_config().get("embedding_model")
     if model:
-        reranker_why = reranker_as_embedding_model(model)
-        if reranker_why:
-            console.print(f"[red]Not switching the embedding model:[/red] {escape(reranker_why)}")
-            sys.exit(1)
-        current = str(load_config().get("embedding_model") or "")
-        if model != current:
-            # The third writer of embedding_model, alongside the RAG picker
-            # (POST /api/rag/embedding) and PATCH /v1/config. Like those two, it
-            # warns what the switch is about to invalidate BEFORE it happens.
-            from ..rag import (collection_provenance_note, collection_provenance_report,
-                               lexical_only_collection_names)
-            affected = collection_provenance_report(candidate_model=model)
-            if affected:
-                console.print(
-                    f"[yellow]{escape(collection_provenance_note(model, affected))}[/yellow]")
-                for c in affected:
-                    built = (f" (built with {escape(c['built_with'])})"
-                             if c.get("built_with") else "")
-                    if c.get("mixed"):
-                        built += " (mixed: vectors from more than one model)"
-                    chunks = f" - {c['n_chunks']} chunks" if c.get("n_chunks") is not None else ""
-                    console.print(f"  - {escape(c['name'])}{built}{chunks}")
-                if not yes:
-                    # NOT abort=True: a script or non-interactive run with
-                    # nobody to answer PROCEEDS with the switch. A collection's
-                    # chunk text and existing vectors stay on disk either way,
-                    # falling back to lexical search until re-embedded.
-                    try:
-                        proceed = click.confirm("Continue with the switch?")
-                    except click.Abort:
-                        console.print(
-                            "[yellow]Not an interactive terminal, so nothing can "
-                            "answer that. Proceeding with the switch - pass --yes "
-                            "to silence this prompt next time.[/yellow]")
-                        proceed = True
-                    if not proceed:
-                        raise click.Abort()
-            else:
-                reembed_hint = bool(lexical_only_collection_names())
+        reembed_hint = check_embedding_switch(model, yes=yes)
         update_config(lambda c: c.update({"embedding_model": model}))
+
+    def _fail(text: str) -> None:
+        if model and model != previous:
+            update_config(lambda c: c.pop("embedding_model", None) if previous is None
+                          else c.update({"embedding_model": previous}))
+            text += (f" The embedding model setting stays "
+                     f"{escape(str(previous or DEFAULT_EMBEDDING_MODEL))}.")
+        console.print(text)
+        sys.exit(1)
+
     name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     console.print(f"Installing embedding model: [bold cyan]{escape(name)}[/bold cyan]")
     path = resolve_embedding_model_path(allow_download=True)
     if not path:
-        console.print(
-            "[red]Could not install the embedding model.[/red] It must be a known "
-            f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
-            "path, and network must be enabled (net_mode is not 'off').")
-        sys.exit(1)
+        why = last_error()
+        _fail("[red]Could not install the embedding model:[/red] "
+              + (escape(why) if why else
+                 f"it must be a known key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered "
+                 "model, or a GGUF path, and network must be enabled (net_mode is not "
+                 "'off')."))
+    console.print("  Loading and testing the model ...")
+    try:
+        emb = get_embedder()
+        vecs = emb.embed(["localm embedding self-test"]) if emb is not None else None
+    except Exception as e:  # noqa: BLE001 - reported below
+        emb, vecs = None, None
+        load_why = f"{type(e).__name__}: {e}"
+    else:
+        load_why = last_error() or "the model could not be loaded"
+    if not vecs or not vecs[0]:
+        _fail(f"[red]'{escape(name)}' did not produce embeddings[/red] "
+              f"({escape(load_why if emb is None else 'it returned empty vectors')}); "
+              "it may not be an embedding model.")
 
     synced_note = ""
     try:

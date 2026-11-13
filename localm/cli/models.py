@@ -2128,10 +2128,30 @@ def cancel_cmd(operation_id):
     console.print("[dim]Confirm with[/dim] localm status")
 
 
+def _note_pooling_change(pooling) -> None:
+    """Name the collections whose vectors were built with the pooling in force
+    before a change to *pooling*."""
+    from rich.markup import escape
+
+    from localm.config import load_config
+    if (load_config().get("embedding_pooling") or "") == (pooling or ""):
+        return
+    from localm.rag import collection_provenance_report
+    affected = collection_provenance_report()
+    if affected:
+        names = ", ".join(escape(c["name"]) for c in affected)
+        console.print(f"[yellow]Changing the pooling changes every new vector; these "
+                      f"collections keep vectors made with the old pooling until you "
+                      f"run localm rag reembed NAME: {names}[/yellow]")
+
+
 @main.command("config")
 @click.argument("key")
 @click.argument("value")
-def config_cmd(key, value):
+@click.option("-y", "--yes", is_flag=True,
+              help="For embedding_model: skip the question about the collections "
+                   "the switch invalidates.")
+def config_cmd(key, value, yes):
     """Set a persistent configuration value.
 
     \b
@@ -2163,6 +2183,11 @@ def config_cmd(key, value):
         validated = validate_update({key: value})
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+    if str(validated.get("embedding_model") or "").strip():
+        from ._embedding import check_embedding_switch
+        check_embedding_switch(str(validated["embedding_model"]).strip(), yes=yes)
+    if "embedding_pooling" in validated:
+        _note_pooling_change(validated["embedding_pooling"])
     if validated.get("require_auth") is True:
         from localm.auth import require_auth_refusal
         refusal = require_auth_refusal()
