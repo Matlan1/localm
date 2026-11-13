@@ -36,9 +36,8 @@ def register(app: FastAPI, ctx) -> None:
         warning = owner_key_downgrade_warning()
         if warning is not None:
             warning = _hs.path_formatter(request)(warning)
-        open_mode = _hs.caller_auth_state(request) == _hs.CALLER_OPEN
         return {"keys": list_keys(), "is_owner": is_owner, "presets": presets,
-                "owner_key_warning": warning, "open_mode": open_mode}
+                "owner_key_warning": warning}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(request: Request, response: Response, body: dict):

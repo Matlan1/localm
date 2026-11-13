@@ -129,7 +129,7 @@ test("the first key says an owner key was set too and shows the Owner key card",
   let seeded = false;
   const { window } = await open({
     "GET /v1/keys": () => ({ status: 200,
-      body: { keys: [], is_owner: seeded, open_mode: !seeded } }),
+      body: { keys: [], is_owner: seeded } }),
     "POST /v1/keys": () => {
       seeded = true;
       return { status: 200,
@@ -185,11 +185,16 @@ test("the Owner key card's Copy reports a blocked clipboard", async () => {
 });
 
 test("owner-only scopes say why they are disabled: open mode, a non-owner device", async () => {
-  for (const [body, want] of [
-    [{ keys: [], is_owner: false, open_mode: true }, /has no key yet/],
-    [{ keys: [], is_owner: false, open_mode: false }, /signed in with the owner key/],
+  for (const [required, want] of [
+    [false, /has no key yet/],
+    [true, /signed in with the owner key/],
   ]) {
-    const { window } = await open({ "GET /v1/keys": () => ({ status: 200, body }) });
+    const { window } = await open({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: false } }),
+      "GET /api/session": () => ({ status: 200, body: { authed: false, required, csrf: "" } }),
+    });
+    await window.refreshCsrf();
+    assert.equal(window.__LOCALM_AUTH_REQUIRED__, required, "refreshCsrf keeps the answer");
     await window.refreshKeysPanel();
     const note = window.document.getElementById("key-owner-note");
     assert.ok(note, "a note says why owner-only scopes are disabled");

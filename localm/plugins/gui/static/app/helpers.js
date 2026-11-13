@@ -192,12 +192,16 @@ export function sentShellToken(headers) {
 // The token is an HMAC of the session computed server-side, so it is always in
 // lockstep with the session cookie - there is no separate cookie to fall out of
 // sync. Called at boot and by the 403-CSRF self-heal. Returns the token or "".
+// Also stashes the answer's `required` as window.__LOCALM_AUTH_REQUIRED__ (false:
+// no key is configured and Require an API key is off; left unchanged when the
+// answer has no boolean `required`).
 export async function refreshCsrf() {
   try {
     const r = await fetch("/api/session", { cache: "no-store" });
     if (!r.ok) return "";
     const j = await r.json();
     window.__LOCALM_CSRF__ = (j && j.csrf) || "";
+    if (j && typeof j.required === "boolean") window.__LOCALM_AUTH_REQUIRED__ = j.required;
     return window.__LOCALM_CSRF__;
   } catch {
     return "";

@@ -1028,7 +1028,7 @@ export async function refreshKeysPanel() {
     card.classList.toggle("sec-hidden", hidden);
     if (typeof buildSettingsNav === "function") buildSettingsNav();
   };
-  let keys, isOwner, presets, openMode;
+  let keys, isOwner, presets;
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
     if (!r.ok) { setHidden(true); return; }   // 401/403 -> not a key minter
@@ -1036,10 +1036,10 @@ export async function refreshKeysPanel() {
     const data = await r.json();
     keys = data.keys || [];
     isOwner = !!data.is_owner;
-    openMode = !!data.open_mode;
     presets = data.presets || [];
   } catch { setHidden(true); return; }
-  applyOwnerGate(isOwner, openMode);   // owner-only scopes disabled, with the reason
+  // Open mode as GET /api/session last reported it (refreshCsrf).
+  applyOwnerGate(isOwner, window.__LOCALM_AUTH_REQUIRED__ === false);
   buildKeyPresets(presets, isOwner);
 
   list.replaceChildren();
