@@ -471,7 +471,7 @@ def _install(build: str, *, force: bool, say: Progress,
                 {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
                  "sha256": sha}, indent=2), encoding="utf-8")
             try:
-                replace_dir(staging, dest, tmp / "previous")
+                replace_dir(staging, dest)
             except ReplaceError as e:
                 raise ProvisionError(
                     f"{e}; stop any music generation that is using it and retry") from e

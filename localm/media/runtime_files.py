@@ -8,6 +8,8 @@ it, and the remedy for a download refused because network access is off.
 from __future__ import annotations
 
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -47,13 +49,18 @@ def logged(on_progress: Optional[Progress], tag: str) -> Progress:
     return say
 
 
-def replace_dir(staging: Path, dest: Path, aside: Path) -> None:
-    """Put the folder *staging* in place of *dest*. An existing *dest* is first
-    renamed to *aside* (same volume, which must not exist), so a folder the
-    system keeps open is refused whole and nothing in it is removed; when the
-    move of *staging* then fails, *aside* is put back. The caller removes
-    *aside* afterwards. Raises :class:`ReplaceError` with *dest* unchanged."""
+def replace_dir(staging: Path, dest: Path) -> None:
+    """Put the folder *staging* in place of *dest* (same volume). An existing
+    *dest* is first renamed to a hidden ``.<name>.previous-<pid>-<n>`` folder
+    beside it, so a folder the system keeps open is refused whole and nothing
+    in it is removed; when the move of *staging* then fails, that folder is put
+    back. It is deleted once the new folder is in place (a failed delete is
+    logged and leaves it on disk). Raises :class:`ReplaceError`: with *dest*
+    unchanged, or, when putting it back fails too, naming the folder that
+    still holds the installed files."""
+    from localm.debuglog import logger
     had_old = dest.exists()
+    aside = dest.with_name(f".{dest.name}.previous-{os.getpid()}-{time.monotonic_ns()}")
     if had_old:
         try:
             os.replace(dest, aside)
@@ -63,6 +70,20 @@ def replace_dir(staging: Path, dest: Path, aside: Path) -> None:
         os.replace(staging, dest)
     except OSError as e:
         if had_old:
-            os.replace(aside, dest)
+            try:
+                os.replace(aside, dest)
+            except OSError as back:
+                logger.warning("media runtime: %s could not be put back from %s (%s)",
+                               dest, aside, back)
+                raise ReplaceError(
+                    f"the new files could not be moved into {dest} ({e}), and the "
+                    f"installed ones could not be put back ({back}); they are kept in "
+                    f"{aside}") from e
         raise ReplaceError(f"the new files could not be moved into {dest} ({e}); the "
                            "installed ones were kept") from e
+    if had_old:
+        try:
+            shutil.rmtree(aside)
+        except OSError as e:
+            logger.warning("media runtime: the replaced folder %s could not be removed "
+                           "(%s); delete it by hand", aside, e)

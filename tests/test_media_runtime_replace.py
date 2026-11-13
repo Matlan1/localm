@@ -200,3 +200,22 @@ def test_a_policy_refusal_that_is_not_net_mode_off_keeps_its_reason():
     text = runtime_files.refused_download_message(
         NetworkPolicyError("example.org is on the deny list"))
     assert text == "the download was refused by the network policy: example.org is on the deny list"
+
+
+def test_when_the_old_folder_cannot_be_put_back_its_files_stay_where_the_error_says(
+        media_runtime, monkeypatch):
+    install, dest, provision_error = media_runtime
+    install()
+    before = _snapshot(dest)
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst) == dest:
+            raise PermissionError(13, "Access is denied", str(dst))
+        return real_replace(src, dst)
+    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    with pytest.raises(provision_error) as info:
+        install(force=True)
+    kept = [p for p in dest.parent.iterdir() if p.name.startswith(f".{dest.name}.previous-")]
+    assert len(kept) == 1 and _snapshot(kept[0]) == before
+    assert str(kept[0]) in str(info.value)

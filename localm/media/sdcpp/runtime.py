@@ -362,7 +362,7 @@ def _install(backend: str, *, force: bool, say: Progress,
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
                                                        encoding="utf-8")
         try:
-            replace_dir(staging, dest, tmp / "previous")
+            replace_dir(staging, dest)
         except ReplaceError as e:
             raise ProvisionError(f"{e}; stop any image or video generation that is using "
                                  "it and retry") from e
