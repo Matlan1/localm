@@ -9655,6 +9655,7 @@ Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the changes listed here.
 ## [0.1.0] - 2026-07-04
 
 First tagged release. A self-contained, offline local-LLM platform.
+- **An update whose file changed after its signature was checked is refused, and a TLS setup error no longer turns certificate verification off for peer and remote-GUI calls.** The downloaded build is hashed again just before it is unpacked, and a failure while deciding whether to verify a peer or instance now stops the call instead of continuing unverified.
 
 ### Added
 - **Inference**: run GGUF models via a bundled llama.cpp runtime, and HuggingFace
