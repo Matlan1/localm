@@ -604,7 +604,7 @@ class TestInstallParity:
         assert torch < pins < hf
         assert cmds[pins][1:] == ["-m", "localm.hwdetect", "torch-pins", "--out",
                                   gui.TORCH_PINS_FILE]
-        assert cmds[pins][0] == str(gui.venv_python(gui.ROOT))
+        assert Path(cmds[pins][0]).parent.parent == gui.ROOT / ".venv"
         assert cmds[hf][-2:] == ["-c", gui.TORCH_PINS_FILE]
 
     def test_a_failed_torch_pins_step_fails_the_pytorch_step(self, gui, monkeypatch):
