@@ -238,6 +238,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_bugreport_email_redaction.py": "the report script lists home/logs, which is not tracked",
     "tests/test_bugreport_host_redaction.py": "the report script lists home/logs, which is not tracked",
     "tests/test_bugreport_scrub_parity.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_report_issue_net_mode.py": "lists the bug-reports folder of a clone in tmp_path",
     "tests/test_bugreport_stdin_interactive.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_standalone.py": "the report script lists home/logs, which is not tracked",
     "tests/test_report_issue_url.py": "the report script lists home/logs, which is not tracked",
