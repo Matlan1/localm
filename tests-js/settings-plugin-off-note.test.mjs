@@ -9,6 +9,14 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 const FIELDS = [
   { key: "coder_max_turns", widget: "number", label: "Max turns", help: "",
     group: "Coder", owner: "coder", default: 30 },
+  { key: "coder_remember_projects", widget: "toggle", label: "Remember projects", help: "",
+    group: "Coder", owner: "core", default: true },
+  { key: "browser_inline_live_view", widget: "toggle", label: "Live view", help: "",
+    group: "Coder", owner: "browser", default: true },
+  { key: "bind_host", widget: "text", label: "Bind address", help: "",
+    group: "Network", owner: "core", default: "" },
+  { key: "net_mode", widget: "select", label: "Network access", help: "",
+    group: "Network", owner: "browser", options: ["off", "ask", "allow"], default: "ask" },
   { key: "rag_top_k", widget: "number", label: "Chunks", help: "",
     group: "Knowledge", owner: "rag", default: 4 },
   { key: "memory_enabled", widget: "toggle", label: "Memory recall", help: "",
@@ -21,6 +29,7 @@ const PLUGINS = [
   { name: "coder", installed: false, enabled: false, active: false },
   { name: "rag", installed: true, enabled: false, active: false },
   { name: "memory", installed: true, enabled: true, active: true },
+  { name: "browser", installed: false, enabled: false, active: false },
 ];
 
 function makeFetch() {
@@ -58,4 +67,5 @@ test("cards of a missing or turned-off plugin say so; others do not", async () =
   assert.match(note(win, "Knowledge") || "", /plugin is turned off/);
   assert.equal(note(win, "Memory"), null, "an active plugin's card has no note");
   assert.equal(note(win, "Web"), null, "a plugin the list does not name gets no note");
+  assert.equal(note(win, "Network"), null, "a card of core fields and a plugin's field gets no note");
 });

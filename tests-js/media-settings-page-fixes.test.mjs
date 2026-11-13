@@ -30,12 +30,14 @@ const MEDIA = { plugins: [
     field("float_type", "select", null,
           { options: ["default", "fp8_e4m3fn"], is_override: false }),
     field("swap_policy", "select", "always", { options: ["auto", "always", "never"] }),
+    field("scheduler", "select", "karras", { options: ["normal", "karras"] }),
   ] },
   { plugin: "music", label: "Music", fields: [
     field("backend", "select", "comfy", { options: ["auto", "native", "comfy"] }),
     field("native_runtime", "select", "auto", { options: ["auto", "vulkan"] }),
     field("float_type", "select", "default", { options: ["default", "fp8_e4m3fn"] }),
     field("swap_policy", "select", "auto", { options: ["auto", "always", "never"] }),
+    field("scheduler", "select", "normal", { options: ["normal", "simple"] }),
   ] },
 ] };
 
@@ -87,6 +89,9 @@ test("Copy from skips backend and native fields and a choice the target lacks", 
   assert.equal(ctl(music, "backend").value, "comfy", "the backend choice is not copied");
   assert.equal(ctl(music, "native_runtime").value, "auto", "native settings are not copied");
   assert.equal(ctl(music, "swap_policy").value, "always", "a shared setting is copied");
+  assert.equal(ctl(music, "scheduler").value, "normal", "a choice Music does not offer is not copied");
+  assert.equal(ctl(music, "float_type").value, "default",
+    "an unset source does not empty a select that has no blank choice");
 });
 
 test("a native backend hides the ComfyUI-only fields; comfy shows them", async () => {

@@ -309,9 +309,9 @@ export function buildSettingControl(field) {
       input = document.createElement("select");
       const blankLabel = t("settings.field.inheritOption");
       const choices = (field.options || []).map((opt) => [opt, opt === "" ? blankLabel : opt]);
-      // A select that is unset (or may be unset) gets a blank choice, so it never
-      // shows an empty box and can return to unset. A media plugin field's blank
-      // inherits the shared value; any other blank means "not set".
+      // A select that is unset (or may be unset) gets a blank choice. A media
+      // plugin field's blank inherits the shared value; any other blank means
+      // "not set".
       if (!choices.some(([v]) => v === "")
           && (value == null || field.shipped_default === null)) {
         choices.unshift(["", field.catalog_scopes ? blankLabel : t("settings.field.unsetOption")]);
@@ -926,12 +926,11 @@ export function applyKeyPreset(want) {
   }
 }
 
-// Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
-// keys:admin device cannot even try to mint a coder:full / admin / keys:admin /
-// plugins:admin / config:write key (the API would 403 anyway; this avoids the
-// confusing failed-submit round-trip). A disabled box carries a tooltip, and the
-// #key-owner-note line under the boxes says why they are disabled: in open mode
-// (no key on the server yet) or for a device without the owner key.
+// Disable + dim the owner-only (privileged) scopes (coder:full / admin /
+// keys:admin / plugins:admin / config:write) for a non-owner key minter. A
+// disabled box carries a tooltip, and the #key-owner-note line under the boxes
+// says why: open mode (*openMode*, no key on the server yet) or a device without
+// the owner key. The owner gets no note.
 export function applyOwnerGate(isOwner, openMode) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
     const ownerOnly = PRIVILEGED_KEY_SCOPES.has(cb.value);
@@ -1757,6 +1756,16 @@ export async function saveSettingsSection(secId, within) {
   return false;
 }
 
+/** The plugin a settings section *sec* belongs to: the owner of all its fields
+ *  when that is one plugin, else the plugin named like the section's group (the
+ *  Coder card also holds core and browser fields); null for a core section. */
+export function sectionPluginOwner(sec) {
+  const owners = new Set(sec.ctrls.map((c) => c.field.owner || "core"));
+  if (owners.size === 1 && !owners.has("core")) return [...owners][0];
+  const named = String(sec.label || "").toLowerCase();
+  return owners.has(named) && named !== "core" ? named : null;
+}
+
 /** A note for a settings card (headed *label*) whose plugin *name* is not
  *  installed or is turned off, from the /api/capabilities plugin list; null when
  *  the plugin is active or the list does not name it. */
@@ -2037,9 +2046,9 @@ export async function refreshSettingsPage() {
     panel.dataset.group = topGroup;
     panel.dataset.secLabel = heading || sec.label;
     if (heading) panel.appendChild(settingsSectionHead(heading, topGroup));
-    const owners = new Set(sec.ctrls.map((c) => c.field.owner || "core"));
-    if (owners.size === 1 && !owners.has("core") && sec.label !== "Voice") {
-      const offNote = pluginOffNote([...owners][0], heading || sec.label);
+    const cardPlugin = sectionPluginOwner(sec);
+    if (cardPlugin && sec.label !== "Voice") {
+      const offNote = pluginOffNote(cardPlugin, heading || sec.label);
       if (offNote) panel.appendChild(offNote);
     }
     const grid = el("div", "settings-fields");
@@ -2337,8 +2346,7 @@ export async function buildMediaSection(form, fields) {
   // SHARED media settings: every visible group="Media" schema field that is not
   // explicitly placed elsewhere (comfy_target above, comfy_gpu_placement
   // below), including the shared defaults behind the per-plugin fields
-  // (media_per_plugin), which a blank per-plugin field uses. Selected by
-  // exclusion, so a new Media field is drawn here by default. Saved through the
+  // (media_per_plugin), which a blank per-plugin field uses. Saved through the
   // Media section's generic PATCH /v1/config path.
   const sharedFields = (fields || []).filter(f =>
     f.group === "Media" && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
@@ -3765,8 +3773,7 @@ export async function enhanceNativeModelFields(name, controls) {
 }
 
 /** Media plugin field keys that only ComfyUI reads (their block path starts at
- *  "comfy"). Bound to settings_schema.MEDIA_PLUGIN_FIELDS by
- *  tests/test_media_settings_page_rules.py. */
+ *  "comfy"). See test_comfy_only_keys_are_the_fields_stored_under_comfy. */
 export const MEDIA_COMFY_ONLY_KEYS = new Set([
   "workdir", "launch_cmd", "api_url", "output_dir", "delete_outputs",
   "fast_dequant", "float_type",
@@ -3812,8 +3819,11 @@ export function copyMediaFields(from, to) {
     if (!s || !c.write) continue;     // only fields both subsections have
     if (!mediaFieldCopyable(c.field.key)) continue;
     const v = s.read();
-    if (c.field.widget === "select" && v != null && v !== ""
-        && !(c.field.options || []).includes(v)) continue;
+    if (c.field.widget === "select") {
+      const want = v == null ? "" : String(v);
+      const sel = c.node.querySelector("select");
+      if (!sel || ![...sel.options].some((o) => o.value === want)) continue;
+    }
     c.write(v);
     c.node.classList.remove("media-inherited");
     n += 1;

@@ -128,13 +128,9 @@ class TestShippedDefaultAnnotation:
 
 
 class TestMediaPerPluginAnnotation:
-    """schema_json's media_per_plugin annotation: the GUI's Media section skips
-    group="Media" fields in the flat form and renders per-plugin-mapped globals
-    ONLY in the per-plugin boxes - so it must be able to tell, from the schema
-    alone, which Media fields those are. Without the annotation a client has to
-    special-case keys by name, and every other Media field
-    (comfy_launch_timeout / comfy_disable_auto_launch / comfy_func_shim) renders
-    NOWHERE. MEDIA_PLUGIN_FIELDS is the single source of truth."""
+    """schema_json's media_per_plugin annotation marks, from the schema alone,
+    the group="Media" fields that are the shared defaults behind a per-plugin
+    Media field (MEDIA_PLUGIN_FIELDS); every other Media field is not marked."""
 
     def test_media_fields_carry_the_annotation(self):
         js = ss.schema_json()

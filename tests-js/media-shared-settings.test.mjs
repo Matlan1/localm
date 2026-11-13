@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The Media section renders every visible group="Media" schema field. Every
-// un-mapped, un-special-cased Media field goes in a "Shared" box, keyed on the
-// schema's media_per_plugin annotation.
+// field not placed elsewhere goes in a "Shared" box, the per-plugin-mapped
+// globals (media_per_plugin) included as the shared defaults.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
 const SCHEMA = { fields: [
-  // Per-plugin-mapped global: owned by the per-plugin boxes.
+  // Per-plugin-mapped global: the shared default behind the per-plugin field.
   { key: "comfy_workdir", widget: "folder", label: "ComfyUI folder", help: "",
     group: "Media", owner: "image", default: "/shared", media_per_plugin: true },
   // The two explicitly-placed fields.
@@ -78,13 +78,17 @@ test("an unmapped future Media field renders too (fail-open, no allowlist)", asy
     "a new group=Media field must be visible by default, never silently dropped");
 });
 
-test("a per-plugin-mapped global gets no duplicate shared control", async () => {
+test("a per-plugin-mapped global is drawn once, in the Shared box", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, 'caps.fsAccess = "host";');
   await render(win);
   const sec = mediaSection(win);
-  // The per-plugin boxes render it under its per-plugin key ("workdir").
-  assert.equal(sec.querySelector('[data-field-key="comfy_workdir"]'), null,
-    "comfy_workdir is per-plugin-mapped; a shared duplicate would be confusing");
+  const shared = [...sec.querySelectorAll(".media-comfy-box")]
+    .find((b) => (b.querySelector("h4") || {}).textContent === "Shared");
+  assert.ok(shared, "the Shared box rendered");
+  assert.equal(sec.querySelectorAll('[data-field-key="comfy_workdir"]').length, 1);
+  assert.ok(shared.querySelector('[data-field-key="comfy_workdir"]'),
+    "comfy_workdir is the shared default a blank per-plugin folder uses");
 });
 
 test("the shared box never duplicates the explicitly-placed fields", async () => {

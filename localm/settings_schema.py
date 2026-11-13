@@ -1191,11 +1191,10 @@ CORE_FIELDS: list = [
     # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
     # field (MEDIA_PLUGIN_FIELDS "float_type"): the music/video backends read
     # the plugin block's value, else this key. Options must stay identical to
-    # the per-plugin field's (pinned by a test). Not rendered anywhere itself:
-    # like every
-    # per-plugin-mapped comfy_* global, the GUI edits the per-plugin values
-    # (schema_json's media_per_plugin annotation routes it away from the
-    # Media section's shared box).
+    # the per-plugin field's (pinned by a test). Like every per-plugin-mapped
+    # comfy_* global (schema_json's media_per_plugin annotation), the GUI draws
+    # it in the Media section's shared box as the default a blank per-plugin
+    # field uses.
     SettingField("comfy_float_type", Widget.SELECT, "Media weight dtype (shared)",
                  "Shared fallback for the per-plugin 'Model weight dtype' Media "
                  "setting (ComfyUI only). default keeps the workflow's value; no "
@@ -1929,13 +1928,9 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
     in which case ``is_set`` and ``env_set`` are both False."""
     from localm.config import DEFAULT_CONFIG
     base = DEFAULT_CONFIG if values is None else values
-    # The GUI's Media section skips group="Media" fields in the flat form and
-    # shows per-plugin-mapped globals ONLY inside the per-plugin boxes, so it
-    # must be able to tell which those are FROM THE SCHEMA rather than from a
-    # client-side name allowlist, which renders any field missing from it
-    # nowhere. MEDIA_PLUGIN_FIELDS is the single source of truth; every OTHER
-    # Media field renders in the section's shared box by default, so a future
-    # field cannot silently vanish.
+    # media_per_plugin marks the group="Media" fields that are the shared
+    # defaults behind a per-plugin Media field (MEDIA_PLUGIN_FIELDS); the GUI's
+    # Media section draws every group="Media" field in its shared box.
     media_mapped = {m.global_key for m in MEDIA_PLUGIN_FIELDS}
     out = []
     for f in CORE_FIELDS:
