@@ -46,6 +46,13 @@ test("an update applied to an install that is not a git clone says nothing about
   assert.doesNotMatch(text, /git/);
 });
 
+test("a refused update shows the server's own words, not a claim that it was rolled back", async () => {
+  const text = await applyWith({ applied: false,
+    error: "this localm runs from its container image, so no update was made" });
+  assert.match(text, /Update failed: this localm runs from its container image/);
+  assert.doesNotMatch(text, /rolled back/);
+});
+
 test("a setup-class update names the setup script of each platform", async () => {
   const text = await applyWith({ applied: true, version: "0.3.5", klass: "setup" });
   assert.match(text, /setup\.bat on Windows, setup\.sh on Linux and macOS/);

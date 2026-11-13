@@ -725,7 +725,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     try:
         res = updater.apply(asset["id"], signature=info.get("signature"), say=_say_step)
     except LocalmError as e:
-        # apply() has already rolled back by this point.
+        # The error says whether apply() changed nothing, rolled back, or needs a manual restore.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
         sys.exit(1)
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "

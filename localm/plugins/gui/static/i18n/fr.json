@@ -2864,7 +2864,7 @@
   "settings.update.downgradeConfirm": "Rétrograder",
   "settings.update.downgradeTitle": "Rétrograder vers {version} ?",
   "settings.update.downloading": "Téléchargement et application ...",
-  "settings.update.failedRolledBack": "Échec de la mise à jour (annulée) : {error}",
+  "settings.update.failedRolledBack": "Échec de la mise à jour : {error}",
   "settings.update.installBody": "Cela télécharge {version}, remplace par celle-ci le code LocaLM en cours d'exécution (vous avez {current}), puis redémarre le serveur.",
   "settings.update.installConfirm": "Installer",
   "settings.update.installTitle": "Installer {version} ?",

@@ -2807,7 +2807,7 @@ export const I18N_EN = {
   "settings.update.updatedRestarting": "Updated to {version}. Restarting ...",
   "settings.update.updatedSetup": "Updated to {version}. Re-run setup in the install folder (setup.bat on Windows, setup.sh on Linux and macOS) to finish.",
   "settings.update.updatedPlain": "Updated to {version}.",
-  "settings.update.failedRolledBack": "Update failed (rolled back): {error}",
+  "settings.update.failedRolledBack": "Update failed: {error}",
   "settings.update.nothingToApply": "Nothing to apply.",
   "settings.update.applyFailed": "Update failed: {message}",
   "settings.update.versionsButton": "Choose a version",

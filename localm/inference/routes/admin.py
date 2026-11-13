@@ -464,7 +464,7 @@ def register(app: FastAPI, ctx) -> None:
                 _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
                 defer_runtime=True)
         except LocalmError as e:
-            # apply() already rolled back; report the failure, do not fake success.
+            # The error says whether apply() changed nothing, rolled back, or needs a manual restore.
             return {"applied": False,
                     "error": _hs.path_formatter(request)(format_localm_error(e))}
         for key in ("backup", "runtime_note", "components_note"):
@@ -565,6 +565,15 @@ def register(app: FastAPI, ctx) -> None:
         try:
             res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:
+            if e.stage == updater.ROLLBACK_INCOMPLETE:
+                from localm.debuglog import logger
+                logger.error("update rollback failed partway; the install may be "
+                             "half-restored and the backup is kept: %s: %s",
+                             e.summary, e.reason)
+                raise HTTPException(
+                    500, f"The rollback failed partway, so the install may be "
+                         f"half-restored. The backup was kept for manual recovery. "
+                         f"Details: {format_localm_error(e)}") from e
         # A precondition failure, so nothing was touched: there is no backup, the backup
         # is incomplete, or an update/rollback already holds the single-flight lock. Kept distinct
         # from the partial-restore case below, where the install HAS been modified.

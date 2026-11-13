@@ -225,7 +225,7 @@ def relaunch_previous(url: str, argv: list, *, request_timeout: float,
         _log(log_path, "the previous version could not be started; start localm again "
                        "to use it")
         return False
-    _log(log_path, f"started the previous version again (pid {pid})")
+    _log(log_path, f"launched the previous version (pid {pid})")
     return True
 
 

@@ -2864,7 +2864,7 @@
   "settings.update.downgradeConfirm": "Volver a esta versión",
   "settings.update.downgradeTitle": "¿Volver a {version}?",
   "settings.update.downloading": "Descargando y aplicando ...",
-  "settings.update.failedRolledBack": "La actualización falló (se revirtió): {error}",
+  "settings.update.failedRolledBack": "La actualización falló: {error}",
   "settings.update.installBody": "Esto descarga {version}, sustituye con ella el código de LocaLM en ejecución (tienes {current}) y reinicia el servidor.",
   "settings.update.installConfirm": "Instalar",
   "settings.update.installTitle": "¿Instalar {version}?",

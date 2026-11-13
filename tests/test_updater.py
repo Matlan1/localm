@@ -915,6 +915,7 @@ def test_rollback_last_reports_a_failed_restore_as_a_localm_error(tmp_path, monk
     with pytest.raises(LocalmError) as ei:
         updater.rollback_last(installed=install)
     assert ei.value.summary.startswith("the rollback did not finish")
+    assert ei.value.stage == updater.ROLLBACK_INCOMPLETE
     assert "refused unsafe name" in ei.value.reason
     assert "backup is kept at" in ei.value.reason
 
@@ -973,6 +974,31 @@ def test_an_update_of_a_git_clone_says_so(tmp_path, monkeypatch, sig_env):
     res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
     assert res["git_clone"] is True
     assert (inst / ".git").is_dir(), "the update leaves the clone's .git alone"
+
+
+def test_a_signed_archive_with_an_unsafe_path_is_a_named_refusal(tmp_path, monkeypatch, sig_env):
+    import io
+    import zipfile
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", "0.2.0")
+        z.writestr("pyproject.toml", _pyproject_str(["click"]))
+        z.writestr("../escape.txt", "x")
+    data = buf.getvalue()
+
+    def opener(url, headers, timeout, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
+                      download_opener=opener)
+    assert ei.value.summary == "refusing to install: the download is not a localm build"
+    assert "unsafe path" in ei.value.reason
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+    assert not (tmp_path / "escape.txt").exists()
 
 
 def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, monkeypatch):
@@ -1409,6 +1435,22 @@ def test_spawn_health_watchdog_passes_the_command_line_to_start_again(tmp_path, 
         relaunch_argv=relaunch, popen=_capturing_popen(calls)) is True
     argv = calls[0][0]
     assert json.loads(argv[argv.index("--relaunch-argv") + 1]) == relaunch
+
+
+def test_spawn_health_watchdog_leaves_the_relaunch_out_for_an_older_watchdog(tmp_path,
+                                                                            monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    old = tmp_path / "scripts" / "update_watchdog.py"
+    old.parent.mkdir()
+    old.write_text("ap.add_argument('--log-file')\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "_watchdog_script", lambda: old)
+    calls = []
+    assert updater.spawn_health_watchdog(
+        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
+        relaunch_argv=["python", "-m", "localm", "gui"], popen=_capturing_popen(calls)) is True
+    argv = calls[0][0]
+    assert argv[1] == str(old)
+    assert "--relaunch-argv" not in argv
 
 
 def test_spawn_health_watchdog_posix_uses_start_new_session(tmp_path, monkeypatch):

@@ -372,7 +372,7 @@ def test_a_rollback_that_succeeded_starts_the_previous_version_and_records_why(t
     assert code == wd.EXIT_ROLLED_BACK
     assert (inst / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
     assert calls == [argv]
-    assert "started the previous version again (pid 4242)" in logfile.read_text(
+    assert "launched the previous version (pid 4242)" in logfile.read_text(
         encoding="utf-8")
     status = json.loads((home / "updates" / "runtime-update.json").read_text(encoding="utf-8"))
     assert status["state"] == "rolled_back"

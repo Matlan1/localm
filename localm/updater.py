@@ -554,12 +554,14 @@ def is_site_packages_install(root=None) -> bool:
 #: Set to "1" by the localm container image (``docker/Dockerfile``).
 CONTAINER_IMAGE_ENV = "LOCALM_CONTAINER_IMAGE"
 
+#: The ``stage`` of the LocalmError :func:`rollback_last` raises when a restore
+#: failed partway.
+ROLLBACK_INCOMPLETE = "rollback_incomplete"
+
 
 def in_container_image() -> bool:
     """True when this localm runs from the localm container image
-    (:data:`CONTAINER_IMAGE_ENV` is "1"). Its code and venv belong to the image,
-    so an update or repair applied inside a container is lost when the container
-    is replaced."""
+    (:data:`CONTAINER_IMAGE_ENV` is "1")."""
     import os
     return os.environ.get(CONTAINER_IMAGE_ENV, "").strip() == "1"
 
@@ -1562,12 +1564,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     "signature was checked",
                     reason="the file on disk no longer matches the verified bytes; "
                            "try the update again")
+            import zipfile
             try:
                 au.verify_zip(zip_path)
-            except ValueError as e:
+                root = au.extract(zip_path, staging)
+            except (ValueError, zipfile.BadZipFile) as e:
                 raise LocalmError("refusing to install: the download is not a localm build",
                                   reason=str(e)) from None
-            root = au.extract(zip_path, staging)
             vf = root / "VERSION"
             new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
             if target_version is None:
@@ -1988,6 +1991,16 @@ def _watchdog_script() -> Path:
     return own if own.is_file() else repo_root() / "scripts" / "update_watchdog.py"
 
 
+def _watchdog_takes_relaunch(script: Path) -> bool:
+    """True when the watchdog *script* accepts ``--relaunch-argv`` (a watchdog of
+    an older build does not, and exits on an argument it does not know). False
+    when it cannot be read."""
+    try:
+        return "--relaunch-argv" in script.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+
+
 def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                           timeout: float = WATCHDOG_TIMEOUT_S,
                           poll_interval: float = WATCHDOG_POLL_INTERVAL_S,
@@ -2009,7 +2022,8 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
     *relaunch_argv*, when given, is the command line the server re-execs with
     (``http_server._restart_argv``); after a rollback that succeeded the watchdog
     starts the previous version with it, unless something already answers on the
-    port."""
+    port. It is passed only to a watchdog script that accepts it
+    (:func:`_watchdog_takes_relaunch`)."""
     try:
         import os
         import subprocess
@@ -2033,9 +2047,9 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                *(["--code-root", str(code_root)] if code_root else []),
                "--timeout", str(timeout), "--poll-interval", str(poll_interval),
                "--request-timeout", str(request_timeout),
-               "--log-file", str(log_file),
-               *(["--relaunch-argv", _json.dumps([str(a) for a in relaunch_argv])]
-                 if relaunch_argv else [])]
+               "--log-file", str(log_file)]
+        if relaunch_argv and _watchdog_takes_relaunch(script):
+            argv += ["--relaunch-argv", _json.dumps([str(a) for a in relaunch_argv])]
         env = os.environ.copy()
         # So the watchdog's rollback call re-derives the same data home this server
         # was using, via rollback_update.py's own _detect_home() precedence.
@@ -2330,7 +2344,9 @@ def rollback_last(*, installed=None, say=None) -> dict:
     to find out performs it.
 
     A restore that fails partway raises LocalmError naming the kept backup,
-    whatever the error was. With *installed* None, refused inside the localm
+    whatever the error was, with ``stage`` :data:`ROLLBACK_INCOMPLETE` (the
+    install may be half-restored); every other LocalmError means nothing was
+    changed. With *installed* None, refused inside the localm
     container image (:func:`refuse_in_container_image`)."""
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
@@ -2386,9 +2402,10 @@ def rollback_last(*, installed=None, say=None) -> dict:
             raise
         except Exception as e:
             unpin()
-            raise LocalmError("the rollback did not finish - some of the previous version "
-                              "could not be put back",
-                              reason=f"{e}; the backup is kept at {backup_dir}") from None
+            raise LocalmError("the rollback did not finish, so the install may be "
+                              "half-restored",
+                              reason=f"{e}; the backup is kept at {backup_dir}",
+                              stage=ROLLBACK_INCOMPLETE) from None
         except BaseException:
             unpin()
             raise

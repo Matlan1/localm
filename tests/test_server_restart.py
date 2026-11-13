@@ -534,7 +534,8 @@ def test_do_restart_spawns_watchdog_when_given(monkeypatch):
     from localm import updater
     calls = []
     env_at_spawn = []
-    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "x")
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS")
 
     def _spawn(**kw):
         calls.append(kw)

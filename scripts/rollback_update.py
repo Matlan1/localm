@@ -329,7 +329,7 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
     left = _parts_left(updates_dir)
     _record_rollback(updates_dir, install_root, left, why)
     if why:
-        print(f"Rolling back because {why}.")
+        print(f"Rolled back because {why}.")
     print("Rolled back to the previous version" + (" and its packages" if undo else "")
           + ". Start localm again to use it; Settings > Updates shows any other part that "
             "still differs.")

@@ -2811,7 +2811,7 @@
   "settings.update.checkButton": "Nach Updates suchen",
   "settings.update.checkFailed": "Prüfung fehlgeschlagen: {message}",
   "settings.update.downloading": "Wird heruntergeladen und angewendet ...",
-  "settings.update.failedRolledBack": "Update fehlgeschlagen (zurückgesetzt): {error}",
+  "settings.update.failedRolledBack": "Update fehlgeschlagen: {error}",
   "settings.update.notConfigured": "Der Updater ist nicht konfiguriert.",
   "settings.update.notesShowAll": "Alle anzeigen",
   "settings.update.notesShowLess": "Weniger anzeigen",
