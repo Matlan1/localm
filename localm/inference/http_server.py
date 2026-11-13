@@ -5806,8 +5806,8 @@ def _roll_back_during_restart() -> bool:
         return True
     except LocalmError as e:
         _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
-                   "localm %s is installed and Settings > Updates shows which parts "
-                   "disagree", e.summary, e.reason, _version.read_version())
+                   "localm %s is installed and Settings > System > Updates > Installed parts "
+                   "shows which parts disagree", e.summary, e.reason, _version.read_version())
         return False
 
 

@@ -129,7 +129,7 @@ def rerank_plan(cfg: Optional[dict] = None, *,
         if len(installed) > 1:
             return RerankPlan(None, candidates, None,
                               f"several rerankers are installed ({', '.join(installed)}); "
-                              "choose one in Settings > Knowledge > Reranker model")
+                              "choose one in Settings > Plugins > Reranker model")
     try:
         name, fn = make_rerank_fn(model)
     except reranker.RerankerModelError as e:
