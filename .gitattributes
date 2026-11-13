@@ -8,3 +8,6 @@ tests/fixtures/rag_store_v1/** -text
 
 # Rerank evaluation corpus: chunk boundaries (and the recorded replay) depend on the line endings.
 tests/fixtures/rag_rerank_eval/corpus/** text eol=lf
+
+# CHANGELOG.md: concurrent [Unreleased] bullets merge by union.
+CHANGELOG.md merge=union
