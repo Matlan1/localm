@@ -60,10 +60,10 @@ Notes:
   no prompt sidecar and ComfyUI's own copy is removed, even when the global mode
   keeps them. The automatic diagnostics the server decides on for such a request
   and its job are off unless you turned on `keep_diagnostics`: the finished job
-  is not kept in the activity record, and a model the request or job loads,
-  including the chat model reloaded after the job, gets no crash trace. A model
-  or media backend already running when the request arrives keeps the crash
-  trace it started with, and the server's hang watchdog follows the global mode.
+  is not kept in the activity record, and a chat model the request or job loads,
+  including the one reloaded after the job, gets no crash trace. A model or
+  media backend already running when the request arrives keeps the crash trace
+  it started with, and the server's hang watchdog follows the global mode.
   A failed `localm run` follows the chat mode for its bug report.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a

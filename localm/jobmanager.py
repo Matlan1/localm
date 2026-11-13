@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import json
 import os
 import re
@@ -981,13 +982,15 @@ class JobManager:
         When ``audit.diagnostics_allowed()`` is False only running jobs are
         written, each with ``result`` set to None; a private job's row gets the
         same treatment unless ``audit.diagnostics_allowed(private_request=True)``
-        is True. Best-effort:
+        is True. Both are decided outside any ``audit.request_privacy`` block the
+        calling thread is in, so a private job's own write keeps the other jobs'
+        rows. Best-effort:
         _ActivityStore.write reports its own failures and returns False instead
         of raising. An EMPTY set of rows removes the file instead of writing an
         empty one."""
         rows = [j.to_record() for j in self._jobs.values()]
-        keep_open = _keeps_finished_records()
-        keep_private = _keeps_private_finished_records()
+        keep_open = contextvars.Context().run(_keeps_finished_records)
+        keep_private = contextvars.Context().run(_keeps_private_finished_records)
         kept = []
         for r in rows:
             if keep_private if r.get("private") else keep_open:

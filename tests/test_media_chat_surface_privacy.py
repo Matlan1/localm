@@ -317,3 +317,46 @@ def test_a_failed_run_saves_no_report_when_chat_is_private(chat_private):
 def test_another_failed_command_still_saves_its_report(chat_private):
     _report_failure("pull")
     assert len(_saved_reports()) == 1
+
+def test_a_private_jobs_own_write_keeps_other_jobs_rows(chat_private, jobs, tmp_path):
+    from localm.audit import request_privacy
+    open_job = jobs.start_fn("pull", lambda job: True)
+    _wait_finished(open_job)
+    with request_privacy(True):
+        private_job = jobs.start_fn("imagine", lambda job: True)
+    _wait_finished(private_job)
+    text = _activity_text(tmp_path / "activity")
+    assert open_job.id in text
+    assert private_job.id not in text
+
+
+def test_a_reload_a_private_job_left_to_a_later_job_says_privacy(monkeypatch):
+    from localm import vram
+    from localm.jobmanager import Job
+    sent = []
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+    def self_request(method, path, **kw):
+        sent.append((path, kw.get("headers")))
+        return _Resp()
+    monkeypatch.setattr("localm.selfclient.self_request", self_request)
+    monkeypatch.setattr(vram, "_handover_deferred_headers", {})
+    monkeypatch.setattr(vram, "_handover_deferred_backends", [])
+    monkeypatch.setattr(vram, "_handover_deferred", None)
+    backend = MagicMock()
+    backend.free_vram.return_value = True
+    s = {"reload_after": True}
+    private_job = Job(id="a", kind="imagine", argv=[])
+    private_job.private = True
+    open_job = Job(id="b", kind="imagine", argv=[])
+    monkeypatch.setattr(vram, "_handover_jobs", 2)
+    vram.reload_chat_after_media(private_job, "http://127.0.0.1:9/v1", s, backend, "image")
+    assert sent == []
+    monkeypatch.setattr(vram, "_handover_jobs", 1)
+    vram.reload_chat_after_media(open_job, "http://127.0.0.1:9/v1", s, backend, "image")
+    assert sent == [("/models/load", {"X-Localm-Session-Mode": "privacy"})]
+    vram.reload_chat_after_media(open_job, "http://127.0.0.1:9/v1", s, backend, "image")
+    assert sent[-1] == ("/models/load", {})
