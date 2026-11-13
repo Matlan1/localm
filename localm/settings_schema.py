@@ -858,7 +858,8 @@ CORE_FIELDS: list = [
     SettingField("suggest_plugins", Widget.TOGGLE,
                  "Suggest installing a plugin for its command",
                  "When a command belongs to a known but inactive plugin, suggest "
-                 "installing it instead of reporting an unknown command.",
+                 "installing or enabling it. Off: the command only says that its "
+                 "plugin is not active.",
                  group="Plugins", tier=Tier.CONFIG_WRITE),
     # Only the LOCAL operator can trigger this - a remote client never causes a
     # server-side install (the install path is gated on the local principal).

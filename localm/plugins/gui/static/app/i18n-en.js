@@ -1761,6 +1761,7 @@ export const I18N_EN = {
   "tts.noSynthesis": "This browser has no speech synthesis",
   "tts.storageBlocked": "This browser blocked storage, so the voice resets on reload",
   "slash.needsPlugin": "/{cmd} needs the {plugin} plugin - install or enable it on the Plugins page.",
+  "slash.pluginOff": "/{cmd} is not available: the {plugin} plugin is not active.",
   "nav.group.studio": "Studio",
   "nav.leaveSettings.title": "Unsaved settings",
   "nav.leaveSettings.leave": "Leave without saving",
@@ -1777,6 +1778,7 @@ export const I18N_EN = {
   "memory.updateFailed": "Could not update memory: {message}",
   "memory.rememberUsage": "Usage: /remember <fact>",
   "memory.remembered": "Remembered",
+  "memory.alreadyRemembered": "Already in memory",
   "memory.couldNotSave": "Could not save: {message}",
   "memory.synth.running": "Distilling facts from your chat...",
   "memory.synth.nothingNew": "Nothing new to remember yet.",
@@ -2101,7 +2103,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Plugins
   "settings.field.suggestPlugins.label": "Suggest installing a plugin for its command",
-  "settings.field.suggestPlugins.help": "When a command belongs to a known but inactive plugin, suggest installing it instead of reporting an unknown command.",
+  "settings.field.suggestPlugins.help": "When a command belongs to a known but inactive plugin, suggest installing or enabling it. Off: the command only says that its plugin is not active.",
   "settings.field.autoInstallPluginDeps.label": "Auto-install plugin dependencies",
   "settings.field.autoInstallPluginDeps.help": "When you install or enable a plugin that needs extra Python packages, install them automatically on this machine. Skipped on a network bind and by `localm plugin install <folder>`.",
 

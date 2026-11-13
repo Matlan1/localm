@@ -8,7 +8,8 @@ features except this small static catalog, which lets it:
 
   1. Tell a surface which chat commands each first-party plugin provides, so
      the chat composer can say "/remember needs the memory plugin" for a plugin
-     that is off. The hint can be turned off (config: suggest_plugins=False).
+     that is off. With suggest_plugins=False the composer only says that the
+     plugin is not active, with no install or enable advice.
   2. Resolve WHERE to install a first-party plugin from: the bundled store on
      disk. A plugin missing from the store has no source today; install raises
      NotImplementedError when the entry carries a repo URL and KeyError otherwise.

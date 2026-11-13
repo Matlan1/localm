@@ -2012,7 +2012,7 @@ export async function refreshPluginCommands() {
     const map = {};
     for (const p of data.plugins || []) {
       for (const c of p.commands || []) {
-        map[c] = { plugin: p.name, active: !!p.active };
+        map[c] = { plugin: p.name, label: p.label || "", active: !!p.active };
       }
     }
     pluginCommands.map = map;
@@ -2087,17 +2087,24 @@ export async function maybeAutoUpdateCheck() {
   if (apply && !apply.hidden) toast(t("settings.update.foundToast"));
 }
 
-/** A "/cmd needs the X plugin" hint when *cmd* belongs to a known first-party
- *  plugin that is not active, else null (handle it normally). */
+/** The name a plugin is shown by on the Plugins page: its *label*, followed by
+ *  its plugin *name* in parentheses when the two differ ("Knowledge (rag)"). */
+export function pluginShownName(label, name) {
+  const l = String(label || ""), n = String(name || "");
+  if (!l) return n;
+  return l.toLowerCase() === n.toLowerCase() ? l : `${l} (${n})`;
+}
+
+/** The refusal for chat command *cmd* when it belongs to a known first-party
+ *  plugin that is not active, naming the plugin as the Plugins page shows it:
+ *  with "suggest plugins" on it says to install or enable it, with it off
+ *  only that the plugin is not active. Null when *cmd* is no such command
+ *  (handle it normally). */
 export function pluginSuggestion(cmd) {
-  if (!pluginCommands.suggest) return null;
-  // Some composer slash commands differ from the plugin's declared command name
-  // (the menu offers /web, but the web plugin declares "search-web"). Alias them
-  // so an inactive plugin still gets the "install it" hint instead of a raw 404.
-  const ALIAS = { web: "search-web" };
-  const hit = pluginCommands.map[cmd] || pluginCommands.map[ALIAS[cmd]];
+  const hit = pluginCommands.map[cmd];
   if (!hit || hit.active) return null;
-  return t("slash.needsPlugin", { cmd, plugin: hit.plugin });
+  return t(pluginCommands.suggest ? "slash.needsPlugin" : "slash.pluginOff",
+           { cmd, plugin: pluginShownName(hit.label, hit.plugin) });
 }
 
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
@@ -2357,7 +2364,8 @@ export async function rememberFact(fact) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshMemory();
-    toast(t("memory.remembered"));
+    // "exists": the same fact is already stored, nothing new was saved.
+    toast(t(data.status === "exists" ? "memory.alreadyRemembered" : "memory.remembered"));
   } catch (e) {
     toast(t("memory.couldNotSave", { message: e.message }), true);
   }

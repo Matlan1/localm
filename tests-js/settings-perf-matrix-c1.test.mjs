@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // settings-perf.js outside the chat turn: the conversation export, the text
 // read aloud, the memory dialog, the voice download and microphone, web
-// lookup errors, the App update block and the startup update check, and the
-// Live tuning labels.
+// lookup errors, the App update block and the startup update check, the
+// Live tuning labels, the "needs a plugin" refusal and /remember.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp, runScript } from "./harness.mjs";
+import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
 const jsonResp = (obj, status = 200) => ({
   ok: status < 400, status, statusText: status >= 400 ? "Error" : "", headers: { get: () => null },
@@ -303,4 +303,61 @@ test("the Live tuning controls do not claim to show the running model's values",
     assert.doesNotMatch(window.t(key), /running model/);
     assert.match(window.t(key), /saved/);
   }
+});
+
+// --------------------------------------------------------------------------
+//  Plugin command refusal
+// --------------------------------------------------------------------------
+
+async function appWithPlugins(suggest) {
+  const caps = { suggest_plugins: suggest, plugins: [
+    { name: "rag", label: "Knowledge", commands: ["knowledge"], active: false },
+    { name: "image", label: "Images", commands: ["generate-image", "imagine"], active: false },
+    { name: "web", label: "", commands: ["web"], active: false },
+    { name: "memory", label: "", commands: ["remember", "memory"], active: true },
+  ] };
+  const { window } = appWith({ "/api/capabilities": () => jsonResp(caps) });
+  await window.refreshPluginCommands();
+  return window;
+}
+
+test("a command of an inactive plugin names the plugin as the Plugins page shows it", async () => {
+  const window = await appWithPlugins(true);
+  assert.equal(window.pluginSuggestion("generate-image"),
+    window.t("slash.needsPlugin", { cmd: "generate-image", plugin: "Images (image)" }));
+  assert.match(window.pluginSuggestion("knowledge"), /Knowledge \(rag\)/);
+  assert.match(window.pluginSuggestion("web"), /needs the web plugin/, "/web maps to the web plugin with no alias");
+  assert.equal(window.pluginSuggestion("remember"), null, "an active plugin's command runs");
+  assert.equal(window.pluginSuggestion("nosuch"), null);
+});
+
+test("with plugin suggestions off a command of an inactive plugin is still refused, without install advice", async () => {
+  const window = await appWithPlugins(false);
+  const said = window.pluginSuggestion("generate-image");
+  assert.equal(said, window.t("slash.pluginOff", { cmd: "generate-image", plugin: "Images (image)" }));
+  assert.doesNotMatch(said, /install/i);
+});
+
+test("the plugin name in the refusal follows the Plugins page's own rule", () => {
+  const { window } = loadAppWithPages();
+  for (const [label, name] of [["Knowledge", "rag"], ["Images", "image"], ["", "web"], ["Chat", "chat"], ["MUSIC", "music"]]) {
+    assert.equal(window.pluginShownName(label, name), window.pluginTitle({ label, name }), `${label}/${name}`);
+  }
+});
+
+// --------------------------------------------------------------------------
+//  /remember
+// --------------------------------------------------------------------------
+
+test("/remember of a fact already stored says so instead of claiming it was remembered", async () => {
+  const { window } = appWith({
+    "/api/memory/append": () => jsonResp({ status: "exists", id: "m1" }),
+  });
+  await window.rememberFact("I like tea");
+  assert.equal(toastText(window), window.t("memory.alreadyRemembered"));
+  const { window: w2 } = appWith({
+    "/api/memory/append": () => jsonResp({ status: "appended", id: "m2" }),
+  });
+  await w2.rememberFact("I like coffee");
+  assert.equal(toastText(w2), w2.t("memory.remembered"));
 });
