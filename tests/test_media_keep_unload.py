@@ -444,8 +444,16 @@ def test_a_chat_message_waits_for_a_busy_image_job_then_stops_the_worker(
     monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 10.0)
     assert sd_shared.lock.acquire(timeout=5)
     statuses = []
-    threading.Timer(0.5, sd_shared.lock.release).start()
-    result = chat_load(preempt=False, on_status=statuses.append)
+
+    def on_status(text):
+        statuses.append(text)
+        if text == hs.WAITING_FOR_MODEL_STATUS:
+            threading.Timer(0.5, sd_shared.lock.release).start()
+    try:
+        result = chat_load(preempt=False, on_status=on_status)
+    finally:
+        if sd_shared.lock.locked() and hs.WAITING_FOR_MODEL_STATUS not in statuses:
+            sd_shared.lock.release()
 
     assert result["status"] == "loaded", result
     assert not sd_worker.is_alive()

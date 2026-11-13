@@ -55,7 +55,7 @@ function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
   const win = dom.window;
   const calls = [];
 
-  win.confirm = () => true;           // Delete uses confirm(); auto-accept.
+  win.confirm = () => { throw new Error("the browser's own confirm() must not be used"); };
   win.fetch = async (url, opts = {}) => {
     const method = (opts.method || "GET").toUpperCase();
     calls.push({ url: String(url), method, body: opts.body });
@@ -63,7 +63,7 @@ function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
       return { ok: true, status: 200,
                json: async () => ({ jobs, scheduler_warning: schedulerWarning }) };
     }
-    if (method === "GET" && /\/api\/models$/.test(url)) {
+    if (method === "GET" && /\/api\/models(\?|$)/.test(url)) {
       return { ok: true, status: 200, json: async () => ({ models, active }) };
     }
     if (method === "POST" && /\/api\/jobs\/[^/]+\/run$/.test(url)) {
@@ -200,8 +200,8 @@ test("the Model field is a dropdown populated from /api/models", async () => {
   assert.ok(values.includes(""), "keeps a blank = active/default option");
   assert.ok(values.includes("chat-model") && values.includes("coder-model"),
     "installed model names are added as options");
-  assert.ok(calls.some((c) => c.method === "GET" && /\/api\/models$/.test(c.url)),
-    "the dropdown is sourced from GET /api/models");
+  assert.ok(calls.some((c) => c.method === "GET" && /\/api\/models\?(.*&)?type=llm(&|$)/.test(c.url)),
+    "the dropdown is sourced from GET /api/models, asking for chat models only (type=llm)");
 });
 
 // --- the rag (knowledge re-sync) task kind ---------------------------------
@@ -400,8 +400,8 @@ test("row action buttons use the in-table tiers, not the page .btn-* classes", a
 });
 
 // --- delete confirmation ----------------------------------------------------
-// Delete confirms through window.confirmDanger, the app's in-page modal; a native
-// confirm() fallback exists for the no-GUI-shell case.
+// Delete confirms through window.confirmDanger, the app's in-page modal; without
+// the GUI shell it asks in a minimal in-page dialog of its own.
 
 // Installs a controllable window.confirmDanger and a confirm() that records being
 // called, so the tests can tell which one ran.
@@ -439,6 +439,37 @@ test("Delete confirms with the app's confirmDanger modal, never native confirm()
   assert.ok(
     env.calls.some((c) => c.method === "DELETE" && c.url.endsWith(`/api/jobs/${JOB.id}`)),
     "confirming issues the DELETE");
+});
+
+test("without the GUI shell, Delete asks in an in-page dialog, never native confirm()", async () => {
+  const env = makeEnv();
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  env.win.onViewShown("jobs");
+  await settle();
+
+  env.win.document.querySelector(
+    `#view-jobs [data-action="delete"][data-id="${JOB.id}"]`).click();
+  await settle();
+  const box = env.win.document.querySelector('.jobs-confirm[role="dialog"]');
+  assert.ok(box, "an in-page dialog asks first");
+  assert.match(box.textContent, /Nightly digest/, "it names the job being deleted");
+  assert.ok(!env.calls.some((c) => c.method === "DELETE"), "nothing is deleted before the answer");
+
+  [...box.querySelectorAll("button")].find((b) => b.textContent === "Cancel").click();
+  await settle();
+  assert.equal(env.win.document.querySelector(".jobs-confirm"), null, "Cancel closes the dialog");
+  assert.ok(!env.calls.some((c) => c.method === "DELETE"), "Cancel deletes nothing");
+
+  env.win.document.querySelector(
+    `#view-jobs [data-action="delete"][data-id="${JOB.id}"]`).click();
+  await settle();
+  [...env.win.document.querySelectorAll(".jobs-confirm button")]
+    .find((b) => b.textContent === "Delete").click();
+  await settle();
+  assert.ok(
+    env.calls.some((c) => c.method === "DELETE" && c.url.endsWith(`/api/jobs/${JOB.id}`)),
+    "the dialog's Delete issues the DELETE");
 });
 
 test("declining the confirm deletes nothing", async () => {

@@ -148,7 +148,7 @@ def runs_without_its_own_code(model_path: str) -> bool:
 BUNDLED_CODE_NOTE = ("This model ships its own code, which did not run because 'Allow model-bundled custom "
                      "code' is off; localm used transformers' own support for it instead. That may be why this "
                      "failed. If you trust the model's source, try turning that setting on "
-                     "(localm config hf_trust_remote_code true).")
+                     "(Settings > Model, or `localm config hf_trust_remote_code true`).")
 
 
 BUNDLED_CODE_ALWAYS_NOTE = ("This model ships its own code, which localm does not run for this kind of model; it uses "
@@ -195,7 +195,8 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "run Python bundled inside the model directory (auto_map). That is "
         "arbitrary code execution as the user running localm, so it is refused by "
         "default.\n"
-        "If you trust the source of this model, enable it with:\n"
+        "If you trust the source of this model, turn on 'Allow model-bundled "
+        "custom code' in Settings > Model, or run:\n"
         "  localm config hf_trust_remote_code true\n"
         "Only do that for a model you obtained from a source you trust.")
 
@@ -736,9 +737,12 @@ class HFBackend(BaseBackend):
         if done.get("grammar_unsupported") and not getattr(self, "_grammar_unsupported", False):
             self._grammar_unsupported = True
             logger.warning("the grammar constraint failed during generation; this "
-                           "reply was unconstrained and later grammar requests to "
-                           "this model are refused")
+                           "reply is reported as failed and later grammar requests "
+                           "to this model are refused")
             console.print(
                 "[yellow]grammar constraints failed at generation time for this "
-                "model (the xgrammar runtime raised); later grammar requests are "
-                "refused.[/yellow]")
+                "model (the xgrammar runtime raised); this reply is reported as "
+                "failed and later grammar requests are refused.[/yellow]")
+            if grammar:
+                from .base import GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError
+                raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_MESSAGE)

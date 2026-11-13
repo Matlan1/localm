@@ -4,7 +4,7 @@
 
 ``localm/media/managed_comfy_fresh.py`` installs ``COMFYUI_PINNED_COMMIT`` - one
 commit we decided on - into every fresh managed ComfyUI. This script is what
-earns the word "confirmed": a commit that merely CLONES is not confirmed,
+earns the word "confirmed": a commit that merely DOWNLOADS is not confirmed,
 because a real install needs hardware-matched torch, localm's own custom
 node, localm's patch set, and a running server that actually executes a
 graph, all to line up.
@@ -12,7 +12,7 @@ graph, all to line up.
 WHAT IT DOES, in three PHASES (each a separate ``--phase`` invocation, so the
 caller can hold the shared GPU lease only around the phase that needs it):
 
-  provision  Clone the candidate commit into an ISOLATED scratch LOCALM_HOME
+  provision  Fetch the candidate commit's source archive into an ISOLATED scratch LOCALM_HOME
              (never the real one), install hardware-matched torch, ComfyUI's
              own requirements, the derived pinned custom node, and localm's
              patch set - exactly scripts/setup would, via
@@ -51,7 +51,7 @@ scratch dir; if not, nothing is installed and the run is INCONCLUSIVE.
 
 IDENTITY. ensure_comfy() reuses whatever already answers at a URL - so the
 smoke phase never uses the ComfyUI default port, and verifies /system_stats
-names paths under the scratch checkout before trusting anything else it says.
+names paths under the scratch install before trusting anything else it says.
 
 Three outcomes, kept distinct, same as confirm_llama_runtime.py: PASS, FAIL
 (the candidate is bad), INCONCLUSIVE (could not measure - no network, GPU
@@ -203,22 +203,57 @@ def _verify_isolation(workdir: Path) -> tuple[bool, str]:
 #  provision phase                                                            #
 # --------------------------------------------------------------------------- #
 
-def _requirements_changed(root: Path, old_commit: str, new_commit: str) -> bool | None:
-    """Whether requirements.txt differs between *old_commit* and *new_commit*
-    inside the already-cloned *root* (a full clone, so both commits are
-    reachable). None when it could not be determined (never treated as a
-    firm "no change" - the bump checklist's --reinstall-requirements advice
-    would otherwise silently go missing)."""
+def _fetch_repo_file(repo: str, commit: str, rel: str) -> bytes:
+    """The bytes of *rel* at *commit* of the GitHub repository *repo*, read from
+    raw.githubusercontent.com. Raises OSError or ValueError on any failure."""
+    import urllib.request
+
+    from localm.http_ssl import verified_urlopen
+    from localm.media.source_archive import _GITHUB
+    m = _GITHUB.match(repo or "")
+    if not m:
+        raise ValueError(f"{repo!r} is not a GitHub repository URL")
+    url = f"https://raw.githubusercontent.com/{m['owner']}/{m['repo']}/{commit}/{rel}"
+    req = urllib.request.Request(url, headers={"User-Agent": "localm"})
+    with verified_urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+def _requirements_changed(repo: str, old_commit: str, new_commit: str,
+                          fetch=_fetch_repo_file) -> bool | None:
+    """Whether requirements.txt differs between *old_commit* and *new_commit* of
+    *repo*, each read with *fetch(repo, commit, "requirements.txt")*. None when
+    it could not be determined (never treated as a firm "no change" - the bump
+    checklist's --reinstall-requirements advice would otherwise silently go
+    missing)."""
     try:
-        r = subprocess.run(
-            ["git", "-C", str(root), "diff", "--quiet", old_commit, new_commit,
-            "--", "requirements.txt"],
-            capture_output=True, timeout=60)
+        return fetch(repo, old_commit, "requirements.txt") != fetch(
+            repo, new_commit, "requirements.txt")
     except Exception:
         return None
-    if r.returncode not in (0, 1):
-        return None
-    return r.returncode == 1
+
+
+def _tag_commit(repo: str, tag: str) -> tuple[str | None, str]:
+    """(commit, error) for refs/tags/*tag* of *repo* as ``git ls-remote`` reports
+    it, an annotated tag peeled to its commit; commit None with the reason when
+    it cannot be read or the tag does not exist."""
+    try:
+        r = subprocess.run(["git", "ls-remote", repo, f"refs/tags/{tag}",
+                            f"refs/tags/{tag}^{{}}"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"git ls-remote failed: {e}"
+    if r.returncode != 0:
+        return None, f"git ls-remote exited {r.returncode}: {r.stderr.strip()}"
+    refs = {}
+    for line in r.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref:
+            refs[ref.strip()] = sha.strip()
+    commit = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if not commit:
+        return None, f"{repo} has no tag {tag}"
+    return commit, ""
 
 
 # Substrings of pip, uv, urllib3 and git output that mean a download or connection
@@ -288,31 +323,31 @@ def run_provision_phase(tag: str, commit: str, workdir: Path, receipt_path: Path
         return 1 if verdict == FAIL else 2
     _set_check(receipt, "provision", PASS, result.message)
 
+    from localm.media import source_archive
+    from localm.media.managed_comfy_fresh import COMFYUI_REPO
+
     root = mc.managed_comfy_paths().root
-    head_proc = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                               capture_output=True, text=True, timeout=30)
-    head = head_proc.stdout.strip() if head_proc.returncode == 0 else None
-    tag_proc = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", f"refs/tags/{tag}^{{commit}}"],
-        capture_output=True, text=True, timeout=30)
-    tag_commit = tag_proc.stdout.strip() if tag_proc.returncode == 0 else None
+    head = source_archive.tree_commit(root)
+    tag_commit, tag_error = _tag_commit(COMFYUI_REPO, tag)
     if head is None:
         _set_check(receipt, "checkout", INCONCLUSIVE,
-                  f"could not read HEAD in the clone: {head_proc.stderr.strip()}")
+                  f"the installed tree at {root} records no commit")
     elif tag_commit is None:
         _set_check(receipt, "checkout", INCONCLUSIVE,
-                  f"could not resolve refs/tags/{tag} in the clone: {tag_proc.stderr.strip()}")
+                  f"could not resolve refs/tags/{tag} of {COMFYUI_REPO}: {tag_error}")
     elif head == commit == tag_commit:
         _set_check(receipt, "checkout", PASS,
-                  f"HEAD and refs/tags/{tag} both resolve to the requested commit ({head})")
+                  f"the installed tree and refs/tags/{tag} both resolve to the requested "
+                  f"commit ({head})")
     elif head != commit:
         _set_check(receipt, "checkout", FAIL,
-                  f"HEAD is {head!r}, expected {commit!r}")
+                  f"the installed tree is {head!r}, expected {commit!r}")
     else:
         _set_check(receipt, "checkout", FAIL,
-                  f"HEAD ({head}) matches, but refs/tags/{tag} resolves to {tag_commit!r} "
-                  "in this clone, not the same commit - the tag->commit resolution used to "
-                  "pick this candidate does not match a real clone's own tag ref")
+                  f"the installed tree ({head}) matches, but refs/tags/{tag} of "
+                  f"{COMFYUI_REPO} resolves to {tag_commit!r}, not the same commit - the "
+                  "tag->commit resolution used to pick this candidate does not match the "
+                  "repository's own tag ref")
 
     marker_path = root / ".localm-comfy.json"
     try:
@@ -345,7 +380,7 @@ def run_provision_phase(tag: str, commit: str, workdir: Path, receipt_path: Path
             _set_check(receipt, "localm_patches", PASS,
                       f"{len(patches)} patch(es), all applied: {list(patches)}")
 
-    changed = _requirements_changed(root, COMFYUI_PINNED_COMMIT, commit)
+    changed = _requirements_changed(COMFYUI_REPO, COMFYUI_PINNED_COMMIT, commit)
     receipt["baseline"] = {"tag": None, "commit": COMFYUI_PINNED_COMMIT,
                           "requirements_changed": changed}
     receipt["server"]["comfyui_version"] = marker.get("comfyui_version")
@@ -772,13 +807,10 @@ def _paeth_predictor(a: int, b: int, c: int) -> int:
 # --------------------------------------------------------------------------- #
 
 def run_teardown_phase(workdir: Path) -> int:
-    """Never claims success on a silent partial failure: a
-    managed ComfyUI is a git checkout, and git marks its object store
-    read-only, so a plain shutil.rmtree fails on Windows (WinError 5) and
-    ignore_errors=True would then report "cleared" while custom_nodes/.git
-    actually survive - measured for real on the first live teardown run.
-    Uses managed_comfy.rmtree_robust (already proven for exactly this) and
-    surfaces any genuine removal failure rather than swallowing it."""
+    """Delete the scratch install, keeping its download cache, with
+    managed_comfy.rmtree_robust (which clears read-only files, such as a git
+    object store, that a plain shutil.rmtree cannot remove on Windows), and
+    report every removal that failed."""
     _prepare_scratch_env(workdir)
     from localm.media.managed_comfy import rmtree_robust
 

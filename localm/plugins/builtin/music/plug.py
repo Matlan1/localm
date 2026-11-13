@@ -21,8 +21,6 @@ set up, else the native ACE-Step runtime) and reads this plugin's own config
 
 from __future__ import annotations
 
-import json
-import math
 import os
 import shutil
 import time
@@ -33,12 +31,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import check_request
+from localm.plugins.media_config import media_session_is_private, range_refusal
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
+from localm.settings_schema import NATIVE_STEPS_MAX
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
@@ -112,11 +113,11 @@ async def _require_native_acceptance(req: MusicRequest) -> None:
 async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
         raise HTTPException(400, "Empty style tags")
-    if (not math.isfinite(req.duration_seconds)
-            or req.duration_seconds <= 0 or req.duration_seconds > 3600):
-        raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
-    if req.steps is not None and not (1 <= req.steps <= 200):
-        raise HTTPException(400, "Steps must be between 1 and 200")
+    refused = range_refusal(duration_seconds=req.duration_seconds)
+    if refused:
+        raise HTTPException(400, refused)
+    if req.steps is not None and not (1 <= req.steps <= NATIVE_STEPS_MAX):
+        raise HTTPException(400, f"Steps must be between 1 and {NATIVE_STEPS_MAX}")
     if (req.sampler_name is not None or req.scheduler is not None
             or req.lyrics_strength is not None or req.model_overrides):
         await _require_native_acceptance(req)
@@ -148,7 +149,6 @@ async def music(req: MusicRequest, request: Request):
 
     @media_handover_job
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         # See test_comfy_media_routes_offloaded.
@@ -156,7 +156,7 @@ async def music(req: MusicRequest, request: Request):
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
         # Privacy mode suppresses the sidecar; the backend facade also forces
         # ComfyUI's own output copy to be deleted.
-        is_privacy = effective_mode("server") == SessionMode.PRIVACY
+        is_privacy = media_session_is_private()
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
@@ -272,7 +272,8 @@ async def music(req: MusicRequest, request: Request):
             job.mark_outcome("done" if ok else "failed")
         return ok
 
-    job = jobs.start_fn("music", _generate, result_path=out_path.name,
+    job = jobs.start_fn("music", carry_request_privacy(_generate),
+                        result_path=out_path.name,
                         owner=owner)
     return {"job_id": job.id}
 
@@ -390,13 +391,7 @@ async def music_history(request: Request):
                  if p.suffix.lower() in (".flac", ".mp3", ".wav", ".ogg")]
         for p in sorted(files, key=lambda f: f.stat().st_mtime,
                         reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("music", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "size_bytes": p.stat().st_size,

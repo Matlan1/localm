@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { chat, deleteAllServerConversations, lsSetScoped, retainConversations } from "../app/chat.js";
-import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, showInlineError, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, reloadApp, showInlineError, streamJob, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
@@ -135,8 +135,7 @@ export async function refreshKnowledgePage() {
     add.onclick = () => kbAddDocs(c.name);
     actions.appendChild(add);
 
-    const reembed = el("button", needsReembed ? "warn" : "secondary",
-      needsReembed ? t("knowledge.badge.reembedNeeded") : t("knowledge.reembedButton"));
+    const reembed = el("button", needsReembed ? "warn" : "secondary", t("knowledge.reembedButton"));
     reembed.title = t("knowledge.reembedButton.title");
     reembed.onclick = () => kbReembedCollection(c.name);
     actions.appendChild(reembed);
@@ -154,13 +153,19 @@ export async function refreshKnowledgePage() {
       confirmDanger(t("knowledge.deleteConfirm.title", { name: c.name }),
         t("knowledge.deleteConfirm.body"),
         t("knowledge.deleteConfirm.confirm"), async () => {
-          const r = await fetch(
-            "/api/rag/collections/" + encodeURIComponent(c.name), {
-              method: "DELETE", headers: authHeaders() });
+          let r;
+          try {
+            r = await fetch(
+              "/api/rag/collections/" + encodeURIComponent(c.name), {
+                method: "DELETE", headers: authHeaders() });
+          } catch (e) {
+            toast(t("knowledge.deleteFailedMsg", { message: e.message }), true);
+            return;
+          }
           if (r.ok) { toast(t("knowledge.deleted", { name: c.name })); refreshKnowledgePage(); }
           // Show the server's reason.
-          else toast((await r.json().catch(() => ({}))).detail || t("knowledge.deleteFailed"),
-                     true);
+          else toast((await r.json().catch(() => ({}))).detail
+                     || t("knowledge.deleteFailedMsg", { message: r.statusText || r.status }), true);
         });
     };
     actions.appendChild(del);
@@ -194,7 +199,11 @@ export async function refreshEmbeddingPanel() {
     showInlineError(statusEl, t("knowledge.embed.statusLoadFailed", { message: e.message }));
     return null;
   }
-  if (st.status === "ready") {
+  if (st.status === "ready" && st.error) {
+    // Installed, but the last use failed: semantic search is not known to work.
+    statusEl.textContent = t("knowledge.embed.status.readyLastFailed", { model: st.model });
+    statusEl.style.color = "var(--yellow)";
+  } else if (st.status === "ready") {
     statusEl.textContent = st.dim
       ? t("knowledge.embed.status.readyDim", { model: st.model, dim: st.dim })
       : t("knowledge.embed.status.readyNoDim", { model: st.model });
@@ -253,8 +262,37 @@ export async function refreshEmbeddingPanel() {
   return st;
 }
 
-const RERANKER_PULL_HINT =
-  "localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf";
+const RERANKER_SPEC = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf";
+const RERANKER_PULL_HINT = `localm pull ${RERANKER_SPEC}`;
+
+/** Download the suggested reranker through the Models page's pull route,
+ *  streaming its progress into #kb-log, then repaint the Reranking card. */
+export async function downloadReranker(btn) {
+  const log = $("kb-log");
+  if (log) { log.style.display = "block"; log.textContent = ""; }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/models/pull", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ spec: RERANKER_SPEC, name: null }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      if (!log) return;
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    toast(end.status === "done" ? t("knowledge.rerank.downloaded")
+      : t("knowledge.rerank.downloadStatus", { status: jobStatusWord(end.status) }),
+    end.status !== "done" && end.status !== "cancelled");
+  } catch (e) {
+    toast(t("knowledge.rerank.downloadFailed", { message: e.message }), true);
+  } finally {
+    if (btn) btn.disabled = false;
+    refreshRerankPanel();
+  }
+}
 
 /** Paint the Reranking card from GET /api/rag/rerank: the toggle (the
  *  rag_rerank setting) and one line saying what retrieval will do. */
@@ -291,6 +329,12 @@ export async function refreshRerankPanel() {
   }
   statusEl.textContent = text;
   statusEl.style.color = color;
+  if (st.enabled && !st.model && !st.note) {
+    const dl = el("button", "btn-secondary btn-sm", t("knowledge.rerank.download"));
+    dl.style.marginLeft = "8px";
+    dl.onclick = () => downloadReranker(dl);
+    statusEl.appendChild(dl);
+  }
   return st;
 }
 
@@ -471,16 +515,30 @@ if ($("kb-embed-download")) {
 $("kb-create").onclick = async () => {
   const name = $("kb-name").value.trim();
   if (!name) { toast(t("knowledge.enterName"), true); return; }
-  const r = await fetch("/api/rag/collections", {
-    method: "POST", headers: authHeaders(),
-    body: JSON.stringify({ name }),
-  });
-  const data = await r.json();
-  if (!r.ok) { toast(data.detail || t("knowledge.createFailed"), true); return; }
+  let r, data;
+  try {
+    r = await fetch("/api/rag/collections", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ name }),
+    });
+    data = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast(t("knowledge.createFailedMsg", { message: e.message }), true);
+    return;
+  }
+  if (!r.ok) {
+    toast(data.detail ? data.detail : t("knowledge.createFailedMsg", { message: r.statusText || r.status }), true);
+    return;
+  }
   $("kb-name").value = "";
-  toast(t("knowledge.created", { name: data.name }));
+  toast(t("knowledge.created", { name: data.name || name }));
   refreshKnowledgePage();
 };
+if ($("kb-name")) {
+  $("kb-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); $("kb-create").click(); }
+  });
+}
 
 export async function kbAddDocs(name) {
   // Host access browses the SERVER disk through the host-gated /api/fs/*;
@@ -754,10 +812,15 @@ export async function kbAppendAllowedRoots(folders) {
   }
 }
 
+/** The server's per-file cap for an uploaded document, in bytes (the same
+ *  number as localm.rag.attachment.MAX_DECODED_BYTES). See
+ *  test_kb_upload_cap_matches_the_server. */
+export const KB_UPLOAD_MAX_BYTES = 30000000;
+
 /** POST the bytes of files picked from the user's own device to /upload for
  *  indexing. Reads no server path. */
 export async function uploadAndIndexFiles(name, files) {
-  const MAX = 30 * 1024 * 1024;                 // mirror the server per-file cap
+  const MAX = KB_UPLOAD_MAX_BYTES;
   const tooBig = files.filter((f) => f.size > MAX);
   if (tooBig.length) {
     toast(t("knowledge.upload.tooLarge", { names: tooBig.map((f) => f.name).join(", ") }), true);
@@ -854,10 +917,19 @@ function warnLine(text, color) {
 }
 
 export async function kbInfoModal(name) {
-  const r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
-                        { headers: authHeaders() });
-  const data = await r.json();
-  if (!r.ok) { toast(data.detail || t("knowledge.info.loadFailed"), true); return; }
+  let r, data;
+  try {
+    r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
+                    { headers: authHeaders() });
+    data = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast(t("knowledge.info.loadFailedMsg", { message: e.message }), true);
+    return;
+  }
+  if (!r.ok) {
+    toast(data.detail || t("knowledge.info.loadFailedMsg", { message: r.statusText || r.status }), true);
+    return;
+  }
   openModal(t("knowledge.info.title", { name }), (body) => {
     body.appendChild(el("div", "sub",
       tn("knowledge.docsCount", data.n_docs) + " · " + tn("knowledge.chunksCount", data.n_chunks) + " · " +
@@ -903,14 +975,20 @@ export async function kbInfoModal(name) {
       row.appendChild(document.createTextNode(d.path + " "));
       const rm = el("button", "action", t("knowledge.removeButton"));
       rm.onclick = async () => {
-        const rr = await fetch(
-          `/api/rag/collections/${encodeURIComponent(name)}/remove-doc`, {
-            method: "POST", headers: authHeaders(),
-            body: JSON.stringify({ path: d.path }),
-          });
+        let rr;
+        try {
+          rr = await fetch(
+            `/api/rag/collections/${encodeURIComponent(name)}/remove-doc`, {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({ path: d.path }),
+            });
+        } catch (e) {
+          toast(t("knowledge.removeFailedMsg", { message: e.message }), true);
+          return;
+        }
         if (rr.ok) { toast(t("knowledge.removed")); kbInfoModal(name); refreshKnowledgePage(); }
-        else toast((await rr.json().catch(() => ({}))).detail || t("knowledge.removeFailed"),
-                   true);
+        else toast((await rr.json().catch(() => ({}))).detail
+                   || t("knowledge.removeFailedMsg", { message: rr.statusText || rr.status }), true);
       };
       row.appendChild(rm);
       body.appendChild(row);
@@ -956,8 +1034,12 @@ export function kbSearchModal(name) {
         }
         for (const h of data.hits) {
           const entry = el("div", "log-entry");
+          // A reranked hit shows its rerank score first, then the search score.
+          const score = typeof h.rerank_score === "number"
+            ? t("knowledge.search.rerankScore", { rerank: h.rerank_score, score: h.score })
+            : `${h.score}`;
           entry.appendChild(el("span", "t",
-            `${h.score}  ${h.source.split(/[\\/]/).pop()}:${h.pos}`));
+            `${score}  ${h.source.split(/[\\/]/).pop()}:${h.pos}`));
           entry.appendChild(document.createTextNode(h.text.slice(0, 400)));
           results.appendChild(entry);
         }
@@ -990,7 +1072,7 @@ $("gui-clear-convs").onclick = () => {
         }
       }
       localStorage.removeItem("localm.conversations");
-      location.reload();
+      reloadApp();
     });
 };
 

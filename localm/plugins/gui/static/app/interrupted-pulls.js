@@ -110,12 +110,16 @@ export async function startResume(view) {
 async function _resume(view, btn) {
   btn.disabled = true;
   try {
-    if (_resumeHandler) {
-      await _resumeHandler(view, () => startResume(view));
-    } else {
+    const start = async () => {
       const data = await startResume(view);
-      if (data) toast(t("models.interrupted.resumingToast", { spec: view.spec }));
-    }
+      if (data) {
+        toast(t("models.interrupted.resumingToast", { spec: view.spec }));
+        loadInterrupted();
+      }
+      return data;
+    };
+    if (_resumeHandler) await _resumeHandler(view, start);
+    else await start();
   } catch (e) {
     toast(t("models.interrupted.resumeFailed", { message: e.message }), true);
   } finally {

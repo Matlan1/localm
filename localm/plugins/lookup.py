@@ -71,14 +71,37 @@ def read_source_marker(plugin_dir: Path) -> Optional[dict]:
     return None
 
 
+# Folders whose present but unreadable marker was already logged.
+_UNREADABLE_MARKERS_WARNED: set = set()
+
+
 def installed_from_store(plugin_dir: Path) -> bool:
     """True when the installed folder *plugin_dir* holds a first-party install:
-    it has a manifest and its marker does not record a third-party source."""
+    it has a manifest, and it has no provenance marker (an install made before
+    markers existed) or one that does not record a third-party source. A marker
+    file that is present but cannot be read or parsed reads False, and is logged
+    at WARNING once per folder."""
     d = Path(plugin_dir)
     if not (d / "plugin.toml").is_file():
         return False
+    marker_file = d / SOURCE_MARKER
+    try:
+        present = marker_file.exists()
+    except OSError:
+        present = True
+    if not present:
+        return True
     marker = read_source_marker(d)
-    return marker is None or marker.get("source") in (None, "store")
+    if marker is None:
+        key = str(d)
+        if key not in _UNREADABLE_MARKERS_WARNED:
+            _UNREADABLE_MARKERS_WARNED.add(key)
+            from localm.debuglog import logger
+            logger.warning("plugin folder %s: its provenance marker %s cannot be "
+                           "read; the plugin is treated as third-party", d,
+                           SOURCE_MARKER)
+        return False
+    return marker.get("source") in (None, "store")
 
 
 def is_available(name: str) -> bool:

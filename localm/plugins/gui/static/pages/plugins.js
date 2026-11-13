@@ -346,8 +346,8 @@ export function pluginCatalogAction(action, name, btn = null, title = name) {
 
 /* External (third-party) plugins, from the same engine API as the catalog
    above: /api/plugins lists every INSTALLED plugin, and an external one is an
-   installed plugin that is not first-party (builtin = in the bundled store or
-   the static catalog). */
+   installed plugin that is not first-party (builtin = installed from the bundled
+   store, or a store or catalog entry not installed yet). */
 export async function refreshPluginsPage() {
   const box = $("plugins-table");
   const loading = el("div", "sub", t("plugins.loading"));

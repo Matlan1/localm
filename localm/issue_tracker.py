@@ -167,13 +167,16 @@ def record_filed(number, title: str = "") -> bool:
                     _SESSION_ONLY.append(entry)
                     del _SESSION_ONLY[:-MAX_RECORDED]
                 return True
-            items = [e for e in _read_disk(strict=True)
-                     if e["number"] != entry["number"]]
-            items.append(entry)
             path = _record_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             from localm.config import atomic_write_private
-            atomic_write_private(path, json.dumps({"issues": items[-MAX_RECORDED:]}))
+            from localm.storekit import store_lock
+            with store_lock(path):
+                items = [e for e in _read_disk(strict=True)
+                         if e["number"] != entry["number"]]
+                items.append(entry)
+                atomic_write_private(path, json.dumps({"issues": items[-MAX_RECORDED:]}),
+                                     retrying=True)
             return True
         except Exception as e:
             logger.warning("could not record filed issue #%s: %s", entry["number"], e)

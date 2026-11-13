@@ -147,13 +147,15 @@ def _make_self_embed(self_url: str, active_model):
     model is loaded."""
     def _self_embed(texts: list) -> list:
         from localm.selfclient import self_request
+        from localm.audit import request_privacy_headers
         from localm.config import load_config as _lc
         from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
         _cfg = _lc()
         emb_name = str(_cfg.get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
         r = self_request("POST", "/embeddings",
                          json={"input": texts, "model": emb_name or "localm"},
-                         timeout=600, base_url=self_url)
+                         timeout=600, base_url=self_url,
+                         headers=request_privacy_headers())
         if not r.ok:
             # Surface the endpoint's actionable detail instead of the bare HTTP status.
             detail = ""
@@ -182,6 +184,7 @@ def _make_self_classify(self_url: str, active_model):
         if not model:
             return None
         from localm.selfclient import self_request
+        from localm.audit import request_privacy_headers
         prompt = (
             "You are a file format classifier. Respond ONLY with a single lowercase word "
             "identifying the format of the code/configuration/text snippet below "
@@ -197,7 +200,8 @@ def _make_self_classify(self_url: str, active_model):
                                  "temperature": 0.0,
                                  "max_tokens": 10,
                              },
-                             timeout=10, base_url=self_url)
+                             timeout=10, base_url=self_url,
+                             headers=request_privacy_headers())
             if r.ok:
                 body = r.json()["choices"][0]
                 if body.get("finish_reason") == "error":
@@ -277,6 +281,7 @@ def _make_self_describe_image(self_url: str, active_model):
     setting is."""
     def _self_describe_image(image_bytes: bytes, mime_type: str) -> Optional[str]:
         from localm.selfclient import self_request
+        from localm.audit import request_privacy_headers
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{b64}"
         prompt = "Describe this image in detail. Extract any visible text, handwriting, diagram structure, or code verbatim."
@@ -295,7 +300,8 @@ def _make_self_describe_image(self_url: str, active_model):
                              "temperature": 0.2,
                              "max_tokens": 1000,
                          },
-                         timeout=_DESCRIBE_TIMEOUT_S, base_url=self_url)
+                         timeout=_DESCRIBE_TIMEOUT_S, base_url=self_url,
+                         headers=request_privacy_headers())
         if r.ok:
             from localm.jsonreply import response_json
             body = response_json(r)["choices"][0]

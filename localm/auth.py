@@ -482,7 +482,9 @@ def _atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> N
     ``store_lock`` on the file it writes: the owner key writer
     (``set_api_key``, auth.key) and the keystore writer (``_save_keystore``,
     auth.json, under ``create_key``/``revoke_key``/``_mark_record_alg``/
-    ``_touch_last_used``). The owner-KDF writer passes False.
+    ``_touch_last_used``). The owner-KDF writer passes True while it holds
+    the cross-process lock on its file and False when that lock could not be
+    taken.
 
     Kept as a name here because it is referenced throughout this module. The bool
     the shared writer returns is dropped: no caller in this module logs a
@@ -718,7 +720,9 @@ def _load_owner_kdf() -> list:
     return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
 
 
-def _save_owner_kdf(records: list) -> None:
+def _save_owner_kdf(records: list, *, retrying: bool = False) -> None:
+    """Write the owner key derivation records. *retrying* is True only while
+    the caller holds the cross-process lock on the file."""
     from localm.config import ensure_dirs
     ensure_dirs()
     path = owner_kdf_file()
@@ -728,7 +732,7 @@ def _save_owner_kdf(records: list) -> None:
     # copy behind. _atomic_write_private additionally creates the temp file
     # already restricted rather than tightening it a moment later.
     _atomic_write_private(path, json.dumps({"v": 1, "records": records},
-                                           indent=2))
+                                           indent=2), retrying=retrying)
 
 
 def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
@@ -786,23 +790,26 @@ def _owner_digest_locked(key: str) -> str:
     from localm.storekit import store_lock
     path = owner_kdf_file()
     with contextlib.ExitStack() as stack:
+        locked = False
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             stack.enter_context(store_lock(path))
+            locked = True
         except (OSError, TimeoutError) as e:
             logger.warning("could not lock the owner key derivation record %s (%s); "
                            "reading and writing it without the cross-process lock",
                            path, e)
-        digest, minted = _owner_digest_record(key)
+        digest, minted = _owner_digest_record(key, locked=locked)
     if minted:
         _migrate_legacy_owner_identity(_legacy_owner_identity(key), digest)
     return digest
 
 
-def _owner_digest_record(key: str) -> tuple:
+def _owner_digest_record(key: str, *, locked: bool = False) -> tuple:
     """``(digest, minted)``: the digest of the persisted record matching *key*
     with minted False, or a freshly minted and saved record's digest with minted
-    True. Caller holds the locks :func:`_owner_digest_locked` takes."""
+    True. *locked* says whether the caller holds the cross-process lock on the
+    file."""
     records = _load_owner_kdf()
     existing = _owner_kdf_record_for(key, records)
     if existing is not None:
@@ -816,7 +823,7 @@ def _owner_digest_record(key: str) -> tuple:
     }
     records.append(rec)
     try:
-        _save_owner_kdf(records[-_OWNER_KDF_KEEP:])
+        _save_owner_kdf(records[-_OWNER_KDF_KEEP:], retrying=locked)
     except OSError as e:
         # Not fatal: the digest is still correct for THIS process, so auth keeps
         # working. But it is not persisted, so the next process mints a different
@@ -963,9 +970,9 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
         return
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
@@ -1530,9 +1537,9 @@ def _touch_last_used(key_hash: str) -> None:
         _last_used_writes[key_hash] = now
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY

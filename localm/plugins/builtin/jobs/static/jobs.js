@@ -90,15 +90,25 @@ function iconElFor(name, cls) {
   return el("span", cls);
 }
 
-// Confirm a destructive action with the app's own themed modal. The native
-// confirm() fallback is the pre-existing behaviour, kept only for the no-shell
-// case: it still blocks the action, so a delete is never silently unconfirmed.
+// Confirm a destructive action with the app's own themed modal. Without the
+// shell, a minimal in-page dialog asks instead; the action runs only on its
+// confirm button.
 function confirmDangerous(title, message, confirmLabel, onConfirm) {
   if (typeof window !== "undefined" && typeof window.confirmDanger === "function") {
     window.confirmDanger(title, message, confirmLabel, onConfirm);
     return;
   }
-  if (confirm(`${title} ${message}`)) onConfirm();
+  const box = el("div", "jobs-confirm");
+  box.setAttribute("role", "dialog");
+  box.appendChild(el("p", null, `${title} ${message}`));
+  const cancel = el("button", "secondary", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => box.remove();
+  const ok = el("button", "danger", confirmLabel);
+  ok.type = "button";
+  ok.onclick = () => { box.remove(); onConfirm(); };
+  box.append(cancel, ok);
+  document.body.appendChild(box);
 }
 
 // --- schedule / time formatting -------------------------------------------
@@ -320,10 +330,8 @@ export function register(ctx) {
     refresh();
   }
 
-  // Deleting is confirmed with the app's themed modal, like every other
-  // destructive action in the GUI. window.confirm() is suppressed outright by
-  // some mobile / PWA browsers, which would have made this delete fire with no
-  // prompt at all on exactly those clients.
+  // Deleting is confirmed in the in-page dialog, like every other destructive
+  // action in the GUI.
   function remove(job) {
     confirmDangerous(`Delete job "${job.name}"?`, "This also removes its results.",
       "Delete", async () => {
@@ -371,6 +379,9 @@ export function register(ctx) {
           ? (r.error || "(error, no detail)")
           : (r.output || "(no output)");
         item.appendChild(pre);
+        if (r.answered_by) {
+          item.appendChild(el("div", "job-meta sub", `Answered by ${r.answered_by}`));
+        }
         if (r.routing) item.appendChild(el("div", "job-meta sub job-routing", r.routing));
         body.appendChild(item);
       }
@@ -409,10 +420,15 @@ export function register(ctx) {
       ["cron", "Custom cron (5-field)"],
     ]);
     const schedDetails = el("div", "jobs-sched-details");
+    const schedHint = el("div", "sub");
     
     function updateSchedDetails() {
       clear(schedDetails);
       const val = schedKind.querySelector("select").value;
+      schedHint.textContent = (val === "hours" || val === "interval")
+        ? "A new job first runs at the scheduler's next check (within a minute), then on its schedule."
+        : "A new job first runs at its next matching time. Times of day use the clock of the " +
+          "computer the server runs on.";
       if (val === "hours") {
         const wrap = el("div", "");
         wrap.appendChild(el("span", null, "Every "));
@@ -456,6 +472,7 @@ export function register(ctx) {
     updateSchedDetails();
     schedContainer.appendChild(schedKind);
     schedContainer.appendChild(schedDetails);
+    schedContainer.appendChild(schedHint);
 
     // Model is a dropdown of installed models (blank = active/default). It is
     // populated asynchronously from /api/models so the form renders immediately.
@@ -500,7 +517,7 @@ export function register(ctx) {
       } else if (preset === "interval") {
         kind = "interval";
         let raw = document.getElementById("jobs-sched-interval").value.trim();
-        if (!/^\d+$/.test(raw)) raw = raw === "" ? "3600" : "";
+        if (!/^\d+$/.test(raw)) raw = "";
         schedule = parseInt(raw, 10);
         if (Number.isNaN(schedule) || schedule < 1) {
           toast("Interval must be a whole number of seconds (e.g. 3600).", true);
@@ -509,7 +526,10 @@ export function register(ctx) {
       } else if (preset === "cron") {
         kind = "cron";
         schedule = document.getElementById("jobs-sched-cron").value.trim();
-        if (!schedule) schedule = "0 8 * * *";
+        if (!schedule) {
+          toast("Enter a 5-field cron expression (e.g. 0 8 * * *).", true);
+          return;
+        }
       }
       const payload = {
         name: name.querySelector("input").value.trim(),
@@ -555,7 +575,7 @@ export function register(ctx) {
   // usable. Uses raw fetch (not api(), which is namespaced to /api/jobs).
   async function populateModels(sel) {
     try {
-      const r = await fetch("/api/models", { headers: authHeaders() });
+      const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
       if (!r.ok) return;
       const data = await r.json();
       for (const m of (data && data.models) || []) {

@@ -425,7 +425,7 @@ localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
 
-Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
+Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (1 to 3600, default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (1 to 20, default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
 
 `localm image`, `localm video` and `localm music` need no ComfyUI: with nothing set up
 they use the built-in native backends (stable-diffusion.cpp for images and video, ACE-Step
@@ -919,7 +919,7 @@ localm coder doctor --model mymodel                       # check the model serv
 - `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
 - `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project. Attached to that server while it holds another model, `coder` switches it to `--model` and says so; if the server cannot load it, `coder` says why and its requests still name the model, so the server tries again on the first one.
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
-- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
+- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` (with `--yes` or `auto_approve`) still asks before every tool that runs code (`run_shell`, `run_shell_background`, `run_tests`, an untrusted MCP server's tools), `--dry-run` runs without executing destructive or code-running tools.
 - `--allow-network` lets an unattended run (a TASK, nobody to confirm) use `fetch_url`, `web_search`, the browser tools and `git_push` without asking while `net_mode` is `ask`; without it they are denied, unless the `coder_unattended_network` setting is `allow` (`localm config coder_unattended_network allow`, or Settings > Plugins > Coder). It covers that run only. `net_mode` `off` still refuses them, and an interactive session still asks.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
 - `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
@@ -1153,9 +1153,9 @@ with `compaction_flush = false` in `.localcoder/config.toml`.
 ```bash
 localm coder --episodes                    # list stored lessons and exit
 localm coder --episodes-archive            # list dropped (merged/evicted/forgotten) lessons and exit
-localm coder --forget-episode ID           # drop one lesson (archived, recoverable) and exit
+localm coder --forget-episode ID           # drop one lesson (archived, recoverable) and exit (1 when no such id)
 localm coder --forget-episodes             # erase ALL episodic memory for this project and exit
-localm coder --restore-episode ID          # bring an archived lesson back into recall and exit
+localm coder --restore-episode ID          # bring an archived lesson back into recall and exit (1 when no such id)
 localm coder --consolidate-episodes        # ask the model to merge related lessons (opt-in, manual only)
 ```
 

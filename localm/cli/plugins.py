@@ -415,8 +415,11 @@ def plugin_uninstall_engine(name, delete_data):
     # is_installed_or_on_disk(), not is_installed(): a manifest-less
     # directory is something uninstall() below can still act on.
     existed = mgr.is_installed_or_on_disk(name)
-    complete = run_or_die(mgr.uninstall, name, delete_data=delete_data,
-                          missing_msg=f"No such plugin: {name}")
+    complete, left = run_or_die(mgr.uninstall_report, name, delete_data=delete_data,
+                                missing_msg=f"No such plugin: {name}")
+    if left is not None:
+        from localm.plugins.engine import data_left_in_place_message
+        console.print(f"[yellow]{escape(data_left_in_place_message(name, left))}[/yellow]")
     if complete:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{escape(name)}[/bold]")
         return

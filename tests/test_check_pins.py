@@ -112,6 +112,47 @@ def test_github_releases_skips_drafts_prereleases_and_undated(monkeypatch):
     assert [t for t, _ in cp._github_releases("r")] == ["v1"]
 
 
+def test_github_releases_keep_filters_and_reports_what_it_dropped(monkeypatch):
+    _router(monkeypatch, {"api.github.com": [_rel("v1", 1), _rel("v2", 1, assets=["bad"])]})
+    dropped = []
+
+    def keep(rel):
+        return not any(a["name"] == "bad" for a in rel["assets"])
+    assert [t for t, _ in cp._github_releases("r", keep, dropped)] == ["v1"]
+    assert dropped == ["v2"]
+
+
+def _sdcpp_linux(short: str, ubuntu: str) -> str:
+    return f"sd-master-{short}-bin-Linux-Ubuntu-{ubuntu}-x86_64.zip"
+
+
+def test_sdcpp_release_built_on_a_newer_ubuntu_than_docker_is_left_out_not_stale(monkeypatch):
+    pinned = cp._read_const("localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"')
+    spec = next(s for s in cp.build_registry() if s.name == "stable-diffusion.cpp")
+    _router(monkeypatch, {"leejet/stable-diffusion.cpp": [
+        _rel(pinned, 60), _rel("master-99999-aaaaaaa", 45,
+                               assets=[_sdcpp_linux("aaaaaaa", "99.04")])]})
+    row = spec.check(NOW)
+    assert row.status == cp.CURRENT
+    assert "1 newer release(s) left out" in row.detail and "master-99999-aaaaaaa" in row.detail
+
+
+def test_sdcpp_release_built_on_the_docker_ubuntu_still_counts_as_newer(monkeypatch):
+    pinned = cp._read_const("localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"')
+    spec = next(s for s in cp.build_registry() if s.name == "stable-diffusion.cpp")
+    bump_spec = importlib.util.spec_from_file_location("bump_sdcpp_pin_for_test",
+                                                       _PATH.parent / "bump_sdcpp_pin.py")
+    bump = importlib.util.module_from_spec(bump_spec)
+    bump_spec.loader.exec_module(bump)
+    ceiling = bump.linux_build_ceiling()
+    _router(monkeypatch, {"leejet/stable-diffusion.cpp": [
+        _rel(pinned, 60), _rel("master-99999-aaaaaaa", 45,
+                               assets=[_sdcpp_linux("aaaaaaa", ceiling)])]})
+    row = spec.check(NOW)
+    assert row.status == cp.STALE and row.latest == "master-99999-aaaaaaa"
+    assert "left out" not in row.detail
+
+
 def test_github_releases_rejects_a_non_list_body(monkeypatch):
     _router(monkeypatch, {"api.github.com": {"message": "rate limited"}})
     with pytest.raises(cp.FetchError):
@@ -788,10 +829,16 @@ def test_a_pinned_asset_missing_from_its_release_is_inconsistent(monkeypatch):
     assert row.status == cp.INCONSISTENT and victim in row.detail
 
 
-@pytest.mark.parametrize("victim", ["cudart-llama-bin-win-cuda-12.4-x64.zip",
-                                          "cudart-llama-bin-win-cuda-13.4-x64.zip"])
+_TAGLESS_CUDART_X64 = sorted(n for n in _real_table()
+                             if n.startswith("cudart-llama-bin-win-cuda-") and n.endswith("-x64.zip"))
+
+
+def test_the_table_pins_one_tagless_cudart_bundle_per_windows_cuda_line():
+    assert [n.split("-cuda-")[1].split(".")[0] for n in _TAGLESS_CUDART_X64] == ["12", "13"]
+
+
+@pytest.mark.parametrize("victim", _TAGLESS_CUDART_X64)
 def test_a_tagless_cudart_asset_missing_from_the_release_is_inconsistent(monkeypatch, victim):
-    assert victim in _real_table()
     _asset_router(monkeypatch, drop=victim)
     row = _checksum_row()
     assert row.status == cp.INCONSISTENT and victim in row.detail

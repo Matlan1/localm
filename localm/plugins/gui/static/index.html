@@ -169,7 +169,7 @@
               <div><label data-i18n="chat.topP">Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default" data-i18n-placeholder="chat.default"></div>
               <div><label data-i18n="chat.topK">Top-k</label><input id="p-top-k" type="number" step="1" min="0" placeholder="default" data-i18n-placeholder="chat.default"></div>
               <div><label data-i18n="chat.repeatPenalty">Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default" data-i18n-placeholder="chat.default"></div>
-              <div><label data-i18n="chat.maxTokens">Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default" data-i18n-placeholder="chat.default"></div>
+              <div><label data-i18n="chat.maxTokens">Max tokens</label><input id="p-max-tokens" type="number" step="64" min="0" placeholder="default" data-i18n-placeholder="chat.default" title="Upper limit on tokens per reply in this chat. Blank or 0 uses Max tokens per reply from Settings › Model; set that to 0 for no limit." data-i18n-title="chat.maxTokens.title"></div>
               <div><label data-i18n="chat.seed">Seed</label><input id="p-seed" type="number" step="1" placeholder="random" data-i18n-placeholder="chat.random"></div>
               <div class="full"><label data-i18n="chat.grammar">GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
             </div>
@@ -435,7 +435,7 @@
               <option value="" data-i18n="models.pull.noVisionProjector">No vision projector</option>
             </select>
             <input type="text" id="pull-sha256" data-i18n-placeholder="models.pull.sha256Placeholder" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" data-i18n-title="models.pull.sha256Title" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
-            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into ~/.localm/models.">
+            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in the models folder of this instance's data folder, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into that models folder.">
               <option value="" data-i18n="models.pull.store.registerInPlace">Register in place</option>
               <option value="copy" data-i18n="models.pull.store.copy">Copy into library</option>
               <option value="move" data-i18n="models.pull.store.move">Move into library</option>
@@ -751,8 +751,8 @@
       <div class="page">
         <h2 data-i18n="knowledge.title">Knowledge</h2>
         <div class="sub" data-i18n-rich="knowledge.intro">Index folders or files into collections, then pick a collection in
-        the chat parameters drawer - replies get grounded in the most relevant excerpts,
-        with citations. Retrieval is BM25 (always works offline); when an embedding model is
+        the chat parameters drawer - replies get grounded in the most relevant excerpts;
+        the excerpts used are listed under the reply as its sources. Retrieval is BM25 (always works offline); when an embedding model is
         set up, semantic (vector) search is blended in. Collections live in the
         localm data directory under <code>rag/</code>.</div>
         <div class="card">
@@ -766,7 +766,7 @@
             <select id="kb-embed-model" style="max-width:340px"></select>
             <button class="btn-primary" id="kb-embed-apply" data-i18n="knowledge.embed.setupApply">Set up / apply</button>
             <button class="btn-secondary" id="kb-embed-download" style="display:none"
-              title="One-time download of the configured model, blocked so far by the network policy. Changes no settings."
+              title="One-time download of the configured model. Changes no settings."
               data-i18n-title="knowledge.embed.downloadHint" data-i18n="knowledge.embed.downloadModelNow">Download model now</button>
           </div>
           <pre id="kb-embed-log" class="job-log" style="display:none"></pre>
@@ -1158,7 +1158,7 @@
               <!-- Shown by "Send to maintainer": the saved report's full text.
                    Nothing is sent until bug-confirm-send is pressed. -->
               <div id="bug-review" hidden>
-                <div class="sub" data-i18n="settings.bug.reviewHelp">This is the whole report as it will be sent, except the closing note about editing it, which is left out. It becomes a public GitHub issue. Nothing has been sent yet.</div>
+                <div class="sub" data-i18n="settings.bug.reviewHelp">This is the whole report as it will be sent; the closing note about editing it is removed when it is sent. It becomes a public GitHub issue. Nothing has been sent yet.</div>
                 <textarea id="bug-preview" rows="14" readonly aria-label="Bug report to send" data-i18n-aria-label="settings.bug.previewLabel"></textarea>
                 <div class="actions">
                   <button class="btn-primary" id="bug-confirm-send" data-i18n="settings.bug.confirmSendButton">Send this report</button>
@@ -1310,10 +1310,7 @@
                    reads THIS file. Do not add, rename or drop one here alone. -->
               <div class="update-subsection">
                 <h4 class="update-sub-head" data-i18n="settings.runtime.subHead">Inference runtime</h4>
-                <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed
-                backend, or install one on a machine that has none yet. You always start it -
-                it never re-provisions on its own. A build that fails to load on this machine
-                is never kept: setup-llama walks back to an older one that does.</div>
+                <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. When localm starts with a runtime that is not the build this release uses and no build is pinned, it updates the runtime first. A build that fails to load on this machine is not kept.</div>
                 <div id="runtime-choice" class="key-warn" hidden>
                   <span id="runtime-choice-text"></span>
                   <div class="actions">
@@ -1333,9 +1330,7 @@
                   <option value="metal" data-i18n="settings.runtime.optMetal">metal - Apple Silicon</option>
                   <option value="amd-rocm" data-i18n="settings.runtime.optAmdRocm">amd-rocm - AMD RX 6000, self-contained</option>
                 </select>
-                <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the
-                runtime; nothing is replaced while a model is loaded, and your pick is never
-                swapped silently if it turns out not to load here.</div>
+                <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the runtime. On Windows it is refused while a model is loaded; on Linux and macOS a loaded model keeps its build until it is loaded again. Your pick is never swapped silently if it turns out not to load here.</div>
                 <label for="runtime-tag" data-i18n="settings.runtime.buildLabel">Build</label>
                 <input type="text" id="runtime-tag" style="max-width:340px"
                        placeholder="leave blank to keep the current build" data-i18n-placeholder="settings.runtime.tagPlaceholder">

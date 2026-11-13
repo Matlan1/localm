@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken, toast } from "./helpers.js";
+import { $, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken, toast } from "./helpers.js";
 import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
@@ -158,6 +158,7 @@ export async function resetClientState() {
   } catch { /* ignore */ }
   try { localStorage.clear(); } catch { /* ignore */ }
   try { sessionStorage.clear(); } catch { /* ignore */ }
+  if (window.discardSettingsDraft) window.discardSettingsDraft();
   try { await resetServiceWorkerAndCaches(); } catch { /* ignore */ }
   location.reload();
 }
@@ -600,10 +601,9 @@ window.bootAuthProbe = bootAuthProbe;
         // `pull_token` so ITS OWN deep link can redeem it here and
         // auto-start with zero clicks - unattended launches keep working.
         // A forged link cannot know that secret, so the redeem call below
-        // 403s and we fall back to an explicit human confirmation instead.
-        // window.confirm is a native browser-chrome dialog a page cannot
-        // script past, auto-dismiss, or hide, so that fallback holds even
-        // from an invisible iframe.
+        // 403s and the person confirms in the in-page dialog instead. The
+        // shell cannot be framed, so that dialog never shows inside another
+        // site's frame. See test_csp_enforcing_and_locked_down.
         let authorized = false;
         if (pullToken) {
           try {
@@ -614,7 +614,8 @@ window.bootAuthProbe = bootAuthProbe;
             authorized = r.ok;
           } catch { authorized = false; }
         }
-        if (authorized || confirm(t("init.pullConfirm", { spec: pullSpec }))) {
+        if (authorized || await confirmDangerAsync(t("init.pullTitle"),
+          t("init.pullConfirm", { spec: pullSpec }), t("common.modelDownload.download"))) {
           $("pull-start").click();   // kick off the pull with progress
         }
       }

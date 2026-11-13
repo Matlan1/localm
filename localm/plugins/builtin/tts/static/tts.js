@@ -20,18 +20,14 @@ import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 
-// R-NET: net_mode=ask gate. Reaches the GUI shell's shared in-page modal via
-// window (app/main.js exposes every app/helpers.js export as window.<name>,
-// the same bridge the jobs plugin's own confirmDangerous() uses, including
-// its native confirm() fallback for a document with no shell - this module's
-// own isolated unit test). No closure dependency on register()'s cfg/ctx, so
-// it is a plain module-level export rather than nested like the rest of this
-// file's helpers.
+// R-NET: net_mode=ask gate. Asks in the GUI shell's shared in-page modal,
+// reached via window (app/main.js exposes every app/helpers.js export as
+// window.<name>). In a document with no shell it asks in a minimal in-page
+// dialog of its own; with no document at all it resolves false.
 export function requestDownloadConsent() {
   if (typeof window === "undefined" || typeof window.openModal !== "function" ||
       typeof window.$ !== "function" || typeof window.el !== "function") {
-    return Promise.resolve(typeof confirm === "function" && confirm(
-      "Download the Kokoro voice model (~86 MB) from huggingface.co now?"));
+    return consentWithoutShell();
   }
   return new Promise((resolve) => {
     let settled = false;
@@ -58,6 +54,28 @@ export function requestDownloadConsent() {
     const watch = setInterval(() => {
       if (window.$("modal").style.display === "none") finish(false);
     }, 200);
+  });
+}
+
+/** The download question as a minimal in-page dialog appended to the body.
+ *  Resolves true on Download, false on Not now or when there is no document. */
+function consentWithoutShell() {
+  if (typeof document === "undefined" || !document.body) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const box = document.createElement("div");
+    box.className = "tts-consent";
+    box.setAttribute("role", "dialog");
+    const text = document.createElement("p");
+    text.textContent = "Download the Kokoro voice model (~86 MB) from huggingface.co now?";
+    const answer = (label, value) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = label;
+      btn.onclick = () => { box.remove(); resolve(value); };
+      return btn;
+    };
+    box.append(text, answer("Not now", false), answer("Download", true));
+    document.body.appendChild(box);
   });
 }
 

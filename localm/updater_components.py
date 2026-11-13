@@ -54,6 +54,9 @@ PENDING_FILE = "pending-components.json"
 STATUS_FILE = "components-update.json"
 # The install root and version whose components were last found at its pins.
 CHECKED_FILE = "components-checked.json"
+# The (install root, version) pairs found at their pins in this process while
+# the session mode allowed no automatic write.
+_checked_in_process: set = set()
 # Seconds a failed first-start update waits before the next start tries again.
 RETRY_AFTER_S = 3600.0
 STATE_FILE = "state.json"
@@ -712,10 +715,11 @@ def torch_step(tree: Path, spec: str) -> tuple:
     for a in args:
         if a.startswith("--torch-backend="):
             line = a.split("=", 1)[1]
+    from localm.hwdetect import TORCH_PINS_FILE
     return (_requirements_in(args) + _extras(tree, ["hf", "audio"]),
             [["pip", "install", "-p", ".venv", *args],
              ["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
-              "--extra", "hf", "--extra", "audio"]], line)
+              "--extra", "hf", "--extra", "audio", "-c", TORCH_PINS_FILE]], line)
 
 
 def _local_label(version: str) -> Optional[str]:
@@ -1005,18 +1009,33 @@ def _write_status(status: dict, root: Optional[Path] = None,
 
 def _mark_checked(root: Path, version: Optional[str]) -> None:
     """Record that every component of the install at *root*, at *version*, is
-    at its pins (or kept by the user's choice)."""
+    at its pins (or kept by the user's choice): in :data:`CHECKED_FILE`, or,
+    when the session mode allows no automatic write
+    (``audit.automatic_write_allowed("server")`` False, as in privacy mode),
+    only in this process, without writing or creating anything on disk."""
+    from localm import audit
+    resolved = str(Path(root).resolve())
+    if not audit.automatic_write_allowed("server"):
+        _checked_in_process.add((resolved, version))
+        return
     try:
         (_updates_dir() / CHECKED_FILE).write_text(json.dumps(
-            {"root": str(Path(root).resolve()), "version": version}), encoding="utf-8")
+            {"root": resolved, "version": version}), encoding="utf-8")
     except OSError as e:
         _warn("update: could not record the component check: %s", e)
 
 
 def _is_checked(root: Path, version: Optional[str]) -> bool:
+    """Whether :func:`_mark_checked` recorded the install at *root* at
+    *version*, in this process or in :data:`CHECKED_FILE`. False for an empty
+    *version*."""
+    if not version:
+        return False
+    resolved = str(Path(root).resolve())
+    if (resolved, version) in _checked_in_process:
+        return True
     data = _read_json(_updates_dir(create=False) / CHECKED_FILE) or {}
-    return bool(version) and data.get("version") == version and data.get("root") == str(
-        Path(root).resolve())
+    return data.get("version") == version and data.get("root") == resolved
 
 
 def last_status() -> Optional[dict]:
@@ -1035,7 +1054,9 @@ def catch_up(root=None, *, repair: bool = False) -> Optional[list]:
 
     Checks once per install root and version: after the components were found
     at their pins (:func:`finish_pending` or this check) it returns None at
-    once. After a failed attempt it waits :data:`RETRY_AFTER_S` seconds before
+    once; when the session mode allows no automatic write that is recorded in
+    this process only (:func:`_mark_checked`), so each new process checks
+    again. After a failed attempt it waits :data:`RETRY_AFTER_S` seconds before
     trying again."""
     import time
 
@@ -1763,25 +1784,48 @@ def _tree_text(root: Path, rel: str) -> str:
         return ""
 
 
-def _commands(p: dict, root: Path) -> list:
-    """The argv lists that update component *p* with the localm tree at *root*."""
+def _commands(p: dict, root: Path):
+    """The argv lists that update component *p* with the localm tree at *root*,
+    one at a time: for PyTorch, a command that constrains the install with
+    ``hwdetect.TORCH_PINS_FILE`` is produced after the commands before it ran,
+    with that file written from the torch packages then installed
+    (:func:`_write_torch_pins`)."""
     if p["name"] == "pytorch":
         from localm import updater
+        from localm.hwdetect import TORCH_PINS_FILE
         uv = updater._uv_for_deps(root)
-        return [[uv, *c] for c in p["items"]]
+        for c in p["items"]:
+            if TORCH_PINS_FILE in c:
+                _write_torch_pins(root)
+            yield [uv, *c]
+        return
     if p["name"] == "sdcpp":
-        return [[sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
-                for b in p["items"]]
+        yield from ([sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
+                    for b in p["items"])
+        return
     if p["name"] == "koboldcpp":
-        return [[sys.executable, "-m", "localm", "setup-music", "--backend",
-                 _KOBOLD_BUILD_BACKEND.get(b, b), "--no-models", "--no-test"]
-                for b in p["items"]]
+        yield from ([sys.executable, "-m", "localm", "setup-music", "--backend",
+                     _KOBOLD_BUILD_BACKEND.get(b, b), "--no-models", "--no-test"]
+                    for b in p["items"])
+        return
     if p["name"] == "comfyui":
         cmd = [sys.executable, "-m", "localm", "comfy", "update"]
         if '"--reinstall-requirements"' in _tree_text(root, "localm/cli/comfy.py"):
             cmd.append("--reinstall-requirements")
-        return [cmd]
-    return []
+        yield cmd
+
+
+def _write_torch_pins(root: Path) -> None:
+    """Write ``hwdetect.TORCH_PINS_FILE`` in the install at *root*: the exact
+    versions of the torch packages its venv has now (``hwdetect.torch_pins``),
+    one per line, empty when it has none. Raises OSError when it cannot be
+    written."""
+    from localm.hwdetect import TORCH_PINS_FILE, torch_pins
+    site = site_packages(Path(root) / ".venv")
+    installed = {name: (info or {}).get("version")
+                 for name, info in (dists(site) if site is not None else {}).items()}
+    path = Path(root) / TORCH_PINS_FILE
+    path.write_text("".join(f"{line}\n" for line in torch_pins(installed)), encoding="utf-8")
 
 
 def _verify(p: dict, root: Path, home: Path) -> Optional[str]:

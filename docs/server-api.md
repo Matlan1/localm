@@ -67,10 +67,13 @@ A failed request answers `{"detail": "<message>"}`: `401` for a missing or
 invalid key, `403` for a key without the route's scope (`Key lacks required
 scope: <scope>`), a cookie-authenticated change without its CSRF token, or a
 cross-origin browser request to a route that does not accept one, and the
-statuses listed with each route below. A defect in the server is a `500` with
-`{"detail": "Internal server error"}`; its cause goes to the server log. A body
-that fails validation is a `422` with `{"detail": "<one sentence per field>",
-"errors": [...]}`, where `errors` is the structured list. Three groups answer in
+statuses listed with each route below. On a `/v1/...` path the body also
+carries OpenAI's error object, `"error": {"message", "type", "param", "code"}`,
+with the same message. A defect in the server is a `500` with
+`{"detail": "Internal server error"}` (a failed file operation names its cause,
+`Internal server error: <reason>`, never the path); its cause goes to the server
+log. A body that fails validation is a `422` with `{"detail": "<one sentence per
+field>", "errors": [...]}`, where `errors` is the structured list. Three groups answer in
 their own shape, and a body that fails validation is a `400` there:
 the Ollama routes (`{"error": "..."}`), `POST /v1/messages` (Anthropic's error
 object) and `POST /v1/responses` (OpenAI's error object).
@@ -101,7 +104,9 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `processing_progress` (a long prompt is still being read; its delta also carries
 `status_args` with `done` and `total`, the prompt tokens read so far and in all),
-`encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
+`processing_layers` (a HuggingFace-format model is still reading a long prompt;
+`status_args` `done` and `total` are the model layers the prompt has passed so far and
+in all), `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
 `audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
 `downloading_embedder` (the embedding model memory recall needs, on its first
@@ -386,8 +391,9 @@ otherwise carry the account name and install layout to the caller). The reason,
 the file name and any line number are kept - the text is redacted, not muted.
 
 An error that is neither of those - a genuine defect in the server - is a `500`
-with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
-server log rather than to the client.
+with `{"detail": "Internal server error"}` (for a failed file operation,
+`Internal server error: <reason>`), and its cause goes to the server log rather
+than to the client.
 
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 
@@ -778,6 +784,11 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 `url` is a `400`. In privacy mode nothing is kept: the image is generated into a
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
+
+The image is returned only when its embedded metadata (which can carry the prompt)
+was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;
+otherwise the request fails with `502` and the reason, and no file is kept. Any
+other warning the generation reported is listed in the response's `warnings`.
 
 Failures: `400` an empty or over-long prompt, a bad `size`, an `output_format` other
 than `png`, a bad `response_format`, or `url` where none can be served (above);
@@ -1281,7 +1292,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out; that response carries `owner_key_created` (true when the owner key was made by this request), and `localm key show --reveal` or rolling it from the Owner key card shows it. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (owner key, scope `admin`; CSRF-protected for

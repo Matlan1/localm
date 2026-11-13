@@ -116,7 +116,7 @@ def test_reused_live_engine_is_not_unloaded_by_run_job(home, hsclean, monkeypatc
     hs._engine = live                       # the live server's shared engine, loaded
     monkeypatch.setattr(
         "localm.plugins.builtin.jobs.webtool.run_chat_with_web",
-        lambda eng, prompt: "reply")
+        lambda eng, prompt, **_: "reply")
 
     # model=None -> _load_engine returns the reused _live (no VRAM gate, no fresh load)
     job = _make_job(model=None, prompt="hello")
@@ -138,7 +138,7 @@ def test_fresh_runner_loaded_engine_is_unloaded(home, hsclean, monkeypatch):
     monkeypatch.setattr(runner, "_load_engine", lambda model: (fresh, False))
     monkeypatch.setattr(
         "localm.plugins.builtin.jobs.webtool.run_chat_with_web",
-        lambda eng, prompt: "reply")
+        lambda eng, prompt, **_: "reply")
 
     result = runner.run_job(_make_job(model="fresh", prompt="hi"), engine=None)
 
@@ -152,7 +152,7 @@ def test_passed_in_engine_never_unloaded(home, hsclean, monkeypatch):
     passed = _FakeEngine("passed")
     monkeypatch.setattr(
         "localm.plugins.builtin.jobs.webtool.run_chat_with_web",
-        lambda eng, prompt: "reply")
+        lambda eng, prompt, **_: "reply")
     result = runner.run_job(_make_job(prompt="x"), engine=passed)
     assert result["status"] == "ok"
     assert passed.unloaded == 0

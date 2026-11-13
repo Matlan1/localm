@@ -134,7 +134,10 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
                  lowvram: bool = False, timeout: float = 3600.0,
                  on_progress: Optional[Progress] = None,
                  cancel_check: Optional[CancelCheck] = None) -> tuple[bytes, str]:
-    """Generate one track. Returns (WAV bytes, backend that produced it)."""
+    """Generate one track. Returns (WAV bytes, backend that produced it).
+    Under ``auto`` a backend that crashed while loading is remembered as not
+    working here (``runtime.record_backend``) only when a later backend then
+    produced the track, so a broken model file marks no backend."""
     say = on_progress or (lambda _m: None)
     order = backend_order(choice)
     resolved = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
@@ -144,17 +147,21 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
         if path:
             logger.info("koboldcpp music: job uses model %s", Path(path).name)
     models = runtime_paths(resolved)
+    from localm.config import load_config
+    main_gpu = load_config().get("main_gpu_index")
     errors: list[str] = []
+    crashed: list[tuple[str, str]] = []
     auto = choice.strip().lower() == "auto"
     for i, backend in enumerate(order):
         rt = _ensure_runtime(backend, say, cancel_check)
         try:
             data = server.run(rt, backend, models, work_dir(), prepare=plan,
                               request=request, timeout=timeout, lowvram=lowvram,
+                              device=server.device_for(backend, main_gpu),
                               on_progress=say, cancel_check=cancel_check)
         except StartError as e:
             if auto and e.crashed:
-                runtime.record_backend(backend, False, str(e))
+                crashed.append((backend, str(e)))
             errors.append(f"{backend}: {e}")
             if auto and i + 1 < len(order):
                 say(f"The {backend} backend did not start here ({e}); "
@@ -172,6 +179,8 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
                 "; this happens with some prompts on some GPUs: set the native runtime "
                 "to cpu in the Music settings, or try other style tags")
             raise NativeMusicError("; ".join(errors) + hint)
+        for failed, reason in crashed:
+            runtime.record_backend(failed, False, reason)
         if not runtime.backend_worked(backend):
             runtime.record_backend(backend, True)
         return data, backend

@@ -274,7 +274,7 @@ def test_kobold_installs_each_installed_build_with_its_setup_backend(tmp_path, i
     staged = _write_tree(tmp_path / "s", _files("0.3.2", kobold="v1.123.1"))
     p = _plans(staged, install)["koboldcpp"]
     assert p["update"] and p["items"] == ["nocuda"]
-    assert uc._commands(p, staged) == [[sys.executable, "-m", "localm", "setup-music",
+    assert list(uc._commands(p, staged)) == [[sys.executable, "-m", "localm", "setup-music",
                                         "--backend", "cpu", "--no-models", "--no-test"]]
 
 
@@ -921,16 +921,16 @@ def test_comfy_update_installs_the_pinned_torch_only_when_it_differs(tmp_path, m
     site.mkdir(parents=True)
     _dist(site, "torch", "2.9.1+rocm7.13.0", {"torch/__init__.py": b"x"})
     py = venv / "Scripts" / "python.exe"
-    spec = f.ComfyTorchSpec("rocm", ("torch==2.9.1+rocm7.13.0",), extra_index_url="https://x/")
+    spec = f.ComfyTorchSpec("rocm", ("torch==2.9.1+rocm7.13.0",), index_url="https://x/")
     monkeypatch.setattr(f, "comfy_torch_spec", lambda det=None: spec)
     ran = []
     monkeypatch.setattr(upd, "_run", lambda argv, **kw: ran.append(argv) or (True, ""))
     assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
     assert ran == []
-    spec = f.ComfyTorchSpec("rocm", ("torch==2.11.0+rocm7.13.0",), extra_index_url="https://x/")
+    spec = f.ComfyTorchSpec("rocm", ("torch==2.11.0+rocm7.13.0",), index_url="https://x/")
     assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
     assert ran == [[str(py), "-m", "pip", "install", "--disable-pip-version-check",
-                    "torch==2.11.0+rocm7.13.0", "--extra-index-url", "https://x/"]]
+                    "torch==2.11.0+rocm7.13.0", "--index-url", "https://x/"]]
 
 
 # ------------------------------ the Linux CUDA libraries ----------------------

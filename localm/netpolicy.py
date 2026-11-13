@@ -21,7 +21,8 @@ net_allow          list of domains (or comma-separated string). Empty = any
                    domain. "example.com" matches example.com and *.example.com.
 net_deny           same format; matches are always refused (wins over allow).
 net_allow_private  False (default) blocks loopback/private/link-local targets
-                   (SSRF guard). True restores access to local dev services.
+                   (SSRF guard). True restores access to local dev services;
+                   link-local and cloud-metadata addresses stay blocked.
 net_search_url     None = the built-in search: DuckDuckGo, then Brave Search
                    when DuckDuckGo fails (no API key). Or the base URL of a
                    SearXNG instance (its JSON API, or its HTML results page
@@ -429,11 +430,48 @@ def check_url(url: str, *, allow_when_off: bool = False,
             f"localm config net_allow "
             f"\"{', '.join(allow + [host])}\"")
 
-    if not cfg.get("net_allow_private", False):
-        if search_backend and is_search_backend_origin(url, cfg):
-            _check_search_backend_address(host)
-        else:
-            _check_public_address(host)
+    if cfg.get("net_allow_private", False):
+        if _only_link_local(host):
+            raise NetworkPolicyError(_link_local_refusal(host))
+    elif search_backend and is_search_backend_origin(url, cfg):
+        _check_search_backend_address(host)
+    else:
+        _check_public_address(host)
+
+
+def _only_link_local(host: str) -> bool:
+    """True when *host* is a link-local or cloud-metadata address
+    (:func:`is_link_local_or_metadata_ip`, every numeric IPv4 spelling
+    included), or resolves only to such addresses. A host with at least one
+    other address, or one that does not resolve, gives False: the pinned
+    connection (:func:`_resolve_pinned_all`) dials only its other addresses."""
+    lit = _literal_ipv4(host)
+    if lit is not None:
+        return lit.is_link_local
+    try:
+        return is_link_local_or_metadata_ip(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, ValueError, OSError):
+        return False
+    found = []
+    for info in infos:
+        try:
+            found.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return bool(found) and all(is_link_local_or_metadata_ip(ip) for ip in found)
+
+
+def _link_local_refusal(host: str, ip=None) -> str:
+    """The refusal for a link-local or cloud-metadata *host* (resolved to *ip*
+    when given) while net_allow_private is on."""
+    where = f"resolves to the link-local address {ip}" if ip is not None else \
+        "is a link-local or cloud-metadata address"
+    return (f"'{host}' {where}. Link-local and cloud-metadata addresses are "
+            "refused even with net_allow_private on.")
 
 
 def download_refusal(url: str) -> Optional[str]:
@@ -606,10 +644,11 @@ def _resolve_pinned_all(host: str, *, search_backend: bool = False) -> list[str]
     empty list when the host is unresolvable (the caller then fails closed).
     Numeric/short-form and IPv6 literals are returned directly, already
     validated by check_url. When net_allow_private is False, an address that
-    fails the SSRF class check is never returned, and a host whose every
-    address fails it raises ``NetworkPolicyError``, on the exact IPs to be
-    dialled, which catches a rebind that slipped past check_url's separate
-    lookup.
+    fails the SSRF class check is never returned; when it is True, a
+    link-local or cloud-metadata address (:func:`is_link_local_or_metadata_ip`)
+    is never returned. A host whose every address is refused raises
+    ``NetworkPolicyError``, on the exact IPs to be dialled, which catches a
+    rebind that slipped past check_url's separate lookup.
 
     *search_backend* True (the caller has established that the request is the
     search provider's, to the configured ``net_search_url`` origin) returns only
@@ -619,17 +658,22 @@ def _resolve_pinned_all(host: str, *, search_backend: bool = False) -> list[str]
 
     def _refused(ip_obj) -> bool:
         if allow_private:
-            return False
+            return is_link_local_or_metadata_ip(ip_obj)
         if search_backend:
             return not _search_backend_address_ok(ip_obj)
         return _is_blocked_ip(ip_obj)
 
+    def _refusal(ip_obj) -> NetworkPolicyError:
+        if allow_private:
+            return NetworkPolicyError(_link_local_refusal(host, ip_obj))
+        return NetworkPolicyError(
+            f"'{host}' resolves to the non-public address {ip_obj}. "
+            "Requests to local/private networks are blocked "
+            "(set net_allow_private true to permit them).")
+
     def _guard(ip_obj) -> None:
         if _refused(ip_obj):
-            raise NetworkPolicyError(
-                f"'{host}' resolves to the non-public address {ip_obj}. "
-                "Requests to local/private networks are blocked "
-                "(set net_allow_private true to permit them).")
+            raise _refusal(ip_obj)
 
     literal = _literal_ipv4(host)
     if literal is not None:
@@ -660,10 +704,7 @@ def _resolve_pinned_all(host: str, *, search_backend: bool = False) -> list[str]
             usable.append(ip_obj)
     if not usable:
         if blocked is not None:
-            raise NetworkPolicyError(
-                f"'{host}' resolves to the non-public address {blocked}. "
-                "Requests to local/private networks are blocked "
-                "(set net_allow_private true to permit them).")
+            raise _refusal(blocked)
         return []
     ordered = _interleave_families(usable)[:_MAX_PINNED_ADDRESSES]
     return [str(ip) for ip in ordered]

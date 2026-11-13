@@ -232,9 +232,10 @@ class CompletionRequest(SamplingFields):
 
 
 def _zero_cap_as_omitted(v):
-    """``None`` for a reply cap of 0 (an int, not a bool), else *v* unchanged.
-    The engine reads a cap <= 0 as unlimited, so 0 never reaches it."""
-    if isinstance(v, int) and not isinstance(v, bool) and v == 0:
+    """``None`` for a reply cap of 0 (an int or a float equal to 0, not a
+    bool), else *v* unchanged. The engine reads a cap <= 0 as unlimited, so 0
+    never reaches it."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0:
         return None
     return v
 
@@ -438,6 +439,14 @@ def prefill_progress_status(done: int, total: int) -> StatusText:
     return StatusText(f"Processing prompt... ({done} of {total} tokens)",
                       "processing_progress", args)
 
+
+def prefill_layers_status(done: int, total: int) -> StatusText:
+    """The status for a prompt that has passed *done* of the model's *total*
+    decoder layers."""
+    args = {"done": str(done), "total": str(total)}
+    return StatusText(f"Processing prompt... (layer {done} of {total})",
+                      "processing_layers", args)
+
 # Emitted by the SSE route while it summarises older messages to fit the
 # context window, before the reply starts.
 COMPACTING_STATUS = "Compacting conversation..."
@@ -488,6 +497,7 @@ STATUS_ARGS_BY_CODE: dict[str, tuple[str, ...]] = {
     "loading_beside": ("model", "resident"),
     "loading_routed": ("model", "current", "needs"),
     "processing_progress": ("done", "total"),
+    "processing_layers": ("done", "total"),
 }
 
 

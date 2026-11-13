@@ -712,7 +712,7 @@ HELP_TEXT = """\
 [bold cyan]localcoder commands[/bold cyan]
 
   [bold]/help[/bold]                 this message
-  [bold]/exit[/bold]                 quit (also: exit, quit, q)
+  [bold]/exit[/bold]                 quit (also: /quit, /q, /bye, or exit, quit, q, bye)
   [bold]/clear[/bold]                clear conversation history
   [bold]/model \\[name][/bold]         show or switch model
   [bold]/mode[/bold]                 show session persistence mode (privacy/log/full)
@@ -725,6 +725,7 @@ HELP_TEXT = """\
   [bold]/history[/bold]              show turn count, context usage, and index size
   [bold]/changes[/bold]              list every file this session has changed
   [bold]/diff \\[path][/bold]          cumulative diff of session changes (all or one file)
+  [bold]/bg[/bold]                   list this session's background shell jobs and sub-agents
   [bold]/undo[/bold]                 revert the last file write or edit
   [bold]/sessions[/bold]             list this project's saved (interrupted) sessions
   [bold]/resume \\[id][/bold]          resume the most recent interrupted session, or a

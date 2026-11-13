@@ -19,6 +19,14 @@ import pytest
 from localm.media import backend_choice, comfy_client
 
 
+@pytest.fixture(autouse=True)
+def _isolated_comfy_handles(monkeypatch):
+    """A fresh ComfyUI handle registry per test, so a stub launch this file
+    leaves "running" is never seen as a running ComfyUI by another test."""
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
+
+
 class _Redirects(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         self.send_response(302)

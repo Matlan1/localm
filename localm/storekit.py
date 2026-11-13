@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from localm import procid, sysprog
 
@@ -236,12 +236,16 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     *retrying* selects the final replace: False (default) is a bare
     ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
     backoff (up to ~1 s) over a transient Windows sharing violation, such as a
-    concurrent reader's open handle. Pass True only when the caller serializes
-    every writer of *path* across processes (a cross-process lock held for the
-    whole write or read-modify-write). The callers that pass True are
-    ``auth.set_api_key`` (auth.key), ``auth._save_keystore`` (auth.json) and
-    ``model_source_credentials._write_all`` (model_source_credentials.json);
-    every other caller uses the bare replace.
+    concurrent reader's open handle. Pass True only when no other process
+    writes *path* at the same time: a cross-process lock held for the whole
+    write or read-modify-write, or a file only one process ever writes. Every
+    caller passes True: ``auth.set_api_key`` (auth.key),
+    ``auth._save_keystore`` (auth.json), ``model_source_credentials._write_all``,
+    ``sessions._save`` and ``issue_tracker.record_filed`` under the file's
+    cross-process lock; ``instances._write_entry`` and the job manager's
+    activity store, whose files only their own process writes; the owner-KDF
+    writer while it holds its cross-process lock (False when that lock could not
+    be taken). See test_every_private_store_write_rides_out_a_reader.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -274,9 +278,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
-    With *retrying* False the replace is a bare ``os.replace``; some of those
-    callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run on the asyncio event loop.
+    Some callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run on the asyncio event loop, where a retry sleeps on the
+    loop while another handle holds *path*.
 
     ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
     TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
@@ -358,9 +362,27 @@ def _is_transient_permission_error(e: OSError) -> bool:
     return getattr(e, "winerror", None) in (5, 32, None)
 
 
-def replace_atomic(src: Path, dst: Path) -> None:
+def lock_create_refusal_is_transient(e: OSError) -> bool:
+    """True when a refused exclusive create of a lock file (``os.open`` with
+    ``O_CREAT | O_EXCL``) is a transient Windows state to wait out on the lock's
+    own deadline, False when it is a denial to raise at once.
+
+    On Windows a lock file that another process is deleting (delete pending) or
+    that a scanner holds open refuses the create with access denied, which
+    ``os.open`` raises as a ``PermissionError`` with no ``winerror``, instead of
+    the ``FileExistsError`` of a lock that is simply held. A genuine denial (a
+    folder this user cannot write) raises the same error, so a caller that
+    waits must still raise once its deadline is spent. On POSIX the error is a
+    stable denial and this returns False. Every lock-file creator
+    (``store_lock``, ``rag.collection_lock``) decides through this function."""
+    return isinstance(e, PermissionError) and _is_transient_permission_error(e)
+
+
+def replace_atomic(src: Path, dst: Path, *,
+                   on_retry: Optional[Callable[[int, OSError], None]] = None) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
-    sharing violation.
+    sharing violation. *on_retry*, when given, is called with the number of
+    the refused attempt (from 1) and its error before each retry.
 
     os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
     when another handle has *dst* open at that instant: a second localm process
@@ -379,6 +401,8 @@ def replace_atomic(src: Path, dst: Path) -> None:
         except PermissionError as e:
             if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
+            if on_retry is not None:
+                on_retry(attempt + 1, e)
             _transient_backoff(attempt)
 
 
@@ -492,6 +516,9 @@ def read_json_state(path: Path, default):
 
 
 _CROSS_LOCK_TIMEOUT = 10.0      # seconds to wait for a lock held by another process
+# Wait budget, in seconds, for store_lock on a best-effort write made on the
+# request path (a last_used stamp, a marker back-fill).
+BEST_EFFORT_LOCK_TIMEOUT = 0.5
 _CROSS_LOCK_STALE_AGE = 30.0    # a lock file whose holder cannot be identified (no start
                                  # identity, another pid space, unreadable) and that is
                                  # older than this is presumed abandoned and is reclaimed
@@ -779,6 +806,15 @@ def store_lock(target: Path, *, timeout: Optional[float] = None):
     reclaimed once the file is older than _CROSS_LOCK_STALE_AGE. Every reclaim is
     logged.
 
+    ACCESS DENIED ON THE CREATE: on Windows a lock file another process is
+    deleting, or that a scanner holds open, refuses the create with a
+    PermissionError (see :func:`lock_create_refusal_is_transient`). That is
+    waited out on the same deadline as a held lock. When the deadline is spent,
+    ConfigLockTimeout is raised if the lock was found held at any point in the
+    wait; otherwise the create never got further than access denied, and a
+    PermissionError naming the lock file is raised, chained to the last
+    refusal. On POSIX a PermissionError is raised at once.
+
     Yields a handle whose ``assert_held()`` re-reads the lock file and raises
     ConfigLockLost unless it still holds this acquisition's token; call it
     immediately before the write the lock protects."""
@@ -787,10 +823,35 @@ def store_lock(target: Path, *, timeout: Optional[float] = None):
     budget = _CROSS_LOCK_TIMEOUT if timeout is None else timeout
     deadline = time.time() + budget
     attempt = 0
+    found_held = False
+    denied = 0
     while True:
         try:
             fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except PermissionError as e:
+            if not lock_create_refusal_is_transient(e):
+                raise
+            denied += 1
+            if denied == 1:
+                logger.debug("store lock: creating %s was refused (%s); waiting "
+                             "for it on the lock's deadline", lockpath.name, e)
+            if time.time() >= deadline:
+                if found_held:
+                    raise ConfigLockTimeout(
+                        f"timed out after {budget:g}s waiting for "
+                        f"{lockpath.name}, held by another localm process") from e
+                raise PermissionError(
+                    e.errno,
+                    f"could not create the lock file {lockpath.name}: access was "
+                    f"denied for the whole {budget:g}s wait ({denied} attempts); "
+                    "its folder is not writable for this user, or another "
+                    "program keeps the file open",
+                    str(lockpath)) from e
+            _cross_lock_backoff(attempt)
+            attempt += 1
+            continue
         except FileExistsError:
+            found_held = True
             try:
                 held = lockpath.read_bytes()
             except OSError:

@@ -19,8 +19,6 @@ by default.
 
 from __future__ import annotations
 
-import json
-import math
 import os
 import shutil
 import time
@@ -32,15 +30,18 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
     MAX_LORAS, LoraChoice, check_generation_extras, check_request,
 )
+from localm.plugins.media_config import media_session_is_private, range_refusal
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
 from localm.selfclient import resolve_self_url
+from localm.settings_schema import NATIVE_FLOW_SHIFT_MAX, NATIVE_STEPS_MAX
 from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
@@ -69,7 +70,7 @@ class VideoRequest(BaseModel):
     # flow shift (None keeps Settings > Media > Video > Native flow shift or the model default).
     sample_method: str | None = None
     scheduler: str | None = None
-    flow_shift: float | None = Field(None, ge=0.0, le=100.0, allow_inf_nan=False)
+    flow_shift: float | None = Field(None, ge=0.0, le=NATIVE_FLOW_SHIFT_MAX, allow_inf_nan=False)
 
 
 class MoveFileRequest(BaseModel):
@@ -113,16 +114,17 @@ async def _require_native_size(width: int, height: int) -> None:
 async def video(req: VideoRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(400, "Empty prompt")
-    if not math.isfinite(req.seconds) or req.seconds <= 0 or req.seconds > 20:
-        raise HTTPException(400, "Duration must be between 1 and 20 seconds")
+    refused = range_refusal(seconds=req.seconds)
+    if refused:
+        raise HTTPException(400, refused)
     if req.fps <= 0 or req.fps > 60:
         raise HTTPException(400, "FPS must be between 1 and 60")
     if req.width is not None and not (16 <= req.width <= 4096):
         raise HTTPException(400, "Width must be between 16 and 4096")
     if req.height is not None and not (16 <= req.height <= 4096):
         raise HTTPException(400, "Height must be between 16 and 4096")
-    if req.steps is not None and not (1 <= req.steps <= 200):
-        raise HTTPException(400, "Steps must be between 1 and 200")
+    if req.steps is not None and not (1 <= req.steps <= NATIVE_STEPS_MAX):
+        raise HTTPException(400, f"Steps must be between 1 and {NATIVE_STEPS_MAX}")
     if req.width is not None and req.height is not None:
         await _require_native_size(req.width, req.height)
     from localm.debuglog import logger
@@ -158,7 +160,6 @@ async def video(req: VideoRequest, request: Request):
 
     @media_handover_job
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
@@ -264,7 +265,7 @@ async def video(req: VideoRequest, request: Request):
             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
@@ -289,7 +290,8 @@ async def video(req: VideoRequest, request: Request):
             job.mark_outcome("done" if ok else "failed")
         return ok
 
-    job = jobs.start_fn("video", _generate, result_path=out_path.name,
+    job = jobs.start_fn("video", carry_request_privacy(_generate),
+                        result_path=out_path.name,
                         owner=owner)
     return {"job_id": job.id}
 
@@ -410,13 +412,7 @@ async def video_history(request: Request):
                  if p.suffix.lower() in (".mp4", ".webm", ".gif")]
         for p in sorted(files, key=lambda f: f.stat().st_mtime,
                         reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("video", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "size_bytes": p.stat().st_size,

@@ -53,29 +53,38 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
     return None
 
 
-def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names: installed (physically present in the
-    installed folder) AND enabled (config). "Installed" is disk presence in the
-    store to installed model, NOT a config flag, so this scans the installed
-    folder."""
+def _installed_plugins() -> tuple[set, Optional[OSError]]:
+    """``(names, error)``: the plugins installed from the bundled store
+    (physically present in the installed folder, without a third-party
+    provenance marker), and the OSError that stopped the scan of that folder,
+    or None. A third-party folder under a first-party name is not counted. A
+    failed scan is logged at debug level; *names* then holds what was found
+    before it failed."""
     from pathlib import Path
 
     from localm.debuglog import logger
     from localm.plugins.loader import plugins_dir
-    installed = set()
+    from localm.plugins.lookup import installed_from_store
+    installed: set = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
             if (not child.name.startswith(".") and child.is_dir()
-                    and (child / "plugin.toml").is_file()):
+                    and installed_from_store(child)):
                 installed.add(child.name)
     except OSError as exc:
-        # Surface a real disk or permission fault on the plugins-dir scan: an
-        # empty result here does NOT prove no plugins exist, the scan itself may
-        # have failed.
         logger.debug("active_plugins: failed to scan plugins dir %s: %s",
                      plugins_dir(), exc)
-    enabled = set(cfg.get("plugins_enabled", []) or [])
-    return installed & enabled
+        return installed, exc
+    return installed, None
+
+
+def active_plugins(cfg: dict) -> set:
+    """The set of ACTIVE plugin names: installed from the bundled store
+    (``_installed_plugins``) AND enabled (config). "Installed" is disk presence in the
+    store to installed model, NOT a config flag, so this scans the installed
+    folder. A scan that fails returns what it found before failing."""
+    installed, _error = _installed_plugins()
+    return installed & set(cfg.get("plugins_enabled", []) or [])
 
 
 def would_cycle(name: str, source: str, cfg: dict) -> bool:
@@ -102,17 +111,26 @@ def resolve_config(name: str, cfg: dict,
     *active* is the set of active plugin names (installed AND enabled); when None
     it is derived from disk + config via ``active_plugins`` (the source plugin
     must be installed on disk and enabled, per the store->installed model).
-    Returns ``(block, warning_or_None)``. The returned block is a deep copy, so
-    the stored config is never mutated even if the caller writes to nested blocks.
+    Returns ``(block, warning_or_None)``. When the plugins folder could not be
+    read to tell whether the source is active, the warning says so instead of
+    calling the source inactive. The returned block is a deep copy, so the
+    stored config is never mutated even if the caller writes to nested blocks.
     """
     own = _own_block(name, cfg)
     src = own.get("use_config_from")
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
         return own, None
 
+    derived = active is None
     if active is None:
         active = active_plugins(cfg)
     if src not in _plugins(cfg) or src not in active:
+        scan_error = (_installed_plugins()[1]
+                      if derived and src in _plugins(cfg) else None)
+        if scan_error is not None:
+            return own, (f"'{name}' is set to use '{src}' config, but the plugins "
+                         f"folder could not be read to check whether '{src}' is "
+                         f"active ({scan_error}); using its own settings.")
         return own, (f"'{name}' is set to use '{src}' config, but '{src}' is not "
                      f"active; using its own settings.")
     if would_cycle(name, src, cfg):
@@ -250,18 +268,27 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     declares *capability* (one of ``CAPABILITIES``; any other name raises
     KeyError).
 
-    ``generate`` takes the extra keyword ``privacy`` (default False), which is
-    not passed to the backend. It passes the backend ``delete_outputs`` as
-    True when ``privacy`` is set and as the settings' ``delete_outputs``
-    otherwise; a caller that passes ``delete_outputs`` itself gets a TypeError.
+    ``generate`` takes the extra keywords ``privacy`` and ``withhold_on_trace``
+    (both default False), which are not passed to the backend. It passes the
+    backend ``delete_outputs`` as True when ``privacy`` is set and as the
+    settings' ``delete_outputs`` otherwise; a caller that passes
+    ``delete_outputs`` itself gets a TypeError. The generation is STRICT when
+    ``privacy`` or ``withhold_on_trace`` is set (``withhold_on_trace``: the
+    file is handed to a caller as it is, for example in an HTTP response).
+    A strict generation passes a backend that declares ``NEEDS_COMFY_SERVER``
+    ``containment_required=True``, so a ComfyUI copy or history entry it could
+    not remove fails the generation.
     When the backend declares
     ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a non-empty
     file at *out_path*, ``generate`` strips
     the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
     ``video``) once, here. A failed strip appends the WARNING to the message;
-    with ``privacy`` it instead deletes the file and returns
-    ``(False, <message naming the reason>)``, so a file that may still carry the
-    prompt is never reported as generated."""
+    a strict generation instead returns ``(False, "Output withheld: <reason>")``
+    and deletes the file. A strict generation that fails for any other reason,
+    with a backend that declares ``EMBEDS_OUTPUT_METADATA``, deletes *out_path*
+    when this generation created or changed it; a file it left as it was is
+    kept. The message says when a file could not be removed, so a file that may
+    still carry the prompt is never left behind or reported as generated."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()
@@ -284,36 +311,104 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
         return resolve(s).free_vram(s, *args, **kwargs)
 
     def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
-                 **kwargs) -> tuple[bool, str]:
-        if "delete_outputs" in kwargs:
-            raise TypeError("generate() sets delete_outputs from the settings "
-                            "and privacy; do not pass it")
+                 withhold_on_trace: bool = False, **kwargs) -> tuple[bool, str]:
+        if "delete_outputs" in kwargs or "containment_required" in kwargs:
+            raise TypeError("generate() sets delete_outputs and containment_required "
+                            "from the settings, privacy and withhold_on_trace; do not "
+                            "pass them")
+        strict = bool(privacy or withhold_on_trace)
         impl = resolve(s)
+        embeds = bool(getattr(impl, "EMBEDS_OUTPUT_METADATA", False))
+        if strict and getattr(impl, "NEEDS_COMFY_SERVER", False):
+            kwargs["containment_required"] = True
+        before = _file_state(out_path) if strict and embeds else None
         ok, message = impl.generate(
             s, prompt, out_path, *args,
             delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
-        if (not ok or not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
+        if not ok:
+            if strict and embeds and _file_state(out_path) not in (None, before):
+                message += _remove_withheld(out_path)
+            return False, message
+        if (not embeds
                 or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
             return ok, message
         from localm.media.output_metadata import strip_output
         result = strip_output(output_kind, Path(out_path))
         if not result.failed:
             return ok, message
-        if privacy:
-            removed = ""
-            try:
-                Path(out_path).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                removed = (f" The file could not be removed ({e}); delete "
-                           f"{out_path} by hand.")
-            return False, f"Output withheld: {result.reason}{removed}"
+        if strict:
+            return False, f"Output withheld: {result.reason}{_remove_withheld(out_path)}"
         return ok, f"{message}\n{result.reason}"
 
     return SimpleNamespace(resolve=resolve, supports=supports,
                            ensure_available=ensure_available,
                            free_vram=free_vram, generate=generate)
+
+
+def _file_state(path):
+    """``(size, mtime_ns, inode)`` of the file at *path*, or None when there is
+    none or it cannot be read."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+def _remove_withheld(out_path) -> str:
+    """Delete *out_path* when it exists. Returns "" when it is gone, or a
+    sentence telling the user to delete it by hand when it could not be
+    removed. Never raises."""
+    try:
+        Path(out_path).unlink()
+    except FileNotFoundError:
+        return ""   # See test_withheld_file_already_gone_is_not_reported.
+    except OSError as e:
+        return f" The file could not be removed ({e}); delete {out_path} by hand."
+    return ""
+
+
+def media_session_is_private() -> bool:
+    """True when generated media must leave no traces: the server's session
+    mode is privacy or cannot be resolved, or the work runs inside an
+    ``audit.request_privacy`` block (a caller whose own session mode is
+    privacy, carried into a job thread by ``audit.carry_request_privacy``).
+    Never raises."""
+    from localm.audit import automatic_write_allowed, request_is_privacy
+    return request_is_privacy() or not automatic_write_allowed("server")
+
+
+#: The generation arguments with a fixed range, by argument name:
+#: ``(lowest, highest, refusal text)``. ``denoise`` is the image-to-image
+#: strength, ``duration_seconds`` a music track's length, ``seconds`` a video
+#: clip's length.
+REQUEST_RANGES = {
+    "denoise": (0.0, 1.0, "Denoise must be between 0 and 1"),
+    "duration_seconds": (1.0, 3600.0, "Duration must be between 1 and 3600 seconds"),
+    "seconds": (1.0, 20.0, "Duration must be between 1 and 20 seconds"),
+}
+
+
+def range_refusal(**kwargs) -> Optional[str]:
+    """The refusal text of the first argument in *kwargs* named in
+    :data:`REQUEST_RANGES` whose value is not a finite number inside its range,
+    or None when every such argument is None or in range. A number written as
+    text is read as that number; a bool or any other value is out of range.
+    Other arguments are ignored. Never raises."""
+    import math
+    for name, (low, high, text) in REQUEST_RANGES.items():
+        value = kwargs.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return text
+        try:
+            number = float(value)
+        except ValueError:
+            return text
+        if not math.isfinite(number) or not low <= number <= high:
+            return text
+    return None
 
 
 def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
@@ -330,8 +425,9 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
     (``prepare_for_job``). Returns ``(ok, message, path)`` where *path* is
     *out_path* with the backend's ``OUTPUT_SUFFIX`` when it declares one.
     *on_progress* receives every status line and is handed to the backend as
-    given (not passed when None). A backend that cannot honour the
-    request, or is given ``steps`` / ``clip_skip`` without the matching
+    given (not passed when None). An argument outside its
+    :data:`REQUEST_RANGES` range (:func:`range_refusal`), a backend that cannot
+    honour the request, or ``steps`` / ``clip_skip`` given without the matching
     capability, returns ``(False, <reason>, path)`` before anything is loaded."""
 
     def say(text: str) -> None:
@@ -344,6 +440,9 @@ def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
             say(note)
     impl = backend._impl(s)
     path = out_path.with_suffix(getattr(impl, "OUTPUT_SUFFIX", out_path.suffix))
+    out_of_range = range_refusal(**kwargs)
+    if out_of_range:
+        return False, out_of_range, path
     unsupported = [name for name, capability in (("steps", "SUPPORTS_STEPS"),
                                                  ("clip_skip", "SUPPORTS_CLIP_SKIP"))
                    if kwargs.get(name) is not None
