@@ -713,7 +713,9 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(confirm, "ensure_model", lambda cache_dir: (model, "from the cache", ""))
     pins = bump.read_pins(fake_api.REAL_PINS)
     api = fake_api.FakeApi(tag=pins.tag)
-    body = fake_api.lemonade_body(pins.tag, commit="71ad0")
+    families = sorted({name.split("-rocm-", 1)[1].rsplit("-x64.zip", 1)[0]
+                       for name in pins.rocm_table})
+    body = fake_api.lemonade_body(pins.tag, commit="71ad0", families=families)
     body["published_at"] = "2026-10-08T20:46:47Z"
     for a in body["assets"]:
         if a["name"] in pins.rocm_table:
@@ -734,6 +736,7 @@ def world(tmp_path, monkeypatch):
     w = World()
     w.work, w.receipt, w.api, w.pins, w.tmp = work, tmp_path / "r.json", api, pins, tmp_path
     w.cand = bump.fetch_candidate(pins.tag, api)
+    assert w.cand.rocm_assets == pins.rocm_table
     w.stages = Stages(work, w.cand)
 
     def go(*argv, stages=None, fetch=None):
