@@ -608,17 +608,19 @@ def check(*, opener=None) -> dict:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
     if not _net_policy_allows_update_check():
-        raise LocalmError(
-            "update checks are off because network access is set to off",
-            reason='turn on "Check for updates even when network access is off" '
-                   "in Settings, or set network access to ask or allow")
+        from localm import config
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY,
+                          stage="network_off",
+                          hint=config.net_off_update_refusal("no update check was made"))
     import urllib.parse
     current = _version.read_version()
     query = {"client": current or "unknown"}
     if _prerelease_channel_enabled():
         query["channel"] = "prerelease"
     path = "/update?" + urllib.parse.urlencode(query)
-    data = _proxy.request(base, path, token=token, opener=opener)
+    data = _proxy.request(base, path, token=token, opener=opener,
+                          net_exempt=_net_policy_allows_update_check())
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
     # Whether "not newer" means anything: is_newer() returns False both for a
@@ -653,17 +655,19 @@ def _selection_request(path: str, params: dict, *, opener=None) -> dict:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
     if not _net_policy_allows_update_check():
-        raise LocalmError(
-            "update checks are off because network access is set to off",
-            reason='turn on "Check for updates even when network access is off" '
-                   "in Settings, or set network access to ask or allow")
+        from localm import config
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY,
+                          stage="network_off",
+                          hint=config.net_off_update_refusal("no update check was made"))
     query = dict(params)
     if _prerelease_channel_enabled():
         query["channel"] = "prerelease"
     qs = urllib.parse.urlencode(query)
     try:
         data = _proxy.request(base, path + (f"?{qs}" if qs else ""), token=token,
-                              opener=opener)
+                              opener=opener,
+                              net_exempt=_net_policy_allows_update_check())
     except LocalmError as e:
         if str(e.reason).startswith("HTTP 404"):
             raise LocalmError(
@@ -859,8 +863,10 @@ def class_summary(klass: str) -> str:
 def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     """Stream the release asset (build zip) from the proxy to *dest*; return the path.
 
-    Raises :class:`~localm.bugreport.LocalmError` on failure. *opener* is injectable
-    for tests: it receives ``(url, headers, timeout, dest)`` and writes the file."""
+    Raises :class:`~localm.bugreport.LocalmError` on failure, and before any
+    connection when network access is off and the update channel is not exempt
+    (``update_ignore_net_policy``). *opener* is injectable for tests: it
+    receives ``(url, headers, timeout, dest)`` and writes the file."""
     from localm.bugreport import LocalmError
     base, token = endpoint()
     if not base:
@@ -869,6 +875,9 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
         aid = int(asset_id)
     except (TypeError, ValueError):
         raise LocalmError("bad asset id", reason=str(asset_id)) from None
+    from localm.bugreport.transport import refuse_when_network_off
+    refuse_when_network_off("the update was not downloaded",
+                            exempt=_net_policy_allows_update_check(), update=True)
     url = base.rstrip("/") + f"/update/download?id={aid}"
     headers = {"User-Agent": "localm"}
     if token:

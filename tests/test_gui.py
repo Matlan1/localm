@@ -4158,18 +4158,19 @@ class TestDiscoverEndpoints:
         with TestClient(app) as client:
             assert client.get("/api/discover/search?source=civitai").status_code == 502
 
-    def test_civitai_net_off_is_403_with_gui_native_message(self, gui_app, monkeypatch):
+    def test_civitai_net_off_is_403_with_the_refusal_text(self, gui_app, monkeypatch):
+        from localm import config
         from localm.model_manager.sources import CivitAIError
+        refusal = config.net_off_download_refusal("nothing was searched")
 
         def blocked(q, limit=20, types=None, nsfw=False, api_key=None):
-            raise CivitAIError("Network access is disabled (net_mode=off).", off=True)
+            raise CivitAIError(refusal, off=True)
         app, _ = gui_app
         monkeypatch.setattr("localm.model_manager.sources.civitai_search", blocked)
         with TestClient(app) as client:
             r = client.get("/api/discover/search?source=civitai")
         assert r.status_code == 403
-        assert "Network access is off" in r.json()["detail"]
-        assert "Settings > Server & network" in r.json()["detail"]
+        assert r.json()["detail"] == refusal
 
     def test_civitai_no_valid_type_is_422(self, gui_app, monkeypatch):
         """civitai_search itself refuses an empty resolved type list (ModelSourceError,

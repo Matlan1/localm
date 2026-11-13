@@ -102,6 +102,77 @@ def configured_mode() -> str:
     return AUTOSWITCH_DEFAULT
 
 
+# Fit classes: what loading a candidate would mean on this machine now, best
+# first. routing_fit.assess measures them.
+FIT_RESIDENT = 0     # already loaded here or answered by a peer: nothing loads
+FIT_GPU = 1          # every layer and expert on the GPU
+FIT_EXPERTS_RAM = 2  # every layer on the GPU, routed experts in system RAM
+FIT_PARTIAL = 3      # some layers on the CPU (or no GPU at all), within RAM
+FIT_CPU_ONLY = 4     # a GPU exists but no layer fits on it
+FIT_UNSIZED = 5      # how it would fit could not be measured
+FIT_DISK = 6         # weights read from the model file on disk while answering
+FIT_NAMES = {FIT_RESIDENT: "resident", FIT_GPU: "gpu", FIT_EXPERTS_RAM: "experts_in_ram",
+             FIT_PARTIAL: "partial", FIT_CPU_ONLY: "cpu_only", FIT_UNSIZED: "unsized",
+             FIT_DISK: "disk"}
+_ASK_CLASSES = (FIT_CPU_ONLY, FIT_UNSIZED, FIT_DISK)
+
+
+@dataclass(frozen=True)
+class Fit:
+    """How one candidate would run if routing chose it.
+
+    *cls* is a ``FIT_*`` class. *evicts_user* names the loaded models the user
+    chose that would be unloaded to reach it. *load_bytes* is the model's size
+    on disk (0 for a resident one). *disk_read_bytes* is what it would read
+    from disk while answering, for ``FIT_DISK``. *error* is set when the model
+    could not even be prepared for loading; such a model is never chosen or
+    suggested, and the error is reported as a load error."""
+
+    cls: int
+    evicts_user: tuple[str, ...] = ()
+    load_bytes: int = 0
+    disk_read_bytes: int = 0
+    error: str = ""
+
+    @property
+    def needs_ask(self) -> bool:
+        """Whether routing must ask before using this candidate: it would run on
+        the CPU only beside a GPU, its fit is unknown, it would read weights from
+        disk, or it would unload a model the user chose."""
+        return self.cls in _ASK_CLASSES or bool(self.evicts_user)
+
+    def ask_reason(self) -> str:
+        """Why using this candidate needs the user's yes, as one clause; empty
+        when it does not."""
+        parts = []
+        if self.evicts_user:
+            parts.append(f"loading it unloads {', '.join(self.evicts_user)}")
+        if self.cls == FIT_DISK:
+            gb = self.disk_read_bytes / 1024 ** 3
+            size = f" {gb:.1f} GB of" if gb >= 0.1 else ""
+            parts.append("it does not fit in this machine's VRAM and RAM, so it would "
+                         f"read{size} its weights from disk while answering (very slow)")
+        elif self.cls == FIT_CPU_ONLY:
+            parts.append("it would run on the CPU only, because no layer fits on the GPU")
+        elif self.cls == FIT_UNSIZED:
+            parts.append("how it would fit on this machine could not be measured")
+        return "; ".join(parts)
+
+
+FitAssessor = Callable[[Sequence[str]], Mapping[str, "Fit"]]
+
+
+def fit_resident_only(resident: Sequence[str]) -> FitAssessor:
+    """An assessor for a caller that cannot size a load: a model in *resident*
+    is ``FIT_RESIDENT`` and any other ``FIT_UNSIZED``, so routing only ever
+    moves to a resident model and asks for anything else."""
+    loaded = frozenset(resident)
+
+    def assess(names: Sequence[str]) -> dict[str, Fit]:
+        return {n: Fit(FIT_RESIDENT if n in loaded else FIT_UNSIZED) for n in names}
+    return assess
+
+
 @dataclass(frozen=True)
 class CapabilityNeeds:
     """What one request needs from whatever model answers it.
@@ -170,9 +241,12 @@ class RoutingDecision:
     ``skipped`` lists the models that meet the request's needs but were left
     out of ``candidates`` because their last load failed.
 
-    ``policy`` is the autoswitch mode the decision was made under. Under
-    ``ask``, ``suggested`` names the model that would have answered; ``resolved``
-    stays ``current``."""
+    ``policy`` is the autoswitch mode the decision was made under.
+    ``suggested`` names the model that would answer if the user agreed, with
+    ``resolved`` staying ``current``: under ``ask`` always, and under any other
+    mode when the best candidate needs the user's yes (``Fit.needs_ask``), with
+    ``ask_reason`` saying why. ``candidates`` only ever holds models routing may
+    use without asking. ``fits`` maps each ranked candidate to its ``Fit``."""
 
     current: Optional[str]
     resolved: Optional[str]
@@ -186,6 +260,8 @@ class RoutingDecision:
     skipped: tuple[SkippedCandidate, ...] = ()
     policy: str = AUTOSWITCH_AUTO
     suggested: Optional[str] = None
+    ask_reason: str = ""
+    fits: dict[str, Fit] = field(default_factory=dict)
 
     def answered_by(self, name: str) -> RoutingDecision:
         """This decision with candidate *name* answering: ``resolved`` names it and
@@ -198,6 +274,17 @@ class RoutingDecision:
         is unmet, and *load_errors* records why each candidate could not be
         used."""
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
+                       load_errors=tuple(load_errors))
+
+    def asked(self, name: str, fit: Fit,
+              load_errors: Sequence[str] = ()) -> RoutingDecision:
+        """This decision turned into a suggestion: *current* answers, *name* is
+        ``suggested`` with *fit* (measured when its load was refused) as its fit
+        and the reason, nothing is a candidate, and *load_errors* records the
+        candidates that failed to load."""
+        return replace(self, resolved=self.current, suggested=name,
+                       ask_reason=fit.ask_reason(), candidates=(), candidate_unmet={},
+                       unmet=tuple(sorted(self.gaps)), fits={**self.fits, name: fit},
                        load_errors=tuple(load_errors))
 
     def with_skipped(self, more: Sequence[SkippedCandidate]) -> RoutingDecision:
@@ -242,8 +329,9 @@ class RoutingDecision:
         if self.pinned:
             return f"kept pinned {self.current} ({gap_text})"
         if self.suggested:
+            why = f": {self.ask_reason}" if self.ask_reason else ""
             return (f"kept {self.current} ({gap_text}); {self.suggested} would "
-                    f"answer if you switch")
+                    f"answer if you switch{why}")
         if self.policy == AUTOSWITCH_OFF:
             return f"kept {self.current} ({gap_text}); model autoswitch is off"
         if self.load_errors:
@@ -394,8 +482,20 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
     return gaps
 
 
+def capable_models(needs: CapabilityNeeds, *, exclude: Optional[str] = None,
+                   reg: Optional[dict] = None) -> list[str]:
+    """The installed chat models confirmed to meet *needs*, *exclude* left out,
+    by name. A listing only: it does not rank by fit and chooses nothing."""
+    reg = caps._registry._mm.load_registry() if reg is None else reg
+    if not isinstance(reg, dict):
+        return []
+    dir_cache: dict = {}
+    return sorted(n for n in reg
+                  if n != exclude and _model_satisfies(n, needs, reg, dir_cache))
+
+
 def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
-               pinned: bool, resident: Sequence[str] = (),
+               pinned: bool, fit: FitAssessor, resident: Sequence[str] = (),
                reg: Optional[dict] = None,
                current_known: Optional[dict[str, bool]] = None,
                skip: Union[Mapping[str, SkippedCandidate],
@@ -441,9 +541,18 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     ones meeting more of the rest first, and ``unmet`` names what the chosen one
     lacks.
 
-    Ranking among qualified candidates: already resident first, then the largest
-    confirmed context window, then name, so the result is deterministic and a
-    test can assert on it."""
+    *fit* says how each candidate would run here (``routing_fit.assess``, or
+    ``fit_resident_only`` for a caller that cannot size a load). It is called
+    at most once, with the candidates that meet the needs. It is required: no
+    caller can rank without it.
+
+    Ranking: candidates usable without asking (``Fit.needs_ask`` False) first,
+    then the fit class, then (when no model meets every need) the ones meeting
+    more of the other needs, then already resident, then the smaller load,
+    then the larger confirmed context window, then name, so the result is
+    deterministic. When the best candidate needs asking, the decision keeps
+    *current*, names it in ``suggested`` with ``ask_reason`` and leaves
+    ``candidates`` empty."""
     mode = coerce_autoswitch_mode(mode) or AUTOSWITCH_AUTO
     if mode == AUTOSWITCH_IMAGE and not pinned:
         needs = CapabilityNeeds(
@@ -478,7 +587,7 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                                needs=needs, gaps=gaps, policy=mode)
 
     decision = _plan_unpinned(current, needs, gaps, reg, dir_cache, resident,
-                              skip, only_resident=mode == AUTOSWITCH_LOADED)
+                              skip, fit, only_resident=mode == AUTOSWITCH_LOADED)
     decision = replace(decision, policy=mode)
     if mode == AUTOSWITCH_ASK and decision.routed:
         return replace(decision, resolved=current, suggested=decision.resolved,
@@ -486,17 +595,13 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     return decision
 
 
-def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip,
+def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip, fit,
                    only_resident: bool) -> RoutingDecision:
     """The decision for an unpinned request whose current model has *gaps*:
-    the best other model, or *current* kept with every gap unmet. With
-    *only_resident*, only a model in *resident* is a candidate."""
+    the best other model, a suggestion when the best one needs the user's yes,
+    or *current* kept with every gap unmet. With *only_resident*, only a model
+    in *resident* is a candidate."""
     resident_set = set(resident)
-
-    def rank(n: str):
-        ctx = caps.model_context_length(n, reg=reg) or 0
-        return (0 if n in resident_set else 1, -ctx, n)
-
     skip = (skip() if callable(skip) else skip) or {}
 
     def split_skipped(names):
@@ -506,14 +611,49 @@ def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip,
     def eligible(n: str) -> bool:
         return n != current and (not only_resident or n in resident_set)
 
+    errors: list[str] = []
+
+    def ranked(names, extra=lambda n: 0):
+        fits = dict(fit(list(names)))
+        for n in names:
+            fits.setdefault(n, Fit(FIT_UNSIZED))
+        broken = [n for n in names if fits[n].error]
+        errors.extend(f"{n}: {fits[n].error}" for n in broken)
+        names = [n for n in names if not fits[n].error]
+
+        def key(n: str):
+            f = fits[n]
+            ctx = caps.model_context_length(n, reg=reg) or 0
+            return (f.needs_ask, f.cls, extra(n), 0 if n in resident_set else 1,
+                    f.load_bytes, -ctx, n)
+        return sorted(names, key=key), {n: fits[n] for n in names}
+
+    def decide(order, fits, skipped, unmet_of=None):
+        if not order:
+            return RoutingDecision(current=current, resolved=current, pinned=False,
+                                   needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)),
+                                   skipped=skipped, load_errors=tuple(errors),
+                                   fits=fits)
+        usable = tuple(n for n in order if not fits[n].needs_ask)
+        unmet_of = unmet_of or {}
+        if usable:
+            return RoutingDecision(
+                current=current, resolved=usable[0], pinned=False, needs=needs,
+                gaps=gaps, unmet=unmet_of.get(usable[0], ()), candidates=usable,
+                candidate_unmet={n: unmet_of[n] for n in usable if n in unmet_of},
+                skipped=skipped, fits=fits)
+        best = order[0]
+        return RoutingDecision(
+            current=current, resolved=current, pinned=False, needs=needs, gaps=gaps,
+            unmet=tuple(sorted(gaps)), skipped=skipped, suggested=best,
+            ask_reason=fits[best].ask_reason(), fits=fits)
+
     qualified, skipped = split_skipped(
         [n for n in reg
          if eligible(n) and _model_satisfies(n, needs, reg, dir_cache)])
     if qualified:
-        qualified.sort(key=rank)
-        return RoutingDecision(current=current, resolved=qualified[0], pinned=False,
-                               needs=needs, gaps=gaps,
-                               candidates=tuple(qualified), skipped=skipped)
+        order, fits = ranked(qualified)
+        return decide(order, fits, skipped)
 
     required = CapabilityNeeds(
         capabilities=tuple(c for c in needs.capabilities if c in _REQUIRED_TO_ANSWER),
@@ -530,13 +670,10 @@ def _plan_unpinned(current, needs, gaps, reg, dir_cache, resident, skip,
              if eligible(n) and _model_satisfies(n, required, reg, dir_cache)])
         skipped = partial_skipped
         if partial:
-            partial.sort(key=lambda n: (-sum(has(n, c) for c in optional), *rank(n)))
             lacks = {n: tuple(sorted(c for c in optional if not has(n, c)))
                      for n in partial}
-            return RoutingDecision(current=current, resolved=partial[0], pinned=False,
-                                   needs=needs, gaps=gaps, unmet=lacks[partial[0]],
-                                   candidates=tuple(partial), candidate_unmet=lacks,
-                                   skipped=skipped)
+            order, fits = ranked(partial, extra=lambda n: len(lacks[n]))
+            return decide(order, fits, skipped, lacks)
 
     return RoutingDecision(current=current, resolved=current, pinned=False,
                            needs=needs, gaps=gaps, unmet=tuple(sorted(gaps)),
