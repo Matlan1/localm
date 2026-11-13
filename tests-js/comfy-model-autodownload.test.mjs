@@ -282,7 +282,7 @@ for (const [status, phrase] of [
 
 for (const [reason, phrase] of [
   ["path", "cannot save a file under"],
-  ["format", ".safetensors and .gguf"],
+  ["format", ".safetensors, .sft and .gguf"],
   ["folder", "which comfyui models folder"],
   ["name", "too generic"],
 ]) {

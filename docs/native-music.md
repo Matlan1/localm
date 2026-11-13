@@ -9,7 +9,7 @@ Metal GPUs.
 
 ## Which backend runs
 
-Settings > Music > **Music backend** (config `plugins.music.backend`):
+Settings > Media > Music > **Music backend** (config `plugins.music.backend`):
 
 | Value | Behaviour |
 |---|---|
