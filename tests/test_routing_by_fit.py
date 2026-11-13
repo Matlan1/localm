@@ -568,6 +568,7 @@ def test_a_routed_request_never_reloads_a_model_by_unloading_the_users(
     loaded: no reload that would unload the current model."""
     client, engines, _ = vision_server
     _fix_classes(monkeypatch, cr.FIT_GPU)
+    monkeypatch.setattr(hs, "_switch_probe_vram", _cannot_measure)
     _seer_resident(engines)
     seer = engines["seer"]
     assert seer.loaded and engines["plain"].loaded
@@ -849,3 +850,39 @@ def test_the_audio_refusal_text_names_the_suggested_model_first(monkeypatch):
     monkeypatch.setattr(registry, "audio_capable_models", lambda: ["big-asr", "small-asr"])
     assert "`localm run small-asr" in registry.audio_input_guidance(suggested="small-asr")
     assert "`localm run big-asr" in registry.audio_input_guidance()
+
+
+def test_once_the_blocker_is_gone_a_routed_request_reloads_and_unloads_nothing_else(
+        vision_server, monkeypatch):
+    """A box that cannot measure free VRAM: the user's explicit switch to the
+    vision model unloads the other model to make room. A routed image request
+    then reloads the vision model for a better placement (its blocker is gone);
+    the reload is the only switch, and no other model is unloaded or loaded."""
+    import asyncio
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+
+    monkeypatch.setattr(hs, "_switch_probe_vram", _cannot_measure)
+    asyncio.run(hs.switch_engine("seer", None, preempt=True, activate=False))
+    assert not engines["plain"].loaded and list(hs._engines) == ["seer"]
+    seer = engines["seer"]
+    seer.gpu_placement = {"degraded": True}
+    seer.placement_heal = hs.PlacementHeal(frozenset({"plain"}), False)
+    switches = []
+    real = hs.switch_engine
+
+    async def spy(name, *a, **k):
+        switches.append((name, k.get("routed"), k.get("preempt")))
+        return await real(name, *a, **k)
+    monkeypatch.setattr(hs, "switch_engine", spy)
+    r = _post_image(client)
+    assert r.status_code == 200, r.text
+    assert switches == [("seer", True, False)]
+    assert list(hs._engines) == ["seer"] and not engines["plain"].loaded
+    assert "seer" not in hs._routing_loaded
+
+
+async def _cannot_measure(loop, budget, reading=None):
+    """A VRAM probe on a box that reports no free figure (a CI runner)."""
+    return switch_admission.VramProbe(free=None, probe_ok=True, process_scoped=False,
+                                      shortfall=None, shares_adaptive=False)
