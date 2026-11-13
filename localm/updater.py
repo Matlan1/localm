@@ -491,7 +491,8 @@ def _refuse_downgrade(new_version: str) -> None:
         raise LocalmError(
             "cannot read the installed localm version",
             reason="without it an update cannot be confirmed as newer; choose the "
-                   "version to install (Settings > Updates, or 'localm update "
+                   "version to install (Settings > System > Updates > Choose a version, "
+                   "or 'localm update "
                    "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
@@ -1310,6 +1311,41 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
     return status, (status["note"] if status is not None else note)
 
 
+def _check_package(au, root: Path, target: Path, version: str, scratch: Path,
+                   components_of) -> list:
+    """Check the statement of the extracted build at *root*
+    (:func:`localm.update_package.check`, with *components_of* reading the pinned
+    components) and that the disk holds the update
+    (:func:`localm._apply_update.check_space`, the backup going under *scratch*).
+    Returns the top-level entries to swap into the install at *target*: those
+    the stated files belong to and the statement, or for a build that need not
+    carry one and does not, every entry of the build; entries an update never
+    replaces are left out. Raises LocalmError, with nothing changed, when the
+    statement is missing, malformed or does not match the build, or the disk
+    cannot hold the update. *au* is :mod:`localm._apply_update`."""
+    from localm import update_package
+    from localm.bugreport import LocalmError
+    try:
+        stated = update_package.check(root, version, components_of)
+    except update_package.MissingStatement as e:
+        raise LocalmError("the update package does not state what it changes, so nothing "
+                          "was updated", reason=str(e)) from None
+    except update_package.PackageError as e:
+        raise LocalmError("the update package does not match what it states, so nothing "
+                          "was updated", reason=str(e)) from None
+    names = (au.swap_entries(root) if stated is None
+             else sorted(t for t in update_package.tops(stated) if t not in au.NEVER_TOUCH))
+    try:
+        au.check_space(root, target, names, scratch)
+    except au.NoSpace as e:
+        raise LocalmError("there is not enough free disk space for the update, so nothing "
+                          "was updated", reason=f"{e}; free some space and update again") from None
+    except OSError as e:
+        raise LocalmError("could not tell whether the update fits on the disk, so nothing "
+                          "was updated", reason=str(e)) from None
+    return names
+
+
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
           runner=None, defer_runtime=False, say=None) -> dict:
@@ -1367,6 +1403,18 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     build must be newer.
 
     *expect_sha256*, when given, must equal the downloaded build's sha256.
+
+    THE PACKAGE STATEMENT. After the version checks and before anything is
+    replaced, the build's statement of what it changes is checked
+    (:func:`_check_package`): every file of localm it holds with its sha256 and
+    size, and every component it pins with its version and per-platform checksums
+    (``updater_components.stated_components``). A build newer than
+    :data:`localm.update_package.LAST_WITHOUT` without one, or whose files or
+    components differ from what it states (a cut-off or damaged package), is
+    refused with nothing changed, and so is an update the disk cannot hold
+    together with its backup. Only the top-level entries the stated files belong
+    to are swapped, and the components updated are the stated ones whose
+    installed version differs.
 
     *signature* is the signature envelope text from :func:`check` (the proxy serves
     it with the release). :func:`verify_signature` checks it BEFORE the build is
@@ -1449,6 +1497,12 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 verified, verify_reason = assessed["verified"], assessed["reason"]
                 if not verified and not allow_unverified:
                     raise UnverifiedBuild(str(target_version), verify_reason, digest)
+            if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
+                raise LocalmError(
+                    "refusing to install: the downloaded build changed after its "
+                    "signature was checked",
+                    reason="the file on disk no longer matches the verified bytes; "
+                           "try the update again")
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
@@ -1461,8 +1515,10 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             downgrade = _version.is_newer(_version.read_version(), new_version)
             klass = classify(root, target, read_manifest(root))
             from localm import updater_runtime
-            rt_plan = updater_runtime.plan(root, target)
             from localm import updater_components
+            swap_names = _check_package(au, root, target, new_version, run_dir,
+                                        updater_components.stated_components)
+            rt_plan = updater_runtime.plan(root, target)
             comp_plans = updater_components.plan(root, target, deep=False)
             comp_update = updater_components.needs_finish(comp_plans)
             if comp_update and klass != "setup":
@@ -1518,7 +1574,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         # a failure only when the rollback failed too and a manual recovery needs it.
         previous_version = _version.read_version()
         try:
-            names = au.swap_with_backup(root, target, run_backup_dir)
+            names = au.swap_with_backup(root, target, run_backup_dir, swap_names)
         except au.BackupFailed as e:
             _drop_run_dir(run_dir)
             raise LocalmError("could not keep a copy of the current version, so nothing was "
@@ -2145,7 +2201,7 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
            for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += (" (" + "; ".join(why) + "). To try again, close anything else using this "
-                 "install, then choose Update now in Settings > Updates")
+                 "install, then choose Settings > System > Updates > Update now")
     write_runtime = not keep_failures or (runtime_last is not None
                                           and not failed_now(runtime_last))
     write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))

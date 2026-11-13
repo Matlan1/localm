@@ -132,9 +132,10 @@ def add_transport_middleware(app: FastAPI) -> None:
     # OUTSIDE the BaseHTTPMiddleware handlers that otherwise mask http.disconnect
     # from the non-streaming inference path (see the class + _generate_full).
     app.add_middleware(_hs._DisconnectSignalMiddleware)
-    # Outermost of all: in-flight/progress bookkeeping for the hang alarm's
-    # starvation detector. Pure ASGI and content-free (counts and
-    # clocks only); sits outside everything so a request wedged in ANY inner
-    # layer still shows as in flight.
+    # Outermost of the three: in-flight/progress bookkeeping for the hang
+    # alarm's starvation detector. Pure ASGI and content-free (counts and
+    # clocks only); sits outside every layer that can hold a request, so a
+    # request wedged in ANY inner layer still shows as in flight. Only the
+    # metrics counter and the debug request log, both pass-through, wrap it.
     from localm.inference._hang_alarm import RequestProgressMiddleware
     app.add_middleware(RequestProgressMiddleware)

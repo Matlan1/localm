@@ -55,7 +55,8 @@ def no_native_trace_detail(privacy_skipped: bool) -> str:
     if privacy_skipped:
         return (" No native fault trace was captured: crash traces are off in this "
                 "session (privacy mode keeps none). Turn on keep diagnostics "
-                "(Settings > Privacy, or  localm config keep_diagnostics true) to "
+                "(Settings > Privacy & data > Keep diagnostics for bug reports, or "
+                "localm config keep_diagnostics true) to "
                 "capture one if it happens again.")
     return " No native fault trace was captured for this exit."
 

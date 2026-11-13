@@ -419,11 +419,8 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
                       host=peer.get("host"), port=int(peer.get("port")),
                       scheme=scheme, api_key=api_key or "")
     url = _peer_url(probe, "/v1/models")
-    try:
-        from localm.tls import requests_verify
-        verify = requests_verify(url)
-    except FileNotFoundError:
-        verify = False
+    from localm.tls import requests_verify
+    verify = requests_verify(url)
     from localm.loopback_http import local_request
     resp = local_request("GET", _peer_url(probe, "/api/session"),
                          headers=_auth_headers(api_key), timeout=timeout,
@@ -498,8 +495,10 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
-    except FileNotFoundError:
-        verify = False
+    except Exception as e:
+        logger.debug("peer_routing: could not determine TLS verification for %s: %s",
+                     url, e)
+        return None
     headers = {**_auth_headers(api_key), SESSION_MODE_HEADER: SessionMode(mode).value}
     try:
         from localm.loopback_http import local_request
@@ -639,11 +638,8 @@ async def forward(route: PeerRoute, request, path: str, *,
     url = _peer_url(route, path)
 
     import requests
-    try:
-        from localm.tls import requests_verify
-        verify = requests_verify(url)
-    except FileNotFoundError:
-        verify = False
+    from localm.tls import requests_verify
+    verify = requests_verify(url)
 
     from localm.loopback_http import local_request
 

@@ -60,7 +60,7 @@ class MusicRequest(BaseModel):
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
     # Native backend only: {component: registered name or "" for the default}
-    # laid over Settings > Music for this job (components: dit, text_encoder,
+    # laid over Settings > Media > Music for this job (components: dit, text_encoder,
     # vae, lm).
     native_models: dict[str, str] | None = None
 

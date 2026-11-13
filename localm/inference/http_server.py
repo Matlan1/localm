@@ -4534,6 +4534,7 @@ class _BodyStreamCapMiddleware:
                 break
         if cl is not None and cl > MAX_REQUEST_BODY_BYTES:
             # Fast path: reject BEFORE reading any body bytes off the wire.
+            _note_refusal(scope, "request body too large")
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
@@ -4612,11 +4613,27 @@ class _BodyStreamCapMiddleware:
                 drained += len(message.get("body") or b"")
                 if not message.get("more_body", False):
                     real_stream_done = True
+            _note_refusal(scope, "request body too large")
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
                 headers={MEDIA_REFUSAL_HEADER: "body-size"},
             )(scope, receive, send)
+
+
+# Scope key under which the debug request log
+# (app_assembly.diagnostics.RequestLogMiddleware) keeps a dict for this request;
+# a middleware that answers without passing the request on records why in it.
+REQUEST_LOG_SCOPE_KEY = "localm.request_log"
+
+
+def _note_refusal(scope, reason: str) -> None:
+    """Record *reason* as why this request was refused, for the debug request
+    log line. *reason* is fixed operational text: never a header value, key,
+    token or body content. Does nothing when the request log is off."""
+    note = scope.get(REQUEST_LOG_SCOPE_KEY)
+    if isinstance(note, dict):
+        note["refusal"] = reason
 
 
 # Scope key under which _DisconnectSignalMiddleware publishes a non-blocking
@@ -6048,8 +6065,8 @@ def _roll_back_during_restart() -> bool:
         return True
     except LocalmError as e:
         _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
-                   "localm %s is installed and Settings > Updates shows which parts "
-                   "disagree", e.summary, e.reason, _version.read_version())
+                   "localm %s is installed and Settings > System > Updates > Installed parts "
+                   "shows which parts disagree", e.summary, e.reason, _version.read_version())
         return False
 
 
@@ -6549,7 +6566,6 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         mounting.add_api_landing(app)
     transport.add_request_privacy(app)      # innermost
     transport.add_client_left_answer(app)
-    diagnostics.add_request_logging(app)     # debug mode only
     diagnostics.add_debug_stacks(app)
     cors_cfg = security.add_cors(app)
     security.add_origin_guard(app, cors_cfg)
@@ -6558,7 +6574,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_docs_loopback_gate(app)
     security.add_host_header_guard(app)
     transport.add_transport_middleware(app)
-    metrics_assembly.add_metrics(app)        # outermost; only when enabled
+    metrics_assembly.add_metrics(app)        # only when enabled
+    diagnostics.add_request_logging(app)     # outermost; debug mode only
 
     # 5. Route groups (localm/inference/routes/*.py).
     mounting.mount_route_groups(app, ctx)

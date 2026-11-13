@@ -233,7 +233,8 @@ class TestWatchdogHonoursThePrivacyMarker:
         ({"pid": 1, "diagnostics": False}, False),
         ({"pid": 1, "diagnostics": True}, True),
         ({"pid": 1}, True),
-        ("not json", True),
+        ("not json", False),
+        ("[1]", False),
         (None, True),
     ])
     def test_marker_allows_exit_record(self, tmp_path, body, expected):
@@ -242,6 +243,14 @@ class TestWatchdogHonoursThePrivacyMarker:
             marker.write_text(json.dumps(body), encoding="utf-8")
         elif body is not None:
             marker.write_text(body, encoding="utf-8")
+        assert _load_wd().marker_allows_exit_record(marker) is expected
+
+    @pytest.mark.parametrize("diagnostics, expected", [(False, False), (True, True)])
+    def test_a_missing_marker_follows_its_stopping_record(
+            self, tmp_path, diagnostics, expected):
+        (tmp_path / "server-crash.x.stopping").write_text(
+            json.dumps({"pid": 1, "diagnostics": diagnostics}), encoding="utf-8")
+        marker = tmp_path / "server-crash.x.marker"
         assert _load_wd().marker_allows_exit_record(marker) is expected
 
     @pytest.mark.skipif(sys.platform != "win32", reason="reads a Windows exit code")

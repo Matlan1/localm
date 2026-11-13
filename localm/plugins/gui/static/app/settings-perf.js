@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
@@ -2293,7 +2293,11 @@ export async function downloadMemoryEmbedder(btn) {
   return success;
 }
 
-export function openMemoryModal() {
+/** Open the memory dialog on a fresh copy of memory. Save sends the text the
+ *  dialog showed as its base, so a fact added meanwhile is never deleted. */
+export async function openMemoryModal() {
+  await refreshMemory();
+  let base = memory.text;
   openModal(t("memory.modal.title"), (body) => {
     body.appendChild(el("div", "sub",
       t(memory.writable ? "memory.modal.writable" : "memory.modal.readOnly")));
@@ -2326,12 +2330,14 @@ export function openMemoryModal() {
         try {
           const r = await fetch("/api/memory", {
             method: "PUT", headers: authHeaders(),
-            body: JSON.stringify({ text: ta.value }),
+            body: JSON.stringify({ text: ta.value, base }),
           });
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
           await refreshMemory();
-          toast(t("memory.saved"));
+          toast(data.kept_newer
+            ? t("memory.savedKeptNewer", { count: data.kept_newer })
+            : t("memory.saved"));
           $("modal").style.display = "none";
         } catch (e) {
           toast(t("memory.saveFailed", { message: e.message }), true);
@@ -2344,6 +2350,7 @@ export function openMemoryModal() {
         synth.disabled = true;
         await synthesizeMemoryNow(status);
         ta.value = memory.text;              // reflect any newly-added facts
+        base = memory.text;
         synth.disabled = false;
       };
       row.appendChild(save);
@@ -2534,19 +2541,11 @@ export function parseRoutingHeader(resp) {
   } catch { return null; }
 }
 
-/** The content of every user message in *conv*, keyed by the message object,
- *  for restoring attachments that a refusal stripped. */
-function userContentSnapshot(conv) {
-  const snap = new Map();
-  for (const m of conv.messages) {
-    if (m.role === "user" && Array.isArray(m.content)) snap.set(m, m.content.slice());
-  }
-  return snap;
-}
+/** Milliseconds between two redraws of a streaming reply. */
+const LIVE_RENDER_MS = 50;
 
 /** After a refusal that names a model the server did not switch to on its
- *  own: a button under the chat that puts the stripped attachments back
- *  (offer.before, when there is one), selects offer.suggest and sends the
+ *  own: a button under the chat that selects offer.suggest and sends the
  *  conversation again, with offer.reason (why the server did not switch) shown
  *  beside it when present. Returns the row, or null when there is no chat to
  *  show it in. The row is not saved with the chat; a later re-render or
@@ -2561,9 +2560,6 @@ function showMediaOffer(conv, offer) {
   btn.onclick = () => {
     row.remove();
     if (currentConv() !== conv || chat.busy) return;
-    for (const [m, content] of offer.before || []) {
-      if (conv.messages.includes(m)) m.content = content;
-    }
     if ([...modelSelect.options].some((o) => o.value === offer.suggest)) {
       modelSelect.value = offer.suggest;
       modelSelect.dispatchEvent(new Event("change"));
@@ -2687,6 +2683,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // its untrusted spans then take the same alternation-merge path below. It is
   // marked origin "tool" so the server keeps it out of what it treats as the
   // user's own words (the memory recall query, the audit's user line).
+  // The model this request asks for; earlier turns' images and clips it
+  // refused are left out of the request (wireParts).
+  const askedModel = pinnedModelName(conv) || modelSelect.value || modelCache.active;
+  let lastUserIdx = -1;
+  conv.messages.forEach((m, i) => { if (m.role === "user" && !isToolEvent(m)) lastUserIdx = i; });
   const mapped = conv.messages.map((m, i) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
@@ -2716,7 +2717,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
                own: [[0, m.content.length]] };
     }
     return {
-      role: m.role, content: wireParts(m.content),
+      role: m.role, content: wireParts(m.content, { model: askedModel, latest: i === lastUserIdx }),
       untrusted_spans: m.untrusted_spans ? m.untrusted_spans.slice() : undefined,
       own: m.role === "user" && (m.tag === "kb" || m.tag === "doc") ? [] : undefined,
     };
@@ -2800,8 +2801,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     elideAudioForWire(messages);
   }
 
-  // VIS-1: did this request carry a user-attached image? If a text-only model
-  // rejects it (400), we must drop the image so the chat is not wedged.
+  // Whether this request carries an image or an audio clip.
   const sentImage = messages.some((m) => Array.isArray(m.content) &&
     m.content.some((p) => p.type === "image_url"));
   const sentAudio = messages.some((m) => Array.isArray(m.content) &&
@@ -2880,68 +2880,82 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     serverCompacted = !!(r.headers && typeof r.headers.get === "function"
         && r.headers.get("X-Localm-Context-Compacted"));
     let streamErr = null;
-    await readSSE(r, (payload) => {
-      if (payload === "[DONE]" || cutAtCall) return;
-      let chunk;
-      try { chunk = JSON.parse(payload); } catch { return; }
-      if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
-        const meta = chunk.localm_headers;
-        const inStream = {
-          headers: { get: (k) => (typeof meta[k] === "string" ? meta[k] : null) },
-        };
-        memUsed = parseMemoryHeader(inStream) || memUsed;
-        routing = parseRoutingHeader(inStream) || routing;
-        if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
-      }
-      if (chunk.localm_error) {
-        streamErr = chunk.localm_error;
-        return;
-      }
-      if (chunk.usage) usage = chunk.usage;
-      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-      const d = chunk.choices?.[0]?.delta || {};
-      if (d.status) {
-        updateStatusIndicator(liveBody, d.status, d.status_code, d.status_args);
-        if (chat.stick) box.scrollTop = box.scrollHeight;
-      }
-      const cDelta = d.content || "";
-      const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
-      if (cDelta || rDelta) {
-        removeStatusIndicator(liveBody);
-        full += cDelta;
-        reasoning += rDelta;
-        if (webEnabled && cDelta && /tool_call/i.test(full)) {
-          const end = firstToolCallEnd(full);
-          const rest = end >= 0 ? full.slice(end) : "";
-          const after = rest.trimStart();
-          let cutAt = -1;
-          if (end >= 0 && web.final) {
-            const next = rest.search(_TOOL_CALL_TAG);
-            if (next >= 0) cutAt = end + next;
-          } else if (after &&
-                     !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
-            // The server's inference-error text after the block (or the start
-            // of it) does not cut the reply; the turn then ends as failed.
-            cutAt = end;
-          }
-          if (cutAt >= 0) {
-            full = full.slice(0, cutAt);
-            cutAtCall = true;
-            finishReason = "stop";
-            reqCtl.abort();
-          }
+    // The reply on screen is redrawn at most once per LIVE_RENDER_MS while it
+    // streams, and once more when the stream ends.
+    let liveTimer = null;
+    const paintLive = () => {
+      liveTimer = null;
+      // Rebuild <think> from the reasoning stream so splitThink renders the
+      // collapsible block exactly as before. Back-compat: an older server that
+      // still inlines <think> in content also renders (reasoning stays empty).
+      renderMarkdown(liveBody,
+        reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
+      // R31: follow the stream ONLY while the user is at the bottom. chat.stick
+      // is latched by the scroll listener, so scrolling up reliably pauses
+      // autoscroll (recomputing nearBottom per token fought the user instead).
+      if (chat.stick) box.scrollTop = box.scrollHeight;
+    };
+    try {
+      await readSSE(r, (payload) => {
+        if (payload === "[DONE]" || cutAtCall) return;
+        let chunk;
+        try { chunk = JSON.parse(payload); } catch { return; }
+        if (chunk.localm_headers && typeof chunk.localm_headers === "object") {
+          const meta = chunk.localm_headers;
+          const inStream = {
+            headers: { get: (k) => (typeof meta[k] === "string" ? meta[k] : null) },
+          };
+          memUsed = parseMemoryHeader(inStream) || memUsed;
+          routing = parseRoutingHeader(inStream) || routing;
+          if (inStream.headers.get("X-Localm-Context-Compacted")) serverCompacted = true;
         }
-        // Rebuild <think> from the reasoning stream so splitThink renders the
-        // collapsible block exactly as before. Back-compat: an older server that
-        // still inlines <think> in content also renders (reasoning stays empty).
-        renderMarkdown(liveBody,
-          reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
-        // R31: follow the stream ONLY while the user is at the bottom. chat.stick
-        // is latched by the scroll listener, so scrolling up reliably pauses
-        // autoscroll (recomputing nearBottom per token fought the user instead).
-        if (chat.stick) box.scrollTop = box.scrollHeight;
+        if (chunk.localm_error) {
+          streamErr = chunk.localm_error;
+          return;
+        }
+        if (chunk.usage) usage = chunk.usage;
+        if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
+        const d = chunk.choices?.[0]?.delta || {};
+        if (d.status) {
+          updateStatusIndicator(liveBody, d.status, d.status_code, d.status_args);
+          if (chat.stick) box.scrollTop = box.scrollHeight;
+        }
+        const cDelta = d.content || "";
+        const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
+        if (cDelta || rDelta) {
+          removeStatusIndicator(liveBody);
+          full += cDelta;
+          reasoning += rDelta;
+          if (webEnabled && cDelta && /tool_call/i.test(full)) {
+            const end = firstToolCallEnd(full);
+            const rest = end >= 0 ? full.slice(end) : "";
+            const after = rest.trimStart();
+            let cutAt = -1;
+            if (end >= 0 && web.final) {
+              const next = rest.search(_TOOL_CALL_TAG);
+              if (next >= 0) cutAt = end + next;
+            } else if (after &&
+                       !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
+              // The server's inference-error text after the block (or the start
+              // of it) does not cut the reply; the turn then ends as failed.
+              cutAt = end;
+            }
+            if (cutAt >= 0) {
+              full = full.slice(0, cutAt);
+              cutAtCall = true;
+              finishReason = "stop";
+              reqCtl.abort();
+            }
+          }
+          if (liveTimer === null) liveTimer = setTimeout(paintLive, LIVE_RENDER_MS);
+        }
+      });
+    } finally {
+      if (liveTimer !== null) {
+        clearTimeout(liveTimer);
+        paintLive();
       }
-    });
+    }
     if (streamErr) {
       full = "";
       reasoning = "";
@@ -3002,11 +3016,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
                (e.refusal === "audio" || e.refusal === "body-size") && !full.trim()) {
       audioRejected = true;
       const suggest = !pinnedModel && e.refusal === "audio" && e.routing && e.routing.suggested;
-      const before = suggest ? userContentSnapshot(conv) : null;
-      const n = stripUserAudio(conv);
+      // A model that cannot hear audio refused it: later requests to that model
+      // leave the clips out. A request too large to send: no request sends them.
+      const n = e.refusal === "audio" ? markRefusedBy(conv, "input_audio", modelName)
+        : markNotSent(conv, "input_audio");
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { before, suggest, reason: e.routing.askReason || "" };
+        mediaOffer = { suggest, reason: e.routing.askReason || "" };
         toast(t("chat.audio.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3017,32 +3033,31 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // The server cannot read this clip (no decoder for its format): drop the
       // clip just sent so later turns are not refused for it.
       audioRejected = true;
-      const n = stripUserAudio(conv, true);
+      const n = markNotSent(conv, "input_audio", true);
       saveConversations(conv);
       toast(n
         ? t("chat.audio.rejected", { detail: e.detail || e.message })
         : t("chat.requestFailed", { message: e.message }), true);
     } else if (sentImage && (e.status === 413 || e.status === 501) && e.refusal === "image" && !full.trim()) {
       // The server could not use the image just sent (unreadable, too large, a
-      // format it does not decode, over a request limit): drop that image so
-      // later turns are not refused for it. Earlier turns' images stay.
+      // format it does not decode, over a request limit): no later request sends
+      // it. The conversation keeps it, and earlier turns' images are sent.
       visionRejected = true;
-      const n = stripUserImages(conv, true, "[Image removed: the server did not accept it.]");
+      const n = markNotSent(conv, "image_url", true);
       saveConversations(conv);
       toast(n
         ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
         : t("chat.requestFailed", { message: e.message }), true);
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
-      // VIS-1: a text-only model rejected the image. Drop it from history so the
-      // next turn is text-only and the chat stays usable, instead of re-sending
-      // the image every turn (which 400s forever -> all-blank assistant replies).
+      // VIS-1: a text-only model refused the images. Later requests to that
+      // model leave earlier turns' images out, so the chat stays usable; the
+      // conversation keeps them for a model that can read them.
       visionRejected = true;
       const suggest = !pinnedModel && e.routing && e.routing.suggested;
-      const before = suggest ? userContentSnapshot(conv) : null;
-      const n = stripUserImages(conv);
+      const n = markRefusedBy(conv, "image_url", modelName);
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { before, suggest, reason: e.routing.askReason || "" };
+        mediaOffer = { suggest, reason: e.routing.askReason || "" };
         toast(t("chat.vision.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3057,7 +3072,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       renderMarkdown(liveBody, full + "\n\n*[error: " + localizeServerNotes(e.message) + "]*");
       toast(t("chat.requestFailed", { message: e.message }), true);
       const suggest = !pinnedModel && e.routing && e.routing.suggested;
-      if (suggest) mediaOffer = { before: null, suggest, reason: e.routing.askReason || "" };
+      if (suggest) mediaOffer = { suggest, reason: e.routing.askReason || "" };
     }
   } finally {
     signal.removeEventListener("abort", forwardAbort);
@@ -3129,8 +3144,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
 
   // VIS-1: a vision reject must NOT persist an empty assistant turn - a blank
   // reply saved every send is the "every turn after the image is empty" wedge.
-  // Re-render from real history (which now has the image stripped) and stop
-  // here so the chat recovers.
+  // Re-render from history and stop here so the chat recovers.
   if (visionRejected || audioRejected) {
     renderChat();
     if (mediaOffer) outcome.liveRow = showMediaOffer(conv, mediaOffer);

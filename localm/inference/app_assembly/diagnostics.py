@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Kernel diagnostics ``create_app()`` wires in: the debug-mode request log and
-GET /debug/stacks. Both report the event-loop lag the lifespan's heartbeat
+"""Kernel diagnostics ``create_app()`` wires in: the debug-mode request log (the
+outermost middleware) and GET /debug/stacks. Both report the event-loop lag the lifespan's heartbeat
 measures, and /debug/stacks decides on ``app.state.bind_host``, never on the
 request peer. Also the ``FastAPI()`` options that keep FastAPI's own telemetry
 off."""
@@ -30,31 +30,86 @@ def fastapi_telemetry_off() -> dict:
                           "metrics": False, "logs": False}}
 
 
-def add_request_logging(app: FastAPI) -> None:
-    """In debug mode (decided once, here), log every request with its status,
-    timing and loop lag. Added right after the client-left answer, so it is
-    the innermost BaseHTTPMiddleware handler."""
-    # Debug mode: log every request with timing to the debug log file
-    from localm.debuglog import debug_enabled, logger as _dbg
-    if debug_enabled():
-        @app.middleware("http")
-        async def _log_requests(request, call_next):
-            start = time.perf_counter()
-            start_mono = time.monotonic()
-            response = await call_next(request)
-            # loop_lag = longest event-loop stall that overlapped this request
-            # (_loop_stall_between); None (cold start, before the heartbeat's
-            # first tick) renders as "n/a", never as 0.00.
+class RequestLogMiddleware:
+    """Pure-ASGI debug request log: exactly one DEBUG line per HTTP request,
+
+        <METHOD> <path> -> <status> (<ms> ms, loop_lag=<lag>)[ refused: <reason>]
+
+    written when the response starts, so ``ms`` is the time to the response
+    headers. ``loop_lag`` is the longest event-loop stall that overlapped the
+    request, ``n/a`` before the heartbeat's first tick. A request that ends
+    before any response is logged with 499, one whose app raised first with
+    500. The refusal reason is what a middleware recorded with
+    ``http_server._note_refusal``; a refused CORS preflight is named as one.
+    Logs the path only: never the query string, headers or body. Passes
+    ``receive`` and every message through unchanged."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from localm.debuglog import logger as _dbg
+        start = time.perf_counter()
+        start_mono = time.monotonic()
+        note: dict = {}
+        scope[_hs.REQUEST_LOG_SCOPE_KEY] = note
+        logged = False
+
+        def _log(status: int) -> None:
+            nonlocal logged
+            logged = True
             lag = _hs._loop_stall_between(start_mono, time.monotonic())
             lag_str = f"{lag:.2f}s" if lag is not None else "n/a"
+            reason = note.get("refusal")
+            if reason is None and status >= 400 and _is_cors_preflight(scope):
+                reason = "CORS preflight refused"
             _dbg.debug(
-                "%s %s -> %d (%.0f ms, loop_lag=%s)",
-                request.method, request.url.path,
-                response.status_code,
-                (time.perf_counter() - start) * 1000,
-                lag_str,
+                "%s %s -> %d (%.0f ms, loop_lag=%s)%s",
+                scope.get("method", "?"), Request(scope).url.path, status,
+                (time.perf_counter() - start) * 1000, lag_str,
+                f" refused: {reason}" if reason else "",
             )
-            return response
+
+        async def _send(message) -> None:
+            if not logged and message["type"] == "http.response.start":
+                _log(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except asyncio.CancelledError:
+            if not logged:
+                _log(499)
+            raise
+        except BaseException:
+            if not logged:
+                _log(500)
+            raise
+        if not logged:
+            _log(499)
+
+
+def _is_cors_preflight(scope) -> bool:
+    """True for an OPTIONS request carrying Origin and
+    Access-Control-Request-Method, the shape CORSMiddleware answers itself."""
+    if scope.get("method") != "OPTIONS":
+        return False
+    names = {k for k, _ in scope.get("headers") or ()}
+    return b"origin" in names and b"access-control-request-method" in names
+
+
+def add_request_logging(app: FastAPI) -> None:
+    """In debug mode (decided once, here), add :class:`RequestLogMiddleware`.
+    Call after every other middleware is added, so it is the outermost layer
+    and also logs the requests a middleware answers itself (the Host header
+    guard, the body size cap, CORS preflight, the origin and open-mode gates,
+    the keyless network gate, the docs gate)."""
+    from localm.debuglog import debug_enabled
+    if debug_enabled():
+        app.add_middleware(RequestLogMiddleware)
 
 
 def add_debug_stacks(app: FastAPI) -> None:

@@ -13,6 +13,7 @@ venv/
 
 # Generated during a release build; never hand-written
 localm/_build_version.py
+/update-package.json
 
 # Editor / assistant configs (launch.json names which local model to run)
 .vscode/

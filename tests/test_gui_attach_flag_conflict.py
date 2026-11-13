@@ -34,6 +34,8 @@ def running(monkeypatch):
     monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
     monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: "/proj")
     monkeypatch.setattr("localm.instances.find_attachable", lambda *a, **k: entry)
+    monkeypatch.setattr("localm.plugins.gui.cli._running_session_mode",
+                        lambda existing: None)
 
     def set_active_model(model_id):
         monkeypatch.setattr("localm.inference.http_engine.remote_model_status",
@@ -110,15 +112,28 @@ def test_gui_new_flag_bypasses_the_conflict_and_starts_fresh(running, monkeypatc
     assert ran.get("ok"), "should start a fresh server"
 
 
-def test_gui_different_model_is_refused(running):
+def test_gui_different_model_is_switched_not_refused(running, monkeypatch):
     running("qwen2.5-0.5b")   # the running server serves Y
+    switches = []
+    monkeypatch.setattr(
+        "localm.inference.server_switch.switch_server_model",
+        lambda base_url, token, model: switches.append(model) or (model, None))
     result = CliRunner().invoke(guicli.main, ["SmolLM2-135M", "--no-browser"])
     flat = _flat(result.output)
-    assert result.exit_code == 1, result.output
-    assert "smollm2-135m" in flat
-    assert "qwen2.5-0.5b" in flat
-    assert "--new" in flat
-    assert "attaching" not in flat
+    assert result.exit_code == 0, result.output
+    assert switches == ["SmolLM2-135M"]
+    assert "serves qwen2.5-0.5b; switching it to smollm2-135m" in flat
+    assert "attaching" in flat
+    assert "cannot apply" not in flat
+
+
+def test_gui_explicit_load_options_attach_and_are_named(running):
+    result = CliRunner().invoke(guicli.main, ["--ctx", "4096", "--no-browser"])
+    flat = _flat(result.output)
+    assert result.exit_code == 0, result.output
+    assert "attaching" in flat
+    assert "not applied to the running server: --ctx" in flat
+    assert "cannot apply" not in flat
 
 
 def test_gui_same_model_still_attaches(running):
@@ -168,7 +183,6 @@ def test_serve_explicit_conflicting_options_are_refused_not_attached(running):
     assert result.exit_code == 1, result.output
     assert "cannot apply" in flat
     assert "--port 8650" in flat
-    assert "--ctx" in flat
     assert "--mode" in flat
     assert "--new" in flat
     assert "attaching" not in flat

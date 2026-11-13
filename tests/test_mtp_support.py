@@ -1528,7 +1528,7 @@ def test_bench_mtp_advice_names_a_speculative_drafting_setting_that_overrides_th
         assert "takes precedence over the MTP toggle" in out
         assert "Turn it on in Settings" not in out
     else:
-        assert "Turn it on in Settings > Engine > Multi-Token Prediction" in out
+        assert "Turn it on in Settings > Model > Multi-Token Prediction (MTP)" in out
         assert "takes precedence" not in out
 
 

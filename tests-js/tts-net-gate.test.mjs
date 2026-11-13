@@ -171,7 +171,7 @@ test("requestDownloadConsent: clicking Not now resolves false", async () => {
   assert.equal(await p, false);
 });
 
-test("requestDownloadConsent: dismissing via the shared modal chrome (backdrop/x) resolves false", async () => {
+test("requestDownloadConsent: dismissing via the shared modal chrome (Escape/x) resolves false", async () => {
   const win = installModalShell();
   const { requestDownloadConsent } = await importFresh(TTS_JS);
   const p = requestDownloadConsent();

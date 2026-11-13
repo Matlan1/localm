@@ -1380,8 +1380,8 @@ def test_a_run_backup_a_scanner_holds_is_still_promoted(install, home, monkeypat
     real = au.swap_with_backup
     holds = []
 
-    def swap_then_hold(root, target, run_backup):
-        names = real(root, target, run_backup)
+    def swap_then_hold(root, target, run_backup, *a, **kw):
+        names = real(root, target, run_backup, *a, **kw)
         holds.append(held(run_backup / "localm" / "__init__.py"))
         holds[0].__enter__()
         return names
@@ -1411,8 +1411,8 @@ def test_a_run_backup_that_cannot_be_moved_puts_the_earlier_backup_back(install,
     real = au.swap_with_backup
     holds = []
 
-    def swap_then_hold(root, target, run_backup):
-        names = real(root, target, run_backup)
+    def swap_then_hold(root, target, run_backup, *a, **kw):
+        names = real(root, target, run_backup, *a, **kw)
         holds.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
         holds[0].__enter__()
         return names
@@ -1592,8 +1592,8 @@ def test_a_partial_copy_that_cannot_be_removed_stays_away_from_the_backup_path(
     real_swap, real_copy = au.swap_with_backup, shutil.copytree
     source_hold, copy_hold = [], []
 
-    def swap_then_hold(root, target, run_backup):
-        names = real_swap(root, target, run_backup)
+    def swap_then_hold(root, target, run_backup, *a, **kw):
+        names = real_swap(root, target, run_backup, *a, **kw)
         source_hold.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
         source_hold[0].__enter__()
         return names

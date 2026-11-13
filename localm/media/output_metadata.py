@@ -12,7 +12,7 @@ unchanged: MP4 ``stco``/``co64`` chunk offsets and FLAC seek points are
 absolute and must stay valid.
 
 PNG images are handled the same way: ``tEXt``, ``zTXt``, ``iTXt`` and ``eXIf``
-chunks are dropped.
+chunks are dropped, and so are any bytes after the ``IEND`` chunk.
 
 Pure Python, no dependencies. ``strip_output`` is the typed entry point: it
 returns a ``StripResult`` that says whether metadata was stripped, there was
@@ -245,20 +245,31 @@ def _strip(output_path: Path, formats, kind: str, contents: str) -> StripResult:
 
 
 def _neutralise_png(f: BinaryIO, size: int) -> int:
-    """Drop every text and EXIF chunk from the PNG in *f*, in place. Returns the
-    number of chunks dropped."""
+    """Drop every text and EXIF chunk from the PNG in *f*, and any bytes after
+    its IEND chunk, in place. Returns the number of chunks dropped, counting
+    trailing bytes as one. Raises ValueError, writing nothing, when a chunk runs
+    past the end of the file or the file has no IEND chunk."""
     f.seek(0)
     data = f.read()
     clean = bytearray(_PNG_MAGIC)
     pos, dropped = len(_PNG_MAGIC), 0
-    while pos + 8 <= len(data):
+    while True:
+        if pos + 12 > len(data):
+            raise ValueError("PNG ends without an IEND chunk")
         length = int.from_bytes(data[pos:pos + 4], "big")
         total = 12 + length
-        if data[pos + 4:pos + 8] in _PNG_METADATA_CHUNKS:
+        if pos + total > len(data):
+            raise ValueError("PNG chunk runs past the end of the file")
+        ctype = data[pos + 4:pos + 8]
+        if ctype in _PNG_METADATA_CHUNKS:
             dropped += 1
         else:
             clean.extend(data[pos:pos + total])
         pos += total
+        if ctype == b"IEND":
+            break
+    if pos < len(data):
+        dropped += 1
     if dropped:
         f.seek(0)
         f.write(bytes(clean))
@@ -285,7 +296,9 @@ def strip_output(kind: str, output_path: Path) -> StripResult:
     Returns a ``StripResult``: STRIPPED when metadata was neutralised,
     NOTHING_TO_STRIP when the container is recognised and carried none, FAILED
     (with the reason) when the file is a container this kind does not handle,
-    is unreadable, or the rewrite failed. Raises KeyError for an unknown *kind*.
+    is unreadable or malformed (a block, box or chunk that runs past the end of
+    the file, or a PNG without an IEND chunk), or the rewrite failed. Raises
+    KeyError for an unknown *kind*.
     """
     return _strip(output_path, _KIND_FORMATS[kind], kind, _CONTENTS[kind])
 
@@ -294,7 +307,7 @@ def strip_image_metadata(output_path: Path) -> str:
     """Strip PNG text and EXIF chunks from a generated image, in place.
 
     Returns "" unless the strip failed, else a WARNING string: the file is not a
-    PNG, or the rewrite failed."""
+    PNG, is malformed, or the rewrite failed."""
     return strip_output("image", output_path).warning
 
 

@@ -83,3 +83,63 @@ def test_missing_file_warns(tmp_path):
     warning = strip_image_metadata(tmp_path / "does_not_exist.png")
 
     assert warning, "a missing file must return a warning, not silent success"
+
+
+def _strip_result(path):
+    from localm.media.output_metadata import StripStatus, strip_output
+    return strip_output("image", path), StripStatus
+
+
+def test_chunk_length_past_the_end_fails_and_writes_nothing(tmp_path):
+    """A chunk whose length runs past the end of the file, ahead of a tEXt
+    prompt chunk, is a FAILED strip and the file is left as it was."""
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    bad = (0x7FFFFFF0).to_bytes(4, "big") + b"zzzz" + b"\x00" * 8
+    blob = PNG_SIG + _png_chunk(b"IHDR", ihdr) + bad + _png_chunk(b"tEXt", _SECRET)
+    path = tmp_path / "generated.png"
+    path.write_bytes(blob)
+
+    result, status = _strip_result(path)
+
+    assert result.status is status.FAILED
+    assert result.warning
+    assert path.read_bytes() == blob
+
+
+def test_png_without_iend_fails_and_writes_nothing(tmp_path):
+    blob = _png_with_text_prompt()[:-12]
+    path = tmp_path / "generated.png"
+    path.write_bytes(blob)
+
+    result, status = _strip_result(path)
+
+    assert result.status is status.FAILED
+    assert path.read_bytes() == blob
+
+
+def test_bytes_after_iend_are_dropped(tmp_path):
+    """Data appended after IEND is removed."""
+    blob = _png_with_text_prompt() + b"appended prompt: secret"
+    path = tmp_path / "generated.png"
+    path.write_bytes(blob)
+
+    result, status = _strip_result(path)
+
+    assert result.status is status.STRIPPED
+    out = path.read_bytes()
+    assert out.endswith(_png_chunk(b"IEND", b""))
+    assert b"appended prompt" not in out and b"super secret" not in out
+
+
+def test_png_carrying_no_metadata_is_left_byte_identical(tmp_path):
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    blob = (PNG_SIG + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+            + _png_chunk(b"IEND", b""))
+    path = tmp_path / "generated.png"
+    path.write_bytes(blob)
+
+    result, status = _strip_result(path)
+
+    assert result.status is status.NOTHING_TO_STRIP
+    assert path.read_bytes() == blob

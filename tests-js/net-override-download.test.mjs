@@ -182,7 +182,7 @@ test("memory modal offers a Download-now hint when can_download_embedder is true
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: memFetch(MEM_BLOCKED, calls) });
   await win.refreshMemory();
-  win.openMemoryModal();
+  await win.openMemoryModal();
   const body = win.document.getElementById("modal-body");
   assert.match(body.textContent, /Semantic recall is off/,
     "explains why recall is degraded");
@@ -196,7 +196,7 @@ test("no can_download_embedder renders neither hint nor button", async () => {
   const body = { ...MEM_BLOCKED, can_download_embedder: false, embedder_model: null };
   const { window: win } = loadAppWithPages({ fetchImpl: memFetch(body, calls) });
   await win.refreshMemory();
-  win.openMemoryModal();
+  await win.openMemoryModal();
   assert.equal(win.document.getElementById("mem-embed-download"), null);
   assert.doesNotMatch(
     win.document.getElementById("modal-body").textContent, /Semantic recall is off/);
@@ -208,7 +208,7 @@ test("clicking Download-now POSTs the SAME route the Knowledge page uses, and cl
     const { window: win } = loadAppWithPages({ fetchImpl: memFetch(MEM_BLOCKED, calls) });
     runScript(win, `streamJob = () => Promise.resolve({ status: "done" });`);
     await win.refreshMemory();
-    win.openMemoryModal();
+    await win.openMemoryModal();
     win.document.getElementById("mem-embed-download").click();
     await tick(); await tick(); await tick();
     const posts = calls.filter((c) => c.url === "/api/rag/embedding/download");
