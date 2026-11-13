@@ -486,11 +486,18 @@ def test_each_lines_driver_floor_is_the_toolkit_of_its_pinned_windows_build():
         assert f"llama-{sl._PINNED_TAG}-bin-win-cuda-{ver}-x64.zip" in sl._PINNED_FALLBACK_SHA256
 
 
-def test_the_specific_cuda_matchers_name_the_pinned_toolkit():
+def test_the_specific_cuda_matchers_name_a_pinned_build():
     from localm.setup_llama.pins import _ASSET_MATCH
-    for plat, os_fragment in (("win32", "win"), ("linux", "ubuntu")):
+    names = [n for n in sl._PINNED_FALLBACK_SHA256 if n.startswith(f"llama-{sl._PINNED_TAG}-")]
+    for plat in ("win32", "linux"):
         for line, matchers in _ASSET_MATCH[plat]["cuda"].items():
-            assert matchers[0] == f"bin-{os_fragment}-cuda-{_CUDA_TOOLKIT[os_fragment][line]}-{{arch}}"
+            hits = [n for n in names for arch in ("x64", "arm64")
+                    if matchers[0].format(arch=arch) in n and "cudart" not in n]
+            assert hits, (plat, line, matchers[0])
+
+
+def test_the_linux_cuda_13_build_shares_the_windows_toolkit_the_driver_floor_is_read_from():
+    assert _CUDA_TOOLKIT["ubuntu"]["cuda-13"] == _CUDA_TOOLKIT["win"]["cuda-13"]
 
 
 @pytest.mark.parametrize("names, match", [

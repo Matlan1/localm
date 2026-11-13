@@ -299,8 +299,9 @@ def checklist(moves: dict, pin: dict, review: list) -> str:
     if kept:
         lines.append(f"       (not moved, still pinned: {', '.join(kept)})")
     lines += [
-        "  3. _MIN_DRIVER_CUDA in localm/setup_llama/cuda.py: the driver floor per line still",
-        "       covers the new runtime",
+        "  3. _MIN_DRIVER_CUDA in localm/setup_llama/cuda.py (read from the CUDA toolkit of the",
+        "       pinned llama.cpp build): the driver floor per line still covers the new runtime;",
+        "       a runtime newer than that toolkit waits for a llama.cpp pin that ships it",
         "  4. These wheels are not loaded on a GPU by this script; a Linux NVIDIA box (or the CUDA",
         "       container check) is the only place the new runtime is exercised",
         "  5. CHANGELOG.md, [Unreleased]: one bullet, the CUDA runtime fetched for Linux moved",

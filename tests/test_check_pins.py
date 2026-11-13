@@ -788,11 +788,16 @@ def test_a_pinned_asset_missing_from_its_release_is_inconsistent(monkeypatch):
     assert row.status == cp.INCONSISTENT and victim in row.detail
 
 
-@pytest.mark.parametrize("victim", sorted(n for n in _real_table()
-                                          if n.startswith("cudart-llama-bin-win-cuda-")
-                                          and n.endswith("-x64.zip")))
+_TAGLESS_CUDART_X64 = sorted(n for n in _real_table()
+                             if n.startswith("cudart-llama-bin-win-cuda-") and n.endswith("-x64.zip"))
+
+
+def test_the_table_pins_one_tagless_cudart_bundle_per_windows_cuda_line():
+    assert [n.split("-cuda-")[1].split(".")[0] for n in _TAGLESS_CUDART_X64] == ["12", "13"]
+
+
+@pytest.mark.parametrize("victim", _TAGLESS_CUDART_X64)
 def test_a_tagless_cudart_asset_missing_from_the_release_is_inconsistent(monkeypatch, victim):
-    assert victim in _real_table()
     _asset_router(monkeypatch, drop=victim)
     row = _checksum_row()
     assert row.status == cp.INCONSISTENT and victim in row.detail
