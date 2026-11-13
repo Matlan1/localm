@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeGuard
 
 from localm import _apply_update as au
 
@@ -303,7 +303,7 @@ def _runtime_loads(lib: Path, backend: str, sl) -> tuple:
     return (sl._native_loads_ok if backend == "cpu" else sl._native_gpu_loads_ok)(env=env)
 
 
-def failed(status: Optional[dict]) -> bool:
+def failed(status: Optional[dict]) -> TypeGuard[dict]:
     """Whether a :func:`finish_pending` *status* leaves the update unable to go on:
     ``failed`` or ``waiting``. ``kept`` (the previous working runtime was kept)
     and the other states let it continue."""
