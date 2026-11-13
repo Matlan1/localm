@@ -85,7 +85,12 @@ test("R10: editing a setting marks the page dirty; a fresh render is clean", asy
   assert.equal(win.settingsDirty(), false, "a re-render resets the baseline");
 });
 
-test("R10: leaving Settings with unsaved edits warns; declining stays put", async () => {
+const modalOpen = (win) => win.document.getElementById("modal").style.display !== "none";
+const modalButton = (win, label) => [...win.document.querySelectorAll("#modal-body button")]
+  .find((b) => b.textContent === label);
+const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+test("R10: leaving Settings with unsaved edits asks in the page dialog; Cancel stays put", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
   makeSettingsActive(win);
@@ -93,24 +98,29 @@ test("R10: leaving Settings with unsaved edits warns; declining stays put", asyn
   nctx.value = "8192";
   nctx.dispatchEvent(new win.Event("input", { bubbles: true }));
 
-  let asked = 0;
-  win.confirm = () => { asked += 1; return false; };   // user declines
+  win.confirm = () => { throw new Error("the browser's own confirm must not be used"); };
   runScript(win, 'showView("chat");');
-  assert.equal(asked, 1, "the unsaved-changes prompt fired");
-  assert.equal(win.isSettingsView(), true, "declining keeps you on Settings");
+  assert.ok(modalOpen(win), "the unsaved-changes dialog opened");
+  assert.match(win.document.getElementById("modal-body").textContent, /unsaved settings changes/);
+  assert.equal(win.isSettingsView(), true, "nothing moves while the question is open");
+  runScript(win, 'showView("chat");');
+  assert.equal(win.document.querySelectorAll("#modal-body button").length, 2,
+    "a second navigation while asking opens no second question");
+  modalButton(win, "Cancel").click();
+  await settle();
+  assert.equal(win.isSettingsView(), true, "Cancel keeps you on Settings");
 
-  win.confirm = () => true;                              // user confirms
   runScript(win, 'showView("chat");');
-  assert.equal(win.isSettingsView(), false, "confirming leaves Settings");
+  modalButton(win, "Leave without saving").click();
+  await settle();
+  assert.equal(win.isSettingsView(), false, "choosing to leave leaves Settings");
 });
 
 test("R10: leaving a clean Settings page does not prompt", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
   makeSettingsActive(win);
-  let asked = 0;
-  win.confirm = () => { asked += 1; return false; };
   runScript(win, 'showView("chat");');
-  assert.equal(asked, 0, "no prompt when there are no unsaved edits");
+  assert.ok(!modalOpen(win), "no prompt when there are no unsaved edits");
   assert.equal(win.isSettingsView(), false, "navigation proceeds");
 });

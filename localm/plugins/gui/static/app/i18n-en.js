@@ -1730,6 +1730,8 @@ export const I18N_EN = {
   "tts.storageBlocked": "This browser blocked storage, so the voice resets on reload",
   "slash.needsPlugin": "/{cmd} needs the {plugin} plugin - install or enable it on the Plugins page.",
   "nav.group.studio": "Studio",
+  "nav.leaveSettings.title": "Unsaved settings",
+  "nav.leaveSettings.leave": "Leave without saving",
   "nav.group.agent": "Agent",
   "memory.age.justNow": "just now",
   "memory.age.minutes": "{count} min ago",
@@ -2978,11 +2980,11 @@ export const I18N_EN = {
   "appearance.language.help":
     "The language the interface is shown in. Saved on the server, so it follows this instance to every browser that connects to it. Parts of the app that are not translated yet stay in English.",
   "appearance.language.saveFailed":
-    "Could not save the language on the server - it applies in this browser but may not on other devices.",
+    "Could not save the language on the server - it applies in this browser until the page is reloaded, then the language saved on the server returns.",
   "appearance.logoStyle": "Logo style",
   "appearance.logoStyle.help":
     "How the wordmark is drawn in the sidebar. Saved on the server, so every browser and the desktop launcher use it.",
-  "appearance.logoStyle.tile": "Use the {name} wordmark",
+  "appearance.logoStyle.tile": "Use the {name} wordmark, with \"{blue}\" in blue",
   "appearance.logoStyle.saveFailed": "The logo style could not be saved on the server - it applies in this browser for now, and the saved style returns on the next load.",
   "appearance.showMmproj": "Show vision projector (.mmproj) files in repository search results (this browser only)",
   "appearance.title": "Appearance",
