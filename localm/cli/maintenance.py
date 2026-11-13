@@ -505,7 +505,8 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         try:
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
-                                expect_sha256=expect, defer_runtime=True, say=_say_step)
+                                expect_sha256=expect, defer_runtime=True,
+                                steps_when="at the next start of localm", say=_say_step)
             break
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
@@ -722,7 +723,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
         res = updater.apply(asset["id"], signature=info.get("signature"),
-                            defer_runtime=True, say=_say_step)
+                            defer_runtime=True, steps_when="at the next start of localm",
+                            say=_say_step)
     except LocalmError as e:
         # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")

@@ -680,7 +680,9 @@ def _finish_pending_runtime_update(command) -> None:
     older build the server restarts once to carry them out
     (:func:`_defer_update_steps_to_a_restart`). A failure is printed, the
     previous runtime stays in use, the command still runs, and the next start
-    tries again."""
+    tries again. When the re-provision an update left pending fails and the
+    previous runtime cannot be kept (``state`` ``failed``), the update is rolled
+    back (:func:`_roll_back_update_at_start`), unless a repair recorded it."""
     from localm import updater_runtime
     if command not in updater_runtime.RUNTIME_COMMANDS:
         return
@@ -714,6 +716,11 @@ def _finish_pending_runtime_update(command) -> None:
         from rich.markup import escape
         style = "green" if status["state"] in ("updated", "current") else "yellow"
         console.print(f"[{style}]Native runtime: {escape(status['note'])}[/{style}]")
+        if status["state"] == "failed" and pending is not None and not pending.get("repair"):
+            from localm import updater_components
+            updater_components.clear_pending()
+            _roll_back_update_at_start("the native runtime of this update could not be "
+                                       "installed")
 
 
 
@@ -727,13 +734,17 @@ def _finish_pending_component_update(command) -> None:
     outcome. Skipped for every other command, and by the start-up hook in a
     process a restart re-executed (see :func:`_finish_pending_runtime_update`).
     A failure is printed, the previous versions stay in use, the command still
-    runs, and the next start tries again."""
+    runs, and the next start tries again; when the component update an update
+    left pending fails, the update is rolled back
+    (:func:`_roll_back_update_at_start`), unless a repair recorded it."""
     from localm import updater_components
     if command not in updater_components.COMPONENT_COMMANDS:
         return
     from rich.markup import escape
+    pending = None
     try:
-        if updater_components.read_pending() is not None:
+        pending = updater_components.read_pending()
+        if pending is not None:
             console.print("[dim]Finishing the component update from the last localm "
                           "update ...[/dim]")
         else:
@@ -755,6 +766,30 @@ def _finish_pending_component_update(command) -> None:
     if status is not None and status.get("note"):
         style = "green" if status["state"] in ("updated", "current") else "yellow"
         console.print(f"[{style}]Components: {escape(status['note'])}[/{style}]")
+    if (status is not None and status["state"] not in ("updated", "current")
+            and pending is not None and not pending.get("repair")):
+        _roll_back_update_at_start("the components of this update could not be installed")
+
+
+def _roll_back_update_at_start(why: str) -> None:
+    """Roll the last update back (``updater.rollback_last``: components and venv,
+    runtime, code) because *why*, print each step and the outcome, and exit with
+    status 1: this process runs the code the rollback replaced. Never returns."""
+    from rich.markup import escape
+    from localm import _version, updater
+    from localm.bugreport import LocalmError
+    console.print(f"[yellow]localm {escape(_version.AT_START)}: {escape(why)}; rolling the "
+                  "update back ...[/yellow]")
+    try:
+        updater.rollback_last(say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+    except LocalmError as e:
+        console.print(f"[red]The update could not be rolled back ({escape(e.summary)}: "
+                      f"{escape(str(e.reason))}). localm {escape(_version.read_version())} is "
+                      "installed; `localm doctor` shows which parts disagree.[/red]")
+        raise SystemExit(1) from None
+    console.print(f"[yellow]localm {escape(_version.read_version())} and its parts were put "
+                  "back. Run the command again.[/yellow]")
+    raise SystemExit(1)
 
 
 def console_main() -> None:

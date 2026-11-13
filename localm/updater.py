@@ -1280,10 +1280,12 @@ def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
 
 
 def _apply_components(plans, needed: bool, *, klass: str, target: Path, version: str,
-                      defer: bool, runner, say, roll_back) -> tuple:
+                      defer: bool, runner, say, roll_back,
+                      when: str = "while localm restarts") -> tuple:
     """The component half of :func:`apply`, after the swap: record the pending
     component update (``updater_components.write_pending``) and, unless
-    *defer* or the ``setup`` class, carry it out now. When it fails,
+    *defer* (the summary then says it happens *when*) or the ``setup`` class,
+    carry it out now. When it fails,
     *roll_back* (``why, step, rolled_back``) puts every part of the update back
     (code, venv, the native runtime it re-provisioned) and raises LocalmError.
     Returns ``(status, note)``: the status of the component update (None when
@@ -1297,8 +1299,7 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
             _apply_warn("could not clear an earlier pending component update: %s", e)
         return None, note
     try:
-        updater_components.write_pending(plans, root=target, version=version,
-                                         applied_by=_apply_token())
+        updater_components.write_pending(plans, root=target, version=version)
     except OSError as e:
         _apply_warn("could not record the pending component update: %s", e)
         return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
@@ -1307,8 +1308,7 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
         return None, (f"{note}, " if note else "checks the components ") + (
             "on the first start after setup")
     if defer:
-        return None, (f"{note}, " if note else "checks the components ") + (
-            "while localm restarts")
+        return None, (f"{note}, " if note else "checks the components ") + when
     try:
         status = updater_components.finish_pending(root=target, runner=runner,
                                                    env=_deps_env(target), say=say)
@@ -1356,29 +1356,19 @@ def _check_package(au, root: Path, target: Path, version: str, scratch: Path,
     return names
 
 
-_APPLY_TOKEN: Optional[str] = None
-
-
-def _apply_token() -> str:
-    """This process's token, written into the pending runtime and component update
-    records an update applied in this process leaves (see :func:`applied_here`)."""
-    global _APPLY_TOKEN
-    if _APPLY_TOKEN is None:
-        _APPLY_TOKEN = uuid.uuid4().hex
-    return _APPLY_TOKEN
-
-
-def applied_here(*pending) -> bool:
-    """Whether a record in *pending* (``read_pending`` results; None allowed) was
-    written by an update this process applied. This process's code is then older
-    than the installed version, which carries the steps out at its own start."""
-    return _APPLY_TOKEN is not None and any(
-        isinstance(p, dict) and p.get("applied_by") == _APPLY_TOKEN for p in pending)
+def newer_version_installed() -> bool:
+    """Whether the installed localm version (``VERSION`` now) is newer than the
+    code this process runs (``_version.AT_START``), or differs from it in a way
+    that cannot be ordered: an update was applied after this process started,
+    by this process or another one. Never raises."""
+    installed, running = _version.read_version(), _version.AT_START
+    return installed != running and _direction(installed, running) in ("newer", "unknown")
 
 
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
-          runner=None, defer_runtime=False, say=None) -> dict:
+          runner=None, defer_runtime=False, steps_when="while localm restarts",
+          say=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
@@ -1395,8 +1385,10 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     changed. Without *defer_runtime* the re-provision is carried out right after
     the swap (``updater_runtime.finish_pending``); when it fails, the previous
     runtime is put back, the code swap is rolled back and LocalmError is
-    raised. With it (the server, which still runs its models) the caller's
-    restart carries it out once its models are unloaded. ``runtime`` is that
+    raised. With it the installed version carries it out at its own start (a
+    server's restart once its models are unloaded, or the next start of a
+    command that uses the runtime), and *steps_when* says when in the summary;
+    a failure there rolls the update back. ``runtime`` is that
     status (None when nothing was attempted) and ``runtime_note`` a one-line
     summary for the user (None when there is nothing to say). *say* receives
     each step of stopping processes and replacing the runtime as one line of
@@ -1749,8 +1741,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _apply_warn("could not clear an earlier pending runtime update: %s", e)
         else:
             try:
-                updater_runtime.write_pending(rt_plan, root=target, version=new_version,
-                                              applied_by=_apply_token())
+                updater_runtime.write_pending(rt_plan, root=target, version=new_version)
             except OSError as e:
                 _apply_warn("could not record the pending runtime update: %s", e)
                 runtime_note = (f"the {rt_plan['backend']} runtime was NOT updated to "
@@ -1760,7 +1751,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 if klass == "setup":
                     runtime_note = f"{rt_plan['note']} on the first start after setup"
                 elif defer_runtime:
-                    runtime_note = f"{rt_plan['note']} while localm restarts"
+                    runtime_note = f"{rt_plan['note']} {steps_when}"
                 else:
                     try:
                         runtime_status = updater_runtime.finish_pending(
@@ -1778,7 +1769,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         components_status, components_note = _apply_components(
             comp_plans, comp_update and "components" not in took_over, klass=klass,
             target=target, version=new_version,
-            defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back)
+            defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back,
+            when=steps_when)
         if not cmd:
             from localm import updater_parts
             updater_parts.note_kept_record(target, previous_version, new_version)

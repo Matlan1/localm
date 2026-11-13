@@ -5896,12 +5896,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
-    # An update this process applied: the installed version carries the update
-    # steps out at its own start (cli._core._update_steps_at_start).
+    # A newer version is installed than this process runs: that version carries
+    # the update steps out at its own start (cli._core._update_steps_at_start).
     from localm import updater as _updater
-    from localm import updater_components as _uc
-    from localm import updater_runtime as _ur
-    deferred = _updater.applied_here(_ur.read_pending(), _uc.read_pending())
+    deferred = _updater.newer_version_installed()
     rolled_back = False if deferred else _finish_pending_runtime_update()
 
     try:

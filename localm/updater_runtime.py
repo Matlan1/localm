@@ -756,18 +756,14 @@ def _updates_dir() -> Path:
     return updater._updates_dir(create=True)
 
 
-def write_pending(p: dict, *, root, version: str, repair: bool = False,
-                  applied_by: Optional[str] = None) -> None:
+def write_pending(p: dict, *, root, version: str, repair: bool = False) -> None:
     """Record the re-provision :func:`plan` decided for the install at *root*,
     for :func:`finish_pending`; *repair* marks one a repair of the installed
-    version recorded (not an update, so a failure rolls nothing back);
-    *applied_by* is the token of the process that applied the update
-    (``updater.applied_here``). Raises OSError when it cannot be written."""
+    version recorded (not an update, so a failure rolls nothing back). Raises
+    OSError when it cannot be written."""
     data = {"root": str(Path(root).resolve()), "version": version,
             "backend": p["backend"], "from": p["current"], "target": p["target"],
             "pins": p["pins"], "repair": bool(repair)}
-    if applied_by:
-        data["applied_by"] = applied_by
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -1016,19 +1012,20 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         if loads:
             restored = sl._provisioned_build(lib)
             previous = restored or pending.get("from") or "build"
+            recorded = False
             if setup_finished and restored:
                 try:
                     _record_kept(lib, backend, previous, target, problem)
+                    recorded = True
                 except OSError as e:
                     from localm.debuglog import logger
                     logger.warning("update: could not record the kept %s runtime: %s",
                                    backend, e)
-                outcome = f"this release's {target} did not work here ({problem})"
-                retry = f"To try it again: {_manual_command(backend)}"
-            else:
-                outcome = f"this release's {target} could not be installed ({problem})"
-                retry = (f"It is tried again on the next start; to try it now: "
-                         f"{_manual_command(backend)}")
+            outcome = (f"this release's {target} did not work here ({problem})" if setup_finished
+                       else f"this release's {target} could not be installed ({problem})")
+            retry = (f"To try it again: {_manual_command(backend)}" if recorded
+                     else (f"It is tried again on the next start; to try it now: "
+                           f"{_manual_command(backend)}"))
             status.update(state="kept", error=problem,
                           why=f"{outcome}; the previous {backend} runtime {previous} was kept",
                           note=f"kept the {backend} runtime {previous}: {outcome}. {retry}")

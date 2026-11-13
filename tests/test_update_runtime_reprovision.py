@@ -1045,3 +1045,19 @@ def test_the_kept_record_names_the_build_read_from_the_restored_runtime(tmp_path
     assert updater_runtime.kept_runtime(lib)["kept"] == "b11757"
     assert "kept the vulkan runtime b11757" in st["note"]
     assert updater_runtime.plan(inst, inst)["reprovision"] is False
+
+
+def test_a_restored_runtime_with_no_recorded_build_is_kept_and_tried_again(tmp_path, cfg,
+                                                                            monkeypatch):
+    inst = _tree(tmp_path / "inst")
+    lib = _provision(inst, "vulkan", None)
+    pending = {"backend": "vulkan", "current": None, "target": "b11928",
+               "pins": updater_runtime.staged_pins(inst)}
+    updater_runtime.write_pending(pending, root=inst, version="0.3.2")
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    st = updater_runtime.finish_pending(
+        root=inst, runner=_fake_setup_llama(inst, "b11928", backend="cpu"), wait=0)
+    assert st["state"] == "kept", st
+    assert updater_runtime.kept_runtime(lib) is None
+    assert "did not work here" in st["note"] and "tried again on the next start" in st["note"]
+    assert "could not be installed" not in st["note"]
