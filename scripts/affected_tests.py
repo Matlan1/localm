@@ -166,6 +166,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_fault_trace_threads.py": (_LOCALM_PY, "walks the AST of every localm .py for faulthandler calls"),
     "tests/test_media_backend_capabilities.py": (_LOCALM_PY, "checks which localm modules reach the media generators"),
     "tests/test_no_bare_uv_command.py": (_LOCALM_PY, "scans every localm .py for a bare uv command"),
+    "tests/test_media_delete_outputs_setting.py": (_LOCALM_PY,
+                                                   "checks every media call site under localm/ for delete_outputs"),
     "tests/test_sysprog.py": (_LOCALM_PY, "walks the AST of every localm .py for system program calls"),
     "tests/test_speech_engine.py": (_LOCALM_PY, "walks the AST of every localm .py for speech engine calls"),
     "tests/test_remote_backend_gate.py": (_LOCALM_PY, "scans every localm .py for remote backend calls"),
