@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The Settings key-minter's scope checkbox list offers EVERY scope
-`localm.scopes.PRIVILEGED_SCOPES` marks privileged, and its owner-only dimming
-set names exactly that same set - no more, no less.
+"""The Settings key-minter's scope checkbox list offers EVERY scope localm
+ships (`localm.scopes.all_known_scopes`), each with an English label, and its
+owner-only dimming set names exactly `localm.scopes.PRIVILEGED_SCOPES` - no
+more, no less.
 
 `POST /v1/keys` refuses a privileged scope for a non-owner key regardless of what
 the GUI offers (auth.create_key's allow_privileged gate), so the SERVER boundary
@@ -68,3 +69,19 @@ def test_every_offered_scope_is_a_real_known_scope():
 def test_no_duplicate_checkboxes():
     values = _key_scope_values()
     assert len(values) == len(set(values)), values
+
+
+def test_every_scope_localm_ships_has_a_checkbox():
+    """A scope with no box can be minted only by the CLI or the API."""
+    missing = S.all_known_scopes() - set(_key_scope_values())
+    assert not missing, (
+        f"these scopes have no checkbox in the GUI key minter: {sorted(missing)}")
+
+
+def test_every_offered_scope_has_an_english_label():
+    catalog = (STATIC_DIR / "app" / "i18n-en.js").read_text(encoding="utf-8")
+    m = re.search(r"export const KEY_SCOPES = \[(.*?)\n\];", _js_text(), re.S)
+    labels = re.findall(r'\["[^"]+", "([^"]+)"\]', m.group(1))
+    assert len(labels) == len(_key_scope_values())
+    missing = [k for k in labels if f'"{k}":' not in catalog]
+    assert not missing, f"scope labels with no English text: {missing}"

@@ -993,14 +993,16 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
-`GET /v1/config` returns the whole config plus up to ten read-only extras (the
-two network ones only for the owner):
+`GET /v1/config` returns the whole config plus up to eleven read-only extras (the
+two network ones and `mode_from_env` only for the owner):
 `effective_mode`, `effective_chat_mode`, `effective_coder_mode`,
 `effective_net_mode` (the network access mode in force: the stored `net_mode`,
 or the server's `LOCALM_NET_MODE` when set), `net_mode_from_env` (true when
-`LOCALM_NET_MODE` sets it), `effective_ctx_max`, `effective_ctx_model`,
+`LOCALM_NET_MODE` sets it), `mode_from_env` (true when the server's
+`LOCALM_MODE`, set by a `--mode` flag, sets the session mode over the stored
+mode keys), `effective_ctx_max`, `effective_ctx_model`,
 `effective_ctx_model_key`, `instance_id` and `instance_port`.
-PATCH ignores those ten (and `warnings`), so a client can send back what it read, and returns
+PATCH ignores those eleven (and `warnings`), so a client can send back what it read, and returns
 the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them

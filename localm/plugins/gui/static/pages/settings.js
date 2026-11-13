@@ -4,14 +4,14 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, copyTextWithFeedback, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
-import { loginWithKey, modelCache } from "../app/models-sidebar.js";
+import { keyGateErrorText, loginWithKeyResult, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, pluginState, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -307,10 +307,19 @@ export function buildSettingControl(field) {
   switch (field.widget) {
     case "select": {
       input = document.createElement("select");
-      for (const opt of field.options || []) {
+      const blankLabel = t("settings.field.inheritOption");
+      const choices = (field.options || []).map((opt) => [opt, opt === "" ? blankLabel : opt]);
+      // A select that is unset (or may be unset) gets a blank choice, so it never
+      // shows an empty box and can return to unset. A media plugin field's blank
+      // inherits the shared value; any other blank means "not set".
+      if (!choices.some(([v]) => v === "")
+          && (value == null || field.shipped_default === null)) {
+        choices.unshift(["", field.catalog_scopes ? blankLabel : t("settings.field.unsetOption")]);
+      }
+      for (const [v, label] of choices) {
         const o = document.createElement("option");
-        o.value = opt;
-        o.textContent = opt === "" ? t("settings.field.inheritOption") : opt;
+        o.value = v;
+        o.textContent = label;
         input.appendChild(o);
       }
       input.value = value == null ? "" : String(value);
@@ -796,6 +805,42 @@ export async function refreshCompanion() {
   list.style.display = view.urls.length ? "block" : "none";
   hintEl.textContent = view.hint;
   hintEl.style.display = view.hint ? "block" : "none";
+  showBindFallbackNote(info.bind_fallback || "");
+}
+
+/** Show *text* in the note element *noteId* under the drawn field *fieldKey*
+ *  (created on first use); remove the note when *text* is empty or the field is
+ *  not drawn. */
+export function setFieldNote(fieldKey, noteId, text) {
+  const field = document.querySelector(`[data-field-key="${fieldKey}"]`);
+  const old = document.getElementById(noteId);
+  if (!text || !field) { if (old) old.remove(); return; }
+  const note = old || el("div", "sub key-warn field-override-note");
+  note.id = noteId;
+  note.textContent = text;
+  if (!old) field.appendChild(note);
+}
+
+/** Under the Bind address field: a note with *reason* (the server's
+ *  bind_fallback text) when a configured network bind was not applied at
+ *  startup; no note when *reason* is empty. */
+export function showBindFallbackNote(reason) {
+  setFieldNote("bind_host", "bind-fallback-note",
+    reason ? t("settings.field.bindHost.fallbackNote", { reason }) : "");
+}
+
+/** Under the Session persistence and Network access fields: a note when the
+ *  server's environment sets the value in force over the saved one, from GET
+ *  /v1/config's `mode_from_env` / `effective_mode` and `net_mode_from_env` /
+ *  `effective_net_mode`. *cfg* null removes both notes. */
+export function showEnvOverrideNotes(cfg) {
+  const c = cfg || {};
+  setFieldNote("mode", "mode-env-note",
+    c.mode_from_env === true && typeof c.effective_mode === "string"
+      ? t("settings.field.mode.envOverrideNote", { mode: c.effective_mode }) : "");
+  setFieldNote("net_mode", "net-mode-env-note",
+    c.net_mode_from_env === true && typeof c.effective_net_mode === "string"
+      ? t("settings.field.netMode.envOverrideNote", { mode: c.effective_net_mode }) : "");
 }
 
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
@@ -820,8 +865,13 @@ export const KEY_SCOPES = [
   ["web", "settings.keyScopes.web"],
   ["browser", "settings.keyScopes.browser"],
   ["mcp", "settings.keyScopes.mcp"],
+  ["jobs", "settings.keyScopes.jobs"],
+  ["memory", "settings.keyScopes.memory"],
+  ["tts", "settings.keyScopes.tts"],
+  ["exllama", "settings.keyScopes.exllama"],
   ["config:read", "settings.keyScopes.configRead"],
   ["config:write", "settings.keyScopes.configWrite"],
+  ["plugins:read", "settings.keyScopes.pluginsRead"],
   ["plugins:admin", "settings.keyScopes.pluginsAdmin"],
   ["keys:admin", "settings.keyScopes.keysAdmin"],
   ["admin", "settings.keyScopes.admin"],
@@ -879,15 +929,31 @@ export function applyKeyPreset(want) {
 // Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
 // keys:admin device cannot even try to mint a coder:full / admin / keys:admin /
 // plugins:admin / config:write key (the API would 403 anyway; this avoids the
-// confusing failed-submit round-trip).
-export function applyOwnerGate(isOwner) {
+// confusing failed-submit round-trip). A disabled box carries a tooltip, and the
+// #key-owner-note line under the boxes says why they are disabled: in open mode
+// (no key on the server yet) or for a device without the owner key.
+export function applyOwnerGate(isOwner, openMode) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
     const ownerOnly = PRIVILEGED_KEY_SCOPES.has(cb.value);
     cb.disabled = ownerOnly && !isOwner;
     if (cb.disabled) cb.checked = false;
     const lab = cb.closest(".key-scope");
-    if (lab) lab.classList.toggle("key-scope-disabled", cb.disabled);
+    if (lab) {
+      lab.classList.toggle("key-scope-disabled", cb.disabled);
+      if (cb.disabled) lab.title = t("settings.keys.ownerOnlyTitle");
+      else lab.removeAttribute("title");
+    }
   }
+  const box = $("key-scopes");
+  if (!box) return;
+  let note = $("key-owner-note");
+  if (isOwner) { if (note) note.remove(); return; }
+  if (!note) {
+    note = el("div", "sub key-owner-note");
+    note.id = "key-owner-note";
+    ($("key-scope-note") || box).insertAdjacentElement("afterend", note);
+  }
+  note.textContent = t(openMode ? "settings.keys.ownerOnlyOpenNote" : "settings.keys.ownerOnlyNote");
 }
 
 // Owner-only: persist an edited preset list (PATCH /v1/config needs config:write).
@@ -946,19 +1012,24 @@ export async function renderKeyQR(box, key) {
   } catch { unavailable(); }
 }
 
+/** The expiry tag of a key whose deadline is *expires* (epoch seconds; falsy =
+ *  never). The time left is rounded to the nearest hour, shown in days (rounded)
+ *  from 24 hours up and in hours (at least 1) below. */
 export function keyExpiryLabel(expires) {
   if (!expires) return t("settings.keyExpiry.never");
   const ms = expires * 1000 - Date.now();
   if (ms <= 0) return t("settings.keyExpiry.expired");
-  const days = Math.floor(ms / 86400000);
-  if (days >= 1) return t("settings.keyExpiry.days", { days });
-  return t("settings.keyExpiry.hours", { hours: Math.max(1, Math.floor(ms / 3600000)) });
+  const hours = Math.round(ms / 3600000);
+  if (hours >= 24) return t("settings.keyExpiry.days", { days: Math.round(hours / 24) });
+  return t("settings.keyExpiry.hours", { hours: Math.max(1, hours) });
 }
 
+/** The last-used tag of a key last used at *ts* (epoch seconds; falsy = never).
+ *  Under a minute ago, or a stamp ahead of this clock, reads "just now". */
 export function keyLastUsedLabel(ts) {
   if (!ts) return t("settings.lastUsed.never");
   const ms = Date.now() - ts * 1000;
-  if (ms < 0) return t("settings.lastUsed.justNow");
+  if (ms < 60000) return t("settings.lastUsed.justNow");
   const days = Math.floor(ms / 86400000);
   if (days >= 1) return t("settings.lastUsed.days", { days });
   const hrs = Math.floor(ms / 3600000);
@@ -1008,7 +1079,8 @@ export async function refreshKeysPanel() {
     isOwner = !!data.is_owner;
     presets = data.presets || [];
   } catch { setHidden(true); return; }
-  applyOwnerGate(isOwner);           // hide owner-only scopes from a keys:admin device
+  // Open mode as GET /api/session last reported it (refreshCsrf).
+  applyOwnerGate(isOwner, window.__LOCALM_AUTH_REQUIRED__ === false);
   buildKeyPresets(presets, isOwner);
 
   list.replaceChildren();
@@ -1026,10 +1098,14 @@ export async function refreshKeysPanel() {
     rm.onclick = () => {
       confirmDanger(t("settings.keys.revokeConfirmTitle", { name: k.name || k.id }),
         t("settings.keys.revokeConfirmBody"), t("settings.keys.revokeButton"), async () => {
-          const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
-                                { method: "DELETE", headers: authHeaders() });
-          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); }
-          else { toast(t("settings.keys.revokeFailedToast")); }
+          let d;
+          try {
+            d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
+                            { method: "DELETE", headers: authHeaders() });
+          } catch { toast(t("settings.keys.revokeFailedToast"), true); return; }
+          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); return; }
+          const e = await d.json().catch(() => ({}));
+          toast((typeof e.detail === "string" && e.detail) || t("settings.keys.revokeFailedToast"), true);
         });
     };
     row.appendChild(rm);
@@ -1038,7 +1114,7 @@ export async function refreshKeysPanel() {
 
   $("key-create").onclick = async () => {
     const name = ($("key-name").value || "").trim();
-    if (!name) { toast(t("settings.keys.enterNameToast")); return; }
+    if (!name) { toast(t("settings.keys.enterNameToast"), true); return; }
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
     // A zero-scope key is valid: it can still chat (chat is baseline). Confirm so
@@ -1059,10 +1135,11 @@ export async function refreshKeysPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch { toast(t("settings.keys.createFailedToast")); return; }
+    } catch { toast(t("settings.keys.createFailedToast"), true); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      toast(e.detail || t("settings.keys.createFailedToast")); return;
+      toast((typeof e.detail === "string" && e.detail) || t("settings.keys.createFailedToast"), true);
+      return;
     }
     const made = await r.json();
     // The first key on an open-mode server turns authentication on: the shell
@@ -1071,25 +1148,38 @@ export async function refreshKeysPanel() {
     if (!window.__LOCALM_CSRF__ && SHELL_TOKEN) await refreshCsrf();
     const box = $("key-secret");
     box.replaceChildren();
-    box.appendChild(el("div", "sub",
-      t("settings.keys.newKeyIntro", { name: made.name, scopes: (made.scopes || []).join(", ") })));
+    const madeScopes = made.scopes || [];
+    box.appendChild(el("div", "sub", madeScopes.length
+      ? t("settings.keys.newKeyIntro", { name: made.name, scopes: madeScopes.join(", ") })
+      : t("settings.keys.newKeyIntroChatOnly", { name: made.name })));
+    for (const w of made.warnings || []) box.appendChild(el("div", "key-warn", w));
+    if (made.owner_key_created === true) box.appendChild(el("div", "sub", t("settings.keys.ownerKeySeeded")));
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
-      secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(made.key);
-      toast(t("settings.keys.copiedToast"));
-    };
-    box.appendChild(copy);
+    box.appendChild(keySecretCopyButton(secret, made.key));
     await renderKeyQR(box, made.key);
     box.style.display = "";
     $("key-name").value = "";
     scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
     refreshKeysPanel();
+    // The reply carries owner_key_created when it also signed this browser in as owner.
+    if ("owner_key_created" in made) refreshOwnerKeyPanel();
   };
+}
+
+/** The Copy button beside a shown key *secret* (an input holding *key*): selects
+ *  the text and writes *key* to the clipboard; a blocked clipboard keeps the
+ *  button's label and shows an error toast (copyTextWithFeedback). */
+function keySecretCopyButton(secret, key) {
+  const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
+  copy.type = "button";
+  copy.onclick = () => {
+    secret.select();
+    return copyTextWithFeedback(copy, key, t("settings.keys.copyButton"), t("settings.keys.copiedToast"));
+  };
+  return copy;
 }
 
 // Settings -> Owner key: roll or set the ONE key that grants full access. The GUI
@@ -1166,13 +1256,7 @@ export async function refreshOwnerKeyPanel() {
     secret.type = "text"; secret.readOnly = true; secret.value = out.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
-      secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(out.key);
-      toast(t("settings.keys.copiedToast"));
-    };
-    box.appendChild(copy);
+    box.appendChild(keySecretCopyButton(secret, out.key));
     box.style.display = "";
     $("owner-key-value").value = "";
   };
@@ -1250,8 +1334,8 @@ const guiKeySave = $("gui-key-save");
 if (guiKeySave) guiKeySave.onclick = async () => {
   const key = $("gui-api-key").value.trim();
   if (key) {
-    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
-    if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
+    const res = await loginWithKeyResult(key);   // POST /api/session -> server sets the HttpOnly cookie
+    if (!res.ok) { toast(keyGateErrorText(res), true); return; }
     try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast(t("settings.signIn.keySaved"));
     setTimeout(() => location.reload(), 600);
@@ -1673,6 +1757,18 @@ export async function saveSettingsSection(secId, within) {
   return false;
 }
 
+/** A note for a settings card (headed *label*) whose plugin *name* is not
+ *  installed or is turned off, from the /api/capabilities plugin list; null when
+ *  the plugin is active or the list does not name it. */
+export function pluginOffNote(name, label) {
+  const p = (pluginState || []).find((x) => x && x.name === name);
+  if (!p || p.active) return null;
+  const text = p.installed
+    ? t("settings.pluginOff.disabled", { name: label })
+    : t("settings.pluginOff.notInstalled", { name: label });
+  return el("div", "sub plugin-off-note", text);
+}
+
 /** The browser plugin's entry in /api/capabilities ({installed, enabled,
  *  active, ...}), or null when the list does not name it or could not be read.
  *  On null the caller falls back to the engine check, which reports its own
@@ -1860,13 +1956,17 @@ export async function refreshSettingsPage() {
   // override, or an auto-bump onto a different free port, never gets written
   // back to disk). Best-effort - a failed fetch just leaves live_port unset,
   // and the field renders its persisted value only, same as before this.
+  // The same read carries the session and network modes in force, for the
+  // environment-override notes drawn after the fields (showEnvOverrideNotes).
   const portField = fields.find((f) => f.key === "port");
-  if (portField) {
+  let liveConfig = null;
+  if (fields.some((f) => f.key === "port" || f.key === "mode" || f.key === "net_mode")) {
     try {
       const cr = await fetch("/v1/config", { headers: authHeaders() });
-      if (cr.ok) portField.live_port = (await cr.json()).instance_port ?? null;
-    } catch { /* live_port stays unset */ }
+      if (cr.ok) liveConfig = await cr.json();
+    } catch { /* live_port and the override notes stay unset */ }
   }
+  if (portField && liveConfig) portField.live_port = liveConfig.instance_port ?? null;
   if (myToken !== _settingsRenderToken) return;
 
   // Host-path fields (folder/path/pathlist) are hidden from a caller without host
@@ -1937,6 +2037,11 @@ export async function refreshSettingsPage() {
     panel.dataset.group = topGroup;
     panel.dataset.secLabel = heading || sec.label;
     if (heading) panel.appendChild(settingsSectionHead(heading, topGroup));
+    const owners = new Set(sec.ctrls.map((c) => c.field.owner || "core"));
+    if (owners.size === 1 && !owners.has("core") && sec.label !== "Voice") {
+      const offNote = pluginOffNote([...owners][0], heading || sec.label);
+      if (offNote) panel.appendChild(offNote);
+    }
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
@@ -2095,6 +2200,7 @@ export async function refreshSettingsPage() {
   syncEmbeddingWarmupButton();
   refreshPairingQR();
   refreshCompanion();
+  showEnvOverrideNotes(liveConfig);
   refreshKeysPanel();
   refreshOwnerKeyPanel();
   // Wires the wallpaper picker (a static card, never rebuilt above) only from
@@ -2196,26 +2302,17 @@ export function _mediaChanged(cur, orig) {
  *  fields (group="Media", skipped from the flat core loop above) can be pulled
  *  out and rendered here instead of vanishing. */
 export async function buildMediaSection(form, fields) {
-  let data;
+  // A failed read of the per-plugin settings loses only the three plugin boxes:
+  // the boxes drawn from the schema below still render, and the failure is shown
+  // where the plugin boxes would be.
+  let data = {};
+  let loadError = null;
   try {
     const r = await fetch("/v1/media/config", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    // Surface, do not hide (binding rule 5): the group=Media fields are skipped
-    // from the flat form, so if this fetch fails we must SHOW that the media
-    // settings could not load - silently dropping the section would make those
-    // settings vanish with no clue why.
-    const fail = el("section", "card settings-section");
-    fail.id = "settings-sec-media";
-    fail.dataset.sec = "media";
-    fail.dataset.group = "media";
-    fail.dataset.secLabel = t("settings.sectionHeading.media");
-    fail.appendChild(settingsSectionHead(t("settings.sectionHeading.media"), "media"));
-    fail.appendChild(el("div", "sub",
-      t("settings.media.loadFailed", { message: e.message })));
-    form.appendChild(fail);
-    return;
+    loadError = e;
   }
   const byName = {};
   for (const p of (data.plugins || [])) byName[p.plugin] = p;
@@ -2237,19 +2334,14 @@ export async function buildMediaSection(form, fields) {
   panel.appendChild(managed);
   renderManagedComfyPanel(managed, { targetField });
 
-  // SHARED media settings: every remaining visible group="Media" schema field
-  // that is neither explicitly placed here (comfy_target above,
-  // comfy_gpu_placement below) nor per-plugin-mapped (media_per_plugin, from
-  // MEDIA_PLUGIN_FIELDS - those render inside the per-plugin boxes instead).
-  // Rendered by EXCLUSION, not an allowlist, on purpose: a name allowlist is
-  // exactly how comfy_launch_timeout / comfy_disable_auto_launch /
-  // comfy_func_shim ended up rendered NOWHERE in the GUI (schema-visible,
-  // CLI-only in practice; 2026-07-22 settings-exposure audit) - this way a
-  // future Media field is visible by default and cannot silently vanish.
-  // Saved through the Media section's generic PATCH /v1/config path.
+  // SHARED media settings: every visible group="Media" schema field that is not
+  // explicitly placed elsewhere (comfy_target above, comfy_gpu_placement
+  // below), including the shared defaults behind the per-plugin fields
+  // (media_per_plugin), which a blank per-plugin field uses. Selected by
+  // exclusion, so a new Media field is drawn here by default. Saved through the
+  // Media section's generic PATCH /v1/config path.
   const sharedFields = (fields || []).filter(f =>
-    f.group === "Media" && !f.media_per_plugin
-    && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
+    f.group === "Media" && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
   const sharedCtrls = sharedFields.map(f => buildSettingControl(f)).filter(Boolean);
   if (sharedCtrls.length) {
     const box = el("div", "media-comfy-box");
@@ -2306,6 +2398,10 @@ export async function buildMediaSection(form, fields) {
   // and a later single-subsection re-render (R12) can find its node.
   _mediaSubs = {};
   _mediaControls = {};
+  if (loadError) {
+    panel.appendChild(el("div", "sub media-load-failed",
+      t("settings.media.loadFailed", { message: loadError.message })));
+  }
   const grid = el("div", "media-settings-grid");
   panel.appendChild(grid);
   for (const name of MEDIA_PLUGIN_ORDER) {
@@ -3057,6 +3153,29 @@ function startComfyJobIndicator(anchorEl, logEl) {
  *  /api/comfy/remove. Re-renders itself in place after either finishes, so the
  *  view always matches what is on disk. Off by default: nothing here runs
  *  until the user clicks Set up. */
+/** Draw the "ComfyUI to use" control (comfy_target) into *host* and register it
+ *  in the shared control list, replacing an earlier entry for the key, since
+ *  the panel re-renders in place. Returns the drawn controls (empty when the
+ *  schema did not send the field). */
+function appendComfyTargetRow(host, toggleFields) {
+  const row = el("div", "media-comfy-row");
+  const ctrls = [];
+  for (const field of [toggleFields.targetField]) {
+    if (!field) continue;
+    const ctrl = buildSettingControl(field);
+    if (!ctrl) continue;
+    ctrls.push(ctrl);
+    row.appendChild(ctrl.node);
+  }
+  if (ctrls.length) {
+    host.appendChild(row);
+    const keys = new Set(ctrls.map(c => c.field.key));
+    _settingsControls = _settingsControls.filter(c => !keys.has(c.field.key));
+    _settingsControls.push(...ctrls);
+  }
+  return ctrls;
+}
+
 export async function renderManagedComfyPanel(host, toggleFields) {
   host.replaceChildren();
   const head = subCardHead(t("settings.comfy.ownHead"), "download", "cat-teal");
@@ -3099,25 +3218,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // Built independently of the actions row below: Remove must always be
     // offered once installed, even if the schema fetch is missing this field
     // for some reason (rule 5 - a partial schema must not hide Remove).
-    const row = el("div", "media-comfy-row");
-    const ctrls = [];
-    for (const field of [toggleFields.targetField]) {
-      if (!field) continue;
-      const ctrl = buildSettingControl(field);
-      if (!ctrl) continue;
-      ctrls.push(ctrl);
-      row.appendChild(ctrl.node);
-    }
-    if (ctrls.length) {
-      host.appendChild(row);
-      // This panel can re-render in place (after Set up / Remove / Save)
-      // without a full page refresh, which would otherwise leave stale,
-      // detached-node entries for these two keys piling up in the shared
-      // control list every time - drop any prior entries for them first.
-      const keys = new Set(ctrls.map(c => c.field.key));
-      _settingsControls = _settingsControls.filter(c => !keys.has(c.field.key));
-      _settingsControls.push(...ctrls);
-    }
+    const ctrls = appendComfyTargetRow(host, toggleFields);
 
     const actions = el("div", "actions");
     if (ctrls.length) {
@@ -3152,7 +3253,8 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           const r = await fetch("/api/comfy/remove",
                                 { method: "POST", headers: authHeaders() });
           const d = await r.json().catch(() => ({}));
-          toast(r.ok ? t("settings.comfy.removed") : (d.detail || t("settings.comfy.removeFailed")), !r.ok);
+          if (r.ok && d.status === "noop") toast(t("settings.comfy.nothingToRemove"));
+          else toast(r.ok ? t("settings.comfy.removed") : (d.detail || t("settings.comfy.removeFailed")), !r.ok);
         } catch {
           toast(t("settings.comfy.removeFailed"), true);
         }
@@ -3406,11 +3508,19 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.
+  const targetCtrls = appendComfyTargetRow(host, toggleFields);
   const actions = el("div", "actions");
   const setup = el("button", "btn-primary comfy-managed-setup-btn",
                    t("settings.comfy.setup"));
   setup.type = "button";
   actions.appendChild(setup);
+  if (targetCtrls.length) {
+    const save = el("button", "btn-secondary",
+      t("settings.save.section", { name: t("settings.comfy.ownHead") }));
+    save.type = "button";
+    save.onclick = () => savingState(save, () => saveSettingsSection("media", host));
+    actions.appendChild(save);
+  }
   host.appendChild(actions);
   const log = el("pre", "comfy-managed-log");
   log.style.display = "none";
@@ -3487,6 +3597,8 @@ export function renderMediaSubsection(name) {
   txt.appendChild(head);
   wrap.appendChild(txt);
   sub.appendChild(wrap);
+  const offNote = pluginOffNote(name, label);
+  if (offNote) sub.appendChild(offNote);
   if (["image", "music", "video"].includes(name)) {
     // docs/gui-design.md rule 6: state renders as a .job-state pill, not an
     // inline-JS-styled span. checking -> base pill (neutral, matches the old
@@ -3564,6 +3676,7 @@ export function renderMediaSubsection(name) {
   _mediaControls[name] = controls;
   sub.appendChild(grid);
   enhanceNativeModelFields(name, controls);
+  syncComfyOnlyFields(controls);
 
   const actions = el("div", "actions");
   // R11/R13: client-side "Copy from <other>" - prefills this subsection's shared
@@ -3651,9 +3764,43 @@ export async function enhanceNativeModelFields(name, controls) {
   }
 }
 
+/** Media plugin field keys that only ComfyUI reads (their block path starts at
+ *  "comfy"). Bound to settings_schema.MEDIA_PLUGIN_FIELDS by
+ *  tests/test_media_settings_page_rules.py. */
+export const MEDIA_COMFY_ONLY_KEYS = new Set([
+  "workdir", "launch_cmd", "api_url", "output_dir", "delete_outputs",
+  "fast_dequant", "float_type",
+]);
+
+/** Hide a media box's ComfyUI-only fields while its backend is "native", and
+ *  show them again for "auto" or "comfy". No-op for a box without a backend
+ *  field. */
+export function syncComfyOnlyFields(controls) {
+  const backend = controls.find((c) => c.field.key === "backend");
+  if (!backend) return;
+  const input = backend.node.querySelector("select");
+  const apply = () => {
+    const native = backend.read() === "native";
+    for (const c of controls) {
+      if (MEDIA_COMFY_ONLY_KEYS.has(c.field.key)) c.node.hidden = native;
+    }
+  };
+  if (input) input.addEventListener("change", apply);
+  apply();
+}
+
+/** True when Copy from may copy media field *key* between plugin boxes: the
+ *  backend choice ("backend") and the native backend settings ("native_*") are
+ *  each plugin's own and are never copied. */
+export function mediaFieldCopyable(key) {
+  return key !== "backend" && !key.startsWith("native_");
+}
+
 /** R11: prefill the *to* subsection's shared fields from the *from* subsection's
  *  current in-DOM values. Prefill only (no server call); the user still presses
- *  Save. Only fields present in BOTH subsections are copied. */
+ *  Save. Only fields present in BOTH subsections are copied, never a backend or
+ *  native field (mediaFieldCopyable), and never a choice the *to* box does not
+ *  offer. */
 export function copyMediaFields(from, to) {
   const src = _mediaControls[from] || [];
   const dst = _mediaControls[to] || [];
@@ -3663,7 +3810,11 @@ export function copyMediaFields(from, to) {
   for (const c of dst) {
     const s = byKey[c.field.key];
     if (!s || !c.write) continue;     // only fields both subsections have
-    c.write(s.read());
+    if (!mediaFieldCopyable(c.field.key)) continue;
+    const v = s.read();
+    if (c.field.widget === "select" && v != null && v !== ""
+        && !(c.field.options || []).includes(v)) continue;
+    c.write(v);
     c.node.classList.remove("media-inherited");
     n += 1;
   }

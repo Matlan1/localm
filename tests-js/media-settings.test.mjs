@@ -3,9 +3,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// The schema carries the comfy_* media keys in group "Media". The settings form
-// skips the ones annotated media_per_plugin; those are edited per-plugin in the
-// Media section via /v1/media/config.
+// The schema carries the comfy_* media keys in group "Media". The core form
+// skips them; the Media section's Shared box draws them (the shared defaults a
+// blank per-plugin field uses), and each plugin box edits its own values via
+// /v1/media/config.
 const SCHEMA = {
   fields: [
     { key: "n_ctx", widget: "number", label: "Context window", help: "",
@@ -85,12 +86,14 @@ test("media config renders one independent subsection per plugin", async () => {
   await render(win);
   const doc = win.document;
 
-  // The group=Media schema keys are not rendered in the core form.
-  assert.equal(doc.querySelector('[data-key="comfy_workdir"]'), null,
-    "comfy_* media keys are skipped from the schema form");
-
+  // The group=Media schema keys are not in the core form, only in Media's Shared box.
   const media = doc.querySelector("#settings-sec-media");
   assert.ok(media, "a Media section exists");
+  const sharedWorkdir = doc.querySelectorAll('[data-key="comfy_workdir"]');
+  assert.equal(sharedWorkdir.length, 1, "the shared ComfyUI folder is drawn once");
+  assert.ok(media.contains(sharedWorkdir[0]), "inside the Media section");
+  assert.equal(sharedWorkdir[0].closest(".media-subsection"), null,
+    "in the Shared box, not in a plugin box");
   const subs = media.querySelectorAll(".media-subsection");
   assert.equal(subs.length, 3, "image/music/video each get a subsection");
   const heads = [...subs].map(headLabel);

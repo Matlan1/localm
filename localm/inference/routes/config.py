@@ -104,10 +104,16 @@ def register(app: FastAPI, ctx) -> None:
         # sets it over the stored net_mode.
         if owner:
             from localm import netpolicy
+            from localm.audit import MODE_ENV_VAR, SessionMode
             cfg["effective_net_mode"] = netpolicy.network_mode()
             cfg["net_mode_from_env"] = (
                 os.environ.get(netpolicy.NET_MODE_ENV_VAR, "").strip().lower()
                 in netpolicy.NET_MODES)
+            # LOCALM_MODE (set by a --mode flag) in the server's environment sets
+            # the session mode over every stored mode key.
+            cfg["mode_from_env"] = (
+                os.environ.get(MODE_ENV_VAR, "").strip().lower()
+                in {m.value for m in SessionMode})
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
@@ -160,7 +166,8 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
-                    "effective_net_mode", "net_mode_from_env", "warnings",
+                    "effective_net_mode", "net_mode_from_env", "mode_from_env",
+                    "warnings",
                     "effective_ctx_max", "effective_ctx_model",
                     "effective_ctx_model_key", "instance_id",
                     "instance_port"}

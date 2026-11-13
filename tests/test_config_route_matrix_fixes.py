@@ -143,3 +143,28 @@ def test_the_network_extras_are_for_the_owner_only(app_env):
     c, scoped, _ = app_env
     cfg = c.get("/v1/config", headers=_scoped(scoped)).json()
     assert "effective_net_mode" not in cfg and "net_mode_from_env" not in cfg
+    assert "mode_from_env" not in cfg
+
+
+# ------------------------------------------------------------ session mode
+
+def test_get_config_says_when_the_env_sets_the_session_mode(app_env, monkeypatch):
+    c, _scoped_key, _ = app_env
+    monkeypatch.setenv("LOCALM_MODE", "full")
+    assert c.get("/v1/config", headers=_owner()).json()["mode_from_env"] is True
+    monkeypatch.setenv("LOCALM_MODE", "not-a-mode")
+    assert c.get("/v1/config", headers=_owner()).json()["mode_from_env"] is False
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    assert c.get("/v1/config", headers=_owner()).json()["mode_from_env"] is False
+
+
+def test_every_read_only_extra_of_get_is_accepted_back_by_patch(app_env):
+    """A client that sends back what GET /v1/config returned is not refused for
+    the read-only extras GET adds."""
+    c, _scoped_key, _ = app_env
+    from localm.config import load_config
+    cfg = c.get("/v1/config", headers=_owner()).json()
+    extras = {k: v for k, v in cfg.items() if k not in load_config()}
+    assert "mode_from_env" in extras and "effective_net_mode" in extras
+    r = c.patch("/v1/config", headers=_owner(), json=extras)
+    assert r.status_code == 200, r.text

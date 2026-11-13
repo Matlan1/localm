@@ -789,13 +789,17 @@ def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> 
     bind_warning = _gui_bind_warning(plan.host)
     if bind_warning and not insecure and plan.from_config:
         from localm.auth import any_key_configured
-        _why = ("no API key is set" if not any_key_configured()
+        _keyless = not any_key_configured()
+        _why = ("no API key is set" if _keyless
                 else "the API key is too short to be safe")
+        _where = ("Settings > Security > Keys & devices: the first key created "
+                  "there also sets the owner key" if _keyless
+                  else "Settings > Security > Owner key")
         plan.fallback = (
             f"The configured bind address ({plan.host}) was not applied: {_why}. "
             f"The server is on 127.0.0.1 (this computer only). Set a long, "
-            f"random API key (Settings > Security > Owner key, or run: localm "
-            f"key generate), then restart the server.")
+            f"random API key ({_where}; or run: localm key generate), then "
+            f"restart the server.")
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print(
             "[bold yellow]  Ignoring the configured bind address and binding "
