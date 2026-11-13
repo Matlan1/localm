@@ -274,31 +274,51 @@ def _stdout_is_a_pipe() -> bool:
 SUBCOMMAND_ARGS = "localm.subcommand_args"
 
 
+def _session_mode_param(cmd):
+    """The parameter of *cmd* that selects the session mode: an option whose
+    type is a ``click.Choice`` of exactly the ``audit.SessionMode`` values, or
+    None."""
+    from localm.audit import SessionMode
+    modes = {m.value for m in SessionMode}
+    for p in cmd.params:
+        if (isinstance(p, click.Option) and isinstance(p.type, click.Choice)
+                and {str(c).lower() for c in p.type.choices} == modes):
+            return p
+    return None
+
+
 def _export_subcommand_mode(ctx) -> None:
-    """When the subcommand in *ctx* takes ``--mode`` and was given a valid one,
-    export it as ``audit.MODE_ENV_VAR``, as that subcommand does itself, so the
-    steps the group runs before it follow the same session mode. The arguments
-    are parsed by the subcommand's own parser without callbacks; arguments it
-    cannot parse export nothing (the subcommand then reports them)."""
+    """When the subcommand in *ctx* takes a session-mode option
+    (:func:`_session_mode_param`) and was given a value, export it as
+    ``audit.MODE_ENV_VAR``, as that subcommand does itself, so the steps the
+    group runs before it follow the same session mode. The arguments are parsed
+    by the subcommand's own parser without callbacks. Arguments it cannot parse
+    export nothing (the subcommand then reports them); any other failure exports
+    nothing and is logged at debug level. Never raises."""
     import os
-    from localm.audit import MODE_ENV_VAR, SessionMode
-    args = ctx.meta.get(SUBCOMMAND_ARGS)
-    if not args:
-        return
     try:
+        from localm.audit import MODE_ENV_VAR, SessionMode
+        args = ctx.meta.get(SUBCOMMAND_ARGS)
+        if not args:
+            return
         name, cmd, rest = ctx.command.resolve_command(ctx, list(args))
-        if cmd is None or not any(p.name == "mode" for p in cmd.params):
+        param = _session_mode_param(cmd) if cmd is not None else None
+        if param is None:
             return
         sub = cmd.make_context(name, list(rest), parent=ctx, resilient_parsing=True)
+        mode = sub.params.get(param.name)
+        if isinstance(mode, str) and mode.strip():
+            os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
     except click.ClickException:
         return
-    mode = sub.params.get("mode")
-    if not isinstance(mode, str):
-        return
-    try:
-        os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
-    except ValueError:
-        return
+    except Exception as e:   # noqa: BLE001. See test_a_failing_mode_read_never_stops_the_command
+        try:
+            from localm.debuglog import logger
+            logger.debug("could not read the subcommand's --mode before the start-up "
+                         "steps (%s: %s); they follow the configured mode",
+                         type(e).__name__, e)
+        except Exception:   # noqa: BLE001
+            pass
 
 
 class _GracefulGroup(click.Group):

@@ -113,3 +113,53 @@ def test_a_mode_flag_reaches_the_start_up_check(install, plan_calls, monkeypatch
     assert result.exit_code == 0, result.output
     assert len(plan_calls) == 1
     assert (_updates() / uc.CHECKED_FILE).exists() is written
+
+
+def _group_with(option):
+    import click
+
+    from localm.cli._core import SUBCOMMAND_ARGS, _GracefulGroup, _export_subcommand_mode
+    seen = {}
+
+    @click.group(cls=_GracefulGroup)
+    @click.pass_context
+    def group(ctx):
+        _export_subcommand_mode(ctx)
+        import os
+        seen["mode"] = os.environ.get("LOCALM_MODE")
+        seen["args"] = ctx.meta.get(SUBCOMMAND_ARGS)
+
+    @group.command()
+    @option
+    def sub(mode):
+        pass
+    return group, seen
+
+
+def test_an_unrelated_mode_option_sets_no_session_mode(monkeypatch):
+    import click
+    from click.testing import CliRunner
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    group, seen = _group_with(click.option(
+        "--mode", type=click.Choice(["log", "full", "tile"]), default=None))
+    result = CliRunner().invoke(group, ["sub", "--mode", "log"])
+    assert result.exit_code == 0, result.output
+    assert seen["args"] == ["sub", "--mode", "log"]
+    assert seen["mode"] is None
+
+
+def test_a_failing_mode_read_never_stops_the_command(monkeypatch):
+    import click
+    from click.testing import CliRunner
+
+    from localm.cli import _core
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    group, seen = _group_with(click.option(
+        "--mode", type=click.Choice(["privacy", "log", "full"]), default=None))
+
+    def broken(cmd):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(_core, "_session_mode_param", broken)
+    result = CliRunner().invoke(group, ["sub", "--mode", "privacy"])
+    assert result.exit_code == 0, result.output
+    assert seen["mode"] is None
