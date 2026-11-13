@@ -20,8 +20,11 @@ def _find_run_log(home=None, pid=None):
     filename (localm_<date>_<time>_<pid>.log), or None if none is found.
     Shared by _recent_log_tail (below) and _classify_prior_death's raw-tail
     truncation check, so the two never disagree about WHICH file a crash's
-    evidence comes from. Never raises."""
+    evidence comes from. Records this process has queued for its debug log
+    file are written first (``debuglog.drain_debug_log``). Never raises."""
     from pathlib import Path as _P
+    from localm.debuglog import drain_debug_log
+    drain_debug_log()
     if home is None:
         from localm.debuglog import logs_dir
         d = logs_dir()

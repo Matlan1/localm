@@ -475,6 +475,7 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
 # StatusText), each with the names of the ``status_args`` it carries.
 STATUS_ARGS_BY_CODE: dict[str, tuple[str, ...]] = {
     "loading_beside": ("model", "resident"),
+    "loading_routed": ("model", "current", "needs"),
     "processing_progress": ("done", "total"),
     "processing_layers": ("done", "total"),
 }

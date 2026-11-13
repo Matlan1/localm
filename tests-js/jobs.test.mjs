@@ -44,8 +44,11 @@ const MODELS = [
 
 // Build a fresh jsdom env per test, install it as the module's globals, and
 // return { window, calls } where calls records every fetch (method + url).
+const RESULTS = [{ result_id: "r1", status: "ok", output: "the result text",
+                   error: null, finished: 1700003600 }];
+
 function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
-                   schedulerWarning = null } = {}) {
+                   schedulerWarning = null, results = RESULTS } = {}) {
   const dom = new JSDOM(
     `<!DOCTYPE html><html><body><main id="main"></main></body></html>`,
     { url: "http://localhost:8642/" });
@@ -69,9 +72,7 @@ function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
     }
     if (method === "GET" && /\/api\/jobs\/[^/]+\/results$/.test(url)) {
       return { ok: true, status: 200,
-               json: async () => ({ id: JOB.id, results: [
-                 { result_id: "r1", status: "ok", output: "the result text",
-                   error: null, finished: 1700003600 }] }) };
+               json: async () => ({ id: JOB.id, results }) };
     }
     if (method === "PUT" || method === "DELETE" || method === "POST") {
       return { ok: true, status: 200, json: async () => ({}) };
@@ -556,4 +557,35 @@ test("a non-numeric custom interval is refused before any POST", async () => {
     "no job is created from an unparseable interval");
   assert.ok(toasts.some((t) => t.bad && /whole number/i.test(t.m)),
     "and the user is told what a valid interval looks like");
+});
+
+
+test("a result names the model routing did not load, with the reason", async () => {
+  const note = "vl8 could answer this job (plain lacks vision); it was not loaded: " +
+    "loading it unloads plain";
+  const { win } = makeEnv({ results: [{ ...RESULTS[0], routing: note }] });
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+  const btn = win.document.querySelector('[data-action="results"]') ||
+    [...win.document.querySelectorAll("button")].find((b) => /Results/.test(b.textContent));
+  btn.click();
+  await settle();
+  const line = win.document.querySelector(".job-routing");
+  assert.ok(line, "the routing note is shown under the result");
+  assert.equal(line.textContent, note);
+});
+
+test("a result without a routing note shows no routing line", async () => {
+  const { win } = makeEnv();
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+  [...win.document.querySelectorAll("button")].find((b) => /Results/.test(b.textContent))
+    .click();
+  await settle();
+  assert.match(win.document.getElementById("view-jobs").textContent, /the result text/);
+  assert.equal(win.document.querySelector(".job-routing"), null);
 });

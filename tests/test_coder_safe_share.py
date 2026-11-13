@@ -10,6 +10,7 @@ tool is the real containment. These tests pin both halves.
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -398,17 +399,69 @@ def test_scoped_key_cannot_force_a_less_private_mode(tmp_path, monkeypatch):
         r3 = client.post("/api/coder/sessions", headers=h,
                          json={"cwd": str(proj), "mode": "bogus"})
         assert r3.status_code == 400
-        # The owner is not restricted by this gate.
+        # The owner is not refused, but the project's pin is still the floor:
+        # the session runs in privacy mode and says so.
         r4 = client.post("/api/coder/sessions",
                          headers={"Authorization": "Bearer ownersecret"},
                          json={"cwd": str(proj), "mode": "full"})
         assert r4.status_code == 200
+        assert r4.json()["mode"] == "privacy"
+        assert any("pins privacy mode" in n for n in r4.json()["notes"])
         # Close it: a "full" mode session opens a real audit-log file handle in
         # the process-global sessions dir (localm.audit._SESSIONS_DIR is frozen
         # at import time, unaffected by this test's HOME_DIR monkeypatch), and
         # leaving it open trips the suite's own end-of-run cleanup elsewhere.
         client.delete(f"/api/coder/sessions/{r4.json()['id']}",
                       headers={"Authorization": "Bearer ownersecret"})
+
+
+@pytest.mark.parametrize("scope_list, privileged", [(["coder"], False), (["admin"], True)])
+def test_revoking_the_key_that_opened_a_session_ends_it(tmp_path, monkeypatch,
+                                                        scope_list, privileged):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    made = auth.create_key("dev", scope_list, allow_privileged=privileged)
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions",
+                        headers={"Authorization": f"Bearer {made['key']}"},
+                        json={"cwd": str(proj)})
+        assert r.status_code == 200, r.text
+        sid = r.json()["id"]
+        sess = app.state.coder_sessions.get(sid)
+        assert sess.key_hash == auth._hash_key(made["key"])
+        owner = client.post("/api/coder/sessions",
+                            headers={"Authorization": "Bearer ownersecret"},
+                            json={"cwd": str(proj)}).json()["id"]
+        assert auth.revoke_key(made["id"]) is True
+        assert app.state.coder_sessions.get(sid) is None
+        assert sess.closed
+        assert app.state.coder_sessions.get(owner) is not None
+        client.delete(f"/api/coder/sessions/{owner}",
+                      headers={"Authorization": "Bearer ownersecret"})
+
+
+def test_owner_session_keeps_a_more_private_choice_and_unpinned_projects(tmp_path, monkeypatch):
+    pinned_full = tmp_path / "pfull"; pinned_full.mkdir()
+    (pinned_full / ".localcoder").mkdir()
+    (pinned_full / ".localcoder" / "config.toml").write_text('mode = "full"\n',
+                                                              encoding="utf-8")
+    plain = tmp_path / "plain"; plain.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    h = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=h,
+                        json={"cwd": str(pinned_full), "mode": "privacy"})
+        assert r.status_code == 200
+        assert r.json()["mode"] == "privacy"
+        assert not any("pins" in n for n in r.json()["notes"])
+        r2 = client.post("/api/coder/sessions", headers=h,
+                         json={"cwd": str(plain), "mode": "privacy"})
+        assert r2.status_code == 200
+        assert r2.json()["mode"] == "privacy"
+        for sid in (r.json()["id"], r2.json()["id"]):
+            client.delete(f"/api/coder/sessions/{sid}", headers=h)
 
 
 # ------------------------------------------------------------------ #

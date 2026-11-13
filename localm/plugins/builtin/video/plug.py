@@ -265,9 +265,6 @@ async def video(req: VideoRequest, request: Request):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
             is_privacy = effective_mode("server") == SessionMode.PRIVACY
-            # privacy mode forces deletion of ComfyUI's own output copy: no traces
-            # left anywhere, regardless of the configured delete_outputs preference.
-            delete_outputs = bool(s.get("delete_outputs")) or is_privacy
             ok, message = _backend.generate(
                 s, req.prompt, out_path,
                 self_url=self_url,
@@ -278,7 +275,6 @@ async def video(req: VideoRequest, request: Request):
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 input_image=input_image,
                 swap=gen_swap,
-                delete_outputs=delete_outputs,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
                 privacy=is_privacy,

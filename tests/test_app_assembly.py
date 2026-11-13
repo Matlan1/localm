@@ -48,7 +48,8 @@ _EFFECTIVE_CHAIN = (
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
-_INNERMOST = (("ClientLeftMiddleware", None), ("RequestPrivacyMiddleware", None))
+_INNERMOST = (("CredentialRecheckMiddleware", None), ("ClientLeftMiddleware", None),
+              ("RequestPrivacyMiddleware", None))
 
 
 def _effective_chain(app) -> tuple:

@@ -111,7 +111,9 @@ download), `chat_hooks` (chat plugins' inlet hooks are running),
 `checking_grammar`, `generating` and `loading_beside` (the model loads beside
 models that could not be unloaded, so part of it runs on the CPU; its delta also
 carries `status_args` with `model`, the name of the model, and `resident`, the quoted names of those
-models). A streaming request that is compacted
+models), and `loading_routed` (capability routing loads another model for this request because the
+current one lacks what it needs; its delta also carries `status_args` with `model`, the model being
+loaded, `current`, the model that lacks it, and `needs`, what it lacks in words). A streaming request that is compacted
 carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
 after compaction, the refusal arrives in the stream as the reply text with
 `finish_reason: "error"` instead of an HTTP 413.
@@ -1081,7 +1083,7 @@ and every row it returns carries that `error` instead of a state.
 Scope: `admin`. Off by default.
 
 Prometheus text-format metrics. The route does not exist until you turn on the
-`metrics_enabled` setting (Settings > Server, or `localm config metrics_enabled
+`metrics_enabled` setting (Settings > Server & network, or `localm config metrics_enabled
 true`; `LOCALM_METRICS=1` does the same for one run) and restart. With it off
 nothing is collected and `/metrics` answers 404.
 

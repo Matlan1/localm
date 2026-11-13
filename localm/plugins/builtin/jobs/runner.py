@@ -64,6 +64,7 @@ def run_job(job: Job, *, engine=None) -> dict:
     is freed in the finally."""
     started = time.time()
     owned_engine = None
+    routing_notes: list[str] = []
     try:
         refusal = _creator_refusal(job)
         if refusal:
@@ -71,7 +72,7 @@ def run_job(job: Job, *, engine=None) -> dict:
             raise PermissionError(refusal)
         eng = engine
         if job.task_kind in ("chat", "memory"):
-            served = _served_engine(job, engine)
+            served = _served_engine(job, engine, notes=routing_notes)
             if served is not None:
                 eng = served
         if job.task_kind in ("chat", "memory") and eng is None:
@@ -80,7 +81,7 @@ def run_job(job: Job, *, engine=None) -> dict:
             # owned (and unloaded in the finally); a reused shared engine belongs to
             # the host. The verdict is taken from _load_engine rather than re-read
             # from _engine.
-            eng, reused = _load_engine(_headless_routed_model(job))   # may raise (model not found) -> caught below
+            eng, reused = _load_engine(_headless_routed_model(job, notes=routing_notes))   # may raise (model not found) -> caught below
             if eng is not None and not reused:
                 owned_engine = eng          # we loaded it, so we unload it after the run
         if job.task_kind == "chat":
@@ -105,6 +106,8 @@ def run_job(job: Job, *, engine=None) -> dict:
         }
         if job.task_kind in ("chat", "memory") and eng is not None:
             record["answered_by"] = getattr(eng, "display_name", None)
+        if routing_notes:
+            record["routing"] = "; ".join(routing_notes)
         return record
     except Exception as e:
         return {
@@ -215,9 +218,22 @@ def _run_chat(job: Job, *, engine=None) -> str:
 _SERVED_LOAD_TIMEOUT_S = 1800.0
 
 
-def _served_engine(job: Job, live):
+def _routing_note(decision) -> Optional[str]:
+    """One line naming the model capability routing suggested and did not load
+    for a job, with the reason; None when it suggested none."""
+    if not decision.suggested or decision.routed:
+        return None
+    gaps = ", ".join(sorted(decision.gaps)) or "this job"
+    why = f": {decision.ask_reason}" if decision.ask_reason else ""
+    return (f"{decision.suggested} could answer this job ({decision.current} lacks "
+            f"{gaps}); it was not loaded{why}")
+
+
+def _served_engine(job: Job, live, *, notes: Optional[list] = None):
     """The running server's engine a chat or memory job runs on, or None when
-    this process runs no server (a headless ``localm job run``).
+    this process runs no server (a headless ``localm job run``). A routing
+    suggestion that was not loaded, or a routed load refused at load time, is
+    appended to *notes* as one line with its reason.
 
     A job's own ``model`` is always the one used. Without one, the server's
     loaded model (*live*) runs it, unless a chat job needs structured tool calls
@@ -245,6 +261,11 @@ def _served_engine(job: Job, live):
     decision = hs.plan_capability_route(job.model or None, messages, required,
                                         pin_model=bool(job.model))
     target = decision.resolved
+    note = _routing_note(decision)
+    if note:
+        logger.info("jobs: %s", note)
+        if notes is not None:
+            notes.append(note)
     if not target:
         return live
 
@@ -263,10 +284,18 @@ def _served_engine(job: Job, live):
     for name in names:
         fut = asyncio.run_coroutine_threadsafe(
             hs.get_engine(name, activate=False,
-                          skip_if_latched=decision.routed and name != decision.current),
+                          skip_if_latched=decision.routed and name != decision.current,
+                          routed=decision.routed and name != decision.current),
             loop)
         try:
             return fut.result(timeout=_SERVED_LOAD_TIMEOUT_S)
+        except hs.RouteRefused as e:
+            refused = f"{name} was not loaded: {e.reason}"
+            logger.info("jobs: %s", refused)
+            if notes is not None:
+                notes.append(refused)
+            last_error = RuntimeError(refused)
+            continue
         except Exception as e:
             detail = getattr(e, "detail", None) or str(e)
             last_error = RuntimeError(f"could not load {name}: {detail}")
@@ -320,14 +349,19 @@ def _default_chat_model() -> Optional[str]:
     return next(iter(auto_chat_candidates(load_registry())), None)
 
 
-def _headless_routed_model(job: Job) -> Optional[str]:
+def _headless_routed_model(job: Job, *, notes: Optional[list] = None) -> Optional[str]:
     """The model a headless (no server loop) chat/memory job loads: the same
     capability routing ``_served_engine`` and an in-process ``localm run
     --no-server`` apply. A chat job needing structured tool calls (web access
     on), or a longer conversation than the current model was trained for, is
     routed to an installed model that has it. A job's own ``model`` is always
-    the one used."""
+    the one used. A candidate is sized as the server sizes one
+    (``http_server.routing_fit_assessor``), so a model that would unload one
+    already loaded here, read its weights from disk or not fit at all is not
+    chosen; the job then runs on the current model and the suggestion is
+    appended to *notes*."""
     from localm.inference import capability_routing as cr
+    from localm.inference import http_server as hs
     current = job.model or _default_chat_model()
     required = []
     if job.task_kind == "chat":
@@ -337,7 +371,12 @@ def _headless_routed_model(job: Job) -> Optional[str]:
     needs = cr.request_needs(
         [{"role": "user", "content": job.prompt or ""}], required=required)
     decision = cr.plan_route(current, needs, pinned=bool(job.model),
-                             mode=cr.configured_mode())
+                             fit=hs.routing_fit_assessor(), mode=cr.configured_mode())
+    note = _routing_note(decision)
+    if note:
+        logger.info("jobs: %s", note)
+        if notes is not None:
+            notes.append(note)
     return decision.resolved
 
 
