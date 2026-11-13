@@ -85,7 +85,7 @@ def test_upload_with_nothing_skipped_has_no_warning(client):
 def test_route_of_a_plugin_not_installed_names_the_plugin(client):
     r = client.post("/api/web/search", json={"query": "x"})
     assert r.status_code == 404
-    assert r.json()["detail"].startswith("The web plugin is not installed")
+    assert r.json()["detail"].startswith("The web plugin is not installed or not enabled")
 
 
 def test_route_of_a_disabled_plugin_says_enable_it(client, scoped_app):  # noqa: F811
@@ -94,8 +94,14 @@ def test_route_of_a_disabled_plugin_says_enable_it(client, scoped_app):  # noqa:
     mgr.set_enabled_state("web", False)
     r = client.post("/api/web/search", json={"query": "x"})
     assert r.status_code == 404
-    assert "The web plugin is not enabled" in r.json()["detail"]
+    assert "The web plugin is not installed or not enabled" in r.json()["detail"]
     assert "localm plugin enable web" in r.json()["detail"]
+
+
+def test_unknown_path_under_an_active_plugin_is_no_such_endpoint(client):
+    r = client.get("/api/chat/no-such-route")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "No such API endpoint: GET /api/chat/no-such-route"
 
 
 def test_unknown_api_path_is_a_json_404(client):

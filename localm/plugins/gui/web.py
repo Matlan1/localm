@@ -86,32 +86,27 @@ def _route_takes_another_method(scope) -> bool:
 
 async def _missing_endpoint_detail(scope, path: str) -> str:
     """The 404 text for an API *path* no route answers. ``/api/<name>/...`` of a
-    catalog plugin names that plugin and whether it is installed; anything
-    else is "no such endpoint"."""
+    catalog plugin that is not active (installed and enabled) names that plugin;
+    anything else is "no such endpoint"."""
     from localm.plugins import catalog
     name = path.split("/")[2] if path.startswith("/api/") else ""
     entry = catalog.get(name) if name else None
     if entry is None:
         return f"No such API endpoint: {scope.get('method', 'GET')} {path}"
     mgr = getattr(getattr(scope.get("app"), "state", None), "plugin_manager", None)
-    installed = None        # None: could not tell
+    active = False
     if mgr is not None:
         from starlette.concurrency import run_in_threadpool
         try:
-            installed = bool(await run_in_threadpool(mgr.is_installed, name))
+            active = bool(await run_in_threadpool(mgr.is_active, name))
         except Exception:
-            logger.warning("could not check whether plugin %r is installed",
+            logger.warning("could not check whether plugin %r is active",
                            name, exc_info=True)
-    if installed is None:
-        return (f"The {name} plugin is not installed or not enabled, so {path} "
-                "is not served. Check it on the Plugins page.")
-    if installed:
-        return (f"The {name} plugin is not enabled, so {path} is not served. "
-                "Enable it on the Plugins page (or: localm plugin enable "
-                f"{name}).")
-    return (f"The {name} plugin is not installed, so {path} is not served. "
-            "Install it on the Plugins page (or: localm plugin install "
-            f"{name}).")
+    if active:
+        return f"No such API endpoint: {scope.get('method', 'GET')} {path}"
+    return (f"The {name} plugin is not installed or not enabled, so {path} is "
+            "not served. Turn it on on the Plugins page (or: localm plugin "
+            f"install {name}, then localm plugin enable {name}).")
 
 
 # The literal that every inline <script> in index.html carries in place of a real

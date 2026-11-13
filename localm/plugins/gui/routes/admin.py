@@ -81,7 +81,7 @@ def register(app: FastAPI, ctx) -> None:
         the copy.
 
         require_fs_host as well as CONFIG_WRITE: `dest` is an arbitrary host
-        directory that this route mkdir(parents=True)s and writes into, and the
+        directory that this route creates a folder in and writes into, and the
         is_dir check before it makes the 400-vs-200 split a directory-existence
         oracle for the whole disk. It is the same dial the /api/fs/dirs picker
         that SUPPLIES `dest` requires."""
@@ -111,14 +111,17 @@ def register(app: FastAPI, ctx) -> None:
         stem = f"localm-logs-{_time.strftime('%Y%m%d-%H%M%S')}"
         seen: set = set()
         logs: list = []      # *.log files that exist, deduplicated by real path
-        for src in sources:
-            if not src or not src.is_dir():
-                continue
-            for p in src.glob("*.log"):
-                if p.resolve() in seen:
+        try:
+            for src in sources:
+                if not src or not src.is_dir():
                     continue
-                seen.add(p.resolve())
-                logs.append(p)
+                for p in src.glob("*.log"):
+                    if p.resolve() in seen:
+                        continue
+                    seen.add(p.resolve())
+                    logs.append(p)
+        except OSError as e:
+            raise HTTPException(500, f"Could not list the log files: {e}") from e
         found = len(logs)
         if found == 0:
             # Nothing to export: no folder is created.
