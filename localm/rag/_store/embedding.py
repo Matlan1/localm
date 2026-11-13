@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from localm.rag import store as _st
 
@@ -14,6 +14,12 @@ from .types import EmbedFn, ProgressFn
 class _CollectionEmbedding:
     """Mixin of ``Collection``: the recorded embedding model and re-embedding from
     the stored text."""
+
+    if TYPE_CHECKING:
+        def _save_holding_progress_errors(
+                self, on_progress: Optional[ProgressFn] = None) -> Optional[Exception]:
+            """Provided by ``_CollectionFiles`` (files.py)."""
+            ...
 
     def embedding_model(self) -> Optional[str]:
         """The model NAME this collection's vectors were built with, if recorded."""
