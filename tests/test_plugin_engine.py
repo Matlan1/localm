@@ -426,15 +426,16 @@ def test_uninstall_reports_degraded_result_when_rmtree_fails(env, caplog, monkey
 
 
 # ---------------------------------------------------------------------------
-#  _delete_plugin_data: data_subdir is taken verbatim from a (possibly
-#  third-party) manifest. It must NEVER let rmtree escape the data dir via
-#  traversal ('../models'), an absolute path, or '.' (the home root itself).
+#  data_subdir comes from a (possibly third-party) manifest. parse_spec accepts
+#  one folder name only; _delete_plugin_data confines rmtree to the plugin's own
+#  root: the data dir for a store install, plugin-data/<name> for a third-party
+#  one, never the data dir itself.
 # ---------------------------------------------------------------------------
 
 def _mgr_with_data_subdir(tmp_path, monkeypatch, data_subdir):
-    """Build a discovered manager whose plugin 'evil' declares *data_subdir*,
-    with LOCALM_HOME pinned to a subdir of tmp_path so siblings can be
-    created safely outside the data dir."""
+    """Build a discovered manager whose third-party plugin 'evil' declares
+    *data_subdir*, with LOCALM_HOME pinned to a subdir of tmp_path so siblings
+    can be created safely outside the data dir."""
     from localm.plugins.engine import PluginManager
     home = tmp_path / "home"
     home.mkdir()
@@ -447,33 +448,82 @@ def _mgr_with_data_subdir(tmp_path, monkeypatch, data_subdir):
     return mgr, home
 
 
-def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch):
-    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "../victim")
+@pytest.mark.parametrize("bad", ["../victim", ".", "..", "a/b", "a\\\\b", "/abs",
+                                 "C:victim", ".hidden", "sp ace"])
+def test_parse_spec_refuses_a_data_subdir_that_is_not_one_folder_name(tmp_path, bad):
+    from localm.plugins.engine import parse_spec
+    pdir = _make_plugin(tmp_path, "evil", _ping("evil"),
+                        toml_extra=f"data_subdir = '{bad}'\n")
+    with pytest.raises(ValueError, match="data_subdir must be one folder name"):
+        parse_spec(pdir)
+
+
+def test_parse_spec_refuses_a_data_subdir_that_is_not_a_string(tmp_path):
+    from localm.plugins.engine import parse_spec
+    pdir = _make_plugin(tmp_path, "evil", _ping("evil"), toml_extra="data_subdir = 5\n")
+    with pytest.raises(ValueError, match="data_subdir"):
+        parse_spec(pdir)
+
+
+@pytest.mark.parametrize("builtin", [False, True])
+def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch, builtin):
+    from localm.plugins.engine import PluginManager, PluginSpec
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
     victim = tmp_path / "victim"
     victim.mkdir()
     (victim / "keep.txt").write_text("important", encoding="utf-8")
+    mgr = PluginManager(FastAPI(), external_root=home / "plugins", builtin_root=None)
+    escape = "../victim" if builtin else "../../../victim"
+    spec = PluginSpec(name="evil", data_subdir=escape, builtin=builtin)
     # A refused delete is a FAILURE, not a silent no-op: the caller (uninstall())
     # must be able to tell "nothing needed deleting" apart from "deletion was
     # refused for safety".
-    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    assert mgr._delete_plugin_data(spec) is False
     assert victim.exists() and (victim / "keep.txt").exists()
 
 
 def test_delete_data_rejects_dot_root(tmp_path, monkeypatch):
-    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, ".")
-    (home / "models").mkdir()
+    from localm.plugins.engine import PluginManager, PluginSpec
+    home = tmp_path / "home"
+    (home / "models").mkdir(parents=True)
     (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
-    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    mgr = PluginManager(FastAPI(), external_root=home / "plugins", builtin_root=None)
+    assert mgr._delete_plugin_data(PluginSpec(name="evil", data_subdir=".",
+                                              builtin=True)) is False
     assert home.exists() and (home / "models" / "big.gguf").exists()
 
 
 def test_delete_data_deletes_legit_subdir(tmp_path, monkeypatch):
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
     assert mgr._delete_plugin_data(mgr._specs["evil"]) is True
     assert not target.exists()
+
+
+def test_third_party_delete_data_never_reaches_a_kernel_folder(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "models")
+    (home / "models").mkdir()
+    (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
+    own = home / "plugin-data" / "evil" / "models"
+    own.mkdir(parents=True)
+    (own / "cache.bin").write_text("x", encoding="utf-8")
+    assert mgr.uninstall("evil", delete_data=True) is True
+    assert (home / "models" / "big.gguf").read_text(encoding="utf-8") == "data"
+    assert not own.exists()
+
+
+def test_plugin_data_dir_keeps_a_store_plugins_folder_at_the_top(tmp_path):
+    from localm.plugins.engine import PluginSpec, plugin_data_dir
+    assert plugin_data_dir(PluginSpec(name="rag", data_subdir="rag", builtin=True),
+                           tmp_path) == tmp_path / "rag"
+    assert plugin_data_dir(PluginSpec(name="x", data_subdir="d"), tmp_path) == (
+        tmp_path / "plugin-data" / "x" / "d")
+    assert plugin_data_dir(PluginSpec(name="x"), tmp_path) is None
 
 
 def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
@@ -483,8 +533,8 @@ def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
     import shutil
     from pathlib import Path
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
 
     real_rmtree = shutil.rmtree
@@ -515,8 +565,8 @@ def test_uninstall_delete_data_reports_degraded_result_on_failure(tmp_path, monk
     installed_dir = home / "plugins" / "evil"
     assert installed_dir.is_dir()
 
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
 
     real_rmtree = shutil.rmtree

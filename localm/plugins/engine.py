@@ -18,6 +18,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -238,6 +239,21 @@ def _purge_plugin_modules(uniq: str) -> None:
 #  Manifest parsing (the richer contract; superset of loader.PluginManifest)  #
 # --------------------------------------------------------------------------- #
 
+_DATA_SUBDIR_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
+
+
+def plugin_data_dir(spec: PluginSpec, home: Path) -> Optional[Path]:
+    """The data folder *spec* declares with ``data_subdir``, under the data dir
+    *home*: ``<home>/<data_subdir>`` for a store-installed plugin and
+    ``<home>/plugin-data/<name>/<data_subdir>`` for a third-party one. None when
+    it declares none."""
+    if not spec.data_subdir:
+        return None
+    if spec.builtin:
+        return Path(home) / spec.data_subdir
+    return Path(home) / "plugin-data" / spec.name / spec.data_subdir
+
+
 def parse_spec(plugin_dir: Path, *, builtin: bool = False,
                warnings: Optional[list] = None) -> PluginSpec:
     """Parse a plugin.toml in *plugin_dir* into a PluginSpec. Raises ValueError
@@ -288,6 +304,13 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     if not (isinstance(exports, list) and all(isinstance(t, str) for t in exports)):
         raise ValueError(f"{manifest}: [tools] exports must be a list of strings")
 
+    data_subdir = p.get("data_subdir", "")
+    if not isinstance(data_subdir, str) or (
+            data_subdir and not _DATA_SUBDIR_RE.fullmatch(data_subdir)):
+        raise ValueError(f"{manifest}: [plugin] data_subdir must be one folder name "
+                         f"(letters, digits, '.', '_' or '-', not starting with "
+                         f"'.'), got {data_subdir!r}")
+
     s = data.get("surface", {}) if isinstance(data.get("surface"), dict) else {}
     if warnings is not None:
         unknown = [f"[plugin] {k}" for k in sorted(set(p) - KNOWN_PLUGIN_KEYS)]
@@ -313,7 +336,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         requires_extras=str_lists["requires_extras"],
         requires=str_lists["requires"],
         capabilities=str_lists["capabilities"],
-        data_subdir=str(p.get("data_subdir", "")),
+        data_subdir=data_subdir,
         builtin=builtin,
         protected=builtin and bool(p.get("protected", False)),
         default_enabled=builtin and bool(p.get("default_enabled", False)),
@@ -2174,14 +2197,15 @@ class PluginManager:
         installed-dir as the whole story."""
         import shutil
         from localm.config import home_dir
-        if not spec.data_subdir:
-            return True
-        # data_subdir comes verbatim from a manifest. Resolve it and confine to
-        # home_dir: reject traversal, absolute escapes, and the home root
-        # itself before any rmtree.
         home = home_dir().resolve()
-        d = (home / spec.data_subdir).resolve()
-        if d == home or not d.is_relative_to(home):
+        target = plugin_data_dir(spec, home)
+        if target is None:
+            return True
+        # Resolve and confine to the plugin's own root (the data dir for a store
+        # install, plugin-data/<name> for a third-party one) before any rmtree.
+        root = home if spec.builtin else (home / "plugin-data" / spec.name).resolve()
+        d = target.resolve()
+        if d == home or not d.is_relative_to(root):
             _log.warning(
                 "plugin %s: refusing to delete data_subdir %r -> %s (it does "
                 "not resolve inside the data dir); the data is NOT deleted",
