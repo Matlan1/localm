@@ -2370,7 +2370,7 @@ def test_a_build_without_a_finishing_step_runs_the_built_in_steps_only(install, 
     assert sorted(res) == sorted(
         ["applied", "version", "klass", "backup", "restart_needed", "verified", "verify_reason",
          "downgrade", "data_backup", "runtime", "runtime_note", "components", "components_note",
-         "kept_for_updates"])
+         "kept_for_updates", "git_clone"])
 
 
 def test_finishing_step_output_goes_to_stdout_without_a_say(install, capfd):
