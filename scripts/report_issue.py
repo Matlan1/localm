@@ -66,44 +66,64 @@ NET_OFF_REFUSAL = ("Network access is off (net_mode=off), so the report was not 
                    f"{NET_OFF_REMEDY}.")
 
 
+def _home_cfg_line(marker: Path) -> str:
+    """The first line of localm-home.cfg as localm reads it: UTF-8 (with or
+    without a BOM), else on Windows the console (OEM) code page. Raises OSError,
+    ValueError or LookupError when it cannot be read."""
+    raw = marker.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if sys.platform != "win32":
+            raise
+        import ctypes
+        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+    lines = text.strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
 def localm_home() -> Path:
-    """The data dir localm uses: LOCALM_HOME, else the first line of the clone's
+    """The data dir localm uses: LOCALM_HOME, else (in a clone) the first line of
     localm-home.cfg, else the clone's ./home."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
         return Path(env).expanduser()
     marker = REPO_ROOT / "localm-home.cfg"
-    try:
-        lines = marker.read_text(encoding="utf-8-sig").strip().splitlines()
-    except (OSError, UnicodeDecodeError):
-        lines = []
-    if lines and lines[0].strip():
-        return Path(lines[0].strip()).expanduser()
+    if (REPO_ROOT / "pyproject.toml").is_file() and marker.is_file():
+        try:
+            line = _home_cfg_line(marker)
+        except (OSError, ValueError, LookupError):
+            line = ""
+        if line:
+            return Path(line).expanduser()
     return REPO_ROOT / "home"
 
 
 def network_mode() -> tuple:
     """``(mode, why)``: *mode* is ``off``, ``ask`` or ``allow`` as localm reads it
-    (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, an unset
-    or unknown value meaning ``ask``), or None when config.json is missing or cannot
-    be read, with *why* saying which."""
+    (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
+    ``.bak`` when config.json is absent; an unset or unknown value, or a file that
+    is not a JSON object, means ``ask``). None when neither file exists, or when
+    one is present and cannot be read the way localm reads it (strict UTF-8 JSON),
+    where localm itself turns network access off; *why* says which."""
     env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
     if env in NET_MODES:
         return env, ""
-    path = localm_home() / "config.json"
     try:
-        raw = path.read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
-        return None, f"{path} does not exist"
-    except (OSError, UnicodeDecodeError) as e:
+        main = localm_home() / "config.json"
+        bak = main.with_name("config.json.bak")
+        present = [p for p in (main, bak) if p.is_file()]
+    except OSError as e:
+        return None, f"the data directory could not be read ({e.__class__.__name__})"
+    if not present:
+        return None, f"{main} does not exist"
+    path = present[0]
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (ValueError, OSError, RecursionError) as e:
         return None, f"{path} could not be read ({e.__class__.__name__})"
-    try:
-        cfg = json.loads(raw)
-    except ValueError:
-        return None, f"{path} is not valid JSON"
-    if not isinstance(cfg, dict):
-        return None, f"{path} does not hold a settings object"
-    mode = str(cfg.get("net_mode", "ask")).strip().lower()
+    mode = str(cfg.get("net_mode", "ask")).strip().lower() if isinstance(cfg, dict) else "ask"
     return (mode if mode in NET_MODES else "ask"), ""
 
 

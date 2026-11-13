@@ -43,37 +43,75 @@ function Read-Proxy {
 # A copy of localm.config.NET_OFF_REMEDY. See test_the_reporters_copy_the_net_off_remedy.
 $netOffRemedy = 'Turn it on in Settings > Server & network > Network access, or run: localm config net_mode ask'
 
-# The data dir localm uses: LOCALM_HOME, else the first line of the clone's
+# A path with a leading ~ resolved against the user's home, as Python's expanduser does.
+function Expand-Home([string]$p) {
+  if ($p -eq '~' -or $p.StartsWith('~/') -or $p.StartsWith('~\')) { return $HOME + $p.Substring(1) }
+  return $p
+}
+
+# The data dir localm uses: LOCALM_HOME, else (in a clone) the first line of
 # localm-home.cfg, else the clone's home folder.
 function Get-LocalmHome {
-  if ($env:LOCALM_HOME -and $env:LOCALM_HOME.Trim()) { return $env:LOCALM_HOME.Trim() }
+  if ($env:LOCALM_HOME -and $env:LOCALM_HOME.Trim()) { return (Expand-Home $env:LOCALM_HOME.Trim()) }
   $marker = Join-Path $root 'localm-home.cfg'
-  try {
-    if (Test-Path -LiteralPath $marker -PathType Leaf) {
+  if ((Test-Path -LiteralPath (Join-Path $root 'pyproject.toml') -PathType Leaf) -and
+      (Test-Path -LiteralPath $marker -PathType Leaf)) {
+    try {
       $line = Get-Content -LiteralPath $marker -Encoding UTF8 | Where-Object { $_.Trim() } | Select-Object -First 1
-      if ($line) { return $line.Trim() }
-    }
-  } catch { }
+      if ($line) { return (Expand-Home $line.Trim()) }
+    } catch { }
+  }
   return (Join-Path $root 'home')
 }
 
+# True when $t is one JSON value in strict syntax (what Python's json module
+# accepts without NaN): no comments, single quotes, bare names or trailing commas.
+function Test-StrictJson([string]$t) {
+  if ($t -match '[\x00-\x08\x0b\x0c\x0e-\x1f]') { return $false }
+  $s = [regex]::Replace($t, '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"', [string][char]1)
+  if ($s.Contains('"')) { return $false }
+  $s = [regex]::Replace($s, '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null', [string][char]2)
+  $s = [regex]::Replace($s, '[ \t\r\n]', '')
+  $v = '[\x01\x02\x03]'
+  do {
+    $prev = $s
+    $s = [regex]::Replace($s, '\[(?:' + $v + '(?:,' + $v + ')*)?\]', [string][char]3)
+    $s = [regex]::Replace($s, '\{(?:\x01:' + $v + '(?:,\x01:' + $v + ')*)?\}', [string][char]3)
+  } while ($s -ne $prev)
+  return ($s.Length -eq 1 -and [int][char]$s[0] -le 3 -and [int][char]$s[0] -ge 1)
+}
+
 # @(mode, why): mode is off, ask or allow as localm reads it (LOCALM_NET_MODE, else
-# net_mode in the data dir's config.json, an unset or unknown value meaning ask), or
-# unknown when config.json is missing or cannot be read, with why saying which.
+# net_mode in the data dir's config.json, or its .bak when config.json is absent;
+# an unset or unknown value, or a file that is not a JSON object, means ask), or
+# unknown when neither file exists, or one is present and cannot be read the way
+# localm reads it (strict UTF-8 JSON), where localm itself turns network access off.
 function Get-NetMode {
   $modes = @('off', 'ask', 'allow')
-  $e = "$env:LOCALM_NET_MODE".Trim().ToLower()
+  $e = "$env:LOCALM_NET_MODE".Trim().ToLowerInvariant()
   if ($modes -contains $e) { return @($e, '') }
-  $p = Join-Path (Get-LocalmHome) 'config.json'
-  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return @('unknown', "$p does not exist") }
-  try { $raw = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8) }
-  catch { return @('unknown', "$p could not be read") }
-  try { $cfg = $raw | ConvertFrom-Json } catch { return @('unknown', "$p is not valid JSON") }
-  if (-not ($cfg -is [System.Management.Automation.PSCustomObject])) {
-    return @('unknown', "$p does not hold a settings object")
+  try {
+    $main = Join-Path (Get-LocalmHome) 'config.json'
+    $p = $null
+    foreach ($c in @($main, "$main.bak")) {
+      if (Test-Path -LiteralPath $c -PathType Leaf) { $p = $c; break }
+    }
+    if (-not $p) { return @('unknown', "$main does not exist") }
+    $bytes = [System.IO.File]::ReadAllBytes($p)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+      return @('unknown', "$p could not be read (it starts with a byte order mark)")
+    }
+    $raw = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+    if (-not (Test-StrictJson $raw)) { return @('unknown', "$p could not be read (not valid JSON)") }
+    $cfg = $raw | ConvertFrom-Json
+  } catch {
+    return @('unknown', "the setting could not be read ($($_.Exception.Message))")
   }
   $m = 'ask'
-  if ($cfg.PSObject.Properties.Name -contains 'net_mode') { $m = "$($cfg.net_mode)".Trim().ToLower() }
+  if ($cfg -is [System.Management.Automation.PSCustomObject]) {
+    $prop = $cfg.PSObject.Properties | Where-Object { $_.Name -ceq 'net_mode' } | Select-Object -First 1
+    if ($prop) { $m = "$($prop.Value)".Trim().ToLowerInvariant() }
+  }
   if ($modes -notcontains $m) { $m = 'ask' }
   return @($m, '')
 }

@@ -41,6 +41,159 @@ def test_the_reporters_copy_the_net_off_remedy():
             "${net_off_remedy}.") in sh
 
 
+# ------------------- every reporter reads the setting as localm does ------- #
+
+_DEEP = b'{"net_mode": "ask", "x": ' + b"[" * 5000 + b"]" * 5000 + b"}"
+CORPUS = {
+    "off": {"config.json": b'{"net_mode": "off"}'},
+    "ask": {"config.json": b'{"net_mode": "ask"}'},
+    "allow": {"config.json": b'{"net_mode": "allow"}'},
+    "padded-upper": {"config.json": b'{"net_mode": " OFF "}'},
+    "no-key": {"config.json": b'{"mode": "full"}'},
+    "unknown-value": {"config.json": b'{"net_mode": "sometimes"}'},
+    "null-value": {"config.json": b'{"net_mode": null}'},
+    "other-case-key": {"config.json": b'{"NET_MODE": "off"}'},
+    "list": {"config.json": b"[]"},
+    "scalar": {"config.json": b"5"},
+    "empty-file": {"config.json": b""},
+    "bom-ask": {"config.json": b'\xef\xbb\xbf{"net_mode": "ask"}'},
+    "bom-off": {"config.json": b'\xef\xbb\xbf{"net_mode": "off"}'},
+    "bad-utf8": {"config.json": b'{"p": "caf\xe9", "net_mode": "ask"}'},
+    "single-quotes": {"config.json": b"{'net_mode': 'ask'}"},
+    "bare-key": {"config.json": b'{net_mode: "ask"}'},
+    "trailing-comma": {"config.json": b'{"net_mode": "ask",}'},
+    "line-comment": {"config.json": b'{"net_mode": "ask" // on\n}'},
+    "block-comment": {"config.json": b'{/* x */ "net_mode": "ask"}'},
+    "nan": {"config.json": b'{"net_mode": "ask", "x": NaN}'},
+    "raw-tab-in-string": {"config.json": b'{"net_mode": "a\tsk"}'},
+    "duplicate-key": {"config.json": b'{"net_mode": "ask", "net_mode": "off"}'},
+    "deep": {"config.json": _DEEP},
+    "bak-only-off": {"config.json.bak": b'{"net_mode": "off"}'},
+    "bak-only-ask": {"config.json.bak": b'{"net_mode": "ask"}'},
+    "corrupt-with-bak": {"config.json": b"{not json", "config.json.bak": b'{"net_mode": "ask"}'},
+    "nothing": {},
+}
+
+
+@pytest.fixture(scope="module")
+def corpus(tmp_path_factory):
+    root = tmp_path_factory.mktemp("netmode-corpus")
+    dirs = {}
+    for name, files in CORPUS.items():
+        d = root / name
+        d.mkdir()
+        for fname, data in files.items():
+            (d / fname).write_bytes(data)
+        dirs[name] = d
+    return dirs
+
+
+def _localm_reads(d, monkeypatch):
+    """What localm decides for data dir *d*: its mode when it can read the
+    setting, "unknown" when it cannot (it then turns network access off) or when
+    there is no config at all (the reporters ask then)."""
+    if not any((d / n).is_file() for n in ("config.json", "config.json.bak")):
+        return "unknown"
+    monkeypatch.setattr(config, "CONFIG_FILE", d / "config.json")
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    _cfg, ok = config.load_config_checked()
+    return config.network_mode() if ok else "unknown"
+
+
+def _agrees(got, want):
+    return got == want or (got == "unknown" and want in ("ask", "allow"))
+
+
+def test_the_corpus_covers_what_localm_cannot_read(corpus, monkeypatch):
+    seen = {_localm_reads(d, monkeypatch) for d in corpus.values()}
+    assert {"off", "ask", "allow", "unknown"} <= seen
+
+
+@pytest.mark.parametrize("name", sorted(CORPUS))
+def test_the_python_reporter_reads_the_setting_as_localm(corpus, monkeypatch, name):
+    want = _localm_reads(corpus[name], monkeypatch)
+    monkeypatch.setenv("LOCALM_HOME", str(corpus[name]))
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    mode, _why = ri.network_mode()
+    got = mode or "unknown"
+    assert _agrees(got, want), (name, got, want)
+
+
+_PS_DRIVER = r"""param([string]$Target, [string]$List)
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Target, [ref]$null, [ref]$null)
+foreach ($n in @('Expand-Home', 'Get-LocalmHome', 'Test-StrictJson', 'Get-NetMode')) {
+  $fn = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
+  if ($fn.Count -ne 1) { Write-Output "MISSING $n"; exit 1 }
+  Invoke-Expression $fn[0].Extent.Text
+}
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $List
+Remove-Item Env:LOCALM_NET_MODE -ErrorAction SilentlyContinue
+foreach ($line in Get-Content -LiteralPath $List) {
+  $name, $dir = $line -split "`t", 2
+  $env:LOCALM_HOME = $dir
+  $r = Get-NetMode
+  Write-Output "$name`t$($r[0])"
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def powershell_reads(corpus, tmp_path_factory):
+    pwsh = shutil.which("pwsh") or shutil.which("powershell")
+    if not pwsh:
+        pytest.skip("no PowerShell interpreter on PATH")
+    work = tmp_path_factory.mktemp("ps-netmode")
+    (work / "drive.ps1").write_text(_PS_DRIVER, encoding="utf-8")
+    listing = work / "dirs.txt"
+    listing.write_text("".join(f"{n}\t{d}\n" for n, d in corpus.items()), encoding="utf-8")
+    proc = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+         str(work / "drive.ps1"), "-Target", str(_REPO / "scripts" / "report_issue.ps1"),
+         "-List", str(listing)],
+        capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return dict(line.split("\t", 1) for line in proc.stdout.splitlines() if "\t" in line)
+
+
+@pytest.mark.parametrize("name", sorted(CORPUS))
+def test_the_powershell_reporter_reads_the_setting_as_localm(corpus, powershell_reads,
+                                                              monkeypatch, name):
+    want = _localm_reads(corpus[name], monkeypatch)
+    got = powershell_reads.get(name)
+    assert _agrees(got, want), (name, got, want)
+
+
+@pytest.fixture(scope="module")
+def bash_reads(corpus, tmp_path_factory):
+    bash = shutil.which("bash")
+    if not bash or "system32" in bash.lower() or not shutil.which("perl"):
+        pytest.skip("no bash with perl on PATH")
+    text = (_REPO / "report-issue.sh").read_text(encoding="utf-8")
+    start = text.index("ri_net_mode() {")
+    func = text[start:text.index("\n}\n", start) + 3]
+    work = tmp_path_factory.mktemp("sh-netmode")
+    lines = ["unset LOCALM_NET_MODE", func]
+    for name, d in corpus.items():
+        p = d.as_posix()
+        lines.append(
+            f"LOCALM_HOME=\"$(cygpath -u '{p}' 2>/dev/null || printf %s '{p}')\"; "
+            f"export LOCALM_HOME; printf '%s\\t%s\\n' '{name}' \"$(ri_net_mode | cut -f1)\"")
+    (work / "drive.sh").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    proc = subprocess.run([bash, (work / "drive.sh").as_posix()], cwd=work,
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return dict(line.split("\t", 1) for line in proc.stdout.splitlines() if "\t" in line)
+
+
+@pytest.mark.parametrize("name", sorted(CORPUS))
+def test_the_bash_fallback_reads_the_setting_as_localm(corpus, bash_reads, monkeypatch,
+                                                        name):
+    want = _localm_reads(corpus[name], monkeypatch)
+    got = bash_reads.get(name)
+    assert _agrees(got, want), (name, got, want)
+
+
 # ----------------------------- the Python reporter ------------------------ #
 
 @pytest.fixture
@@ -60,7 +213,7 @@ def home(tmp_path, monkeypatch):
     ('{"net_mode": "ask"}', "ask"),
     ('{}', "ask"),
     ('{"net_mode": "sometimes"}', "ask"),
-    ('﻿{"net_mode": "off"}', "off"),
+    ("[]", "ask"),
 ])
 def test_the_setting_is_read_from_config_json(home, text, mode):
     (home / "config.json").write_text(text, encoding="utf-8")
@@ -69,8 +222,8 @@ def test_the_setting_is_read_from_config_json(home, text, mode):
 
 @pytest.mark.parametrize("text, why", [
     (None, "does not exist"),
-    ("{not json", "is not valid JSON"),
-    ("[]", "does not hold a settings object"),
+    ("{not json", "could not be read (JSONDecodeError)"),
+    ('﻿{"net_mode": "ask"}', "could not be read (JSONDecodeError)"),
 ])
 def test_a_missing_or_unreadable_setting_is_unknown(home, text, why):
     if text is not None:
@@ -153,7 +306,7 @@ def test_an_unreadable_setting_with_no_one_to_ask_sends_nothing(home, monkeypatc
     out = capsys.readouterr().out
     assert sent == []
     assert rc == 1
-    assert "could not be read" in out and "is not valid JSON" in out
+    assert "could not be read (JSONDecodeError)" in out
     assert "nothing was sent" in out
 
 
@@ -238,7 +391,7 @@ def test_powershell_off_sends_nothing(tmp_path, recorder):
     assert REFUSAL in out
 
 
-@pytest.mark.parametrize("config_text", [None, "{not json", "[]"])
+@pytest.mark.parametrize("config_text", [None, "{not json", "\ufeff{\"net_mode\": \"ask\"}"])
 def test_powershell_unreadable_setting_with_no_one_to_ask_sends_nothing(
         tmp_path, recorder, config_text):
     rc, out, hits = _ps1_case(tmp_path, recorder, config_text, "--yes")
@@ -298,7 +451,7 @@ def test_bash_fallback_off_sends_nothing(tmp_path):
     assert REFUSAL in out
 
 
-@pytest.mark.parametrize("config_text", [None, "{not json", "[]"])
+@pytest.mark.parametrize("config_text", [None, "{not json", "\ufeff{\"net_mode\": \"ask\"}"])
 @pytest.mark.parametrize("answer, sends", [("y", True), ("", False), ("n", False)])
 def test_bash_fallback_unreadable_setting_asks_and_defaults_to_no(tmp_path, config_text,
                                                                    answer, sends):
