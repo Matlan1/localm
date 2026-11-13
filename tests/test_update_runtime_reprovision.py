@@ -935,6 +935,34 @@ def test_a_fallback_with_a_previous_runtime_that_loads_is_kept_and_the_update_go
     assert after["reprovision"] is False and "kept the amd-rocm runtime" in after["note"]
 
 
+def test_a_failed_setup_keeps_the_previous_runtime_but_tries_the_release_again(
+        install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    data, sig = _release()
+    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                        runner=_fake_setup_llama(install, "x", rc=1))
+    assert res["runtime"]["state"] == "kept"
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert "could not be installed (setup-llama exited 1)" in res["runtime_note"]
+    assert "tried again on the next start" in res["runtime_note"]
+    assert updater_runtime.kept_runtime(_lib(install)) is None
+    assert updater_runtime.plan(install, install)["reprovision"] is True
+
+
+def test_the_kept_record_is_not_part_of_the_runtime_and_never_writes_into_a_snapshot(tmp_path):
+    lib = _provision(tmp_path / "inst", "vulkan", "b11757")
+    snap = tmp_path / "snap"
+    au.snapshot_runtime(lib, snap)
+    updater_runtime._record_kept(lib, "vulkan", "b11757", "b11928", "did not load")
+    assert au.runtime_differs(lib, snap) is False
+    twin = snap / updater_runtime.KEPT_RECORD
+    import os
+    os.link(lib / updater_runtime.KEPT_RECORD, twin)
+    updater_runtime._record_kept(lib, "vulkan", "b11757", "b12000", "did not load")
+    assert '"b11928"' in twin.read_text(encoding="utf-8")
+    assert updater_runtime.kept_runtime(lib)["target"] == "b12000"
+
+
 def test_a_previous_runtime_that_does_not_load_either_still_rolls_the_update_back(
         install, monkeypatch):
     monkeypatch.setattr(updater_runtime, "_runtime_loads",

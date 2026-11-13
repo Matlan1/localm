@@ -30,9 +30,7 @@ from localm import _apply_update as au
 PENDING_FILE = "pending-runtime.json"
 STATUS_FILE = "runtime-update.json"
 
-# In the runtime dir: the previous build an update kept because this release's
-# build did not work here (see :func:`kept_runtime`).
-KEPT_RECORD = ".localm-runtime-kept.json"
+KEPT_RECORD = au.RUNTIME_KEPT_RECORD
 
 # Files that carried the runtime pins, newest layout first.
 _RELEASE_TREE_FILES = ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
@@ -239,7 +237,7 @@ def plan(staged_root, installed_root) -> dict:
             return out
         kept = kept_runtime(lib)
         if (kept is not None and kept["backend"] == backend and kept["target"] == target
-                and kept["kept"] == current):
+                and kept["kept"] == current and current != target):
             out["note"] = (f"kept the {backend} runtime {current}: this release's {target} did "
                            f"not work here ({kept['why']}); to try it again: "
                            f"{_manual_command(backend)}")
@@ -284,9 +282,13 @@ def kept_runtime(lib) -> Optional[dict]:
 
 
 def _record_kept(lib: Path, backend: str, kept: str, target: str, why: str) -> None:
-    """Record :func:`kept_runtime` for the runtime at *lib*. Raises OSError."""
-    (Path(lib) / KEPT_RECORD).write_text(json.dumps(
-        {"backend": backend, "kept": kept, "target": target, "why": why}), encoding="utf-8")
+    """Record :func:`kept_runtime` for the runtime at *lib*, as a new file that
+    replaces any earlier record (never written through a link to it). Raises
+    OSError."""
+    tmp = Path(lib) / (KEPT_RECORD + ".tmp")
+    tmp.write_text(json.dumps({"backend": backend, "kept": kept, "target": target,
+                               "why": why}), encoding="utf-8")
+    os.replace(tmp, Path(lib) / KEPT_RECORD)
 
 
 def _runtime_loads(lib: Path, backend: str, sl) -> tuple:
@@ -904,8 +906,11 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
       pending for the next start;
     - ``"kept"``: the re-provision did not produce the release's build for the
       same backend; the previous runtime was put back, it loads, and it stays in
-      use (recorded for :func:`kept_runtime`, so later checks treat it as current
-      for this release), like a build the user pinned;
+      use. When setup-llama finished and installed another backend or build (the
+      release's build does not work here), that is recorded for
+      :func:`kept_runtime` and later checks treat the kept build as current for
+      this release, like a build the user pinned; otherwise (setup-llama failed
+      or could not run) the re-provision is tried again on the next start;
     - ``"failed"``: the re-provision did not produce the release's build for the
       same backend and the previous runtime could not be put back or does not
       load (``error`` says what failed).
@@ -984,6 +989,7 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         problem = None if rc == 0 else f"setup-llama exited {rc}"
     except Exception as e:
         problem = f"could not run setup-llama: {e}"
+    setup_finished = problem is None
     now_backend, now_build = sl._provisioned_backend(lib), sl._provisioned_build(lib)
     if problem is None and now_backend != backend:
         problem = f"setup-llama installed the {now_backend} runtime instead of {backend}"
@@ -1005,17 +1011,22 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         loads, why_not = _runtime_loads(lib, backend, sl)
         if loads:
             previous = pending.get("from") or "build"
-            try:
-                _record_kept(lib, backend, previous, target, problem)
-            except OSError as e:
-                from localm.debuglog import logger
-                logger.warning("update: could not record the kept %s runtime: %s", backend, e)
+            if setup_finished:
+                try:
+                    _record_kept(lib, backend, previous, target, problem)
+                except OSError as e:
+                    from localm.debuglog import logger
+                    logger.warning("update: could not record the kept %s runtime: %s",
+                                   backend, e)
+                outcome = f"this release's {target} did not work here ({problem})"
+                retry = f"To try it again: {_manual_command(backend)}"
+            else:
+                outcome = f"this release's {target} could not be installed ({problem})"
+                retry = (f"It is tried again on the next start; to try it now: "
+                         f"{_manual_command(backend)}")
             status.update(state="kept", error=problem,
-                          why=(f"this release's {target} did not work here ({problem}); the "
-                               f"previous {backend} runtime {previous} was kept"),
-                          note=(f"kept the {backend} runtime {previous}: this release's "
-                                f"{target} did not work here ({problem}). To try it again: "
-                                f"{_manual_command(backend)}"))
+                          why=f"{outcome}; the previous {backend} runtime {previous} was kept",
+                          note=f"kept the {backend} runtime {previous}: {outcome}. {retry}")
             _write_status(status)
             return status
         kept = f"the previous runtime was put back but does not load either ({why_not})"

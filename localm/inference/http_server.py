@@ -6029,7 +6029,8 @@ def _finish_pending_update_steps() -> bool:
                 updater_components.clear_pending()
                 return _roll_back_during_restart()
         if status is not None:
-            _dbg.info("runtime update during restart: %s", status["note"])
+            (_dbg.warning if status["state"] == "kept" else _dbg.info)(
+                "runtime update during restart: %s", status["note"])
     comp_pending = updater_components.read_pending()
     if comp_pending is None and updater_components.catch_up(repair=True) is not None:
         comp_pending = updater_components.read_pending()
