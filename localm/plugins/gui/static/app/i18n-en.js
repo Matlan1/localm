@@ -17,6 +17,7 @@ export const I18N_EN = {
   "nav.models": "Models",
   "nav.plugins": "Plugins",
   "nav.settings": "Settings",
+  "nav.unknownView": "There is no page called \"{view}\" here (its plugin may be off), so Chat is open.",
 
   // ---- Sidebar ----
   "sidebar.activityDetails": "Click for details",
@@ -38,7 +39,9 @@ export const I18N_EN = {
   "sidebar.status.loadFailed": "load failed",
   "sidebar.status.loading": "loading {model}…",
   "sidebar.status.modelsUnavailable": "models unavailable (HTTP {status})",
+  "sidebar.status.needsKey": "this server needs an API key to manage models from here",
   "sidebar.status.noModel": "no model",
+  "sidebar.status.noModelsScope": "this key cannot list models",
   "sidebar.status.pageStale": "page out of date - reload to reconnect",
   "sidebar.status.serverUnreachable": "server unreachable",
   "sidebar.status.unloadFailed": "unload failed",
@@ -65,6 +68,7 @@ export const I18N_EN = {
   "common.image.notShown": "Image not shown",
   "common.image.notShownWithAlt": "Image not shown ({alt})",
   "common.imageConsent.allow": "Show images from this site",
+  "common.imageConsent.askAgain": "Ask again",
   "common.imageConsent.body":
     "A reply wants to show an image from {origin}. Loading it tells that site someone is reading this reply, and the address itself can carry information out. This machine makes the request, not your browser.",
   "common.imageConsent.decline": "Do not load",
@@ -78,6 +82,7 @@ export const I18N_EN = {
   "common.imageProxy.failed": "This localm could not fetch it (HTTP {status}).",
   "common.imageProxy.refused": "This localm refused to fetch it.",
   "common.imageProxy.unreachable": "This localm could not reach it.",
+  "common.imageProxy.cancelled": "The question about {origin} was closed without an answer, so nothing was loaded.",
   "common.modal.cancel": "Cancel",
   "common.modal.ok": "OK",
   "common.modelDownload.bodyNoSize":
@@ -111,6 +116,10 @@ export const I18N_EN = {
   "common.modelDownload.bodyNativeNoSize": "Generating needs '{filename}', which isn't downloaded yet.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
+  "common.modelDownload.paused": "Download paused: {filename}. The data saved so far is kept; downloading it again continues from there.",
+  "common.modelDownload.interrupted": "Download interrupted: {filename}. The connection to localm was lost; the download may still be running.",
+  "common.modelDownload.endedFailed": "Download failed: {filename}",
+  "common.modelDownload.missingNoSource": "'{filename}' is missing and the workflow gives no download source for it. Add the file with the Add a model card on the Models page, then try again.",
   "common.modelDownload.notNow": "Not now",
   "common.modelDownload.preflightUnavailable":
     "Could not check for missing {kind} models before generating - the check will run again when you press Generate.",
@@ -1628,7 +1637,6 @@ export const I18N_EN = {
   // ---- Settings > schema-driven fields (settings_schema.py CORE_FIELDS) ----
   "settings.field.inheritOption": "(inherit)",
   "settings.field.defaultPlaceholder": "default ({value})",
-  "settings.field.secretPlaceholder": "unchanged",
   "settings.field.secretConfiguredPlaceholder": "saved (enter new value to replace)",
   "settings.field.secretEnvPlaceholder": "set via environment variable",
   "settings.field.secretNotSetPlaceholder": "not set (optional)",
@@ -1643,10 +1651,11 @@ export const I18N_EN = {
   "settings.field.secretClearButton": "Clear",
   "settings.field.secretUndoButton": "Undo",
   "settings.field.secretClearTitle": "Clear stored secret on save",
+  "settings.field.secretUndoTitle": "Keep the stored secret",
   "settings.field.listPlaceholder": "comma-separated",
   "settings.field.pathlistRowPlaceholder": "folder path",
   "settings.field.browse": "Browse...",
-  "settings.field.pathlistPickTitle": "Pick a folder to allow",
+  "settings.field.pathlistPickTitle": "Pick a folder",
   "settings.field.pathlistRemoveTitle": "Remove this folder",
   "settings.field.pathlistAddButton": "Add folder",
   "settings.field.livePort.knownValue":
@@ -1693,12 +1702,18 @@ export const I18N_EN = {
   "keygate.keyHint": "Saved on this device (a secure cookie) so you stay signed in.",
   "keygate.connect": "Connect",
   "keygate.scan": "Scan QR code",
+  "keygate.enterKey": "Enter your API key first.",
+  "keygate.wrongKey": "This key was not accepted. Check it for a typo, or ask the owner of this server for a valid key.",
+  "keygate.unreachable": "Could not reach the LocaLM server to check the key. Check that it is running, then try again.",
+  "keygate.refused": "The server refused the sign-in (HTTP {status}).",
+  "keygate.sessionEnded": "Your sign-in ended: the key may have been revoked or may have expired. Enter a key to continue.",
   "qr.title": "Scan the pairing QR",
   "qr.body": "On the computer running LocaLM, open <b>Settings → Server & network → Companion app</b> and point your camera at the QR.",
   "qr.starting": "Starting camera…",
   "qr.unavailable": "QR scanning is not available here.",
   "qr.cameraFailed": "Could not open the camera (permission denied?).",
   "qr.pointAt": "Point at the QR in the computer's Settings.",
+  "qr.notPairing": "That QR code is not a LocaLM pairing code. Point at the QR in the computer's Settings.",
   "installGate.title": "Add localm to your phone",
   "installGate.body": "localm runs as an installable app. Add it to your home screen for a full-screen, app-like experience - then open it any time with one tap. You can also just continue in the browser.",
   "installGate.install": "Install app",
@@ -1741,6 +1756,8 @@ export const I18N_EN = {
   "tts.storageBlocked": "This browser blocked storage, so the voice resets on reload",
   "slash.needsPlugin": "/{cmd} needs the {plugin} plugin - install or enable it on the Plugins page.",
   "nav.group.studio": "Studio",
+  "nav.leaveSettings.title": "Unsaved settings",
+  "nav.leaveSettings.leave": "Leave without saving",
   "nav.group.agent": "Agent",
   "memory.age.justNow": "just now",
   "memory.age.minutes": "{count} min ago",
@@ -2088,8 +2105,10 @@ export const I18N_EN = {
   "settings.field.ragIndexingMode.help": "Which folders the server may index (`localm rag add` in a terminal is not bound). whitelist = home, the working directory and Allowed folders. blacklist = all but Denied folders. Credentials never.",
   "settings.field.ragAllowedRoots.label": "Allowed folders",
   "settings.field.ragAllowedRoots.help": "Folders indexable in whitelist mode, besides your home folder and the folder the server started from. Picking a folder outside this list offers to add it here and continue.",
+  "settings.field.ragAllowedRoots.pickTitle": "Pick a folder to allow",
   "settings.field.ragDeniedRoots.label": "Denied folders",
   "settings.field.ragDeniedRoots.help": "Folders the server and scheduled jobs never index in blacklist mode (everything else is allowed). Ignored in whitelist mode. `localm rag add` in a terminal is not bound by this.",
+  "settings.field.ragDeniedRoots.pickTitle": "Pick a folder to deny",
   "settings.field.ragClassifyUnknownFiles.label": "Classify unknown files with AI",
   "settings.field.ragClassifyUnknownFiles.help": "Let the local LLM guess the format of a file whose extension it does not recognise, when a chat model is loaded. Off, those files are tagged plain text.",
 
@@ -2248,12 +2267,6 @@ export const I18N_EN = {
   "settings.field.tts.device.help": "webgpu currently produces corrupted, buzzing audio on many GPUs, so auto always uses wasm instead. Pick webgpu only to test whether that has been fixed.",
   "settings.field.tts.dtype.label": "Model precision",
   "settings.field.tts.dtype.help": "auto picks fp32 (clean audio). q8/fp16 download less but sound worse; q8 produced audible cracks on the WASM path.",
-  "settings.field.tts.engine.label": "Engine",
-  "settings.field.tts.engine.help": "Speech engine the plugin uses.",
-  "settings.field.tts.library.label": "Kokoro library path",
-  "settings.field.tts.library.help": "Path to the vendored kokoro-js bundle, relative to the tts plugin's static folder.",
-  "settings.field.tts.wasmPaths.label": "ONNX runtime WASM path",
-  "settings.field.tts.wasmPaths.help": "Folder holding the onnxruntime WASM runtime, relative to the tts plugin's static folder; keep the trailing slash. Blank falls back to the vendored copy that ships with the plugin.",
 
   // ---- Settings > schema-driven section headings (CORE_SECTION_HEADING) ----
   "settings.sectionHeading.engine": "Runtime & GPU",
@@ -2289,11 +2302,9 @@ export const I18N_EN = {
   "settings.sectionHeading.media": "Media",
   "settings.sectionHeading.avatars": "Avatars",
   "settings.sectionHeading.tts": "Text-to-speech",
-  "settings.sectionHeading.ttsPlugin": "Text-to-speech plugin",
   "settings.sectionHeading.pluginSettings": "Plugin settings",
   "settings.voice.setupHead": "Speech model setup",
   "settings.voice.checking": "Checking speech model status...",
-  "settings.voice.download": "Download speech model",
   "settings.voice.inactive": "Speech-to-text plugin is not active.",
   "settings.voice.ready": "Speech model ({model}) is downloaded and ready.",
   "settings.voice.notDownloaded": "Speech model ({model}) is not downloaded yet.",
@@ -2353,7 +2364,8 @@ export const I18N_EN = {
   "settings.tts.downloadNow": "Download voice model now",
   "settings.tts.cacheCheckFailed": "Could not check voice model cache: {message}",
   "settings.tts.downloading": "Downloading voice model...",
-  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Server & network) - the TTS plugin has not finished starting up to offer its own confirmation.",
+  "settings.tts.needsNetwork": "The voice model cannot be downloaded: Network access is off and model downloads are not allowed (Settings > Server & network > Outbound access).",
+  "settings.tts.cannotAsk": "Network access is set to ask, but the text-to-speech plugin is not running in this page, so it cannot ask to download the voice model. Reload the page; if this stays, see Settings > System > Recent errors.",
   "settings.tts.modelReady": "Voice model ready in browser",
   "settings.tts.setupFailed": "Voice model setup failed: {message}",
   "settings.tts.savedUnreadable": "Saved, but the server's reply could not be read - reloading the settings to show what is actually stored",
@@ -2557,6 +2569,7 @@ export const I18N_EN = {
   "settings.perf.ctxHelpPrefix": "Tokens of history the model starts with (",
   "settings.perf.ctxHelpSuffix": "); the window grows on demand.",
   "settings.perf.estimateUnavailable": "estimate unavailable",
+  "settings.perf.estimateNoModel": "No model is loaded: load one to see how much VRAM it needs with these values.",
   "settings.perf.estimateSummary": "~{needed} GB needed (weights {weights} · context {kv} · overhead {overhead})",
   "settings.perf.estimateFreeKnownSuffix": " · {free} GB free - ",
   "settings.perf.estimateFreeHeldSuffix": " · {free} GB free + {held} GB held by this model - ",
@@ -2569,7 +2582,7 @@ export const I18N_EN = {
   "settings.perf.reloadBusyToast": "Saved, but {model} is busy - the new settings apply on its next load",
   "settings.perf.reloadFailedToast": "Saved, but reloading {model} failed: {message}",
   "settings.perf.saveFailedToast": "Could not save: {message}",
-  "settings.perf.gpuLayersRangeToast": "GPU layers must be between 0 and 999",
+  "settings.perf.gpuLayersRangeToast": "GPU layers must be a whole number from 0 to 999",
   "settings.perf.mainGpuLabel": "Main GPU",
   "settings.perf.mainGpuHelp": "GPU for HuggingFace models, the embedder, the vision projector and localm's own ComfyUI; a GGUF chat model spreads over every GPU unless Split across GPUs names some. With none chosen each of these picks its own. Saves immediately; applies on the next model load.",
   "settings.perf.splitLabel": "Split across GPUs",
@@ -2623,15 +2636,15 @@ export const I18N_EN = {
   "settings.companion.kindTailscale": "Tailscale",
   "settings.companion.hintCertUntrusted": "This device no longer trusts this server's certificate. Open localm-ca.crt from the server (/localm-ca.crt) and install it, then reload.",
   "settings.companion.hintInstalled": "Running as an installed app.",
-  "settings.companion.hintTrustCert": "To install localm as an app, trust this device's certificate first (the “Install certificate” step above), then reload.",
+  "settings.companion.hintTrustCert": "To install localm as an app, first make this device trust the server's certificate: open /localm-ca.crt from the server, install it, then reload.",
   "settings.companion.hintNoAddress":
     "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone.",
   "settings.companion.hintLoopback":
-    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.",
+    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server. Once the key is set, `localm gui -H 0.0.0.0` starts it that way too. See docs/phone.md.",
 
   // ---- Settings > Your data ----
   "settings.privacyData.title": "Your data",
-  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone.",
+  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone. Memory facts, generated images, music and video, coder sessions and logs are not touched. In privacy mode the server's conversation store is closed, so conversations it kept earlier stay until you delete them with chat persistence on.",
 
   // ---- Settings > Diagnostics ----
   "settings.diagnostics.title": "Diagnostics",
@@ -2681,7 +2694,7 @@ export const I18N_EN = {
   // ---- Settings > Other running instances ----
   "settings.instances.title": "Other running instances",
   "settings.instances.help":
-    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install.",
+    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install. A server of another install is found only on localm's usual ports (8642 to 8741, and 11434).",
   "settings.instances.loading": "Looking for other instances…",
   "settings.instances.emptyTitle": "No other instances running",
   "settings.instances.emptyBody": "Only the server behind this page is running right now.",
@@ -2989,11 +3002,11 @@ export const I18N_EN = {
   "appearance.language.help":
     "The language the interface is shown in. Saved on the server, so it follows this instance to every browser that connects to it. Parts of the app that are not translated yet stay in English.",
   "appearance.language.saveFailed":
-    "Could not save the language on the server - it applies in this browser but may not on other devices.",
+    "Could not save the language on the server - it applies in this browser until the page is reloaded, then the language saved on the server returns.",
   "appearance.logoStyle": "Logo style",
   "appearance.logoStyle.help":
     "How the wordmark is drawn in the sidebar. Saved on the server, so every browser and the desktop launcher use it.",
-  "appearance.logoStyle.tile": "Use the {name} wordmark",
+  "appearance.logoStyle.tile": "Use the {name} wordmark, with \"{blue}\" in blue",
   "appearance.logoStyle.saveFailed": "The logo style could not be saved on the server - it applies in this browser for now, and the saved style returns on the next load.",
   "appearance.showMmproj": "Show vision projector (.mmproj) files in repository search results (this browser only)",
   "appearance.title": "Appearance",
@@ -3446,7 +3459,7 @@ export const I18N_EN = {
     "The browser plugin is not installed. Install it on the Plugins page to " +
     "let the model drive a web browser.",
   "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
-  "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
+  "browser.setup.readySystem": "localm will use the first of these that starts, found on this computer: {browser}.",
   "browser.setup.switchedToBundled": "Switched to the bundled browser.",
   "browser.setup.systemMissing":
     "No supported browser was found on this computer. localm looked for {names}.",

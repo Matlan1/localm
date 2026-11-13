@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -156,7 +157,10 @@ def _run_menu_entry(tmp_path: Path, *, answer: str, is_macos: int = 0,
     bin_dir = tmp_path / ".venv" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     python = bin_dir / "python"
-    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real = Path(sys.executable).as_posix()
+    root = Path(__file__).resolve().parents[1].as_posix()
+    python.write_text(f'#!/bin/sh\nPYTHONPATH="{root}" MSYS_NO_PATHCONV=1 exec "{real}" "$@"\n',
+                      encoding="utf-8")
     _mark_executable(python)
     if branded:
         exe = tmp_path / ".venv" / "bin" / "LocaLM"
@@ -218,7 +222,8 @@ def test_choice_1_and_the_default_open_the_launcher(tmp_path, answer):
 
 
 @pytest.mark.parametrize("branded, target", [
-    (True, "/.venv/bin/LocaLM -m localm gui"),
+    pytest.param(True, "/.venv/bin/LocaLM -m localm gui", marks=pytest.mark.skipif(
+        os.name == "nt", reason="a native Windows Python cannot see a bash path")),
     (False, "/.venv/bin/localm gui"),
 ])
 def test_choice_2_opens_the_gui(tmp_path, branded, target):

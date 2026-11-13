@@ -131,7 +131,9 @@ served by another instance and the configured `embedding_model` count as registe
   `1970-01-01T00:00:00Z` when it cannot be read), `digest` (the recorded SHA-256, or
   empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
   architecture when recorded, else empty), `families` (a list holding `family`,
-  or null), and empty `parameter_size` and `quantization_level`.
+  or null), `parameter_size` (the parameter count in the weights' file or
+  folder name, such as `8B` or `8x7B`, else empty) and `quantization_level` (the
+  quantization in that name, such as `Q4_K_M`, else empty).
 - `GET /api/ps` returns `{"models": [...]}`: the loaded models, each with the
   `name`, `model`, `size`, `digest` and `details` of a tag (no `modified_at`),
   `expires_at` (the idle-unload time, or a date in 2318 when no idle

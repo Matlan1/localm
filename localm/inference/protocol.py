@@ -194,10 +194,15 @@ class CompletionRequest(SamplingFields):
     best_of: Optional[int] = None
     logprobs: Optional[int] = None
     suffix: Optional[str] = None
-    # A request-level cap must be >= 1: the engine uses max_tokens <= 0
-    # internally as an "unlimited" sentinel, so a 0/negative from a client is
-    # rejected rather than turned into an unbounded generation.
+    # A request-level cap is >= 1, or 0 for "no request cap" (read as omitted:
+    # the configured default applies). A negative value is refused.
     max_tokens: Optional[int] = Field(None, ge=1)
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _zero_max_tokens_is_omitted(cls, v):
+        """0 is the same request as an omitted max_tokens."""
+        return _zero_cap_as_omitted(v)
     # allow_inf_nan=False: stdlib json parses the bare NaN/Infinity tokens, and
     # a non-finite temperature/top_p/penalty would flow straight into the native
     # sampler; it is rejected with a 422 instead.
@@ -226,6 +231,14 @@ class CompletionRequest(SamplingFields):
         return normalize_stop(v)
 
 
+def _zero_cap_as_omitted(v):
+    """``None`` for a reply cap of 0 (an int, not a bool), else *v* unchanged.
+    The engine reads a cap <= 0 as unlimited, so 0 never reaches it."""
+    if isinstance(v, int) and not isinstance(v, bool) and v == 0:
+        return None
+    return v
+
+
 class ChatRequest(SamplingFields):
     # None, not "localm": "localm" is truthy, so it must not also be the
     # field's own default, or an omitted field is indistinguishable from an
@@ -233,12 +246,18 @@ class ChatRequest(SamplingFields):
     model: Optional[str] = None
     messages: list[Message]
     stream: bool = False
-    # A request cap must be >= 1 (0/negative collides with the internal
-    # "unlimited" sentinel), and temperature/top_p/penalty must be finite (a
+    # A request cap is >= 1, or 0 for "no request cap" (read as omitted: the
+    # configured default applies); temperature/top_p/penalty must be finite (a
     # non-finite value reaches the native sampler).
     max_tokens: Optional[int] = Field(None, ge=1)
     # The current OpenAI name for max_tokens.
     max_completion_tokens: Optional[int] = Field(None, ge=1)
+
+    @field_validator("max_tokens", "max_completion_tokens", mode="before")
+    @classmethod
+    def _zero_max_tokens_is_omitted(cls, v):
+        """0 is the same request as an omitted cap."""
+        return _zero_cap_as_omitted(v)
     # {"type": "text" | "json_object" | "json_schema", ...}: the reply is
     # constrained to JSON (a schema) by a grammar.
     response_format: Optional[Any] = None

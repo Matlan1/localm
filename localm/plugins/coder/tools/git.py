@@ -158,8 +158,8 @@ def tool_git_commit(
     message:
         Commit message.
     files:
-        List of file paths to stage.  When omitted, stages all tracked
-        modifications (``git add -A``).
+        List of file paths to stage.  When omitted, stages every change,
+        new untracked files included (``git add -A``; ignored files stay out).
     """
     # Stage
     if files:
@@ -474,4 +474,5 @@ def tool_git_create_branch(
     if not ok:
         return ToolResult.error(f"git branch failed: {out}")
     action = "created and checked out" if checkout else "created"
-    return ToolResult.success(out or f"Branch '{name}' {action}.", summary=f"git branch {name}")
+    text = out if out and out != "(no output)" else f"Branch '{name}' {action}."
+    return ToolResult.success(text, summary=f"git branch {name}")

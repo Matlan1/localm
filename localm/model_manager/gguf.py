@@ -32,6 +32,31 @@ from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_re
 
 
 # ------------------------------------------------------------------ #
+#  Quantization label in a file name                                  #
+# ------------------------------------------------------------------ #
+
+# Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
+# Q6_K, F16, BF16, MXFP4_MOE, TQ1_0. Matched case-insensitively on word-ish
+# boundaries.
+QUANT_LABEL_RE = re.compile(
+    r"(?i)(?<![A-Z0-9])(IQ\d+_[A-Z0-9]+|Q\d+_K(?:_[SML])?|Q\d+_\d+|TQ[12]_0"
+    r"|MXFP4(?:_MOE)?|BF16|F16|F32|FP16|FP32)(?![A-Z0-9])")
+
+
+def quant_label(name: str) -> str:
+    """The single quant label for *name* (upper case), or ``""``. An
+    MXFP4/MXFP4_MOE match wins over an earlier one: a mixed-precision MoE export
+    names the non-expert tensor precision first ('...-bf16_MXFP4_MOE.gguf')."""
+    matches = QUANT_LABEL_RE.findall(name)
+    if not matches:
+        return ""
+    for m in matches:
+        if m.upper().startswith("MXFP4"):
+            return m.upper()
+    return matches[0].upper()
+
+
+# ------------------------------------------------------------------ #
 #  Split GGUF (multi-part *-00001-of-00003.gguf files)                 #
 # ------------------------------------------------------------------ #
 

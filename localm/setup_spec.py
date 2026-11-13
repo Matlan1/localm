@@ -26,12 +26,16 @@ CLI (one answer per line on stdout, exit 0; exit 2 on a usage error):
         the plugins a user can choose, space-separated
     python -m localm.setup_spec plugin-defaults
         the preselected plugins, comma-separated
+    python -m localm.setup_spec menu-entry launcher|gui <install folder>
+        the Linux application menu entry (.desktop file text) for that choice
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 ALL_PLATFORMS = ("win32", "linux", "darwin")
 POSIX = ("linux", "darwin")
@@ -201,6 +205,87 @@ def setup_plugins() -> list:
             if catalog.offered_entry(e) and not e.preinstalled]
 
 
+# Characters that make a Desktop Entry Exec= argument need double quotes, and the
+# ones that must be backslash-escaped inside them (freedesktop Desktop Entry
+# Specification, "The Exec key").
+_EXEC_RESERVED = frozenset(' \t\n"\'\\><~|&;$*?#()`')
+_EXEC_ESCAPED = frozenset('"`$\\')
+
+MENU_ENTRY_NAME = "LocaLM"
+MENU_ENTRY_COMMENT = "Local LLM - chat, coder, models, images"
+MENU_ENTRY_FILE = "localm.desktop"
+
+
+def desktop_exec(argv) -> str:
+    """The Exec= value that runs *argv*: each argument holding a reserved
+    character (a space among them) in double quotes with ``"`` `` ` `` ``$``
+    and ``\\`` backslash-escaped, ``%`` doubled, and then every backslash
+    doubled for the string-value escape the spec applies first (a newline or
+    tab inside an argument is written as ``\\n`` or ``\\t``)."""
+    parts = []
+    for arg in argv:
+        arg = str(arg).replace("%", "%%")
+        if not arg or any(c in _EXEC_RESERVED for c in arg):
+            arg = '"' + "".join("\\" + c if c in _EXEC_ESCAPED else c for c in arg) + '"'
+        parts.append(arg)
+    return (" ".join(parts).replace("\\", "\\\\").replace("\n", "\\n")
+            .replace("\t", "\\t"))
+
+
+def desktop_unstring(value: str) -> str:
+    """A Desktop Entry string value with its escapes (``\\s``, ``\\n``,
+    ``\\t``, ``\\r``, ``\\\\``) undone."""
+    out, i = [], 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value):
+            out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r",
+                        "\\": "\\"}.get(value[i + 1], value[i:i + 2]))
+            i += 2
+            continue
+        out.append(value[i])
+        i += 1
+    return "".join(out)
+
+
+def desktop_string(value) -> str:
+    """*value* as a Desktop Entry string value (backslash, newline and tab escaped)."""
+    return (str(value).replace("\\", "\\\\").replace("\n", "\\n")
+            .replace("\t", "\\t"))
+
+
+def menu_entry_argv(kind: str, root) -> list:
+    """The command a menu entry of *kind* starts for the install at *root*:
+    ``gui`` runs the branded ``.venv/bin/LocaLM -m localm gui`` when it is
+    executable, else ``.venv/bin/localm gui``; ``launcher`` runs
+    ``localm-launcher.sh``. ValueError for another kind."""
+    root = Path(root)
+    if kind == "gui":
+        branded = root / ".venv" / "bin" / "LocaLM"
+        if os.access(branded, os.X_OK):
+            return [branded.as_posix(), "-m", "localm", "gui"]
+        return [(root / ".venv" / "bin" / "localm").as_posix(), "gui"]
+    if kind == "launcher":
+        return [(root / "localm-launcher.sh").as_posix()]
+    raise ValueError(f"unknown menu entry kind: {kind!r}")
+
+
+def menu_entry(kind: str, root) -> str:
+    """The text of the Linux application menu entry of *kind* (``launcher`` or
+    ``gui``) for the install at *root*, every value escaped per the Desktop
+    Entry Specification. The icon is the bundled SVG, else the .ico, else none."""
+    root = Path(root)
+    exec_line = desktop_exec(menu_entry_argv(kind, root))
+    icon = next((p for p in (root / "assets" / "localm.svg", root / "assets" / "localm.ico")
+                 if p.is_file()), None)
+    lines = ["[Desktop Entry]", "Type=Application", f"Name={MENU_ENTRY_NAME}",
+             f"Comment={MENU_ENTRY_COMMENT}", f"Exec={exec_line}",
+             f"Path={desktop_string(root.as_posix())}"]
+    if icon is not None:
+        lines.append(f"Icon={desktop_string(icon.as_posix())}")
+    lines += ["Terminal=false", "Categories=Utility;Development;Science;"]
+    return "\n".join(lines) + "\n"
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
@@ -223,8 +308,12 @@ def main(argv=None) -> int:
     if cmd == "plugin-defaults" and len(args) == 1:
         print(",".join(RECOMMENDED_PLUGINS))
         return 0
+    if cmd == "menu-entry" and len(args) == 3 and args[1] in ("launcher", "gui"):
+        sys.stdout.write(menu_entry(args[1], args[2]))
+        return 0
     print("usage: python -m localm.setup_spec backend-menu <recommended> | "
-          "backend-hint | extras [app-window] | plugins | plugin-defaults",
+          "backend-hint | extras [app-window] | plugins | plugin-defaults | "
+          "menu-entry launcher|gui <install folder>",
           file=sys.stderr)
     return 2
 

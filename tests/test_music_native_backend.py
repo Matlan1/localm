@@ -108,7 +108,7 @@ def test_auto_on_a_fresh_home_is_native_with_a_note(no_comfy):
 
 
 @pytest.mark.parametrize("cfg", [
-    {"comfy_target": "user"},
+    {"comfy_target": "user", "comfy_api_url": "http://127.0.0.1:8190"},
     {"comfy_api_url": "http://127.0.0.1:8188"},
     {"plugins": {"music": {"comfy": {"workdir": "D:/path/to/ComfyUI"}}}},
 ])

@@ -401,6 +401,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         recording.
 
         Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
+        ``still_missing`` (flagged by an earlier run and still gone),
         ``missing_total``, ``restored``, ``pruned``, ``roots``,
         ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), and
         ``vector_degrade_reason`` (why semantic search is degraded after this run,
