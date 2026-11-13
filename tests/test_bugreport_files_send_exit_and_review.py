@@ -50,7 +50,8 @@ def test_two_reports_saved_in_one_second_keep_both(monkeypatch, tmp_path):
     assert first is not None and second is not None and first != second
     assert first.read_text(encoding="utf-8") == "first"
     assert second.read_text(encoding="utf-8") == "second"
-    assert br._is_saved_report_name(second.name)
+    from localm.bugreport.persistence import _is_saved_report_name
+    assert _is_saved_report_name(second.name)
 
 
 def test_the_review_text_is_what_an_upload_sends():

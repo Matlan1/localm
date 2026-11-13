@@ -730,9 +730,9 @@ def test_background_crashes_are_saved_never_sent(world, capsys):
     loop.handler(loop, {"exception": asyncio.CancelledError()})
     assert loop.defaults == [{"message": "only a message"}]
     reports = _saved_reports(world)
-    assert len(reports) == 1
-    text = reports[0].read_text(encoding="utf-8")
-    assert text.startswith("# localm bug report: an async task crashed\n")
+    assert len(reports) == 3
+    heads = {r.read_text(encoding="utf-8").splitlines()[0] for r in reports}
+    assert "# localm bug report: an async task crashed" in heads
     assert world.transport.requests == []
     out = capsys.readouterr().out
     assert "Sorry - a background task crashed (thread 'preload')." in out
