@@ -118,12 +118,13 @@ def resolve_config(name: str, cfg: dict,
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
         return own, None
 
-    scan_error: Optional[OSError] = None
+    derived = active is None
     if active is None:
-        installed, scan_error = _installed_plugins()
-        active = installed & set(cfg.get("plugins_enabled", []) or [])
+        active = active_plugins(cfg)
     if src not in _plugins(cfg) or src not in active:
-        if scan_error is not None and src in _plugins(cfg):
+        scan_error = (_installed_plugins()[1]
+                      if derived and src in _plugins(cfg) else None)
+        if scan_error is not None:
             return own, (f"'{name}' is set to use '{src}' config, but the plugins "
                          f"folder could not be read to check whether '{src}' is "
                          f"active ({scan_error}); using its own settings.")
