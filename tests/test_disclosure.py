@@ -409,9 +409,8 @@ def _has_explicit_user_ace(out: str) -> bool:
     ``icacls /inheritance:r /grant:r user:F`` leaves an explicit ``USER:(F)``,
     while an inherited grant reads ``USER:(I)(F)``.
     """
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    if not user:
-        return False
+    from tests._win_acl import token_user_name
+    user = token_user_name()
     return f"{user}:(F)" in out
 
 

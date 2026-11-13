@@ -65,10 +65,14 @@ localm memory clear [-y]                             # erase everything, archive
 
 `memory add` produces the same kind of record `POST /api/memory/append` does:
 `--kind` is `semantic` (a standing fact, the default) or `episodic` (something
-that happened), and `--importance` (default 0.8) is the weight recall and
-prune use. Source is always `user` - there is no `--source` flag - and
+that happened), and `--importance` (0 to 1, default 0.8) is the weight recall
+and prune use. Source is always `user` - there is no `--source` flag - and
 `--kind` accepts only those two values; anything else is a usage error. `add`
-refuses an empty fact and refuses once the store holds 256 records.
+refuses an empty fact and refuses once the store holds 256 records. A fact you
+already added (the same text, case and spacing ignored) is not stored again:
+`add` says "Already in memory". A fact localm stored on its own with the same
+text becomes one you added. `/remember` in the chat and the chat's "remember
+that ..." follow the same rule.
 
 In privacy mode `add`, `restore`, `accept` and `reject` refuse, and `corrections`
 lists nothing (listing prunes the proposal file, which is a write); `list`,
@@ -81,8 +85,10 @@ outright; the archive `forgotten` lists is filled only when localm drops a fact
 itself - evicting one at the record cap, or replacing one you accepted a
 correction for - and `restore` can only reach those.
 
-`clear` erases everything: live facts, the forgotten archive, and any pending
-or dismissed corrections, so no fact text survives it anywhere on disk. It
+`clear` erases everything: live facts, lines of the facts file localm could not
+read, the forgotten archive, any pending or dismissed corrections, and the
+`chat-memory.md` file of older localm versions, so no fact text survives it
+anywhere on disk. It
 reads its own result back afterward and refuses to report success if anything
 is still there.
 
@@ -128,8 +134,8 @@ Over the HTTP API (the routes the memory plugin mounts; see
 |---|---|
 | `GET /api/memory` | The current facts (text + per-item metadata) and whether writes are allowed. |
 | `PUT /api/memory` | Bulk edit. Body `{"text", "base"}`: `text` is the edited list, `base` the `text` that `GET /api/memory` returned when the edit started. A line matching an existing fact keeps that record; new lines are added; a fact in `base` that is no longer in `text` is deleted; a fact added since `base` was read is kept. `base` is required: a request without it is refused with `422` (`"loc": ["body", "base"], "msg": "Field required"`) and changes nothing. |
-| `POST /api/memory/append` | Add one fact. |
-| `PATCH /api/memory/{id}` | Edit one record's text or importance. |
+| `POST /api/memory/append` | Add one fact. Answers `{"status": "exists", "id"}` and stores nothing when you already added the same text. |
+| `PATCH /api/memory/{id}` | Edit one record's text or importance. Empty text is refused with `400`. |
 | `DELETE /api/memory/{id}` | Delete one record. |
 | `POST /api/memory/consolidate` | Distil durable facts from recent sessions now (needs a loaded model). |
 | `GET /api/memory/forgotten` | List archived (evicted or superseded) records. |

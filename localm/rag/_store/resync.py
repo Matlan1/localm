@@ -65,6 +65,9 @@ class _CollectionResync:
             "unavailable_roots": unavailable,
             "blocked_roots": blocked,
             "missing": missing,
+            "still_missing": sorted(
+                k for k, e in docs.items()
+                if isinstance(e, dict) and e.get("missing") and k not in missing),
             "restored": restored,
             "pruned": pruned,
             "missing_total": sum(

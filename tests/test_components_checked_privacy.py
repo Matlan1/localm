@@ -93,9 +93,9 @@ def test_log_mode_current_finish_records_the_check_on_disk(install, plan_calls,
 
 
 @pytest.mark.parametrize("argv, written", [
-    (["serve", "--mode", "privacy", "--help"], False),
-    (["serve", "--mode=PRIVACY", "--help"], False),
-    (["serve", "--help"], True),
+    (["serve", "--mode", "privacy", "--port", "not-a-port"], False),
+    (["serve", "--mode=PRIVACY", "--port", "not-a-port"], False),
+    (["serve", "--port", "not-a-port"], True),
 ])
 def test_a_mode_flag_reaches_the_start_up_check(install, plan_calls, monkeypatch,
                                                 argv, written):
@@ -110,7 +110,8 @@ def test_a_mode_flag_reaches_the_start_up_check(install, plan_calls, monkeypatch
     monkeypatch.setattr(updater_runtime, "read_pending", lambda: None)
     monkeypatch.setattr(updater_runtime, "catch_up", lambda *a, **k: None)
     result = CliRunner().invoke(main, argv)
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2, result.output
+    assert "not-a-port" in result.output
     assert len(plan_calls) == 1
     assert (_updates() / uc.CHECKED_FILE).exists() is written
 

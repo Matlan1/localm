@@ -212,6 +212,11 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "'localm setup-embeddings <path>' or the GUI to point it at a "
                     "GGUF of your own.",
                     is_error=True)
+            from localm.inference.embedder import embedding_model_refusal
+            why = embedding_model_refusal(model)
+            if why:
+                return _text_result(
+                    f"Refusing to set the embedding model: {why}", is_error=True)
             set_global_config_key("embedding_model", model, is_owner=True)
 
         from ..server import report_progress

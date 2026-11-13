@@ -872,7 +872,7 @@ class TestPosixShortcut:
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
         entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
-        assert f"Icon={assets / 'localm.svg'}\n" in text
+        assert f"Icon={(assets / 'localm.svg').as_posix()}\n" in text
 
     def test_icon_falls_back_to_the_ico_when_only_that_exists(
             self, gui, tmp_path, monkeypatch):
@@ -886,7 +886,7 @@ class TestPosixShortcut:
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
         entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
-        assert f"Icon={assets / 'localm.ico'}\n" in text
+        assert f"Icon={(assets / 'localm.ico').as_posix()}\n" in text
 
     def test_no_icon_line_when_neither_asset_exists(
             self, gui, tmp_path, monkeypatch):

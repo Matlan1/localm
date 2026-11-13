@@ -317,7 +317,10 @@ def register(app: FastAPI, ctx) -> None:
         body = await _body_fields(request, ("model",))
         if model is None:
             model = _opt_str(body.get("model"), "model")
-        name = model or _hs._resolve_unnamed_model_name()
+        # "localm" is the default-model sentinel: it names the same model an
+        # unnamed request would use.
+        name = (model if model and model != "localm"
+                else _hs._resolve_unnamed_model_name() or model)
         if not name:
             raise HTTPException(503, "No model specified or configured to load")
 
