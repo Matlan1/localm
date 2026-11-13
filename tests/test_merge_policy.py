@@ -30,10 +30,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = REPO_ROOT / "scripts" / "merge_policy.py"
 _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-GREEN_UNLABELLED = {"python-pr-gate": "success", "lint": "success",
+GREEN_UNLABELLED = {"python-pr-gate": "success", "python-pr-gate-windows": "success",
+                    "lint": "success",
                     "gui-tests": "skipped", "test": "skipped",
                     "mutation-scope": "success", "mutation-test": "skipped"}
-GREEN_LABELLED = {"python-pr-gate": "skipped", "lint": "success",
+GREEN_LABELLED = {"python-pr-gate": "skipped", "python-pr-gate-windows": "skipped",
+                  "lint": "success",
                   "gui-tests": "success", "test": "success",
                   "mutation-scope": "success", "mutation-test": "skipped"}
 
@@ -247,16 +249,18 @@ def test_an_unlabelled_pr_fails_when_its_gui_tests_failed(mp):
     assert v.reasons == ["gui-tests: failure"]
 
 
-def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp):
-    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "skipped"}, {})
+@pytest.mark.parametrize("gate", ["python-pr-gate", "python-pr-gate-windows"])
+def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp, gate):
+    v = mp.decide(False, {**GREEN_UNLABELLED, gate: "skipped"}, {})
     assert not v.ok
-    assert v.reasons == ["python-pr-gate: skipped (must be success on an unlabelled PR)"]
+    assert v.reasons == [f"{gate}: skipped (must be success on an unlabelled PR)"]
 
 
-def test_the_unlabelled_arm_fails_on_a_red_gate(mp):
-    v = mp.decide(False, {**GREEN_UNLABELLED, "python-pr-gate": "failure"}, {})
+@pytest.mark.parametrize("gate", ["python-pr-gate", "python-pr-gate-windows"])
+def test_the_unlabelled_arm_fails_on_a_red_gate(mp, gate):
+    v = mp.decide(False, {**GREEN_UNLABELLED, gate: "failure"}, {})
     assert not v.ok
-    assert v.reasons == ["python-pr-gate: failure"]
+    assert v.reasons == [f"{gate}: failure"]
 
 
 @pytest.mark.parametrize("job", ["lint", "mutation-scope"])
@@ -278,10 +282,10 @@ def test_a_red_mutation_scope_fails_an_otherwise_green_pr(mp, full_ci, results):
     assert v.reasons == ["mutation-scope: failure"]
 
 
-@pytest.mark.parametrize("job", ["python-pr-gate", "test", "gui-tests"])
+@pytest.mark.parametrize("job", ["python-pr-gate", "python-pr-gate-windows", "test", "gui-tests"])
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_a_job_skipped_by_design_on_one_arm_still_fails_that_arm_when_it_ran_red(mp, job, result):
-    v = mp.decide(job == "python-pr-gate", {**GREEN_LABELLED, **GREEN_UNLABELLED,
+    v = mp.decide(job.startswith("python-pr-gate"), {**GREEN_LABELLED, **GREEN_UNLABELLED,
                                            "test": "success", job: result}, {})
     assert not v.ok
     assert f"{job}: {result}" in v.reasons
@@ -354,10 +358,12 @@ def _run(args, env_extra=None):
 
 
 _GREEN_UNLABELLED_ARGS = ["--full-ci", "false", "--result", "python-pr-gate=success",
+                          "--result", "python-pr-gate-windows=success",
                           "--result", "lint=success", "--result", "gui-tests=success",
                           "--result", "test=skipped", "--result", "mutation-scope=success",
                           "--result", "mutation-test=skipped", "--mutation-modules", "[]"]
 _GREEN_LABELLED_ARGS = ["--full-ci", "true", "--result", "python-pr-gate=skipped",
+                        "--result", "python-pr-gate-windows=skipped",
                         "--result", "lint=success", "--result", "gui-tests=success",
                         "--result", "test=success", "--result", "mutation-scope=success",
                         "--result", "mutation-test=skipped", "--mutation-modules", "[]"]
@@ -444,7 +450,8 @@ def test_main_writes_the_summary_to_the_step_summary_file(tmp_path):
 def test_main_refuses_a_result_for_a_job_the_policy_does_not_know():
     proc = _run(["--full-ci", "false", "--result", "abi-check=success"])
     assert proc.returncode == 2
-    assert "python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test" in proc.stderr
+    assert ("python-pr-gate, python-pr-gate-windows, lint, gui-tests, test, mutation-scope, "
+            "mutation-test") in proc.stderr
 
 
 def test_evaluate_reads_the_change_from_git_when_no_files_are_given(mp, monkeypatch):
@@ -510,7 +517,7 @@ def test_the_merge_policy_job_cannot_be_skipped_green():
     job = ci["jobs"]["merge-policy"]
     assert _merge_policy_names(job["name"]) == ("merge-policy", "merge-policy (pull_request runs only)")
     assert sorted(job["needs"]) == ["gui-tests", "lint", "mutation-scope", "mutation-test",
-                                    "python-pr-gate", "test"]
+                                    "python-pr-gate", "python-pr-gate-windows", "test"]
     cond = _norm(job["if"])
     assert "!cancelled()" in cond or "always()" in cond, (
         "without a status function success() is implied and a failed or skipped needed job "
@@ -552,6 +559,7 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     ci = _load_workflow(_CI)
     assert "full-ci" in ci["jobs"]["test"]["if"]
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
+    assert "full-ci" in ci["jobs"]["python-pr-gate-windows"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
     assert ci["jobs"]["gui-tests"]["if"] == "github.event_name != 'push'"
     scope = next(s for s in ci["jobs"]["gui-tests"]["steps"] if s.get("id") == "scope")
