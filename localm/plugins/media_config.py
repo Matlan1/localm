@@ -53,11 +53,15 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
     return None
 
 
+class PluginScanError(OSError):
+    """The installed-plugins folder could not be listed."""
+
+
 def active_plugins(cfg: dict) -> set:
     """The set of ACTIVE plugin names: installed (physically present in the
     installed folder) AND enabled (config). "Installed" is disk presence in the
     store to installed model, NOT a config flag, so this scans the installed
-    folder."""
+    folder. Raises :class:`PluginScanError` when the folder cannot be listed."""
     from pathlib import Path
 
     from localm.debuglog import logger
@@ -69,11 +73,9 @@ def active_plugins(cfg: dict) -> set:
                     and (child / "plugin.toml").is_file()):
                 installed.add(child.name)
     except OSError as exc:
-        # Surface a real disk or permission fault on the plugins-dir scan: an
-        # empty result here does NOT prove no plugins exist, the scan itself may
-        # have failed.
         logger.debug("active_plugins: failed to scan plugins dir %s: %s",
                      plugins_dir(), exc)
+        raise PluginScanError(str(exc)) from exc
     enabled = set(cfg.get("plugins_enabled", []) or [])
     return installed & enabled
 
@@ -111,7 +113,12 @@ def resolve_config(name: str, cfg: dict,
         return own, None
 
     if active is None:
-        active = active_plugins(cfg)
+        try:
+            active = active_plugins(cfg)
+        except PluginScanError:
+            return own, (f"'{name}' is set to use '{src}' config, but the plugins "
+                         f"folder could not be read to check whether '{src}' is "
+                         f"active; using its own settings.")
     if src not in _plugins(cfg) or src not in active:
         return own, (f"'{name}' is set to use '{src}' config, but '{src}' is not "
                      f"active; using its own settings.")
@@ -304,7 +311,7 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
             try:
                 Path(out_path).unlink()
             except FileNotFoundError:
-                pass
+                pass  # The file is already gone. See test_a_withheld_file_that_is_already_gone_is_still_withheld.
             except OSError as e:
                 removed = (f" The file could not be removed ({e}); delete "
                            f"{out_path} by hand.")

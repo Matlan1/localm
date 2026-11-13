@@ -479,3 +479,29 @@ def test_the_generator_sentinel_sees_both_reference_shapes():
     assert _generator_references("from x.comfy import generate_image") == ["generate_image"]
     assert _generator_references("m.generate_music(a)") == ["generate_music"]
     assert _generator_references("generate_media(a)") == []
+
+
+def _failing_unlink(exc):
+    def unlink(self, *args, **kwargs):
+        raise exc
+    return unlink
+
+
+def test_a_withheld_file_that_is_already_gone_is_still_withheld(tmp_path, monkeypatch):
+    facade, _ = _facade(b"\xff\xd8\xff\xe1Exif prompt: secret")
+    out = tmp_path / "out.png"
+    monkeypatch.setattr(Path, "unlink", _failing_unlink(FileNotFoundError("gone")))
+    ok, message = facade.generate({"backend": "comfy"}, "p", out, privacy=True)
+    assert ok is False
+    assert message.startswith("Output withheld: WARNING: generated file is not PNG")
+    assert "by hand" not in message
+
+
+def test_a_withheld_file_that_cannot_be_removed_says_to_delete_it_by_hand(tmp_path, monkeypatch):
+    facade, _ = _facade(b"\xff\xd8\xff\xe1Exif prompt: secret")
+    out = tmp_path / "out.png"
+    monkeypatch.setattr(Path, "unlink", _failing_unlink(PermissionError("denied")))
+    ok, message = facade.generate({"backend": "comfy"}, "p", out, privacy=True)
+    assert ok is False
+    assert message.startswith("Output withheld: WARNING: generated file is not PNG")
+    assert f"delete {out} by hand" in message and "denied" in message

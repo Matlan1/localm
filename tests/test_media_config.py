@@ -176,3 +176,26 @@ def test_a_plugin_sharing_the_image_config_keeps_its_comfyui_backend(monkeypatch
     s = music_backend.settings(cfg)
     assert s["backend_choice"] == "auto" and s["native"] == {}
     assert s["warning"] is None
+
+
+def test_a_failed_plugins_folder_scan_is_not_reported_as_an_inactive_source(monkeypatch):
+    def scan_fails(cfg):
+        raise mc.PluginScanError("permission denied")
+    monkeypatch.setattr(mc, "active_plugins", scan_fails)
+    cfg = _cfg({"image": {"backend": "comfy"}, "music": {"use_config_from": "image"}})
+    block, warn = mc.resolve_config("music", cfg)
+    assert block["use_config_from"] == "image"
+    assert warn is not None and "could not be read" in warn
+    assert "is not active" not in warn
+
+
+def test_active_plugins_raises_when_the_plugins_folder_cannot_be_listed(monkeypatch, tmp_path):
+    from pathlib import Path
+    from localm.plugins import loader
+    monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path)
+
+    def glob_fails(self, pattern):
+        raise PermissionError("denied")
+    monkeypatch.setattr(Path, "glob", glob_fails)
+    with pytest.raises(mc.PluginScanError):
+        mc.active_plugins({"plugins_enabled": ["image"]})
