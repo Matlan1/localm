@@ -34,7 +34,7 @@ SHA = hashlib.sha256(BODY).hexdigest()
 def _zip(path: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr(_binding.lib_filename(), os.urandom(64 * 1024))
+        zf.writestr(_binding.lib_filename(), os.urandom(300 * 1024))
         zf.writestr("a-first.txt", "license")
         zf.writestr("z-last.txt", "notes")
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -114,7 +114,7 @@ def test_a_new_folder_that_cannot_be_moved_in_puts_the_old_one_back(media_runtim
     real_replace = os.replace
 
     def replace(src, dst):
-        if Path(dst) == dest:
+        if Path(dst) == dest and Path(src).name == "staging":
             raise PermissionError(13, "Access is denied", str(dst))
         return real_replace(src, dst)
     monkeypatch.setattr(runtime_files.os, "replace", replace)

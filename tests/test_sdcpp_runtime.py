@@ -396,7 +396,7 @@ def test_auto_keeps_the_cpu_runtime_when_the_network_policy_refuses(fake_release
     rt = runtime.ensure("auto", on_progress=said.append, probe=_ok_probe)
     assert rt.backend == "cpu"
     assert fake_release == ["fake-cpu.zip"]
-    assert any("network policy" in m for m in said)
+    assert any("Network access is off" in m for m in said)
 
 
 def test_auto_tries_vulkan_when_the_recommended_runtime_does_not_load(fake_release,
