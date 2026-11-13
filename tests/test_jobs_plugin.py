@@ -931,7 +931,7 @@ def test_jobs_available_in_api_state(home, monkeypatch):
     assert "jobs" in names
     jobs = next(p for p in state["plugins"] if p["name"] == "jobs")
     assert jobs["available"] is True       # bundled, not yet installed
-    assert "job" in jobs["commands"]
+    assert jobs["commands"] == []
 
 
 def test_jobs_manifest_parses():
