@@ -17,7 +17,8 @@ _LOG_TAIL_READ_BYTES = 2_000_000
 
 def _find_run_log(home=None, pid=None):
     """The Path to a run's OWN log, matched by the pid embedded in the log
-    filename (localm_<date>_<time>_<pid>.log), or None if none is found.
+    filename (localm_<date>_<time>_<pid>.log), or None if none is found. With
+    *pid* None, the newest log that is not this process's own.
     Shared by _recent_log_tail (below) and _classify_prior_death's raw-tail
     truncation check, so the two never disagree about WHICH file a crash's
     evidence comes from. Records this process has queued for its debug log
@@ -34,11 +35,7 @@ def _find_run_log(home=None, pid=None):
         return None
     logs = sorted(d.glob("localm_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
     if pid is not None:
-        for p in logs:
-            if p.stem.endswith(f"_{pid}"):
-                return p
-    # No pid match (older marker): fall back to the most recent log that is
-    # NOT this current run's, so we do not just echo the recovering start.
+        return next((p for p in logs if p.stem.endswith(f"_{pid}")), None)
     import os as _os
     cur = f"_{_os.getpid()}.log"
     return next((p for p in logs if not p.name.endswith(cur)), None)

@@ -72,7 +72,7 @@ from localm.bugreport.logs import (
 )
 from localm.bugreport.assembly import (
     _format_error, _kv_lines, _app_state_lines, build_report, _report_footer,
-    _strip_report_footer, _client_lines, report_title, _TRACE_REPORT_LIMIT,
+    _strip_report_footer, report_for_review, _client_lines, report_title, _TRACE_REPORT_LIMIT,
     trim_trace_for_report, report_title_from_markdown,
 )
 from localm.bugreport.persistence import (
@@ -136,7 +136,7 @@ __all__ = [
     "_runtime_state", "_SAFE_CONFIG_KEYS", "_safe_config_subset", "save_report",
     "_SAVE_REPORT_LOCK", "save_user_report", "_scrub_home",
     "_scrub_query_and_header_secrets", "_scrub_secrets", "_scrub_url_creds",
-    "_strip_report_footer", "_trace_path_for_marker", "_trace_path_for_stopping_record",
+    "_strip_report_footer", "report_for_review", "_trace_path_for_marker", "_trace_path_for_stopping_record",
     "_TRACE_REPORT_LIMIT", "trim_trace_for_report", "_truncate_body",
     "_TRUNCATION_CHECK_READ_BYTES", "upload_available", "upload_config",
     "upload_report", "_WIN_FAULT_CODE_RE", "_WIN_FAULT_LINE_RE",

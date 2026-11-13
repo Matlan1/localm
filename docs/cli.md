@@ -1323,7 +1323,7 @@ localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send
 localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
 ```
 
-`bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.
+`bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content, and never another run's log. With `--send`, a report that could not be sent exits 1. Two reports saved in the same second get separate files. `issues` is read-only and needs the bug-report proxy to be configured; `issues NUMBER` shows any issue of the tracker and says when this install did not file it.
 
 Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are

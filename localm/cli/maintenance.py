@@ -424,7 +424,10 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
-    bugreport.offer_to_send(summary, path, "", interactive=interactive, auto_send=send)
+    sent = bugreport.offer_to_send(summary, path, "", interactive=interactive,
+                                   auto_send=send)
+    if send and not sent:
+        sys.exit(1)
 
 
 
@@ -742,7 +745,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 @main.command("issues")
 @click.argument("number", required=False, type=int)
 def issues_cmd(number) -> None:
-    """Show the bug reports this install filed, or one issue by NUMBER.
+    """Show the bug reports this install filed, or any issue of the localm
+    tracker by NUMBER (marked when this install did not file it).
 
     Read-only, through the bug-report proxy - no GitHub account needed. Lets a tester
     see whether a bug they filed is acknowledged or fixed. Requires the proxy to be
@@ -769,6 +773,9 @@ def issues_cmd(number) -> None:
                 f"{escape(str(it.get('title', '')))}")
             if it.get("html_url"):
                 console.print(f"[dim]{escape(str(it['html_url']))}[/dim]")
+            filed = {str(e.get("number")) for e in issue_tracker.recorded()}
+            if str(number) not in filed:
+                console.print("[dim]This install did not file this issue.[/dim]")
             return
         issues = issue_tracker.filed_status()
     except LocalmError as e:

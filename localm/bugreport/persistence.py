@@ -15,6 +15,21 @@ from localm.bugreport.assembly import build_report, report_title
 import localm.bugreport as _br
 
 
+def _write_new(base: Path, when: str, text: str) -> Path:
+    """Write *text* to ``bug-<when>.md`` in *base*, or to ``bug-<when>-<n>.md``
+    for the lowest n from 2 whose file does not exist yet; never replaces a
+    file. Returns the path written."""
+    n = 1
+    while True:
+        path = base / (f"bug-{when}.md" if n == 1 else f"bug-{when}-{n}.md")
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(text)
+            return path
+        except FileExistsError:
+            n += 1
+
+
 def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
     """Write the report to the data dir and return its path (or None on failure).
     *when* is a caller-supplied timestamp string (kept injectable for tests)."""
@@ -30,8 +45,7 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         if when is None:
             import time
             when = time.strftime("%Y%m%d-%H%M%S")
-        path = base / f"bug-{when}.md"
-        path.write_text(text, encoding="utf-8")
+        path = _write_new(base, when, text)
         # The report carries environment diagnostics and a traceback; on a
         # multi-user box it should not be world-readable. chmod is a no-op on
         # Windows, so this is safe cross-platform.
