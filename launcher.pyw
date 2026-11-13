@@ -17,23 +17,33 @@ import queue
 import subprocess
 import sys
 import threading
+import shlex
+import shutil
 import time
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
+except ImportError:
+    sys.exit("The LocaLM launcher needs Tk, which this Python does not have. Install "
+             "it (Debian/Ubuntu: sudo apt install python3-tk; Fedora: sudo dnf install "
+             "python3-tkinter; macOS: brew install python-tk), or start LocaLM with "
+             "'localm gui'.")
 
 REPO_DIR = Path(__file__).resolve().parent
 
 
-def _settings_file() -> Path:
+def _settings_file() -> Path | None:
     """Launcher settings live in the localm data dir (LOCALM_HOME / portable
-    home/ folder / ~/.localm) so each checkout stays self-contained."""
+    home/ folder / ~/.localm) so each checkout stays self-contained. None when
+    localm cannot be imported (no data dir is known, so nothing is saved)."""
     try:
         sys.path.insert(0, str(REPO_DIR))
         from localm.config import HOME_DIR
         return HOME_DIR / "launcher.json"
     except Exception:
-        return Path.home() / ".localm" / "launcher.json"
+        return None
 
 
 SETTINGS_FILE = _settings_file()
@@ -168,7 +178,8 @@ def _windows_command_line(cmd: list, env: dict | None) -> str:
     return 'cmd.exe /c "{}"{}'.format(inner, _console_hold(cmd, env))
 
 
-def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
+def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None,
+                    terminal: bool = False):
     """Start a child mode process detached from the launcher, cross-platform.
 
     On Windows we open the child in its own console window via
@@ -195,6 +206,10 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     the console is open, and a clean exit would otherwise take it away.
     Outside debug mode a clean exit still closes normally.
 
+    With *terminal* on POSIX, *cmd* is started inside a terminal window
+    (:func:`terminal_command`, the same hold rule); RuntimeError when no
+    terminal program is found.
+
     The command line comes from ``_windows_command_line``, a raw string that
     ``Popen`` passes straight to ``CreateProcess`` without reprocessing it
     through ``list2cmdline`` a second time.
@@ -206,6 +221,13 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
         cmd = _windows_command_line(cmd, env)
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
     else:
+        if terminal:
+            wrapped = terminal_command(cmd, env)
+            if wrapped is None:
+                raise RuntimeError(
+                    "no terminal program was found to open it in; run "
+                    f"{shlex.join(cmd)} in a terminal, or set TERMINAL")
+            cmd = wrapped
         kwargs["start_new_session"] = True
     return subprocess.Popen(cmd, **kwargs)
 
@@ -353,18 +375,98 @@ def _expand_home(p: str) -> str:
 
 
 def load_settings() -> dict:
+    """The saved launcher choices, or {} when there are none or the file cannot
+    be read."""
+    if SETTINGS_FILE is None:
+        return {}
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def save_settings(data: dict) -> None:
+def save_settings(data: dict) -> str | None:
+    """Save the launcher choices. Returns None on success, else why they were
+    not saved."""
+    if SETTINGS_FILE is None:
+        return "localm could not be imported, so no data folder is known"
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        return str(e) or type(e).__name__
+    return None
+
+
+def config_privacy_modes() -> tuple | None:
+    """``(global, chat, coder)`` session modes from localm's config.json, with
+    USE_GLOBAL for a surface that has no mode of its own, or None when the
+    config cannot be read."""
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        from localm.config import load_config
+        cfg = load_config()
     except Exception:
-        pass
+        return None
+    glob = cfg.get("mode") if cfg.get("mode") in PRIVACY_MODES else "privacy"
+
+    def _surface(key):
+        value = cfg.get(key)
+        return value if value in PRIVACY_MODES else USE_GLOBAL
+    return glob, _surface("chat_mode"), _surface("coder_mode")
+
+
+# Terminal programs tried on Linux for the terminal modes, with the argument
+# that starts a command in them.
+_LINUX_TERMINALS = (
+    ("x-terminal-emulator", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-x"]),
+    ("mate-terminal", ["-x"]),
+    ("lxterminal", ["-e"]),
+    ("kitty", []),
+    ("alacritty", ["-e"]),
+    ("xterm", ["-e"]),
+)
+
+
+def _posix_hold_script(cmd: list, env: dict | None) -> str:
+    """The sh line that runs *cmd* in a terminal and keeps the terminal open
+    when the child fails (or always in debug mode), like the Windows hold."""
+    line = shlex.join(cmd)
+    wait = "printf '\\nPress Enter to close this window. '; read _"
+    source = env if env is not None else os.environ
+    if "--debug" in cmd or str(source.get("LOCALM_DEBUG", "")) == "1":
+        return f"{line}; {wait}"
+    return f"{line} || {{ {wait}; }}"
+
+
+def terminal_command(cmd: list, env: dict | None = None,
+                     platform: str | None = None, which=shutil.which) -> list | None:
+    """The argv that opens a terminal window running *cmd* on POSIX, or None
+    when no terminal program is found. macOS uses Terminal.app; Linux uses
+    $TERMINAL when set, else the first program of _LINUX_TERMINALS on PATH."""
+    platform = platform or sys.platform
+    script = _posix_hold_script(cmd, env)
+    if platform == "darwin":
+        osa = which("osascript")
+        if not osa:
+            return None
+        quoted = script.replace("\\", "\\\\").replace('"', '\\"')
+        return [osa, "-e", f'tell application "Terminal" to do script "{quoted}"',
+                "-e", 'tell application "Terminal" to activate']
+    source = env if env is not None else os.environ
+    chosen = []
+    own = (source.get("TERMINAL") or "").strip()
+    if own:
+        chosen.append((own, ["-e"]))
+    chosen.extend(_LINUX_TERMINALS)
+    for name, start in chosen:
+        exe = which(name)
+        if exe:
+            return [exe, *start, "sh", "-c", script]
+    return None
 
 
 class Launcher(tk.Tk):
@@ -382,6 +484,11 @@ class Launcher(tk.Tk):
         self._style()
 
         saved = load_settings()
+        modes = config_privacy_modes()
+        if modes is None:
+            modes = (saved.get("privacy_global", "privacy"),
+                     saved.get("privacy_chat", USE_GLOBAL),
+                     saved.get("privacy_coder", USE_GLOBAL))
         self.mode = tk.StringVar(value=saved.get("mode", "gui"))
         self.model = tk.StringVar(value=saved.get("model", ""))
         self.debug = tk.BooleanVar(value=saved.get("debug", False))
@@ -395,9 +502,9 @@ class Launcher(tk.Tk):
         self.coder_dir = tk.StringVar(value=_expand_home(saved.get("coder_dir", "")))
         self.coder_yes = tk.BooleanVar(value=saved.get("coder_yes", False))
         self.keep_open = tk.BooleanVar(value=saved.get("keep_open", False))
-        self.privacy_global = tk.StringVar(value=saved.get("privacy_global", "privacy"))
-        self.privacy_chat = tk.StringVar(value=saved.get("privacy_chat", USE_GLOBAL))
-        self.privacy_coder = tk.StringVar(value=saved.get("privacy_coder", USE_GLOBAL))
+        self.privacy_global = tk.StringVar(value=modes[0])
+        self.privacy_chat = tk.StringVar(value=modes[1])
+        self.privacy_coder = tk.StringVar(value=modes[2])
 
         _a = _auth()
         self.api_key = tk.StringVar(value=(_a.get_api_key() if _a else "") or "")
@@ -905,7 +1012,8 @@ class Launcher(tk.Tk):
         port = self.port.get().strip()
         if port:
             cmd += ["-p", port]
-        cmd += ["--mode", self.privacy_global.get() or "privacy"]
+        if self._save_privacy_config():
+            cmd += ["--mode", self.privacy_global.get() or "privacy"]
         try:
             _spawn_detached(cmd, cwd=str(REPO_DIR))
         except Exception as e:
@@ -1026,17 +1134,6 @@ class Launcher(tk.Tk):
             self.status_msg(bad, error=True)
             return None
 
-        # Effective privacy mode for the surface being launched
-        glob_mode = self.privacy_global.get() or "privacy"
-        chat_mode = self.privacy_chat.get()
-        coder_mode = self.privacy_coder.get()
-        surface_mode = {
-            "gui": glob_mode,
-            "serve": glob_mode,
-            "chat": chat_mode if chat_mode != USE_GLOBAL else glob_mode,
-            "coder": coder_mode if coder_mode != USE_GLOBAL else glob_mode,
-        }[mode]
-
         if mode == "gui":
             cmd += ["gui"]
             if no_model:
@@ -1093,24 +1190,34 @@ class Launcher(tk.Tk):
             if self.coder_yes.get():
                 cmd += ["--yes"]
             # coder has no --debug flag; the env var below covers it
-        cmd += ["--mode", surface_mode]
         return cmd
 
-    def _save_privacy_config(self) -> None:
-        """Persist the privacy choices as durable localm config so non-launcher
-        invocations (plain CLI, GUI restarts) see the same modes."""
+    def _surface_mode(self) -> str:
+        """The session mode of the surface the chosen mode launches."""
+        glob_mode = self.privacy_global.get() or "privacy"
+        own = {"chat": self.privacy_chat.get(),
+               "coder": self.privacy_coder.get()}.get(self.mode.get(), USE_GLOBAL)
+        return own if own and own != USE_GLOBAL else glob_mode
+
+    def _save_privacy_config(self) -> str | None:
+        """Persist the privacy choices in localm's config.json, the one place
+        every surface reads them from. Returns None on success, else why it
+        failed (the caller then passes --mode instead)."""
         try:
             sys.path.insert(0, str(REPO_DIR))
-            from localm.config import load_config, save_config
-            cfg = load_config()
-            cfg["mode"] = self.privacy_global.get() or "privacy"
+            from localm.config import update_config
+            glob = self.privacy_global.get() or "privacy"
             chat = self.privacy_chat.get()
             coder = self.privacy_coder.get()
-            cfg["chat_mode"] = None if chat == USE_GLOBAL else chat
-            cfg["coder_mode"] = None if coder == USE_GLOBAL else coder
-            save_config(cfg)
-        except Exception:
-            pass  # config write is best-effort; the --mode flag still applies
+
+            def _mutate(cfg: dict) -> None:
+                cfg["mode"] = glob
+                cfg["chat_mode"] = None if chat == USE_GLOBAL else chat
+                cfg["coder_mode"] = None if coder == USE_GLOBAL else coder
+            update_config(_mutate)
+        except Exception as e:
+            return str(e) or type(e).__name__
+        return None
 
     @staticmethod
     def _expose_key_plan(mode, host_lan, current_key, auth_mod):
@@ -1176,7 +1283,7 @@ class Launcher(tk.Tk):
         if self.require_auth.get():
             env["LOCALM_REQUIRE_AUTH"] = "1"
 
-        save_settings({
+        settings_problem = save_settings({
             "mode": self.mode.get(),
             "model": self.model.get(),
             "debug": self.debug.get(),
@@ -1192,12 +1299,21 @@ class Launcher(tk.Tk):
             "privacy_chat": self.privacy_chat.get(),
             "privacy_coder": self.privacy_coder.get(),
         })
-        self._save_privacy_config()
+        config_problem = self._save_privacy_config()
+        if config_problem:
+            cmd += ["--mode", self._surface_mode()]
 
         try:
-            _spawn_detached(cmd, cwd=str(REPO_DIR), env=env)
+            _spawn_detached(cmd, cwd=str(REPO_DIR), env=env,
+                            terminal=self.mode.get() in ("chat", "coder"))
         except Exception as e:
             self.status_msg(f"Launch failed: {e}", error=True)
+            return
+        if config_problem or settings_problem:
+            what = ("the privacy modes apply to this launch only"
+                    if config_problem else "your launcher choices were not saved")
+            self.status_msg(f"Launched, but {what}: {config_problem or settings_problem}",
+                            error=True)
             return
 
         if auto_keyed:
