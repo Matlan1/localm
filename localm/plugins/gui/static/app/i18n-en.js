@@ -1637,7 +1637,6 @@ export const I18N_EN = {
   // ---- Settings > schema-driven fields (settings_schema.py CORE_FIELDS) ----
   "settings.field.inheritOption": "(inherit)",
   "settings.field.defaultPlaceholder": "default ({value})",
-  "settings.field.secretPlaceholder": "unchanged",
   "settings.field.secretConfiguredPlaceholder": "saved (enter new value to replace)",
   "settings.field.secretEnvPlaceholder": "set via environment variable",
   "settings.field.secretNotSetPlaceholder": "not set (optional)",
@@ -1652,10 +1651,11 @@ export const I18N_EN = {
   "settings.field.secretClearButton": "Clear",
   "settings.field.secretUndoButton": "Undo",
   "settings.field.secretClearTitle": "Clear stored secret on save",
+  "settings.field.secretUndoTitle": "Keep the stored secret",
   "settings.field.listPlaceholder": "comma-separated",
   "settings.field.pathlistRowPlaceholder": "folder path",
   "settings.field.browse": "Browse...",
-  "settings.field.pathlistPickTitle": "Pick a folder to allow",
+  "settings.field.pathlistPickTitle": "Pick a folder",
   "settings.field.pathlistRemoveTitle": "Remove this folder",
   "settings.field.pathlistAddButton": "Add folder",
   "settings.field.livePort.knownValue":
@@ -2103,8 +2103,10 @@ export const I18N_EN = {
   "settings.field.ragIndexingMode.help": "Which folders the server may index (`localm rag add` in a terminal is not bound). whitelist = home, the working directory and Allowed folders. blacklist = all but Denied folders. Credentials never.",
   "settings.field.ragAllowedRoots.label": "Allowed folders",
   "settings.field.ragAllowedRoots.help": "Folders that may be indexed in whitelist mode, in addition to your home folder and the working directory. When you pick a folder outside this list, localm offers to add it here and continue.",
+  "settings.field.ragAllowedRoots.pickTitle": "Pick a folder to allow",
   "settings.field.ragDeniedRoots.label": "Denied folders",
   "settings.field.ragDeniedRoots.help": "Folders the server and scheduled jobs never index in blacklist mode (everything else is allowed). Ignored in whitelist mode. `localm rag add` in a terminal is not bound by this.",
+  "settings.field.ragDeniedRoots.pickTitle": "Pick a folder to deny",
   "settings.field.ragClassifyUnknownFiles.label": "Classify unknown files with AI",
   "settings.field.ragClassifyUnknownFiles.help": "Let the local LLM guess the format of a file whose extension it does not recognise, when a chat model is loaded. Off, those files are tagged plain text.",
 
@@ -2263,12 +2265,6 @@ export const I18N_EN = {
   "settings.field.tts.device.help": "webgpu currently produces corrupted, buzzing audio on many GPUs, so auto always uses wasm instead. Pick webgpu only to test whether that has been fixed.",
   "settings.field.tts.dtype.label": "Model precision",
   "settings.field.tts.dtype.help": "auto picks fp32 (clean audio). q8/fp16 download less but sound worse; q8 produced audible cracks on the WASM path.",
-  "settings.field.tts.engine.label": "Engine",
-  "settings.field.tts.engine.help": "Speech engine the plugin uses.",
-  "settings.field.tts.library.label": "Kokoro library path",
-  "settings.field.tts.library.help": "Path to the vendored kokoro-js bundle, relative to the tts plugin's static folder.",
-  "settings.field.tts.wasmPaths.label": "ONNX runtime WASM path",
-  "settings.field.tts.wasmPaths.help": "Folder holding the onnxruntime WASM runtime, relative to the tts plugin's static folder; keep the trailing slash. Blank falls back to the vendored copy that ships with the plugin.",
 
   // ---- Settings > schema-driven section headings (CORE_SECTION_HEADING) ----
   "settings.sectionHeading.engine": "Runtime & GPU",
@@ -2304,11 +2300,9 @@ export const I18N_EN = {
   "settings.sectionHeading.media": "Media",
   "settings.sectionHeading.avatars": "Avatars",
   "settings.sectionHeading.tts": "Text-to-speech",
-  "settings.sectionHeading.ttsPlugin": "Text-to-speech plugin",
   "settings.sectionHeading.pluginSettings": "Plugin settings",
   "settings.voice.setupHead": "Speech model setup",
   "settings.voice.checking": "Checking speech model status...",
-  "settings.voice.download": "Download speech model",
   "settings.voice.inactive": "Speech-to-text plugin is not active.",
   "settings.voice.ready": "Speech model ({model}) is downloaded and ready.",
   "settings.voice.notDownloaded": "Speech model ({model}) is not downloaded yet.",
@@ -2368,7 +2362,8 @@ export const I18N_EN = {
   "settings.tts.downloadNow": "Download voice model now",
   "settings.tts.cacheCheckFailed": "Could not check voice model cache: {message}",
   "settings.tts.downloading": "Downloading voice model...",
-  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Server & network) - the TTS plugin has not finished starting up to offer its own confirmation.",
+  "settings.tts.needsNetwork": "The voice model cannot be downloaded: Network access is off and model downloads are not allowed (Settings > Server & network > Outbound access).",
+  "settings.tts.cannotAsk": "Network access is set to ask, but the text-to-speech plugin is not running in this page, so it cannot ask to download the voice model. Reload the page; if this stays, see Settings > System > Recent errors.",
   "settings.tts.modelReady": "Voice model ready in browser",
   "settings.tts.setupFailed": "Voice model setup failed: {message}",
   "settings.tts.savedUnreadable": "Saved, but the server's reply could not be read - reloading the settings to show what is actually stored",
@@ -2639,15 +2634,15 @@ export const I18N_EN = {
   "settings.companion.kindTailscale": "Tailscale",
   "settings.companion.hintCertUntrusted": "This device no longer trusts this server's certificate. Open localm-ca.crt from the server (/localm-ca.crt) and install it, then reload.",
   "settings.companion.hintInstalled": "Running as an installed app.",
-  "settings.companion.hintTrustCert": "To install localm as an app, trust this device's certificate first (the “Install certificate” step above), then reload.",
+  "settings.companion.hintTrustCert": "To install localm as an app, first make this device trust the server's certificate: open /localm-ca.crt from the server, install it, then reload.",
   "settings.companion.hintNoAddress":
     "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone.",
   "settings.companion.hintLoopback":
-    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.",
+    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server. Once the key is set, `localm gui -H 0.0.0.0` starts it that way too. See docs/phone.md.",
 
   // ---- Settings > Your data ----
   "settings.privacyData.title": "Your data",
-  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone.",
+  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone. Memory facts, generated images, music and video, coder sessions and logs are not touched. In privacy mode the server's conversation store is closed, so conversations it kept earlier stay until you delete them with chat persistence on.",
 
   // ---- Settings > Diagnostics ----
   "settings.diagnostics.title": "Diagnostics",
@@ -2697,7 +2692,7 @@ export const I18N_EN = {
   // ---- Settings > Other running instances ----
   "settings.instances.title": "Other running instances",
   "settings.instances.help":
-    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install.",
+    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install. A server of another install is found only on localm's usual ports (8642 to 8741, and 11434).",
   "settings.instances.loading": "Looking for other instances…",
   "settings.instances.emptyTitle": "No other instances running",
   "settings.instances.emptyBody": "Only the server behind this page is running right now.",
@@ -3462,7 +3457,7 @@ export const I18N_EN = {
     "The browser plugin is not installed. Install it on the Plugins page to " +
     "let the model drive a web browser.",
   "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
-  "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
+  "browser.setup.readySystem": "localm will use the first of these that starts, found on this computer: {browser}.",
   "browser.setup.switchedToBundled": "Switched to the bundled browser.",
   "browser.setup.systemMissing":
     "No supported browser was found on this computer. localm looked for {names}.",
