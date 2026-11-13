@@ -2,18 +2,20 @@
 """The torch wheel SOURCE must be correct for EVERY hardware+OS combination, not
 just one box. On Windows, AMD has no single ROCm wheel: gfx103X (RX 6000 /
 RDNA2) uses localm's bundled self-contained build, while RX 7000/9000
-(RDNA3/RDNA4) use AMD's official Windows ROCm wheels (public preview).
+(RDNA3/RDNA4) use AMD's Windows ROCm wheels from their family's index.
 ``hwdetect.torch_pip_args`` is the single tested source of truth both installers
 consult via ``hwdetect torch-args <backend>``.
 
-These pin the ROUTING, and test_amd_rocm_win_find_links_resolves_live checks
-the RX 7000/9000 wheels actually RESOLVE against AMD's live repo (a package-index
+These pin the ROUTING, and test_amd_rocm_win_index_resolves_live checks
+the RX 7000/9000 wheels actually RESOLVE against AMD's live indexes (a package-index
 question, no GPU needed for that). Executing them still needs real RDNA3/RDNA4
 hardware.
 """
 
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -146,20 +148,32 @@ def test_amd_rocm_on_windows_gfx103x_uses_bundled_extra(monkeypatch):
     assert args == "-e .[gpu]"
 
 
-@pytest.mark.parametrize("name", ["amd radeon rx 7900 xtx", "amd radeon rx 9070 xt"])
-def test_amd_rocm_on_windows_rdna3_4_uses_official_preview(monkeypatch, name):
-    """RX 7000 / 9000 are NOT the bundled gfx103X build - they get AMD's
-    official Windows ROCm preview wheels, pinned exact versions via
-    --find-links (a flat wheel listing, not a pip/uv package index - see
-    test_amd_rocm_win_find_links_resolves_live), never --torch-backend or
-    --index-url, which resolve no candidates against a flat listing."""
+@pytest.mark.parametrize("name, family", [("amd radeon rx 7900 xtx", "gfx110x"),
+                                          ("amd radeon rx 9070 xt", "gfx120x")])
+def test_amd_rocm_on_windows_rdna3_4_uses_its_family_index(monkeypatch, name, family):
+    """RX 7000 / 9000 are NOT the bundled gfx103X build: they get the pinned torch
+    and torchvision with their family's rocm-sdk packages from that family's AMD
+    index alone."""
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     args = hwdetect.torch_pip_args("amd-rocm", _det(name))
-    assert args == ("torch==2.9.1+rocm7.2.1 torchvision==0.24.1+rocm7.2.1 "
-                    "--find-links https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/")
-    assert args != "-e .[gpu]"
-    assert "--torch-backend" not in args
-    assert "--index-url" not in args
+    torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
+    sdk = " ".join(hwdetect.amd_rocm_win_sdk_packages(family))
+    assert args == (f"{torch} {torchvision} {sdk} --index-url "
+                    f"https://repo.amd.com/rocm/whl/{family[:5]}{family[5:].upper()}-all/ "
+                    "--no-config")
+    assert "--find-links" not in args and "--torch-backend" not in args
+
+
+@pytest.mark.parametrize("name", ["amd radeon rx 7900 xtx", "amd radeon rx 9070 xt"])
+def test_the_updater_reads_only_packages_out_of_the_amd_torch_args(monkeypatch, name):
+    from localm import updater_components
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    args = shlex.split(hwdetect.torch_pip_args("amd-rocm", _det(name)), posix=True)
+    reqs = updater_components._requirements_in(args)
+    assert len(reqs) == 5, reqs
+    for req in reqs:
+        assert re.fullmatch(r"(torch|torchvision|rocm|rocm-sdk-core|rocm-sdk-libraries-gfx1\d\dx-all)"
+                            r"==[\w.+]+", req), req
 
 
 def test_gpu_setup_doc_amd_windows_command_matches_the_live_pin():
@@ -170,17 +184,18 @@ def test_gpu_setup_doc_amd_windows_command_matches_the_live_pin():
     --torch-backend=rocm6.4 after that stopped resolving on Windows)."""
     text = _GPU_SETUP_DOC.read_text(encoding="utf-8")
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
-    find_links = hwdetect.amd_rocm_win_find_links()
     assert torch in text
     assert torchvision in text
-    assert find_links in text
-    assert "--find-links" in text
+    for family in ("gfx110x", "gfx120x"):
+        assert hwdetect.amd_rocm_win_index(family) in text
+    assert "repo.radeon.com" not in text
     # The doc must not still show the dead command shape for this hardware.
     assert "torch torchvision --torch-backend=rocm6.4" not in text
 
 
 @pytest.mark.integration
-def test_amd_rocm_win_find_links_resolves_live(tmp_path):
+@pytest.mark.parametrize("family", ["gfx110x", "gfx120x"])
+def test_amd_rocm_win_index_resolves_live(tmp_path, family):
     """Not mocked: a real uv resolve (metadata only - uv's --dry-run never
     downloads a wheel, unlike pip's) against AMD's live Windows ROCm preview
     repo, cross-targeting win_amd64/cp312 via --python-platform so this runs
@@ -189,11 +204,12 @@ def test_amd_rocm_win_find_links_resolves_live(tmp_path):
     guard blocks that); --python-platform/--python-version override the actual
     resolve target regardless of that venv's own version. Also the
     fires-control for the routing tests above: a genuinely dead URL (or a wrong
-    package name/version) must make THIS half fail, which the linux-target
+    package name/version) must make THIS half fail, which the macOS-target
     assertion below proves by making the same packages fail to resolve for a
     platform AMD does not publish them for."""
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
-    find_links = hwdetect.amd_rocm_win_find_links()
+    source = ["--index-url", hwdetect.amd_rocm_win_index(family), "--no-config"]
+    sdk = list(hwdetect.amd_rocm_win_sdk_packages(family))
 
     venv = tmp_path / "disposable-venv"
     made = subprocess.run(
@@ -205,18 +221,17 @@ def test_amd_rocm_win_find_links_resolves_live(tmp_path):
     resolves = subprocess.run(
         ["uv", "pip", "install", "--dry-run", "--python", str(venv_python),
          "--python-platform", "windows", "--python-version", "3.12",
-         "--find-links", find_links, torch, torchvision],
+         *source, torch, torchvision, *sdk],
         capture_output=True, text=True, timeout=60)
     assert resolves.returncode == 0, (
         f"stdout: {resolves.stdout}\nstderr: {resolves.stderr}")
 
-    # Fires-control: the identical request for a platform AMD does not publish
-    # win_amd64-only wheels for must fail, proving this check can actually
-    # distinguish a resolving repo from a dead one.
+    # Fires-control: the identical request for macOS, which AMD publishes no
+    # ROCm wheels for, must fail.
     doesnt_resolve = subprocess.run(
         ["uv", "pip", "install", "--dry-run", "--python", str(venv_python),
-         "--python-platform", "linux", "--python-version", "3.12",
-         "--find-links", find_links, torch, torchvision],
+         "--python-platform", "macos", "--python-version", "3.12",
+         *source, torch, torchvision, *sdk],
         capture_output=True, text=True, timeout=60)
     assert doesnt_resolve.returncode != 0
     assert "No solution found" in doesnt_resolve.stderr

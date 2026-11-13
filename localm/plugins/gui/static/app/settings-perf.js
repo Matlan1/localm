@@ -131,6 +131,12 @@ export const SAVED_RELOAD_KEYS = {
   cancelled: "settings.perf.savedNextLoad", failed: "settings.perf.reloadFailedToast",
 };
 
+/** i18n keys for the toasts of a Settings "Save and reload model" with nothing changed. */
+export const UNCHANGED_RELOAD_KEYS = {
+  start: "settings.perf.reloadingUnchangedToast", busy: "models.reload.busyToast",
+  cancelled: "models.reload.cancelledToast", failed: "models.reload.failedToast",
+};
+
 /** i18n keys for the toasts of a reload that saves nothing (Models tab, Live tuning "Reload model"). */
 export const PLAIN_RELOAD_KEYS = {
   start: "models.reload.reloadingToast", busy: "models.reload.busyToast",
@@ -157,11 +163,16 @@ export async function reloadWithToasts(model, keys) {
 
 /** After a successful save in Settings: reload the active model so it picks the
  *  saved values up. With no model loaded, or a model answering through a peer
- *  route, the values simply apply on the next load. */
-export async function reloadActiveModelAfterSave() {
+ *  route, the values simply apply on the next load. *saved* false (a "Save and
+ *  reload model" with nothing changed) toasts that nothing changed instead of
+ *  "Saved". */
+export async function reloadActiveModelAfterSave({ saved = true } = {}) {
   const model = modelCache.active;
-  if (!model || isPeerSelected()) { toast(t("settings.perf.savedNextLoad")); return null; }
-  const res = await reloadWithToasts(model, SAVED_RELOAD_KEYS);
+  if (!model || isPeerSelected()) {
+    toast(t(saved ? "settings.perf.savedNextLoad" : "settings.toast.nothingChanged"));
+    return null;
+  }
+  const res = await reloadWithToasts(model, saved ? SAVED_RELOAD_KEYS : UNCHANGED_RELOAD_KEYS);
   // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
   setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
   return res;
