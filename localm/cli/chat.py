@@ -1023,7 +1023,9 @@ def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
     except UnsupportedInputError as e:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # model this install has that can take the input, or how to get one.
-        guidance = _input_refusal_text(engine, messages, e, suggested=suggested)
+        guidance = _input_refusal_text(
+            engine, messages, e,
+            suggested=router.suggested_model() if router is not None else suggested)
         console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:

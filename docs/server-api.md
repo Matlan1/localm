@@ -589,11 +589,11 @@ status.
 ### `POST /v1/messages/count_tokens`
 
 Same request fields as `/v1/messages` (without `max_tokens`); returns `{"input_tokens": N}`,
-counted with the model's own tokenizer and chat template, tool descriptions included. Capability
-routing picks among the models already loaded only: a loaded model that has what the request
-needs counts it, otherwise the requested model (or, with no `model`, the server's model) does,
-and a model another instance serves is counted there. Counting never loads a routed model; the
-requested model is loaded if it is not already.
+counted with the model's own tokenizer and chat template, tool descriptions included. A named
+`model` counts its own tokens and is loaded if it is not already. Without a `model` (or with
+`localm`), capability routing picks among the models already loaded only: a loaded model that has
+what the request needs counts it, otherwise the server's model does; counting never loads a
+routed model. A model another instance serves is counted there.
 
 ### `POST /v1/responses` (OpenAI Responses API)
 
@@ -855,10 +855,10 @@ An unregistered `{id}` is a 404.
 ### `GET /health`
 
 Public - no authentication, even when a key is configured. 200 with
-`{"status": "ok", "model": "...", "loaded": true|false}`; while a model is being
-loaded and none is loaded yet, 200 with `"loaded": false` and `"loading": true`
-for the model being loaded; 503 when no model is loaded, being loaded, or kept
-for a reload on the next request.
+`{"status": "ok", "model": "...", "loaded": true|false}`, where `"loaded": false`
+names a model kept for a reload on the next request; when no model is loaded or
+kept and one is being loaded, 200 names it with `"loaded": false` and
+`"loading": true`; 503 when none of these applies.
 
 ## Model lifecycle
 

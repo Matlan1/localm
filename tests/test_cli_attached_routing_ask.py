@@ -275,3 +275,14 @@ def test_the_refusal_routing_is_kept_only_for_the_request_that_carried_it(attach
     assert engine.refusal_routing["suggested"] == "seer"
     assert list(engine.chat_stream([{"role": "user", "content": "hi"}])) == ["plain"]
     assert engine.refusal_routing is None
+
+
+def test_a_pinned_router_asks_nothing_even_when_the_refusal_suggests_a_model():
+    asked = []
+
+    class Refused:
+        refusal_routing = {"suggested": "seer", "ask_reason": REASON, "gaps": {"vision": "absent"}}
+    router = chat_mod._TurnRouter(Refused(), "plain", pinned=True)
+    router._confirm = lambda decision: asked.append(decision) or True
+    assert router.refusal_offer(Refused()) is None
+    assert asked == []

@@ -938,3 +938,14 @@ class TestCpuOnlyReason:
         fit = _assess(["v"], need=_BIG)["v"]
         assert fit.cls == cr.FIT_CPU_ONLY and fit.configured_layers is None
         assert "no layer fits" in fit.ask_reason()
+
+    def test_the_engine_reports_the_setting_of_its_backend(self, tmp_path):
+        from localm.inference.engine import Engine
+        from tests.test_moe_auto_placement import _dense_model, _Vram
+        zero = Engine(str(_dense_model(tmp_path)), n_gpu_layers=0)
+        assert zero.configured_gpu_layers() == 0
+        with _Vram(1 << 40):
+            fit = routing_fit.assess(
+                ["v"], residents={}, build=lambda n: zero, reading=_reading(free=1 << 40),
+                ram_available=_BIG, ram_total=_BIG, unload_policy="always")["v"]
+        assert fit.configured_layers == 0 and "n_gpu_layers" in fit.ask_reason()
