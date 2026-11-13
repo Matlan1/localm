@@ -6,6 +6,7 @@ id, --estimate, --ci colours, a disabled plugin, and a reply another model gave.
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -54,6 +55,11 @@ def proj(home, tmp_path, monkeypatch):
     return SimpleNamespace(path=p, agent=agent)
 
 
+def _flat(output: str) -> str:
+    """*output* with panel borders and line wrapping collapsed to single spaces."""
+    return re.sub(r"[\u2502\u256d\u256e\u256f\u2570\u2500\s]+", " ", output)
+
+
 def _invoke(proj, *args):
     return CliRunner().invoke(_main.main, ["-m", "stub-model", "--cwd", str(proj.path), *args])
 
@@ -85,8 +91,9 @@ class TestMessages:
     def test_a_resumed_id_that_matches_nothing_explains_the_task_order(self, proj):
         proj.agent.load_checkpoint.return_value = None
         r = _invoke(proj, "-r", "fix")
-        assert "No saved session with id 'fix'" in r.output
-        assert 'localm coder "fix" --resume' in r.output
+        text = _flat(r.output)
+        assert "No saved session with id 'fix'" in text
+        assert 'localm coder "fix" --resume' in text
 
     def test_ci_turns_off_colour_on_the_existing_consoles(self, proj, monkeypatch):
         from localm.plugins.coder import display
