@@ -509,7 +509,7 @@ def test_a_uv_swap_that_is_refused_keeps_the_installed_uv(tmp_path, home,
     assert "could not swap in the new uv" in ei.value.reason
     assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
     assert not (inst / ".uv-update").exists()
-    assert not [d.name for d in inst.iterdir() if d.name.startswith(".uv.previous")]
+    assert not [d.name for d in inst.iterdir() if ".previous-" in d.name]
 
 
 def test_a_running_uv_refuses_the_update_with_nothing_changed(tmp_path, home,

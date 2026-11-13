@@ -192,12 +192,12 @@ def _generate(s: dict, tags: str, out_path: Path, *, self_url: Optional[str] = "
         request["shift"] = float(shift)
     plan = bool(s.get("plan", True))
     t0 = time.monotonic()
-    from localm.discover import list_gpus
+    from localm.discover import listed_gpus
     try:
         data, backend = music.generate_wav(
             _native(s), s.get("native_runtime") or "auto", request, plan=plan,
             lowvram=bool(s.get("lowvram")), on_progress=say, cancel_check=cancel_check,
-            gpus=list_gpus)
+            gpus=listed_gpus)
     except music.Cancelled:
         return False, "Cancelled."
     except (music.ProvisionError, music.ModelError, music.NativeMusicError,

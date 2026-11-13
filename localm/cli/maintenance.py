@@ -101,8 +101,11 @@ from ..media.sdcpp.cli import main as _setup_sdcpp_main  # noqa: E402
 
 main.add_command(_setup_sdcpp_main, name="setup-sdcpp")
 
+from ..discover import listed_gpus as _listed_gpus  # noqa: E402
+from ..media.koboldcpp import cli as _music_cli  # noqa: E402
 from ..media.koboldcpp.cli import main as _setup_music_main  # noqa: E402
 
+_music_cli.gpu_list = _listed_gpus
 main.add_command(_setup_music_main, name="setup-music")
 
 

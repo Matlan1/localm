@@ -858,6 +858,30 @@ def test_a_job_starts_koboldcpp_on_the_main_gpu_in_pci_order(two_backends, monke
     assert keys and keys[-1].device == 1
 
 
+def test_the_setup_music_test_track_counts_the_main_gpu_in_the_same_gpu_list(monkeypatch):
+    import localm.cli.maintenance  # noqa: F401
+    from localm import discover
+    from localm.media.koboldcpp import cli as kcli
+    assert kcli.gpu_list is discover.listed_gpus
+    listed = [{"index": 0, "pci_bus_id": 3}]
+    monkeypatch.setattr(discover, "list_gpus", lambda *a, **k: listed)
+    seen = {}
+
+    def fake(native_cfg, choice, request, **kw):
+        seen["gpus"] = kw.get("gpus")
+        raise music.NativeMusicError("stop here")
+    monkeypatch.setattr(music, "generate_wav", fake)
+    monkeypatch.setattr(server, "stop", lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        kcli._test(_NullConsole(), "cpu", lambda m: None)
+    assert seen["gpus"]() == listed
+
+
+class _NullConsole:
+    def print(self, *a, **k):
+        pass
+
+
 def test_another_main_gpu_starts_a_fresh_server():
     a = server.ServerKey("launcher", "cuda", MODELS, device=0)
     b = server.ServerKey("launcher", "cuda", MODELS, device=1)

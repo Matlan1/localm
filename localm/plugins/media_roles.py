@@ -120,11 +120,11 @@ def _image_vae_fits(info) -> bool:
 
 
 def _family_fits(family: str, variant: Optional[str]) -> dict:
-    """``{role_id: test}`` for the image and video component roles of a
-    workflow whose diffusion model is of *family* (with wan2.2 size
-    *variant*): a text-encoder role takes a file that fits any text-encoder
-    slot of that family, a VAE role a VAE that family decodes with
-    (``families.accepts``)."""
+    """``{role_id: test}`` for the image component roles of a workflow whose
+    diffusion model is of the image family *family* (*variant* is passed to
+    ``families.accepts``): a text-encoder role takes a file that fits any
+    text-encoder slot of that family, the VAE role a VAE that family decodes
+    with."""
     from localm.media.sdcpp import families
     req = families.requirements(families.FileInfo("diffusion", family))
     text = [r.slot for r in req if r.slot in _TEXT_SLOTS]
@@ -135,16 +135,16 @@ def _family_fits(family: str, variant: Optional[str]) -> dict:
     def vae_fits(info) -> bool:
         return families.accepts("vae", family, info, variant)
 
-    return {"image-clip1": text_fits, "image-clip2": text_fits,
-            "image-vae": vae_fits, "video-clip": text_fits, "video-vae": vae_fits}
+    return {"image-clip1": text_fits, "image-clip2": text_fits, "image-vae": vae_fits}
 
 
 def _role_fits(family: Optional[str] = None, variant: Optional[str] = None) -> dict:
     """``{role_id: test}`` for the roles the built-in media plugins declare;
     each test takes a classified file (``families.FileInfo``) and says whether
     it can fill that role. With *family*, the diffusion family of the active
-    workflow's model (and *variant*, its wan2.2 size), the text-encoder and
-    VAE roles take only files that family can use."""
+    workflow's model (and *variant*, its size), when that is an image family,
+    the image text-encoder and VAE roles take only files that family can
+    use."""
     from localm.media.sdcpp import families
     image, video = families.IMAGE_FAMILIES, families.VIDEO_FAMILIES
     fits = {
@@ -159,7 +159,7 @@ def _role_fits(family: Optional[str] = None, variant: Optional[str] = None) -> d
         "music-clip": lambda info: info.kind in ("music", "umt5", "t5xxl"),
         "music-vae": lambda info: info.family not in image | video,
     }
-    if family is not None and families.known_family(family):
+    if family in image:
         fits.update(_family_fits(family, variant))
     return fits
 
@@ -180,7 +180,7 @@ def workflow_family(slots: Optional[list],
     for slot in slots:
         if not isinstance(slot, dict):
             continue
-        if model_type_for_node(slot.get("class_type")) != "diffusion-unet":
+        if model_type_for_node(str(slot.get("class_type") or "")) != "diffusion-unet":
             continue
         current = slot.get("current")
         if not isinstance(current, str) or not current:
@@ -223,8 +223,8 @@ def registry_models_for_role(role: dict, registry: Optional[dict] = None,
     less the files whose header shows they belong elsewhere (a CLIP-L file for a
     T5 role, an image checkpoint for the music model role, a music file for an
     image role). With *family* (and *variant*), the diffusion family of the
-    active workflow's model (:func:`workflow_family`), a text-encoder or VAE
-    role keeps only the files that family can use. A file whose header cannot
+    active workflow's model (:func:`workflow_family`), an image text-encoder
+    or VAE role keeps only the files that image family can use. A file whose header cannot
     be read or classified is kept. A role a built-in media plugin did not
     declare is not filtered."""
     mtype = role.get("model_type")
