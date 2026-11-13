@@ -420,10 +420,10 @@ CORE_FIELDS: list = [
     # first token can take minutes.
     SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
                  "GGUF first-token timeout (s)",
-                 "How long a reply may take to produce its first token before the "
-                 "model is treated as hung. It covers reading your whole prompt, "
-                 "so on CPU or with a long prompt this can legitimately take "
-                 "minutes.",
+                 "How long a reply may go without progress before its first token "
+                 "before the model is treated as hung. Each part of your prompt the "
+                 "model finishes reading counts as progress, so a long prompt on CPU "
+                 "is not cut off while it is still being read.",
                  group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_load_timeout_s", Widget.NUMBER,
                  "HuggingFace load timeout (s)",

@@ -1000,6 +1000,9 @@ from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
 
+# Seconds between two prompt-progress statuses while a prompt is evaluated.
+PREFILL_PROGRESS_INTERVAL_S = 5.0
+
 # n_batch and n_ubatch of the MTP draft context, and the chunk size the draft
 # cache is refilled in. Must stay above _MTP_QUEUED_ROWS_MAX + 1, the most rows
 # one draft decode carries outside a refill.
@@ -2564,7 +2567,7 @@ class LlamaCpp:
                 stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
-        with exclusive, self._inference_lock:
+        with exclusive, self._inference_lock, self._prefill_progress_to(on_status):
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
 
@@ -3507,7 +3510,7 @@ class LlamaCpp:
                 stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
-        with exclusive, self._inference_lock:
+        with exclusive, self._inference_lock, self._prefill_progress_to(on_status):
             if (not self._model_ptr or getattr(self, "_mtmd", None) is None
                     or decoded is None):
                 raise RuntimeError("vision is not available on this model")
@@ -5237,6 +5240,9 @@ class LlamaCpp:
         self._cached_tokens = list(prompt_tokens)
 
     CHECKPOINT_TAIL = CHECKPOINT_TAIL
+    # Called with (tokens done, prompt tokens) after each prompt batch
+    # _decode_prompt finishes, while _prefill_progress_to is active.
+    _prefill_progress: Optional[Callable[[int, int], None]] = None
     CHECKPOINTS_MAX = CHECKPOINTS_MAX
 
     def _resolve_moe_cache(self, requested: int, n_cpu_moe: int) -> int:
@@ -5318,7 +5324,36 @@ class LlamaCpp:
             if end == cut:
                 self._save_checkpoint(prompt_tokens[:cut])
             i = end
+            if self._prefill_progress is not None:
+                self._prefill_progress(i, n)
         return 0
+
+    @contextlib.contextmanager
+    def _prefill_progress_to(self, on_status: Optional[Callable[[str], None]]):
+        """While active, a prompt batch _decode_prompt finishes reports
+        ``protocol.prefill_progress_status`` through *on_status*, at most once
+        per ``PREFILL_PROGRESS_INTERVAL_S`` seconds and always for the last
+        batch. Each report also counts as the worker's sign of life for the
+        first-token deadline (``_runner.FIRST_TOKEN_TIMEOUT_DEFAULT``)."""
+        if on_status is None:
+            yield
+            return
+        from localm.inference.protocol import prefill_progress_status
+        last = [time.monotonic()]
+
+        def report(done: int, total: int) -> None:
+            now = time.monotonic()
+            if done < total and now - last[0] < PREFILL_PROGRESS_INTERVAL_S:
+                return
+            last[0] = now
+            on_status(prefill_progress_status(done, total))
+
+        previous = self._prefill_progress
+        self._prefill_progress = report
+        try:
+            yield
+        finally:
+            self._prefill_progress = previous
 
     def _read_seq_state(self, seq: int, flags: int, limit: Optional[int] = None):
         """Copy sequence *seq*'s state with *flags* (``llama_state_seq_flags``)
