@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Settings details the matrix found wrong: the folder picker title of each list,
 // the secret Clear/Undo tooltip, a cleared text field going back to its default,
-// and a save refusal naming the field's label instead of its config key.
+// a save refusal naming the field's label instead of its config key, and the
+// Live tuning estimate re-read after a core save.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -20,8 +21,9 @@ const FIELDS = [
     help: "", group: "Chat", owner: "core", applies: "live", default: 3 },
 ];
 
-function makeFetch(patches, refusal) {
+function makeFetch(patches, refusal, urls = []) {
   return async (url, opts = {}) => {
+    urls.push(String(url));
     if (url === "/v1/config/schema") {
       return { ok: true, status: 200, json: async () => ({ fields: structuredClone(FIELDS) }),
                text: async () => "" };
@@ -42,8 +44,8 @@ async function settle() {
   for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-async function open(patches = [], refusal) {
-  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches, refusal) });
+async function open(patches = [], refusal, urls = []) {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches, refusal, urls) });
   await settle();
   runScript(win, 'caps.fsAccess = "host"; refreshSettingsPage();');
   await settle();
@@ -82,6 +84,33 @@ test("clearing a changed text field sends its shipped default, not an empty valu
   await settle();
   assert.equal(patches.length, 1);
   assert.equal(patches[0].mdns_name, "localm");
+});
+
+test("a successful core save re-reads the Live tuning estimate", async () => {
+  const urls = [];
+  const win = await open([], undefined, urls);
+  assert.ok(win.document.getElementById("perf-estimate"), "the page has the estimate line");
+  const input = win.document.querySelector('input[data-key="chat_web_max_lookups"]');
+  input.value = "5";
+  input.dispatchEvent(new win.Event("input", { bubbles: true }));
+  const before = urls.filter((u) => u.startsWith("/api/vram-estimate")).length;
+  runScript(win, 'saveSettingsSection("core-Chat");');
+  await settle();
+  const after = urls.filter((u) => u.startsWith("/api/vram-estimate")).length;
+  assert.equal(after - before, 1);
+});
+
+test("a refused core save does not re-read the estimate", async () => {
+  const urls = [];
+  const win = await open([], "chat_web_max_lookups: -1 is below the minimum 0", urls);
+  const input = win.document.querySelector('input[data-key="chat_web_max_lookups"]');
+  input.value = "-1";
+  input.dispatchEvent(new win.Event("input", { bubbles: true }));
+  const before = urls.filter((u) => u.startsWith("/api/vram-estimate")).length;
+  runScript(win, 'saveSettingsSection("core-Chat");');
+  await settle();
+  const after = urls.filter((u) => u.startsWith("/api/vram-estimate")).length;
+  assert.equal(after - before, 0);
 });
 
 test("a save refusal names the field's label, not its config key", async () => {
