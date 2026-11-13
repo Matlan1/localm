@@ -153,14 +153,13 @@ def test_amd_rocm_on_windows_gfx103x_uses_bundled_extra(monkeypatch):
 def test_amd_rocm_on_windows_rdna3_4_uses_its_family_index(monkeypatch, name, family):
     """RX 7000 / 9000 are NOT the bundled gfx103X build: they get the pinned torch
     and torchvision with their family's rocm-sdk packages from that family's AMD
-    index, as an extra index next to PyPI."""
+    index alone."""
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     args = hwdetect.torch_pip_args("amd-rocm", _det(name))
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
     sdk = " ".join(hwdetect.amd_rocm_win_sdk_packages(family))
-    assert args == (f"{torch} {torchvision} {sdk} --extra-index-url "
-                    f"https://repo.amd.com/rocm/whl/{family[:5]}{family[5:].upper()}-all/ "
-                    "--index-strategy=unsafe-best-match")
+    assert args == (f"{torch} {torchvision} {sdk} --index-url "
+                    f"https://repo.amd.com/rocm/whl/{family[:5]}{family[5:].upper()}-all/")
     assert "--find-links" not in args and "--torch-backend" not in args
 
 
@@ -208,8 +207,7 @@ def test_amd_rocm_win_index_resolves_live(tmp_path, family):
     assertion below proves by making the same packages fail to resolve for a
     platform AMD does not publish them for."""
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
-    source = ["--extra-index-url", hwdetect.amd_rocm_win_index(family),
-              "--index-strategy", "unsafe-best-match"]
+    source = ["--index-url", hwdetect.amd_rocm_win_index(family)]
     sdk = list(hwdetect.amd_rocm_win_sdk_packages(family))
 
     venv = tmp_path / "disposable-venv"

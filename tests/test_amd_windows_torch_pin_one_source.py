@@ -84,7 +84,7 @@ def test_the_managed_comfyui_installs_the_hwdetect_wheels_of_each_family(monkeyp
     assert spec.variant == "rocm"
     assert spec.packages == (hwdetect.amd_rocm_win_torch_packages()
                              + hwdetect.amd_rocm_win_sdk_packages(family))
-    assert spec.extra_index_url == hwdetect.amd_rocm_win_index(family)
+    assert spec.index_url == hwdetect.amd_rocm_win_index(family)
 
 
 def test_the_rx_7000_9000_instructions_in_the_docs_name_the_hwdetect_wheels():
@@ -117,3 +117,49 @@ def test_every_setup_variant_asks_hwdetect_for_the_torch_wheel_source(rel):
 def test_the_gui_setup_variants_hand_the_install_to_the_gui_installer(rel):
     text = (ROOT / rel).read_text(encoding="utf-8")
     assert re.search(r"installer[\\/]gui\.py", text), rel
+
+
+_OTHER_SOURCES = ("--extra-index-url", "--find-links", "-f", "--index-strategy")
+
+
+def _amd_install_args():
+    """(where, family, pip arguments) of every AMD Windows PyTorch install: setup's
+    torch-args for the families it installs from AMD's index, and the managed
+    ComfyUI's for every family."""
+    import shlex
+    from localm.media import managed_comfy_fresh as fresh
+    for card, family in (("AMD Radeon RX 6800", "gfx103x"), ("AMD Radeon RX 7900 XTX", "gfx110x"),
+                         ("AMD Radeon RX 9070 XT", "gfx120x")):
+        det = hwdetect.Detection(vendors=["amd"], gpu_names=card.lower(), probe_ok=True)
+        spec = fresh.comfy_torch_spec(det)
+        yield "managed ComfyUI", family, fresh.comfy_torch_install_args(spec)
+        args = hwdetect.torch_pip_args("amd-rocm", det)
+        if args != "-e .[gpu]":
+            yield "torch-args", family, shlex.split(args, posix=True)
+
+
+def test_every_amd_package_comes_from_its_family_index_alone(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    seen = []
+    for where, family, args in _amd_install_args():
+        seen.append((where, family))
+        flat = " ".join(args)
+        assert not any(a == o or a.startswith(o + "=") for a in args for o in _OTHER_SOURCES), \
+            f"{where} {family}: {flat}"
+        assert "unsafe" not in flat, f"{where} {family}: {flat}"
+        indexes = [args[i + 1] for i, a in enumerate(args) if a == "--index-url"]
+        assert indexes == [hwdetect.amd_rocm_win_index(family)], f"{where} {family}: {flat}"
+        reqs = [a for i, a in enumerate(args)
+                if not a.startswith("-") and (i == 0 or args[i - 1] != "--index-url")]
+        assert reqs and all(re.fullmatch(r"[a-z0-9-]+==[\w.+]+", r) for r in reqs), reqs
+    assert ("managed ComfyUI", "gfx103x") in seen and ("torch-args", "gfx110x") in seen \
+        and ("torch-args", "gfx120x") in seen, seen
+
+
+def test_the_manual_amd_commands_in_the_docs_use_the_family_index_alone():
+    doc = (ROOT / "docs" / "gpu-setup.md").read_text(encoding="utf-8")
+    for family in ("gfx110x", "gfx120x"):
+        index = hwdetect.amd_rocm_win_index(family)
+        assert f"--index-url {index}" in doc
+        assert f"--extra-index-url {index}" not in doc
+    assert "unsafe-best-match" not in doc

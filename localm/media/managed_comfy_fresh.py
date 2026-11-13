@@ -76,16 +76,14 @@ COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 @dataclass(frozen=True)
 class ComfyTorchSpec:
     """The PyTorch install spec for a fresh ComfyUI venv on THIS hardware.
-    ``packages`` are pip requirement strings; ``index_url`` is the primary wheel
-    index (None = PyPI); ``extra_index_url`` an additional PEP 503 index (AMD's
-    ROCm repo for the GPU family, so torch resolves there and everything else from
-    PyPI); ``find_links`` a flat (non-PEP-503) wheel listing pip can only reach via
-    --find-links. ``note`` carries an honest reason when the pick is a degraded
-    fallback."""
+    ``packages`` are pip requirement strings; ``index_url`` is the wheel index
+    (None = PyPI; AMD's ROCm index for the GPU family on Windows, which also
+    serves torch's dependencies, so nothing comes from PyPI); ``find_links`` a
+    flat (non-PEP-503) wheel listing pip can only reach via --find-links.
+    ``note`` carries an honest reason when the pick is a degraded fallback."""
     variant: str
     packages: tuple
     index_url: Optional[str] = None
-    extra_index_url: Optional[str] = None
     find_links: Optional[str] = None
     note: str = ""
 
@@ -128,7 +126,7 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
             return ComfyTorchSpec(
                 "rocm", hwdetect.amd_rocm_win_torch_packages()
                 + hwdetect.amd_rocm_win_sdk_packages(fam),
-                extra_index_url=hwdetect.amd_rocm_win_index(fam))
+                index_url=hwdetect.amd_rocm_win_index(fam))
         return _cpu_spec(
             note=("no verified ROCm torch wheel for this AMD GPU on Windows; using "
                   "CPU torch so ComfyUI still runs (on CPU) - add a GPU torch by hand "
@@ -153,12 +151,10 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
 
 def comfy_torch_install_args(spec: ComfyTorchSpec) -> list:
     """The pip arguments (after ``pip install``) for *spec*: the package specs, then
-    --index-url / --extra-index-url / --find-links as set."""
+    --index-url / --find-links as set."""
     args = list(spec.packages)
     if spec.index_url:
         args += ["--index-url", spec.index_url]
-    if spec.extra_index_url:
-        args += ["--extra-index-url", spec.extra_index_url]
     if spec.find_links:
         args += ["--find-links", spec.find_links]
     return args

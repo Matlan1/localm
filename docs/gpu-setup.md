@@ -472,14 +472,12 @@ uv pip install -p .venv -e ".[gpu]"
 # AMD on Windows, RX 7000 (RDNA3, gfx110X) - AMD's Windows ROCm wheels:
 uv pip install -p .venv torch==2.11.0+rocm7.13.0 torchvision==0.26.0+rocm7.13.0 \
     rocm==7.13.0 rocm-sdk-core==7.13.0 rocm-sdk-libraries-gfx110x-all==7.13.0 \
-    --extra-index-url https://repo.amd.com/rocm/whl/gfx110X-all/ \
-    --index-strategy unsafe-best-match
+    --index-url https://repo.amd.com/rocm/whl/gfx110X-all/
 
 # AMD on Windows, RX 9000 (RDNA4, gfx120X) - AMD's Windows ROCm wheels:
 uv pip install -p .venv torch==2.11.0+rocm7.13.0 torchvision==0.26.0+rocm7.13.0 \
     rocm==7.13.0 rocm-sdk-core==7.13.0 rocm-sdk-libraries-gfx120x-all==7.13.0 \
-    --extra-index-url https://repo.amd.com/rocm/whl/gfx120X-all/ \
-    --index-strategy unsafe-best-match
+    --index-url https://repo.amd.com/rocm/whl/gfx120X-all/
 
 # CPU (any machine):
 uv pip install -p .venv torch torchvision --torch-backend=cpu

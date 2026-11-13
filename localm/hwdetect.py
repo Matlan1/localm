@@ -458,7 +458,8 @@ _TORCH_BACKEND = {
 }
 
 # AMD's Windows ROCm wheels: one PEP 503 index per GPU family, each publishing the
-# same torch release with its family's rocm-sdk-libraries package. The `gpu` extra
+# same torch release with its family's rocm-sdk-libraries package and torch's
+# dependencies, so an install of them uses that index alone. The `gpu` extra
 # in pyproject.toml pins the same three versions for gfx103X;
 # scripts/bump_amd_wheels_pin.py moves both. See
 # test_every_amd_windows_torch_pin_matches_hwdetect.
@@ -567,7 +568,8 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
                            build, the ``[gpu]`` extra (no upstream Windows wheel for it)
       * rocm, Windows, gfx110X / gfx120X (RX 7000 / 9000) -> AMD's Windows ROCm
-                           wheels from that family's index (amd_rocm_win_index)
+                           wheels and their dependencies from that family's index
+                           alone (amd_rocm_win_index), never PyPI
       * rocm, Windows, other / unknown AMD       -> "" (no verified prebuilt; the
                            installer skips and prints how to add torch by hand)
       * none            -> ""
@@ -588,8 +590,7 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
         if fam in ("gfx110x", "gfx120x"):
             torch, torchvision, _ = amd_rocm_win_torch_packages()
             sdk = " ".join(amd_rocm_win_sdk_packages(fam))
-            return (f"{torch} {torchvision} {sdk} --extra-index-url {amd_rocm_win_index(fam)} "
-                    "--index-strategy=unsafe-best-match")
+            return f"{torch} {torchvision} {sdk} --index-url {amd_rocm_win_index(fam)}"
         return ""                        # unknown AMD on Windows: no verified prebuilt
     return ""
 

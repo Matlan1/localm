@@ -111,7 +111,7 @@ def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
     assert "torch==2.11.0+rocm7.13.0" in spec.packages
     assert "torchvision==0.26.0+rocm7.13.0" in spec.packages
     assert "rocm-sdk-libraries-gfx103x-all" in spec.packages
-    assert spec.extra_index_url == "https://repo.amd.com/rocm/whl/gfx103X-all/"
+    assert spec.index_url == "https://repo.amd.com/rocm/whl/gfx103X-all/"
 
 
 def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
@@ -236,7 +236,7 @@ def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
     assert torchvision in spec.packages
     assert torchaudio in spec.packages
     assert "rocm-sdk-libraries-gfx110x-all==7.13.0" in spec.packages
-    assert spec.extra_index_url == hwdetect.amd_rocm_win_index("gfx110x")
+    assert spec.index_url == hwdetect.amd_rocm_win_index("gfx110x")
     assert spec.index_url is None
     assert spec.find_links is None
 
