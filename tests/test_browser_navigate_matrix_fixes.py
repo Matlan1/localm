@@ -24,6 +24,15 @@ from tests.test_browser_netgate import _set, cfg_home  # noqa: F401
     ("file:///etc/passwd", "file:///etc/passwd"),
     ("  example.com  ", "https://example.com"),
     ("", ""),
+    ("mailto:a@example.com", "mailto:a@example.com"),
+    ("foo:bar@evil.com", "foo:bar@evil.com"),
+    ("javascript:alert(1)", "javascript:alert(1)"),
+    ("view-source:example.com", "view-source:example.com"),
+    ("C:\\x", "C:\\x"),
+    ("file:C:/x", "file:C:/x"),
+    ("127.evil.com", "https://127.evil.com"),
+    ("127.0.0.1.nip.io", "https://127.0.0.1.nip.io"),
+    ("example.com:8443/x", "https://example.com:8443/x"),
 ])
 def test_with_default_scheme(typed, expected):
     assert netgate.with_default_scheme(typed) == expected
