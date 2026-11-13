@@ -237,7 +237,6 @@ def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
     assert torchaudio in spec.packages
     assert "rocm-sdk-libraries-gfx110x-all==7.13.0" in spec.packages
     assert spec.index_url == hwdetect.amd_rocm_win_index("gfx110x")
-    assert spec.index_url is None
     assert spec.find_links is None
 
 
