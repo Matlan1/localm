@@ -6,6 +6,7 @@ shared uv; a home folder that cannot be found is named as the problem."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,7 @@ def test_shared_uv_shell_lines_are_reported(tmp_path, monkeypatch):
     assert all(i.status == "keep" and i.kind == "report" for i in items)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the user PATH in the registry is Windows only")
 def test_shared_uv_user_path_entry_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(im.sys, "platform", "win32")
     monkeypatch.setattr(im.Path, "home", classmethod(lambda cls: tmp_path))
