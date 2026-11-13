@@ -129,10 +129,10 @@ class Source:
     resolved to the same final URL as a higher-ranked fetched source).
 
     ``grounding`` says what evidence backs the source: ``page-backed`` when page
-    text was extracted; ``snippet-only`` when the provider snippet is the only
-    evidence (the read was not attempted, was skipped, was a duplicate, failed,
-    or found no extractable text); ``failed`` when the source has neither page
-    text nor a snippet.
+    text was extracted; ``failed`` when a read was attempted and failed, or when
+    the source has neither page text nor a snippet; ``snippet-only`` otherwise
+    (not attempted, skipped, duplicate, or the page had no extractable text)
+    while the provider snippet is the only evidence.
     """
 
     id: str
@@ -149,11 +149,8 @@ class Source:
     text_chars: int = 0
 
     def mark_failed(self, error: str) -> None:
-        """Record a failed read: the snippet, when there is one, is still
-        evidence."""
         self.retrieval_status = STATUS_FAILED
-        self.grounding = (GROUNDING_SNIPPET_ONLY if self.snippet.strip()
-                          else GROUNDING_FAILED)
+        self.grounding = GROUNDING_FAILED
         self.error = error
 
     def to_dict(self) -> dict:

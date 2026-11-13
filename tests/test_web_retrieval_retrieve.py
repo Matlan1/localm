@@ -96,9 +96,7 @@ class TestEvidenceStatesAndDuplicates:
 
     def test_per_source_status_and_grounding(self, bundle):
         s1, s2, s3, s4, s5 = bundle.sources
-        # The read failed, but its snippet is used as evidence.
-        assert (s1.retrieval_status, s1.grounding) == ("failed", GROUNDING_SNIPPET_ONLY)
-        assert any(c.source_id == "S1" for c in bundle.chunks)
+        assert (s1.retrieval_status, s1.grounding) == ("failed", GROUNDING_FAILED)
         assert "HTTP 503" in s1.error
         assert (s2.retrieval_status, s2.grounding) == ("fetched", GROUNDING_PAGE_BACKED)
         assert (s3.retrieval_status, s3.grounding) == ("fetched", GROUNDING_PAGE_BACKED)

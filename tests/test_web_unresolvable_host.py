@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A host name that does not resolve is a failure to connect, not a refusal
 by the network policy: the web routes answer 502 saying the name did not
-resolve, a retrieval records a failed search instead of refusing, and a
-source whose page read failed keeps its snippet as evidence. A search that
-failed on every service is not prefixed with a second "Search failed"."""
+resolve, and a retrieval records a failed search instead of refusing. A search
+that failed on every service is not prefixed with a second "Search failed"."""
 
 import pytest
 from fastapi.testclient import TestClient
 
 from localm import netpolicy
-from localm.web_retrieval import GROUNDING_FAILED, GROUNDING_SNIPPET_ONLY
-from localm.web_retrieval.contracts import SearchProviderError, Source
+from localm.web_retrieval.contracts import SearchProviderError
 from localm.web_retrieval.errors import describe_failure
 from localm.web_retrieval.providers import is_policy_refusal
 from tests.test_gui import web_app  # noqa: F401
@@ -72,7 +70,8 @@ def test_a_search_that_failed_everywhere_is_not_prefixed_twice(web_app, monkeypa
 
 
 def test_retrieve_records_an_unresolvable_search_as_failed():
-    from localm.web_retrieval import retrieve as R
+    import importlib
+    R = importlib.import_module("localm.web_retrieval.retrieve")
 
     class Provider:
         name = "duckduckgo"
@@ -85,12 +84,3 @@ def test_retrieve_records_an_unresolvable_search_as_failed():
     assert bundle.search_status == R.SEARCH_FAILED
     assert "did not resolve" in bundle.search_error
 
-
-@pytest.mark.parametrize("snippet, grounding", [
-    ("A snippet", GROUNDING_SNIPPET_ONLY), ("", GROUNDING_FAILED)])
-def test_a_failed_read_keeps_its_snippet_as_evidence(snippet, grounding):
-    s = Source(id="S1", url="https://a.example/", canonical_url="https://a.example/",
-               title="A", snippet=snippet, provider_rank=1)
-    s.mark_failed("HTTP 503")
-    assert s.retrieval_status == "failed"
-    assert s.grounding == grounding
