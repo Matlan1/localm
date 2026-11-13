@@ -102,21 +102,40 @@ def _param_names(node) -> set[str]:
     return names
 
 
-def _loop_names(node) -> set[str]:
-    """The names bound as loop or comprehension targets in function *node*'s
-    own body (nested def/async def/lambda bodies excluded)."""
-    names: set[str] = set()
+def _loop_iters(node) -> dict[str, set[str]]:
+    """Map each name bound as a loop or comprehension target in function
+    *node*'s own body (nested def/async def/lambda bodies excluded) to the
+    names read by the expression it iterates over."""
+    out: dict[str, set[str]] = defaultdict(set)
     stack: list[ast.AST] = list(node.body)
     while stack:
         item = stack.pop()
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
-        target = None
         if isinstance(item, (ast.For, ast.AsyncFor, ast.comprehension)):
-            target = item.target
-        if target is not None:
-            names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+            read = {n.id for n in ast.walk(item.iter) if isinstance(n, ast.Name)}
+            for n in ast.walk(item.target):
+                if isinstance(n, ast.Name):
+                    out[n.id].update(read)
         stack.extend(ast.iter_child_nodes(item))
+    return out
+
+
+def _module_lists(tree: ast.Module) -> set[str]:
+    """Module-level names assigned an empty list or set literal, or list()/set()."""
+    names: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        is_container = (isinstance(value, (ast.List, ast.Set))
+                        or (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                            and value.func.id in ("list", "set")))
+        if is_container:
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
     return names
 
 
@@ -211,7 +230,10 @@ class Analyzer:
         self.by_class: dict[str, list[Func]] = defaultdict(list)
         self.lock_bodies: dict[str, list[tuple[Func, ast.AST]]] = defaultdict(list)
         self.lock_kind: dict[str, tuple[str, str, str]] = {}
+        # (module, module-level list) -> the functions registered into it.
+        self.listeners: dict[tuple[str, str], list[Func]] = defaultdict(list)
         self._load(root / package)
+        self._collect_listeners()
         self._classify_locks()
 
     # ---------------------------------------------------------------- parse --
@@ -235,6 +257,52 @@ class Analyzer:
                 init = mod.funcs.get(qual + ".__init__")
                 if init is not None:
                     self.by_class[qual.rsplit(".", 1)[-1]].append(init)
+
+    def _collect_listeners(self) -> None:
+        """Fill self.listeners. A registrar is a function that appends (or adds)
+        one of its own parameters to a module-level list; every call of a
+        registrar anywhere in the tree registers the function it is passed.
+        A call through a loop variable over that list resolves to them."""
+        registrars: dict[str, tuple[str, str, str, int]] = {}
+        for mod in self.mods.values():
+            lists = _module_lists(mod.tree)
+            if not lists:
+                continue
+            for func in mod.funcs.values():
+                params = func.node.args.posonlyargs + func.node.args.args
+                for node in ast.walk(func.node):
+                    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                            and node.func.attr in ("append", "add")
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id in lists
+                            and len(node.args) == 1 and isinstance(node.args[0], ast.Name)):
+                        continue
+                    pname = node.args[0].id
+                    index = next((i for i, a in enumerate(params) if a.arg == pname), -1)
+                    if index >= 0:
+                        registrars[func.key] = (mod.name, node.func.value.id, pname, index)
+        if not registrars:
+            return
+        for mod in self.mods.values():
+            for func in mod.funcs.values():
+                for node in ast.walk(func.node):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    for target, _ok in self.resolve(func, _dotted(node.func)):
+                        reg = registrars.get(target.key)
+                        if reg is None:
+                            continue
+                        lmod, lname, pname, index = reg
+                        if target.qual.split(".")[0] in target.mod.classes:
+                            index -= 1
+                        arg = next((k.value for k in node.keywords if k.arg == pname), None)
+                        if arg is None and 0 <= index < len(node.args):
+                            arg = node.args[index]
+                        if not isinstance(arg, (ast.Name, ast.Attribute)):
+                            continue
+                        for fn, _c in self.resolve(func, _dotted(arg)):
+                            if fn not in self.listeners[(lmod, lname)]:
+                                self.listeners[(lmod, lname)].append(fn)
 
     @staticmethod
     def _collect_imports(mod: Module) -> None:
@@ -372,8 +440,15 @@ class Analyzer:
             nested = mod.funcs.get(func.qual + "." + name)
             if nested is not None:
                 return [(nested, True)]
-        if not rest and (name in _param_names(func.node) or name in _loop_names(func.node)):
+        if not rest and name in _param_names(func.node):
             return []
+        if not rest:
+            iters = _loop_iters(func.node)
+            if name in iters:
+                out: list[tuple[Func, bool]] = []
+                for listed in sorted(iters[name]):
+                    out.extend((f, True) for f in self.listeners.get((mod.name, listed), []))
+                return out
         if name in mod.funcs:
             return [(mod.funcs[name], True)]
 

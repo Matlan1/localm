@@ -382,9 +382,58 @@ def register(app):
     assert "GET /api/caps" not in _routes(mod, root)
 
 
-def test_a_call_through_a_loop_variable_is_not_bound_to_a_same_named_function(tmp_path):
-    """A loop variable called as ``fn()`` (a listener list) has no static target.
-    The one function in the tree named ``fn`` is not what the handler runs."""
+_LISTENER_ROUTES = '''
+_listeners: list = []
+
+
+def add_listener(fn):
+    if fn not in _listeners:
+        _listeners.append(fn)
+
+
+def _notify():
+    for fn in list(_listeners):
+        fn(None)
+
+
+def register(app):
+    @app.post("/api/rotate")
+    async def rotate():
+        _notify()
+        return {}
+'''
+
+
+def test_a_listener_loop_follows_the_registered_listeners(tmp_path):
+    """``for fn in _listeners: fn()`` reaches every function passed to the
+    registrar that appends to ``_listeners``; a listener that takes the load
+    lock makes the route gate."""
+    mod = _load()
+    root = _tree(tmp_path, {
+        "helpers.py": _HELPERS,
+        "routes.py": _LISTENER_ROUTES,
+        "plugin.py": '''
+from localm.routes import add_listener
+from localm.helpers import get_embedder
+
+
+def _on_revoke(key_hash):
+    return get_embedder()
+
+
+class Manager:
+    def __init__(self):
+        add_listener(_on_revoke)
+''',
+    })
+    found = _routes(mod, root)
+    assert "POST /api/rotate" in found
+    assert any(f.gating for f in found["POST /api/rotate"])
+
+
+def test_a_listener_loop_is_not_bound_to_a_same_named_function(tmp_path):
+    """The one function in the tree named ``fn`` is not a registered listener,
+    so the loop does not reach it."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS + '''
@@ -394,21 +443,16 @@ def submit():
         return get_embedder()
     return fn
 ''',
-        "routes.py": '''
-_listeners = []
+        "routes.py": _LISTENER_ROUTES,
+        "plugin.py": '''
+from localm.routes import add_listener
 
 
-def _notify():
-    for fn in list(_listeners):
-        fn(None)
-    [fn(None) for fn in list(_listeners)]
+def _on_revoke(key_hash):
+    return None
 
 
-def register(app):
-    @app.post("/api/rotate")
-    async def rotate():
-        _notify()
-        return {}
+add_listener(_on_revoke)
 ''',
     })
     assert "POST /api/rotate" not in _routes(mod, root)
