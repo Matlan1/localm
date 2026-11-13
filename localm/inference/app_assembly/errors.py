@@ -19,6 +19,31 @@ SERVER_ERROR_LOG_INTERVAL_S = 30.0
 _ONE_LINE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
+def error_body(path: str, status: int, detail) -> dict:
+    """The JSON body of an error answer for a request to *path*: ``{"detail":
+    detail}``, plus the error field the clients of *path*'s protocol read. An
+    Ollama route (the Ollama paths, ``/api/blobs/...`` and the Ollama management
+    paths) adds ``"error": "<message>"``; ``/v1/messages...`` adds Anthropic's
+    ``"type": "error"`` and ``"error": {"type", "message"}``; every other
+    ``/v1/...`` path adds OpenAI's ``"error": {"message", "type", "param",
+    "code"}`` (:func:`responses_protocol.error_body`). Any other path gets
+    ``{"detail": detail}`` alone."""
+    from localm.inference import anthropic_protocol as A
+    from localm.inference import ollama_protocol as O
+    from localm.inference import responses_protocol as R
+    body: dict = {"detail": detail}
+    message = detail if isinstance(detail, str) else str(detail)
+    if (path in O.INFERENCE_POST_PATHS or path in O.READ_GET_PATHS
+            or path in (O.SHOW_PATH, O.COPY_PATH) or path in O.MANAGEMENT_PATHS
+            or path.startswith(O.BLOBS_PREFIX)):
+        body["error"] = message
+    elif path == "/v1/messages" or path.startswith("/v1/messages/"):
+        body.update(A.error_body(status, message))
+    elif path.startswith("/v1/"):
+        body.update(R.error_body(status, message))
+    return body
+
+
 def read_slow_response(method: str, path: str, exc) -> JSONResponse:  # noqa: ANN001
     """The 503 for a ``config.ConfigReadSlow`` *exc* raised while answering
     *method* *path*, with its Retry-After. Logs one debug-mode line."""
@@ -26,10 +51,10 @@ def read_slow_response(method: str, path: str, exc) -> JSONResponse:  # noqa: AN
     _dbg.info("%s %s refused: %s", method, _ONE_LINE_RE.sub(" ", path), exc)
     return JSONResponse(
         status_code=503,
-        content={"detail": "localm's settings are not readable right now: "
+        content=error_body(path, 503, "localm's settings are not readable right now: "
                            f"reading {_ONE_LINE_RE.sub(' ', str(exc.name))} is "
                            "taking too long (a busy disk?). Nothing was read; "
-                           "try again in a moment."},
+                           "try again in a moment."),
         headers={"Retry-After": str(exc.retry_after_s)})
 
 
@@ -88,7 +113,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         _dbg.info("%s %s refused: %s", request.method, request.url.path, exc)
         return JSONResponse(
             status_code=503,
-            content={"detail": str(exc)},
+            content=error_body(request.url.path, 503, str(exc)),
             headers={"Retry-After": str(exc.retry_after_s)})
 
     @app.exception_handler(ConfigLockTimeout)
@@ -97,9 +122,10 @@ def register_exception_handlers(app: FastAPI) -> None:
         _dbg.warning("%s %s not saved: %s", request.method, request.url.path, exc)
         return JSONResponse(
             status_code=503,
-            content={"detail": "localm's settings are busy: another localm "
+            content=error_body(request.url.path, 503,
+                               "localm's settings are busy: another localm "
                                "process is writing them. Nothing was saved; "
-                               "try again in a moment."},
+                               "try again in a moment."),
             headers={"Retry-After": "5"})
 
     # One backstop so an unexpected error in ANY route returns a consistent
@@ -116,8 +142,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             return read_slow_response(request.method, request.url.path, exc)
         from localm.debuglog import logger as _dbg
         _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
+        detail = "Internal server error"
+        if isinstance(exc, OSError) and exc.strerror and exc.filename is not None:
+            detail = f"Internal server error: {exc.strerror}"
         return JSONResponse(status_code=500,
-                            content={"detail": "Internal server error"})
+                            content=error_body(request.url.path, 500, detail))
 
     # A refusal carries its REASON in the HTTPException detail, and that detail
     # is logged next to the status so a refusal is self-diagnosing from the debug
@@ -188,9 +217,14 @@ def register_exception_handlers(app: FastAPI) -> None:
                                  f" ({held} more like this not logged)" if held else "")
         if undecodable:
             return JSONResponse(status_code=422,
-                                content={"detail": UNDECODABLE_BODY_MESSAGE,
+                                content={**error_body(request.url.path, 422,
+                                                      UNDECODABLE_BODY_MESSAGE),
                                          "errors": []})
-        return await http_exception_handler(request, exc)
+        body = error_body(request.url.path, exc.status_code, exc.detail)
+        if len(body) == 1:
+            return await http_exception_handler(request, exc)
+        return JSONResponse(status_code=exc.status_code, content=body,
+                            headers=getattr(exc, "headers", None))
 
     from fastapi.exceptions import RequestValidationError
 
@@ -308,5 +342,6 @@ def register_exception_handlers(app: FastAPI) -> None:
             summary = ""
         return JSONResponse(
             status_code=422,
-            content={"detail": summary or "Request validation failed",
+            content={**error_body(request.url.path, 422,
+                                  summary or "Request validation failed"),
                      "errors": safe})

@@ -95,13 +95,14 @@ def search_failure_text(exc: BaseException,
         provider = provider_from_config()
     url = (getattr(provider, "endpoint", "")
            or getattr(provider, "base_url", "") or "")
-    reason = describe_failure(exc, url)
+    reason = describe_failure(exc, url).rstrip()
+    end = "" if reason.endswith((".", "!", "?")) else "."
     if getattr(provider, "name", "") == "searxng":
-        return f"The search backend set in Settings > Server & network failed: {reason}."
+        return f"The search backend set in Settings > Server & network failed: {reason}{end}"
     host = urllib.parse.urlparse(url).hostname or ""
     if not (host and reason.startswith(host)):
         reason = reason[:1].upper() + reason[1:]
-    return f"{reason}."
+    return f"{reason}{end}"
 
 
 def _looks_like_html(content_type: str, body: str) -> bool:

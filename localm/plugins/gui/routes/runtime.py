@@ -9,7 +9,8 @@ NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
                                user's chosen backend when a different one is
                                installed (requested, requested_reason), and
                                the backend localm loads (in_use,
-                               in_use_source).
+                               in_use_source), and the backends that can be
+                               installed on this platform (backends).
   POST /api/runtime/keep    -> keep the installed backend: forget the recorded
                                choice of a backend that could not be used.
   POST /api/runtime/update  -> dispatch `localm setup-llama --backend <b>
@@ -64,6 +65,19 @@ _CUSTOM_BUILD_REFUSAL = (
     "newer build.")
 
 
+def _backend_refusal_here(backend: str) -> Optional[str]:
+    """The reason `setup-llama --backend <backend>` refuses *backend* on this
+    platform and CPU architecture, or None when it accepts it. Performs no I/O."""
+    import click
+
+    from localm.setup_llama.assets import _require_backend_here
+    try:
+        _require_backend_here(backend)
+    except click.ClickException as e:
+        return e.format_message()
+    return None
+
+
 def register(app: FastAPI, ctx) -> None:
     jobs = ctx.jobs
 
@@ -76,9 +90,9 @@ def register(app: FastAPI, ctx) -> None:
         (pin-aware, amd-rocm uses its fixed tag, never queries a release
         listing needlessly).
 
-        The response carries no backend list: the set the POST accepts is the
-        constant setup_llama.BACKENDS, which the Settings card carries in its
-        own markup."""
+        ``backends`` lists the members of setup_llama.BACKENDS that
+        `setup-llama --backend` accepts on this platform and CPU architecture,
+        in BACKENDS order; "auto" is always one of them."""
         from localm import setup_llama
 
         def _check():
@@ -89,6 +103,8 @@ def register(app: FastAPI, ctx) -> None:
             use = setup_llama.runtime_in_use()
             out["in_use"] = use["backend"]
             out["in_use_source"] = use["source"]
+            out["backends"] = [b for b in setup_llama.BACKENDS
+                               if _backend_refusal_here(b) is None]
             return out
         try:
             return await run_in_threadpool_bounded(_check, timeout=_CHECK_TIMEOUT_S)
@@ -147,6 +163,8 @@ def register(app: FastAPI, ctx) -> None:
         names 'auto') while the installed runtime is a user-supplied build
         (marker "custom", from `setup-llama --from` or `--url`): no download
         refreshes it, and setup-llama's --backend does not accept "custom".
+        Refuses (400) a named backend `setup-llama --backend` does not accept
+        on this platform and CPU architecture, with its reason.
 
         Refuses (409) only when a runtime job is already running. A concurrent
         `localm update` re-provision or a bare terminal `setup-llama` is refused
@@ -162,6 +180,9 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(
                 400, f"Unknown backend {req.backend!r}. One of: "
                      f"{', '.join(setup_llama.BACKENDS)}.")
+        refusal = _backend_refusal_here(wanted) if wanted is not None else None
+        if refusal is not None:
+            raise HTTPException(400, refusal)
         tag = (req.tag or "").strip() or None
         if tag is not None and not setup_llama.is_safe_tag(tag):
             raise HTTPException(

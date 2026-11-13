@@ -2355,6 +2355,7 @@ function _updateExtras(d) {
   if (d.components_note) text += "  " + t("settings.update.componentsNote", { note: d.components_note });
   const kept = Array.isArray(d.kept_for_updates) ? d.kept_for_updates : [];
   if (kept.length) text += "  " + t("settings.update.keptForUpdates", { parts: kept.join("; ") });
+  if (d.git_clone === true) text += "  " + t("settings.update.gitClone");
   return text;
 }
 
