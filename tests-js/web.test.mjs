@@ -720,7 +720,7 @@ test("a model that keeps searching stops at the Settings ceiling and the turn st
   assert.doesNotMatch(JSON.stringify(conv.messages), /web search limit reached|Stop searching/i);
   const dom = window.document.getElementById("chat-messages").textContent;
   assert.doesNotMatch(dom, /Instruction to the model/);
-  assert.match(dom, /limit of 3 web lookups/, "the user is told why the fourth lookup did not run");
+  assert.match(dom, /web lookup limit \(3,/,"the user is told why the fourth lookup did not run");
 });
 
 test("the tool-free last completion that still writes a call ends on text, never on a bare marker", async () => {
@@ -966,7 +966,7 @@ test("control notes render as a one-line notice, never as an 'Instruction to the
   assert.doesNotMatch(text, /SECRET|Stop searching|model-facing/, "the text the model reads is not shown");
   assert.match(text, /could not be read; the model was asked to send it again/);
   assert.match(text, /Web lookups for this message were stopped/);
-  assert.match(text, /limit of 4 web lookups/);
+  assert.match(text, /web lookup limit \(4,/);
   assert.match(text, /not run again/);
   assert.equal(box.querySelectorAll(".tool-card").length, 2, "only the two calls are cards");
   assert.equal(box.querySelectorAll(".tool-notice-row").length, 2);

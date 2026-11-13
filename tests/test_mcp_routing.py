@@ -21,6 +21,13 @@ import pytest
 from localm import gpu_registry
 from localm.inference import capability_routing as cr
 from localm.plugins.mcpserver.server import EngineCache, MCPStdioServer, build_tools
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 _REAL_CONFIGURED_MODE = cr.configured_mode
 

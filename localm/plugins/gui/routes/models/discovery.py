@@ -44,23 +44,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     async def _run_discover(fn):
         """Run *fn* off the event loop; map DiscoverError/ModelSourceError to its
-        HTTP status.
-
-        A browser has no CLI to run, so a net_mode=off refusal (`e.off`) gets its
-        own GUI-native remedy here rather than the message's own CLI-flavored one
-        (`localm config net_mode ask`)."""
+        HTTP status, with the error's own text."""
         from localm.discover import DiscoverError
         from localm.model_manager.sources import ModelSourceError
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(get_plugin_executor(), fn)
         except (DiscoverError, ModelSourceError) as e:
-            if e.off:
-                raise HTTPException(
-                    _discover_status(e),
-                    "Network access is off. Turn it on, or allow model "
-                    "downloads while network access is off, in Settings > "
-                    "Server & network.") from e
             raise HTTPException(_discover_status(e), str(e)) from e
 
     async def _vram_total():

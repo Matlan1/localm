@@ -177,7 +177,7 @@ def test_yes_flag_never_prompts(monkeypatch):
     seen = []
     _capture_install(monkeypatch, seen)
 
-    def _guard(conflict, root, assume_yes=False, ask=None):
+    def _guard(conflict, root, assume_yes=False, ask=None, **_kw):
         if not assume_yes:
             pytest.fail("prompted despite --yes")
         return "keep"
