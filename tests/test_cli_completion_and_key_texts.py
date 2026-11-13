@@ -4,7 +4,6 @@ own completion: every command that completes model names, and options. The
 PowerShell completer quotes a candidate with a space. `key create --help` names
 only the tiers it accepts."""
 
-import re
 import shutil
 import subprocess
 import sys
@@ -64,7 +63,7 @@ def test_command_names_complete_without_hidden_ones(registered):
 def test_the_powershell_completer_quotes_a_name_with_a_space():
     line = next(ln.strip() for ln in completion_mod._POWERSHELL_COMPLETION.splitlines()
                 if ln.strip().startswith("if ($text -match"))
-    script = "\n".join(f"$text = '{name}'; {line}; Write-Output $text"
+    script = "\n".join("$text = '" + name.replace("'", "''") + f"'; {line}; Write-Output $text"
                        for name in ("my model", "qwen", "it's"))
     out = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -77,4 +76,7 @@ def test_the_powershell_completer_quotes_a_name_with_a_space():
 def test_key_create_help_names_only_the_tiers_it_accepts(cli_runner):
     res = cli_runner.invoke(main, ["key", "create", "--help"])
     assert res.exit_code == 0
-    assert "shared" not in re.sub(r"a shared key", "", " ".join(res.output.split()))
+    flat = " ".join(res.output.split())
+    assert "'shared'" not in flat
+    assert "designated-roots" not in flat
+    assert "none (device upload only) or host" in flat
