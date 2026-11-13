@@ -566,12 +566,12 @@ def test_a_routed_request_never_reloads_a_model_by_unloading_the_users(
     """The user's vision model sits partly on the CPU because the user's
     current model holds the VRAM. A routed image request is answered by it as
     loaded: no reload that would unload the current model."""
-    import asyncio
     client, engines, _ = vision_server
     _fix_classes(monkeypatch, cr.FIT_GPU)
-    asyncio.run(hs.switch_engine("seer", None, preempt=True, activate=False))
+    _seer_resident(engines)
     seer = engines["seer"]
-    assert seer.loaded and "seer" not in hs._routing_loaded
+    assert seer.loaded and engines["plain"].loaded
+    assert "seer" not in hs._routing_loaded
     seer.gpu_placement = {"degraded": True}
     seer.placement_heal = hs.PlacementHeal(frozenset({"plain"}), False)
     assert hs._placement_heal_due("seer", seer)
