@@ -247,20 +247,23 @@ export function showInlineError(target, text, source = "inline") {
 export const TOAST_ERROR_STACK_MAX = 3;
 // Undismissed error toasts kept for the "+N more" count; the oldest go first.
 export const TOAST_ERROR_KEEP_MAX = 50;
-// Undismissed error toasts, oldest first: { text, count }.
+// How long an info toast is shown, in ms.
+export const TOAST_INFO_MS = 3500;
+// How long an error toast is shown: TOAST_ERROR_MIN_MS plus TOAST_ERROR_MS_PER_CHAR
+// per character of its text, at most TOAST_ERROR_MAX_MS.
+export const TOAST_ERROR_MIN_MS = 8000;
+export const TOAST_ERROR_MS_PER_CHAR = 60;
+export const TOAST_ERROR_MAX_MS = 30000;
+// Undismissed error toasts, oldest first:
+// { text, count, remaining (ms left), since (when its timer started), timer }.
 let _toastErrors = [];
 // The element that had focus before focus moved into the error stack.
 let _toastErrorFocusReturn = null;
 // The error toast to announce on the next render (the one just added or raised).
 let _toastErrorAnnounce = null;
+// Whether the pointer is over, or focus is inside, the error stack.
+const _toastErrorHold = { hover: false, focus: false };
 
-/** Show *msg* as a toast. An info toast replaces the previous info toast and
- *  hides after 3.5 s. An error toast (isError true) stays until dismissed: it
- *  joins the error stack (the newest TOAST_ERROR_STACK_MAX shown, the rest
- *  counted in a "+N more" row), an error equal to one already on the stack
- *  raises that one's count instead, and the error is recorded in the recent
- *  errors list and the server log. #toast always holds the latest message and
- *  carries the "error" class for an error; it is shown only for an info toast. */
 /** *text* from the server with its English bundled-code notes in the GUI's language. */
 export function localizeServerNotes(text) {
   return String(text ?? "")
@@ -268,6 +271,30 @@ export function localizeServerNotes(text) {
     .replace(I18N_EN["models.bundledCodeAlwaysNote"], t("models.bundledCodeAlwaysNote"));
 }
 
+/** How long, in ms, the error toast *text* stays on screen while nobody points
+ *  at or focuses the error stack. Grows with the length of the text. */
+export function errorToastLifetimeMs(text) {
+  const len = String(text ?? "").length;
+  return Math.min(TOAST_ERROR_MAX_MS, TOAST_ERROR_MIN_MS + TOAST_ERROR_MS_PER_CHAR * len);
+}
+
+/** Show *msg* as a toast and return a function that takes it back off screen.
+ *
+ *  An info toast replaces the previous info toast and hides after TOAST_INFO_MS.
+ *  An error toast (isError true) joins the error stack (the newest
+ *  TOAST_ERROR_STACK_MAX shown, the rest counted in a "+N more" row); an error
+ *  equal to one already on the stack raises that one's count and restarts its
+ *  time instead. It hides after errorToastLifetimeMs(text), counted only while
+ *  the pointer is not over the stack and focus is not inside it, or earlier when
+ *  its close button, Escape or the returned function removes it. Every error is
+ *  recorded in the recent errors list and the server log, and stays there when
+ *  its toast goes. #toast always holds the latest message and carries the
+ *  "error" class for an error; it is shown only for an info toast.
+ *
+ *  The returned function, for a caller whose cause has passed, removes this
+ *  toast if it is still shown: for an error, the stack entry with this text
+ *  (whoever raised it); for an info toast, only while it is still the current
+ *  one. */
 export function toast(msg, isError = false) {
   const el = $("toast");
   const text = localizeServerNotes(msg);
@@ -277,43 +304,92 @@ export function toast(msg, isError = false) {
     el.className = "error";
     showErrorToast(text);
     recordGuiError(text, "toast");
-    return;
+    return () => dismissErrorToast(text);
   }
   el.className = "show";
-  el._t = setTimeout(() => (el.className = ""), 3500);
+  const timer = setTimeout(() => (el.className = ""), TOAST_INFO_MS);
+  el._t = timer;
+  return () => {
+    if (el._t !== timer || el.className !== "show") return;
+    clearTimeout(timer);
+    el.className = "";
+  };
+}
+
+function _errorToastsHeld() {
+  return _toastErrorHold.hover || _toastErrorHold.focus;
+}
+
+// Start the timer of *entry* unless the stack is held or it already runs.
+function _armErrorToast(entry) {
+  if (entry.timer || _errorToastsHeld()) return;
+  entry.since = Date.now();
+  entry.timer = setTimeout(() => {
+    entry.timer = null;
+    if (!_toastErrors.includes(entry)) return;
+    _toastErrors = _toastErrors.filter((e) => e !== entry);
+    renderErrorToasts();
+  }, Math.max(0, entry.remaining));
+}
+
+// Stop the timer of *entry*, keeping the time it has left.
+function _pauseErrorToast(entry) {
+  if (!entry.timer) return;
+  clearTimeout(entry.timer);
+  entry.timer = null;
+  entry.remaining -= Date.now() - entry.since;
+}
+
+// Record a change of the hover or focus hold, and pause or resume every timer.
+function _setErrorToastHold(kind, on) {
+  const was = _errorToastsHeld();
+  _toastErrorHold[kind] = on;
+  const now = _errorToastsHeld();
+  if (was === now) return;
+  for (const entry of _toastErrors) {
+    if (now) _pauseErrorToast(entry);
+    else _armErrorToast(entry);
+  }
 }
 
 /** Put *text* on the error toast stack (or raise the count of the same error
- *  already there) without recording it anywhere. */
+ *  already there and restart its time) without recording it anywhere. */
 export function showErrorToast(text) {
   const i = _toastErrors.findIndex((e) => e.text === text);
+  let entry;
   if (i >= 0) {
-    const [same] = _toastErrors.splice(i, 1);
-    same.count += 1;
-    _toastErrors.push(same);
+    [entry] = _toastErrors.splice(i, 1);
+    entry.count += 1;
+    _pauseErrorToast(entry);
+    _toastErrors.push(entry);
   } else {
-    _toastErrors.push({ text, count: 1 });
-    if (_toastErrors.length > TOAST_ERROR_KEEP_MAX) _toastErrors.shift();
+    entry = { text, count: 1, remaining: 0, since: 0, timer: null };
+    _toastErrors.push(entry);
+    if (_toastErrors.length > TOAST_ERROR_KEEP_MAX) _pauseErrorToast(_toastErrors.shift());
   }
+  entry.remaining = errorToastLifetimeMs(text);
+  _armErrorToast(entry);
   _toastErrorAnnounce = text;
   renderErrorToasts();
 }
 
 /** Remove the error toast for *text* from the stack. */
 export function dismissErrorToast(text) {
+  for (const e of _toastErrors) if (e.text === text) _pauseErrorToast(e);
   _toastErrors = _toastErrors.filter((e) => e.text !== text);
   renderErrorToasts();
 }
 
 /** Remove every error toast from the stack. */
 export function dismissAllErrorToasts() {
+  for (const e of _toastErrors) _pauseErrorToast(e);
   _toastErrors = [];
   renderErrorToasts();
 }
 
-/** The error toasts on the stack, oldest first (a copy). */
+/** The error toasts on the stack, oldest first, as `{ text, count }` copies. */
 export function errorToasts() {
-  return _toastErrors.map((e) => ({ ...e }));
+  return _toastErrors.map((e) => ({ text: e.text, count: e.count }));
 }
 
 // Focus the next close button, or, when the stack is empty, the element that had
@@ -334,7 +410,13 @@ export function renderErrorToasts() {
     box._focusReturnWatched = true;
     box.addEventListener("focusin", (e) => {
       if (e.relatedTarget && !box.contains(e.relatedTarget)) _toastErrorFocusReturn = e.relatedTarget;
+      _setErrorToastHold("focus", true);
     });
+    box.addEventListener("focusout", (e) => {
+      if (!e.relatedTarget || !box.contains(e.relatedTarget)) _setErrorToastHold("focus", false);
+    });
+    box.addEventListener("mouseenter", () => _setErrorToastHold("hover", true));
+    box.addEventListener("mouseleave", () => _setErrorToastHold("hover", false));
   }
   const focused = box.contains(document.activeElement)
     ? document.activeElement.closest(".toast-error")?.dataset.text : undefined;
@@ -378,6 +460,8 @@ export function renderErrorToasts() {
     if (focused === entry.text) close.focus();
   }
   box.hidden = _toastErrors.length === 0;
+  if (box.hidden) _setErrorToastHold("hover", false);
+  if (!box.contains(document.activeElement)) _setErrorToastHold("focus", false);
 }
 
 marked.setOptions({ breaks: true });
@@ -549,12 +633,11 @@ const _IMG_PROXY_CACHE_MAX = 64;
 const _imgOriginConsent = new Map();
 /** Dialogs are serialised through this: openModal drives a SINGLE #modal
  *  element, so two overlapping asks would leave the second silently replacing
- *  the first and the first's promise resolving off the wrong buttons.
- *
- *  It is also what de-duplicates them. Ten images from one host queue ten
- *  thunks, the first opens a dialog, and each of the nine behind it re-reads
- *  _imgOriginConsent on its turn and finds the answer already there. */
+ *  the first and the first's promise resolving off the wrong buttons. */
 let _imgConsentQueue = Promise.resolve();
+/** The ask waiting or open for each (scope, origin) key, so every image from
+ *  one host shares one dialog and one answer, a closed dialog included. */
+const _imgConsentPending = new Map();
 
 function _consentKey(scope, origin) {
   // JSON rather than a delimiter: an origin cannot collide with a scope
@@ -589,14 +672,13 @@ window.clearImageProxyCache = clearImageProxyCache;
 
 /** Ask the reader whether to load images from ONE origin in ONE conversation.
  *
- *  Resolves true/false, never rejects. Built on openModal like confirmDanger and
- *  promptText rather than window.confirm, which is suppressed outright in some
- *  mobile / PWA browsers (the NET-1 class): there it returns undefined with no
- *  error, which is indistinguishable from the reader declining and would make
- *  the `ask` state silently unusable on a phone.
+ *  Resolves true ("Show images from this site"), false ("Do not load") or null
+ *  when the dialog was closed without an answer (the x, or Escape); never
+ *  rejects. Built on openModal like confirmDanger and promptText rather than
+ *  window.confirm, which is suppressed outright in some mobile / PWA browsers:
+ *  there it returns undefined with no error.
  *
- *  Dismissing through the shared modal chrome (the x, or Escape) is a
- *  DECLINE. Those handlers are not ours, so it is detected by polling for
+ *  A close through the shared modal chrome is detected by polling for
  *  display:none - the same pattern promptText and the missing-model modal use. */
 function askOriginConsent(origin) {
   return new Promise((resolve) => {
@@ -622,26 +704,31 @@ function askOriginConsent(origin) {
       body.appendChild(row);
     });
     watch = setInterval(() => {
-      if ($("modal").style.display === "none") finish(false);
+      if ($("modal").style.display === "none") finish(null);
     }, 200);
   });
 }
 
 /** The reader's answer for one scope+origin: the remembered one if there is one,
- *  otherwise a dialog. Serialised so only one is ever open, which is also what
- *  keeps ten images from one host to a single dialog - see _imgConsentQueue.
- *  Both answers are remembered; nothing is remembered if the ask never ran. */
+ *  otherwise a dialog. Serialised so only one is ever open, and shared by every
+ *  request for the same key while it waits or is open (_imgConsentPending), so
+ *  ten images from one host get one dialog. Resolves true, false or null (the
+ *  dialog was closed without an answer). An allow or a "Do not load" is
+ *  remembered; a closed dialog is not, so a later request asks again. */
 function requestOriginConsent(scope, origin) {
   const key = _consentKey(scope, origin);
   if (_imgOriginConsent.has(key)) return Promise.resolve(_imgOriginConsent.get(key));
+  if (_imgConsentPending.has(key)) return _imgConsentPending.get(key);
   const p = _imgConsentQueue
     .then(() => (_imgOriginConsent.has(key)
       ? _imgOriginConsent.get(key)
       : askOriginConsent(origin).then((ok) => {
-        _imgOriginConsent.set(key, ok);
+        if (ok !== null) _imgOriginConsent.set(key, ok);
         return ok;
       })))
-    .catch(() => false);
+    .catch(() => null)
+    .finally(() => _imgConsentPending.delete(key));
+  _imgConsentPending.set(key, p);
   // The QUEUE swallows the answer: a declined ask must not stop the next one.
   _imgConsentQueue = p.then(() => undefined, () => undefined);
   return p;
@@ -678,10 +765,21 @@ class ImageOriginDeclined extends Error {
   }
 }
 
+/** The reader closed the question for this origin without answering. */
+class ImageOriginCancelled extends Error {
+  constructor(origin) {
+    super("cancelled: " + origin);
+    this.origin = origin;
+  }
+}
+
 /** One sentence saying why an image did not load, for the placeholder below. */
 function proxyRefusalText(e) {
   if (e instanceof ImageOriginDeclined) {
     return t("common.imageProxy.declined", { origin: e.origin });
+  }
+  if (e instanceof ImageOriginCancelled) {
+    return t("common.imageProxy.cancelled", { origin: e.origin });
   }
   if (e instanceof ImageProxyRefused) {
     if (e.detail) return e.detail;
@@ -714,8 +812,9 @@ function _requestProxiedImage(href, consented) {
 /** Fetch one remote image through the proxy, asking the reader about its ORIGIN
  *  first if the route says the setting requires it.
  *
- *  Resolves to a blob: URL, or to `{failed, reason, declined}` - it never
- *  rejects, because the caller renders the reason either way.
+ *  Resolves to a blob: URL, or to `{failed, reason, declined, cancelled}` - it
+ *  never rejects, because the caller renders the reason either way. `cancelled`
+ *  means the reader closed the question without answering.
  *
  *  428 means the setting is `ask` and this origin has no answer yet, and it is
  *  raised BEFORE the route fetches anything, so nothing has reached the remote
@@ -726,6 +825,7 @@ function _proxyImage(href, origin, scope) {
     .catch((e) => {
       if (!(e instanceof ImageProxyRefused) || e.status !== 428) throw e;
       return requestOriginConsent(scope, origin).then((ok) => {
+        if (ok === null) throw new ImageOriginCancelled(origin);
         if (!ok) throw new ImageOriginDeclined(origin);
         return _requestProxiedImage(href, true);
       });
@@ -737,15 +837,13 @@ function _proxyImage(href, origin, scope) {
     })
     .catch((e) => {
       const declined = e instanceof ImageOriginDeclined;
-      // Forget it so a later render may retry - EXCEPT after a decline, which
-      // is an answer rather than a failure. Retrying that would re-ask on every
-      // streamed chunk, which is the same dialog-per-token defect keying this
-      // on the URL instead of the element exists to avoid. The remembered
-      // answer is dropped by clearImageProxyCache() on any settings save, and
-      // it can never keep an image OUT once the setting is `on`, because `on`
-      // never asks in the first place.
-      if (!declined) _imgProxyCache.delete(href);
-      return { failed: true, declined, reason: proxyRefusalText(e) };
+      const cancelled = e instanceof ImageOriginCancelled;
+      // Forget it so a later render may retry, except after a "Do not load" or
+      // a closed question: those stay cached for this URL, so a streamed
+      // re-render does not ask again. A closed question is asked again from its
+      // placeholder's "Ask again" button, or by another image from that origin.
+      if (!declined && !cancelled) _imgProxyCache.delete(href);
+      return { failed: true, declined, cancelled, reason: proxyRefusalText(e) };
     });
 }
 
@@ -755,7 +853,7 @@ function _proxyImage(href, origin, scope) {
  *  it stays outside the sanitize-then-modify hazard the surrounding function is
  *  careful about. The model's alt text is carried along as TEXT.
  *  See "a refused image says why" in tests-js/image-proxy-rewrite.test.mjs. */
-function showBlockedImage(img, reason) {
+function showBlockedImage(img, reason, retry) {
   const note = el("span", "img-blocked");
   note.dataset.lmProxySrc = img.dataset.lmProxySrc || "";
   note.dataset.lmProxyFailed = "1";
@@ -764,6 +862,12 @@ function showBlockedImage(img, reason) {
   note.appendChild(el("span", "img-blocked-label",
                       alt ? t("common.image.notShownWithAlt", { alt }) : t("common.image.notShown")));
   note.appendChild(el("span", "img-blocked-why", reason));
+  if (retry) {
+    const again = el("button", "btn-secondary img-blocked-retry", t("common.imageConsent.askAgain"));
+    again.type = "button";
+    again.onclick = () => { again.disabled = true; retry(note); };
+    note.appendChild(again);
+  }
   if (img.parentNode) img.parentNode.replaceChild(note, img);
 }
 
@@ -795,9 +899,21 @@ function proxyRemoteImages(root, scope) {
     // img-src, that guarantee moves to this line's timing and becomes a race.
     img.removeAttribute("src");
 
+    // The "Ask again" button of a closed question: ask for this URL once more
+    // and put the image, or the note for the new outcome, in place of the note.
+    const retry = (note) => {
+      _imgProxyCache.delete(u.href);
+      const again = _proxyImage(u.href, u.origin, scope);
+      _imgProxyCache.set(u.href, again);
+      again.then((o) => {
+        if (!note.parentNode) return;
+        note.parentNode.replaceChild(img, note);
+        settle(o);
+      });
+    };
     const settle = (o) => {
       if (typeof o === "string") img.src = o;
-      else if (o && o.failed) showBlockedImage(img, o.reason);
+      else if (o && o.failed) showBlockedImage(img, o.reason, o.cancelled ? retry : null);
     };
 
     const cached = _imgProxyCache.get(u.href);
@@ -850,6 +966,7 @@ const _MATH_SPAN = new RegExp([
   String.raw`\\\[[\s\S]{1,4000}?\\\]`,
   String.raw`\\\([\s\S]{1,4000}?\\\)`,
   String.raw`(?<![\\$])\$(?![\s\d)\]},.;:!?])[^$\n]*[^$\s\n(\[{]\$(?!\d)`,
+  String.raw`(?<![\\$\w])\$(?=\d)(?=[^$\n]*?(?:\\[A-Za-z]|[\^_=]))[^$\n]*[^$\s\n(\[{\\]\$(?!\d)`,
 ].join("|"), "gm");
 
 const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<=["'(\[*~])\$\$(?=["')\]*~])|(?<!\$)\$(?!\$)`;
@@ -880,7 +997,11 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
  *  Inline `$...$` is math only when the opening `$` is followed by a character
  *  that is neither whitespace, a digit nor closing punctuation and the closing
  *  `$` follows a character that is neither whitespace nor an opening bracket and
- *  is not followed by a digit. Every other dollar sign outside code (a lone `$`,
+ *  is not followed by a digit. An opening `$` followed by a digit (`$14 \times 2
+ *  = 28$`) opens math only when it follows no word character, the text up to the
+ *  next `$` holds a TeX command (`\` and a letter), `^`, `_` or `=`, and that
+ *  next `$` follows neither whitespace, an opening bracket nor `\` and is not
+ *  followed by a digit, so `$5 and $10` stays text. Every other dollar sign outside code (a lone `$`,
  *  a run of three or more, an empty `$$ $$`, a `$$` standing alone between
  *  brackets, quotes or `*`/`~` marks, an escaped `\$`) is swapped for an inert
  *  token so KaTeX's auto-render never pairs it. A leftover `$$ ... $$` pair that
@@ -960,6 +1081,20 @@ export function escapeDelimiterRuns(text) {
       .join("\n"))).join("");
 }
 
+// Open or shut, for each reasoning text whose Thoughts box the person toggled,
+// so a box rebuilt for the same reasoning keeps their choice. Oldest first.
+const _thinkChoices = new Map();
+const _THINK_CHOICES_MAX = 200;
+
+// Record that the person left the Thoughts box *det* open (*open* true) or shut
+// for the reasoning text *key*, dropping the entry for its previous text.
+function _rememberThinkChoice(det, key, open) {
+  if (det._thinkKey !== undefined && det._thinkKey !== key) _thinkChoices.delete(det._thinkKey);
+  _thinkChoices.delete(key);
+  _thinkChoices.set(key, open);
+  if (_thinkChoices.size > _THINK_CHOICES_MAX) _thinkChoices.delete(_thinkChoices.keys().next().value);
+}
+
 /** Render one model reply into *target*.
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
@@ -982,7 +1117,8 @@ export function renderMarkdown(target, text, opts = {}) {
   // <details> per chunk reset its open/closed state each tick, so the reasoning
   // bubble could not be toggled mid-stream; keeping the same element makes a
   // user toggle stick. Default: open while thinking, collapse once done - until
-  // the user clicks it (data-userset), after which their choice is left alone.
+  // the user clicks it (data-userset), after which their choice is left alone,
+  // also in a box rebuilt later for the same reasoning (_thinkChoices).
   let det = target.querySelector("details.think-block");
   let thinkFinish = null;
   if (think) {
@@ -990,11 +1126,22 @@ export function renderMarkdown(target, text, opts = {}) {
       det = document.createElement("details");
       det.className = "think-block";
       const sum = document.createElement("summary");
-      sum.addEventListener("click", () => { det.dataset.userset = "1"; });
+      const block = det;
+      sum.addEventListener("click", () => { block.dataset.userset = "1"; });
+      block.addEventListener("toggle", () => {
+        if (block.dataset.userset) _rememberThinkChoice(block, block._thinkKey, block.open);
+      });
       det.appendChild(sum);
       det.appendChild(document.createElement("div"));
       target.insertBefore(det, target.firstChild);
+      if (_thinkChoices.has(think)) {
+        det.dataset.userset = "1";
+        det.open = _thinkChoices.get(think);
+      }
+    } else if (det.dataset.userset) {
+      _rememberThinkChoice(det, think, det.open);
     }
+    det._thinkKey = think;
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     const thinkMath = protectMath(think);
     const thinkBody = det.querySelector("div");
@@ -1348,14 +1495,36 @@ export function enhanceCodeBlock(pre) {
     const btn = document.createElement("button");
     btn.className = "copy-btn";
     btn.textContent = t("common.codeBlock.copy");
-    btn.onclick = () => {
-      navigator.clipboard.writeText(pre.querySelector("code")?.innerText || pre.innerText);
-      btn.textContent = t("common.codeBlock.copied");
-      setTimeout(() => (btn.textContent = t("common.codeBlock.copy")), 1200);
-    };
+    btn.onclick = () => copyTextWithFeedback(btn,
+      pre.querySelector("code")?.innerText || pre.innerText,
+      t("common.codeBlock.copy"), t("common.codeBlock.copied"));
     pre.appendChild(btn);
   }
   applyCanvasButton(pre);
+}
+
+/** Write *text* to the clipboard for the copy button *btn*.
+ *
+ *  On success *btn* shows *copiedLabel* for 1.2 s, then *copyLabel* again, and
+ *  the promise resolves true. When the clipboard is missing or the write is
+ *  refused (no permission, an insecure context) *btn* keeps *copyLabel*, an
+ *  error toast says the browser blocked the copy, and the promise resolves
+ *  false. Never rejects. */
+export async function copyTextWithFeedback(btn, text, copyLabel, copiedLabel) {
+  try {
+    const clip = navigator.clipboard;
+    if (!clip || typeof clip.writeText !== "function") throw new Error("no clipboard");
+    await clip.writeText(text);
+  } catch {
+    clearTimeout(btn._copyReset);
+    btn.textContent = copyLabel;
+    toast(t("chat.copyBlocked"), true);
+    return false;
+  }
+  clearTimeout(btn._copyReset);
+  btn.textContent = copiedLabel;
+  btn._copyReset = setTimeout(() => (btn.textContent = copyLabel), 1200);
+  return true;
 }
 
 /** Create an element with class and (safe) text content. */
@@ -1411,14 +1580,29 @@ export function fileToAvatarDataUri(file, maxSize = 128) {
   });
 }
 
-/** Reads an image file client-side and resolves a data:image/jpeg;base64,...
- * URI downscaled so its longest edge is at most maxSize, encoded as JPEG
- * (not PNG - a downscaled photo is far smaller as JPEG at this resolution)
- * at the given quality. Kept well under settings_schema.py's
- * _BACKGROUND_MAX_DATA_URI_LEN regardless of the source file's size, and read
- * entirely in-browser (no server round trip). Same shape as
- * fileToAvatarDataUri, kept separate rather than parameterized: the two
- * pickers want different output formats and default sizes. */
+/** The longest chat_background value the server accepts; equal to
+ *  settings_schema.py's _BACKGROUND_MAX_DATA_URI_LEN. */
+export const CHAT_BACKGROUND_MAX_DATA_URI_LEN = 3_000_000;
+
+/** True when any pixel of the w x h canvas behind *ctx* is not fully opaque,
+ *  and also when the pixels cannot be read. */
+function _canvasHasTransparency(ctx, w, h) {
+  let data;
+  try { data = ctx.getImageData(0, 0, w, h).data; } catch { return true; }
+  for (let i = 3; i < data.length; i += 4) if (data[i] !== 255) return true;
+  return false;
+}
+
+/** Reads an image file client-side and resolves a data URI downscaled so its
+ * longest edge is at most maxSize, read entirely in-browser (no server round
+ * trip). An image with no transparent pixel (and every JPEG) is encoded as
+ * data:image/jpeg at the given quality. An image with transparency is encoded
+ * as data:image/png so its transparent parts stay transparent, scaled down
+ * further while the URI is longer than CHAT_BACKGROUND_MAX_DATA_URI_LEN (up to
+ * eight times; a URI still too long is resolved as it is and the server refuses
+ * it). Same shape as fileToAvatarDataUri, kept separate rather than
+ * parameterized: the two pickers want different output formats and default
+ * sizes. */
 export function fileToBackgroundDataUri(file, maxSize = 1920, quality = 0.85) {
   return new Promise((resolve, reject) => {
     if (!file.type || !file.type.startsWith("image/")) {
@@ -1437,8 +1621,25 @@ export function fileToBackgroundDataUri(file, maxSize = 1920, quality = 0.85) {
         const canvas = document.createElement("canvas");
         canvas.width = w;
         canvas.height = h;
-        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        if (file.type === "image/jpeg" || !_canvasHasTransparency(ctx, w, h)) {
+          resolve(canvas.toDataURL("image/jpeg", quality));
+          return;
+        }
+        let uri = canvas.toDataURL("image/png");
+        let cw = w, ch = h;
+        for (let i = 0; i < 8 && uri.length > CHAT_BACKGROUND_MAX_DATA_URI_LEN && cw > 1 && ch > 1; i++) {
+          const shrink = Math.sqrt(CHAT_BACKGROUND_MAX_DATA_URI_LEN / uri.length) * 0.9;
+          cw = Math.max(1, Math.round(cw * shrink));
+          ch = Math.max(1, Math.round(ch * shrink));
+          canvas.width = cw;
+          canvas.height = ch;
+          ctx.clearRect(0, 0, cw, ch);
+          ctx.drawImage(img, 0, 0, cw, ch);
+          uri = canvas.toDataURL("image/png");
+        }
+        resolve(uri);
       };
       img.src = reader.result;
     };
@@ -1898,6 +2099,37 @@ export function promptText(title, defaultValue) {
   });
 }
 
+/** The note under a download's "Source:" line saying where *source* came from:
+ *  found on Hugging Face by its file name, or named by an imported workflow file
+ *  (with or without a sha256 to check it against). Null for a source from
+ *  localm's own catalog. */
+function _downloadOriginText(source) {
+  if (!source) return null;
+  if (source.origin === "huggingface") return t("common.modelDownload.foundOnHf");
+  if (source.origin === "workflow") {
+    return t(source.sha256 ? "common.modelDownload.fromWorkflow" : "common.modelDownload.fromWorkflowNoSha");
+  }
+  return null;
+}
+
+/** Toast that the download of *filename* ended with the streamJob() end status
+ *  *status* (anything but "done"). "cancelled" (stopped, with the data saved so
+ *  far kept by the server) is an info toast saying it is paused; "disconnected"
+ *  says the connection was lost and it may still run; "failed" says it failed;
+ *  any other status is named through jobStatusWord(). All but "cancelled" are
+ *  error toasts. */
+function _toastDownloadEnded(status, filename) {
+  if (status === "cancelled") {
+    toast(t("common.modelDownload.paused", { filename }));
+  } else if (status === "disconnected") {
+    toast(t("common.modelDownload.interrupted", { filename }), true);
+  } else if (status === "failed") {
+    toast(t("common.modelDownload.endedFailed", { filename }), true);
+  } else {
+    toast(t("common.modelDownload.ended", { status: jobStatusWord(status), filename }), true);
+  }
+}
+
 /** Offer to download ONE curated missing model (repo/file/size shown in full,
  *  a real Download button - never a silent auto-pull). Resolves true whether
  *  the user downloads or skips (either way the caller proceeds to its real
@@ -1928,12 +2160,8 @@ function _offerModelDownload(missingModel, log, plugin) {
         : t(`common.modelDownload.body${native}NoSize`, { filename })));
       body.appendChild(el("p", "",
         t("common.modelDownload.source", { repo: source.repo, file: source.file })));
-      if (source.origin === "huggingface") {
-        body.appendChild(el("p", "sub", t("common.modelDownload.foundOnHf")));
-      } else if (source.origin === "workflow") {
-        body.appendChild(el("p", "sub", t(source.sha256
-          ? "common.modelDownload.fromWorkflow" : "common.modelDownload.fromWorkflowNoSha")));
-      }
+      const originNote = _downloadOriginText(source);
+      if (originNote) body.appendChild(el("p", "sub", originNote));
       const row = el("div", "actions");
       const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
       skip.onclick = () => finish(true);
@@ -1970,7 +2198,7 @@ function _offerModelDownload(missingModel, log, plugin) {
           const end = await streamJob(data.job_id, (line) => {
             if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
           });
-          if (end.status !== "done") toast(t("common.modelDownload.ended", { status: end.status, filename }), true);
+          if (end.status !== "done") _toastDownloadEnded(end.status, filename);
           resolve(true);
         } catch (e) {
           toast(t("common.modelDownload.failed", { message: e.message }), true);
@@ -2039,6 +2267,8 @@ export async function offerNativeDownloads(parts, log) {
           : t("common.modelDownload.bodyNativeNoSize", { filename })));
         body.appendChild(el("p", "",
           t("common.modelDownload.source", { repo: source.repo, file: source.file })));
+        const originNote = _downloadOriginText(source);
+        if (originNote) body.appendChild(el("p", "sub", originNote));
       } else {
         body.appendChild(el("p", "", total
           ? t("common.modelDownload.bodyNativeMany",
@@ -2051,6 +2281,8 @@ export async function offerNativeDownloads(parts, log) {
             : filename);
           item.appendChild(el("div", "sub",
             t("common.modelDownload.source", { repo: source.repo, file: source.file })));
+          const originNote = _downloadOriginText(source);
+          if (originNote) item.appendChild(el("div", "sub", originNote));
           list.appendChild(item);
         }
         body.appendChild(list);
@@ -2084,7 +2316,7 @@ export async function offerNativeDownloads(parts, log) {
               if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
             });
             if (end.status !== "done") {
-              toast(t("common.modelDownload.ended", { status: end.status, filename }), true);
+              _toastDownloadEnded(end.status, filename);
               resolve("failed");
               return;
             }
@@ -2147,11 +2379,13 @@ export function createMissingModelOffer(log) {
  *  naming the file and the workflow input that needs it. *status* is the
  *  source lookup's outcome ("not_found", "offline", "failed") when a search
  *  ran; when it is absent or "unsupported", missingModel.reason ("format",
- *  "folder", "name", "path") picks the message. Never blocks: the real
- *  generate call's own preflight_models() gate remains authoritative. */
+ *  "folder", "name", "path") picks the message. An entry with no class_type or
+ *  input_name (a native workflow model) gets a message that names no node
+ *  wherever the picked one would. Never blocks: the real generate call's own
+ *  preflight_models() gate remains authoritative. */
 function _reportUncuratedMiss(missingModel, log, status) {
   const { filename, class_type, input_name, reason } = missingModel;
-  const key = {
+  let key = {
     format: "common.modelDownload.unsupportedFormat",
     folder: "common.modelDownload.unknownFolder",
     name: "common.modelDownload.genericName",
@@ -2161,6 +2395,9 @@ function _reportUncuratedMiss(missingModel, log, status) {
     failed: "common.modelDownload.searchFailed",
   }[status && status !== "unsupported" ? status : reason]
     || "common.modelDownload.uncuratedMissing";
+  if ((!class_type || !input_name) && String(I18N_EN[key] || "").includes("{class_type}")) {
+    key = "common.modelDownload.missingNoSource";
+  }
   const msg = t(key, { filename, class_type, input_name });
   toast(msg, true);
   if (log) {

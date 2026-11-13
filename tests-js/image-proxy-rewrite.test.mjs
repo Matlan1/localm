@@ -511,10 +511,10 @@ test("clearImageProxyCache forgets consent, so a settings save re-asks", async (
     "the setting that governs asking may have moved, so every answer is stale");
 });
 
-test("dismissing the dialog through the modal chrome counts as declining", async () => {
-  // The x and Escape are not our handlers - they just hide the modal. A
-  // dismissal that resolved as "allowed" would load the very image the reader
-  // was getting away from.
+test("closing the dialog through the modal chrome is a cancel: nothing loads and nothing is remembered", async () => {
+  // The x and Escape are not our handlers - they just hide the modal. A close
+  // that resolved as "allowed" would load the very image the reader was getting
+  // away from; one remembered as "Do not load" would never ask again.
   const { win, calls } = loadAsking();
   const t = renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
   await settle();
@@ -524,6 +524,9 @@ test("dismissing the dialog through the modal chrome counts as declining", async
 
   assert.equal(consented(calls).length, 0, "nothing was fetched");
   assert.ok(t.querySelector(".img-blocked"), "and the reader is told why");
+  renderScoped(win, "![b](https://cdn.example.com/2.png)", "chat:1");
+  await settle();
+  assert.ok(modalOpen(win), "the next image from that site asks again");
 });
 
 test("two origins in one reply raise their dialogs one at a time", async () => {
