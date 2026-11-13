@@ -562,14 +562,6 @@ def _prerelease_channel_enabled() -> bool:
         return False
 
 
-#: The error and remedy of an update check refused because network access is off.
-UPDATE_CHECK_NET_OFF = "update checks are off because network access is set to off"
-UPDATE_CHECK_NET_OFF_REASON = (
-    'turn on "Check for updates even when network access is off" in Settings > '
-    "System > Updates, or set network access to ask or allow (localm config "
-    "update_ignore_net_policy true, or localm config net_mode ask)")
-
-
 def _net_policy_allows_update_check() -> bool:
     """Whether the update check may reach the network: allowed whenever
     ``net_mode`` is not ``"off"``, or an admin explicitly exempted the update
@@ -616,7 +608,11 @@ def check(*, opener=None) -> dict:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
     if not _net_policy_allows_update_check():
-        raise LocalmError(UPDATE_CHECK_NET_OFF, reason=UPDATE_CHECK_NET_OFF_REASON)
+        from localm import config
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY,
+                          stage="network_off",
+                          hint=config.net_off_update_refusal("no update check was made"))
     import urllib.parse
     current = _version.read_version()
     query = {"client": current or "unknown"}
@@ -659,7 +655,11 @@ def _selection_request(path: str, params: dict, *, opener=None) -> dict:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
     if not _net_policy_allows_update_check():
-        raise LocalmError(UPDATE_CHECK_NET_OFF, reason=UPDATE_CHECK_NET_OFF_REASON)
+        from localm import config
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY,
+                          stage="network_off",
+                          hint=config.net_off_update_refusal("no update check was made"))
     query = dict(params)
     if _prerelease_channel_enabled():
         query["channel"] = "prerelease"
@@ -877,7 +877,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
         raise LocalmError("bad asset id", reason=str(asset_id)) from None
     from localm.bugreport.transport import refuse_when_network_off
     refuse_when_network_off("the update was not downloaded",
-                            exempt=_net_policy_allows_update_check())
+                            exempt=_net_policy_allows_update_check(), update=True)
     url = base.rstrip("/") + f"/update/download?id={aid}"
     headers = {"User-Agent": "localm"}
     if token:

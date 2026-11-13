@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""With Network access off nothing leaves the machine: a bug report is not
+"""With Network access off no request reaches the localm proxy: a bug report is not
 uploaded (no connection is opened), and the GUI and the CLI say why and how to
 turn the network on."""
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -140,6 +141,19 @@ def test_cli_send_with_network_off_says_why_and_sends_nothing(monkeypatch):
     assert "localm config net_mode ask" in out
 
 
+def test_the_send_menu_offers_no_retry_with_network_off(monkeypatch):
+    from localm.bugreport import consent
+    _off(monkeypatch, "env")
+    opened = []
+    monkeypatch.setattr("localm.http_ssl.verified_urlopen",
+                        lambda req, **kw: opened.append(req))
+    monkeypatch.setattr(consent.console, "print", lambda *a, **kw: None)
+    asked = []
+    consent._upload_with_retries("it broke", None, "report text", URL, None,
+                                 lambda q: asked.append(q) or "y", "report.md")
+    assert opened == []
+    assert asked == []
+
 def test_an_update_download_with_network_off_opens_no_connection(monkeypatch, tmp_path):
     from localm import updater
     _off(monkeypatch, "env")
@@ -171,19 +185,54 @@ def test_the_off_refusals_name_the_settings_place_and_the_command(make):
     assert "net_mode=off" in text
 
 
+def _string_literals(tree):
+    """(line, text) of every string literal in *tree* except docstrings, with
+    implicitly joined pieces as one text and an f-string's fields as {}."""
+    import ast
+    docstrings = {id(n.body[0].value) for n in ast.walk(tree)
+                  if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                    ast.AsyncFunctionDef))
+                  and n.body and isinstance(n.body[0], ast.Expr)
+                  and isinstance(n.body[0].value, ast.Constant)}
+    in_fstring = {id(v) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)
+                  for v in n.values}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.JoinedStr):
+            yield n.lineno, "".join(
+                v.value if isinstance(v, ast.Constant) else "{}" for v in n.values)
+        elif (isinstance(n, ast.Constant) and isinstance(n.value, str)
+              and id(n) not in docstrings and id(n) not in in_fstring):
+            yield n.lineno, n.value
+
+
+_OWN_OFF_WORDING = re.compile(
+    r"network access is (?:set to )?(?:off|disabled)|Set net_mode to ask"
+    r"|The user can enable it|allow just downloads"
+    r"|Enable it with:? +localm config net_mode", re.I)
+
+
 def test_no_source_words_an_off_refusal_of_its_own():
-    """Every net_mode=off refusal text comes from config.net_off_refusal or
-    config.net_off_download_refusal."""
-    import re
+    """Every net_mode=off refusal text comes from config (net_off_lead and the
+    refusals built on it); settings_schema holds the setting labels they quote."""
+    import ast
     from pathlib import Path
 
     import localm
     root = Path(localm.__file__).parent
-    pattern = re.compile(r"Network access is disabled|Set net_mode to ask"
-                         r"|The user can enable it|allow just downloads"
-                         r"|Enable it with:? +localm config net_mode", re.I)
-    hits = [f"{p.relative_to(root)}:{i}"
-            for p in root.rglob("*.py")
-            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-            if pattern.search(line)]
+    allowed = {root / "config.py", root / "settings_schema.py"}
+    hits = [f"{p.relative_to(root)}:{line}"
+            for p in root.rglob("*.py") if p not in allowed
+            for line, text in _string_literals(ast.parse(p.read_text(encoding="utf-8")))
+            if _OWN_OFF_WORDING.search(text)]
     assert hits == []
+
+
+def test_the_wording_scan_sees_a_refusal_split_across_lines():
+    import ast
+    src = ('x = ("The model is not downloaded, and network "\n'
+           '     "access is disabled (net_mode=off).")\n'
+           'y = f"so {1} network access is off"\n'
+           'def f():\n    """network access is off (a docstring)."""\n')
+    found = [text for _, text in _string_literals(ast.parse(src))
+             if _OWN_OFF_WORDING.search(text)]
+    assert len(found) == 2

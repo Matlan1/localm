@@ -1828,14 +1828,16 @@ def vision_input_guidance(mmproj_failed: bool = False,
                 "log for the mtmd error).")
     elif active_model_path and (missing := _active_model_missing_mmproj(active_model_path)):
         name, repo_id = missing
+        from localm.config import NET_OFF_DOWNLOAD_REMEDY
         msg = (
             "This model cannot accept image input: "
             f"'{name}' has no vision projector (mmproj) recorded. If it is a "
             "vision model whose repository publishes one, localm fetches it "
             "automatically the next time it starts (subject to your network "
             "setting) - restart localm, or reload the Models page. If network "
-            "access is off (net_mode=off), turn it on, or pull the projector "
-            f"explicitly: `localm pull {repo_id} --mmproj <repo>:<file>`."
+            f"access off (net_mode=off): {NET_OFF_DOWNLOAD_REMEDY}; or pull "
+            f"the projector explicitly: `localm pull {repo_id} --mmproj "
+            "<repo>:<file>`."
         )
         others = [n for n in vision_capable_models() if n != name]
         if others:
@@ -3179,12 +3181,12 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         # projector found", which is a different, silent outcome; see
         # _hf_repo_files/_maybe_fetch_repo_mmproj's own distinction between
         # "could not look" and "looked and found nothing".
+        from localm.config import net_off_refusal
         blocked_note = (
             f"{len(net_blocked_mmproj)} model(s) may be missing a vision "
-            f"projector ({', '.join(net_blocked_mmproj)}) but network access "
-            "is off (net_mode=off), so localm did not check. Turn it on in "
-            "Settings > Server & network > Network access to let localm look, or "
-            "pull the projector explicitly with --mmproj."
+            f"projector ({', '.join(net_blocked_mmproj)}). "
+            f"{net_off_refusal('localm did not check')} Or pull the projector "
+            "explicitly with --mmproj."
         )
         note = f"{note} {blocked_note}".strip() if note else blocked_note
 

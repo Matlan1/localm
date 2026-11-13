@@ -50,18 +50,23 @@ def mailto_url(summary: str, body: str) -> str:
 #  automatic - a crash report is only saved to a file.                         #
 # --------------------------------------------------------------------------- #
 
-def refuse_when_network_off(what: str, *, exempt: bool) -> None:
+def refuse_when_network_off(what: str, *, exempt: bool, update: bool = False) -> None:
     """Raise LocalmError (stage ``network_off``) when ``net_mode`` is ``off``
     and *exempt* is False; *what* says what was not done. An unreadable config
     resolves to ``off`` (``config.network_mode``), so it refuses too. Every
-    request to the localm proxy passes here before a connection is opened."""
+    request to the localm proxy passes here before a connection is opened.
+    The error's ``reason`` is the remedy and its ``hint`` the whole refusal;
+    *update* names the update channel's own switch in both."""
     if exempt:
         return
     from localm import config
     if config.network_mode() == "off":
-        raise LocalmError(f"network access is off (net_mode = off), so {what}",
-                          reason="net_mode = off", stage="network_off",
-                          hint=config.net_off_refusal(what))
+        raise LocalmError(
+            config.net_off_lead(what),
+            reason=config.NET_OFF_UPDATE_REMEDY if update else config.NET_OFF_REMEDY,
+            stage="network_off",
+            hint=(config.net_off_update_refusal(what) if update
+                  else config.net_off_refusal(what)))
 
 
 def upload_config() -> tuple:

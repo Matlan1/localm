@@ -5,7 +5,7 @@ faked."""
 
 from click.testing import CliRunner
 
-from localm import issue_tracker, updater
+from localm import config, issue_tracker, updater
 from localm.cli import main
 
 
@@ -45,14 +45,14 @@ def test_update_check_blocked_by_net_policy(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
 
     def boom():
-        raise LocalmError(updater.UPDATE_CHECK_NET_OFF,
-                          reason=updater.UPDATE_CHECK_NET_OFF_REASON)
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY)
 
     monkeypatch.setattr(updater, "check", boom)
     r = CliRunner().invoke(main, ["update", "--check"])
     output = " ".join(r.output.split())   # rich wraps long lines; normalize whitespace first
     assert "Could not check for updates" in output
-    assert "network access is set to off" in output
+    assert config.net_off_lead("no update check was made") in output
     assert "up to date" not in output
 
 
@@ -143,3 +143,17 @@ def test_issues_not_configured(monkeypatch):
     monkeypatch.setattr(issue_tracker, "available", lambda: False)
     r = CliRunner().invoke(main, ["issues"])
     assert "not configured" in r.output
+
+
+def test_issues_with_network_off_prints_the_remedy(monkeypatch):
+    from localm import config
+    opened = []
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    monkeypatch.setattr(issue_tracker, "available", lambda: True)
+    monkeypatch.setattr(issue_tracker, "endpoint", lambda: ("https://w", None))
+    monkeypatch.setattr("localm._proxy._default_opener", lambda *a, **kw: opened.append(a))
+    r = CliRunner().invoke(main, ["issues", "3"])
+    output = " ".join(r.output.split())
+    assert opened == []
+    assert "Could not load issues" in output
+    assert config.NET_OFF_REMEDY in output

@@ -2075,12 +2075,17 @@ NET_OFF_REMEDY = ("Turn it on in Settings > Server & network > Network access, "
                   "or run: localm config net_mode ask")
 
 
+def net_off_lead(what: str = "") -> str:
+    """The first part of a net_mode=off refusal, without a remedy: that network
+    access is off and, when given, *what* was refused."""
+    return (f"Network access is off (net_mode=off), so {what}" if what
+            else "Network access is off (net_mode=off)")
+
+
 def net_off_refusal(what: str = "") -> str:
     """The text of a net_mode=off refusal: *what* was refused (optional) and
     :data:`NET_OFF_REMEDY`."""
-    lead = (f"Network access is off (net_mode=off), so {what}." if what
-            else "Network access is off (net_mode=off).")
-    return f"{lead} {NET_OFF_REMEDY}."
+    return f"{net_off_lead(what)}. {NET_OFF_REMEDY}."
 
 
 #: How to let a download through while network access is off.
@@ -2093,7 +2098,21 @@ NET_OFF_DOWNLOAD_REMEDY = (
 def net_off_download_refusal(what: str) -> str:
     """The text of a net_mode=off refusal of a download: *what* was refused and
     :data:`NET_OFF_DOWNLOAD_REMEDY`."""
-    return f"Network access is off (net_mode=off), so {what}. {NET_OFF_DOWNLOAD_REMEDY}."
+    return f"{net_off_lead(what)}. {NET_OFF_DOWNLOAD_REMEDY}."
+
+
+#: How to let the update channel through while network access is off.
+NET_OFF_UPDATE_REMEDY = (
+    "Turn it on in Settings > Server & network > Network access, or turn on "
+    "\"Check for updates even when network access is off\" in Settings > System > "
+    "Updates; or run: localm config net_mode ask (or: localm config "
+    "update_ignore_net_policy true)")
+
+
+def net_off_update_refusal(what: str) -> str:
+    """The text of a net_mode=off refusal on the update channel: *what* was
+    refused and :data:`NET_OFF_UPDATE_REMEDY`."""
+    return f"{net_off_lead(what)}. {NET_OFF_UPDATE_REMEDY}."
 
 
 def network_mode() -> str:

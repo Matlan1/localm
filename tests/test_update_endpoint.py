@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from localm import issue_tracker, updater
+from localm import config, issue_tracker, updater
 from localm.inference.http_server import create_app
 
 
@@ -89,13 +89,13 @@ def test_update_check_blocked_by_net_policy_is_not_up_to_date(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
 
     def boom():
-        raise LocalmError(updater.UPDATE_CHECK_NET_OFF,
-                          reason=updater.UPDATE_CHECK_NET_OFF_REASON)
+        raise LocalmError(config.net_off_lead("no update check was made"),
+                          reason=config.NET_OFF_UPDATE_REMEDY)
 
     monkeypatch.setattr(updater, "check", boom)
     data = _get(create_app(_engine()), "/api/update/check").json()
     assert data["available"] is True
-    assert "network access is set to off" in data["error"]
+    assert config.net_off_lead("no update check was made") in data["error"]
     assert "newer" not in data
 
 

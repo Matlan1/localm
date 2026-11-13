@@ -69,7 +69,8 @@ def test_net_mode_off_makes_no_request(monkeypatch, how):
         issue_tracker.get_issue(3)
     assert calls == []
     assert e2.value.stage == "network_off"
-    assert "net_mode = off" in e2.value.reason
+    from localm import config
+    assert e2.value.reason == config.NET_OFF_REMEDY
 
 
 @pytest.mark.parametrize("mode", ["ask", "allow"])

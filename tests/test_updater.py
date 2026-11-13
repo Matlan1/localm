@@ -140,6 +140,9 @@ def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
     assert op.calls["n"] == 0, "a blocked check must not attempt any connection"
     msg = f"{ei.value.summary} {ei.value.reason}".lower()
     assert "network access" in msg and "off" in msg
+    from localm import config
+    assert ei.value.reason == config.NET_OFF_UPDATE_REMEDY
+    assert ei.value.hint == config.net_off_update_refusal("no update check was made")
     assert "settings > system > updates" in msg
     assert "localm config update_ignore_net_policy true" in msg
     assert "localm config net_mode ask" in msg
