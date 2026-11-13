@@ -10,12 +10,6 @@ if exist ".venv\Scripts\pythonw.exe" (
     exit /b 0
 )
 
-where pythonw >nul 2>nul
-if not errorlevel 1 (
-    start "" pythonw "launcher.pyw"
-    exit /b 0
-)
-
-echo No Python environment found.
-echo Run setup.bat first - it creates a private .venv in this folder.
+echo No .venv found in %~dp0
+echo Run setup.bat in that folder first - it creates a private .venv there.
 pause
