@@ -6,7 +6,7 @@ that reports nothing is still caught."""
 
 from __future__ import annotations
 
-import pickle
+import multiprocessing
 import threading
 import time
 
@@ -68,7 +68,9 @@ def test_without_a_status_callback_nothing_is_reported(monkeypatch):
 
 def test_the_progress_status_survives_the_process_boundary():
     s = protocol.prefill_progress_status(2048, 30000)
-    back = pickle.loads(pickle.dumps(s))
+    q = multiprocessing.get_context("spawn").Queue()
+    q.put(s)
+    back = q.get(timeout=10)
     assert str(back) == str(s)
     assert back.code == "processing_progress"
     assert back.args == {"done": "2048", "total": "30000"}
