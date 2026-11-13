@@ -330,7 +330,6 @@ def build(engines: EngineCache, coder_shell: bool = False,
                     input_image=input_p,
                     denoise=args.get("denoise"),
                     write_sidecar=not is_privacy,
-                    delete_outputs=is_privacy,
                     privacy=is_privacy,
                     on_progress=_srv.report_progress,
                 )

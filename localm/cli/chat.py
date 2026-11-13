@@ -1244,8 +1244,7 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     _ok, message, _path = media_backend.generate_media(
         arg, out, before_generate=_unload_chat,
         on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
-        write_sidecar=not is_privacy, delete_outputs=is_privacy,
-        privacy=is_privacy)
+        write_sidecar=not is_privacy, privacy=is_privacy)
     console.print(escape(message))
 
 
