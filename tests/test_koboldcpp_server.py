@@ -747,3 +747,15 @@ def test_prepare_refuses_a_non_ascii_model_path_before_installing_the_runtime(mo
                         lambda *a, **k: pytest.fail("the runtime was installed first"))
     with pytest.raises(music.ModelError, match="short"):
         music.prepare({}, "vulkan")
+
+
+def test_a_crash_on_every_backend_marks_none_of_them(two_backends):
+    """A crash that every backend repeats (a broken model file) is not the GPU
+    backend's fault: nothing is remembered, so the next job tries the GPU again."""
+    for backend in ("cuda", "vulkan", "cpu"):
+        two_backends[backend] = "crash"
+    with pytest.raises(music.NativeMusicError):
+        music.generate_wav({}, "auto", REQUEST, plan=False)
+    for backend in ("cuda", "vulkan", "cpu"):
+        assert runtime.backend_failed(backend) is None
+    assert music.backend_order("auto")[0] == "cuda"
