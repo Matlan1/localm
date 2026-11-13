@@ -7,6 +7,7 @@ model, so it cannot declare premature success."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import localm.plugins.coder.cli as _cli
 from ..agent import Agent
@@ -56,7 +57,7 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
         f"Goal mode: iterating on the task until `{until_cmd}` exits 0 "
         f"(max {max_iters} iteration(s)).")
     agent._note_typed_request(task)
-    mode = {"interactive": True} if interactive else {}
+    mode: dict[str, Any] = {"interactive": True} if interactive else {}
     if attachments:
         response = agent.run_task(_goal_task_wrap(task, until_cmd),
                                   attachments=attachments, record_request=False, **mode)
