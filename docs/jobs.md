@@ -121,7 +121,7 @@ even exists.
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. Fields left out keep their value; `model`, `cwd` and `scope` sent as `null` are cleared (a coder job still needs a `cwd`). |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. Deleting a shell-enabled job needs the owner key or a `coder:full` key, like editing or running one. A run that finishes after its job was deleted records nothing. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result (`result_id` is null when the job was deleted while it ran). `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
@@ -204,8 +204,8 @@ hour after it finishes, and only when some new operation starts, so an idle
 server may keep showing it longer; an operation still marked `running` is
 never dropped, at any age.
 
-Cancelling a running operation answers `{"status": "cancelling"}`; one that
-already ended answers `{"status": "not_running", "state": ...}` with the state
+Cancelling an operation that has not finished answers `{"status": "cancelling"}`;
+one that already ended answers `{"status": "not_running", "state": ...}` with the state
 it ended in. It terminates the subprocess behind a model pull, a model
 removal or a ComfyUI setup; for the in-process operations it is only a request
 the work has to notice, and image, video, music and text-to-speech generation

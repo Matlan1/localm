@@ -535,7 +535,18 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
-    result_id = await run_in_threadpool(store.record_result, job_id, result)
+    try:
+        result_id = await run_in_threadpool(store.record_result, job_id, result)
+    except BaseException:
+        try:
+            job_now = store.get(job_id)
+            if job_now is not None:
+                store.release_claim(job_id, job_now.claim)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("jobs: the run claim of job %s could not be released after "
+                           "its result failed to save (%s)", job_id, e)
+        raise
     return {"result_id": result_id, **result}
 
 

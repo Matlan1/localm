@@ -82,3 +82,63 @@ def test_cancelling_an_operation_that_ended_says_so(tmp_path):
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "not_running"
         assert r.json()["state"] == done.status
+
+
+def test_a_result_is_saved_when_the_job_check_cannot_be_made(tmp_path, monkeypatch):
+    from localm.plugins.builtin.jobs import store as store_mod
+    from localm.plugins.builtin.jobs.store import Job, JobStore
+    store = JobStore(root=tmp_path / "jobs")
+    job = Job(name="j", task_kind="chat", prompt="hi", schedule_kind="interval",
+              schedule=60)
+    store.add(job)
+    monkeypatch.setattr(store_mod, "_RESULT_CHECK_WAIT_S", 0.2)
+    lock = store.root / "jobs.json.lock"
+    lock.write_bytes(b"999999:" + b"f" * 32)
+    try:
+        rid = store.record_result(job.id, {"status": "ok", "output": "kept",
+                                           "started": 1.0, "finished": 2.0})
+    finally:
+        lock.unlink()
+    assert rid
+    assert [r["output"] for r in store.list_results(job.id)] == ["kept"]
+
+
+def test_run_now_releases_its_claim_when_the_result_cannot_be_saved(jobs_app,  # noqa: F811
+                                                                     monkeypatch):
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    def broken(self, job_id, result):
+        raise TimeoutError("lock held elsewhere")
+
+    with TestClient(jobs_app, raise_server_exceptions=False) as c:
+        jid = c.post("/api/jobs", json={"name": "j", "prompt": "hi"}).json()["id"]
+        with monkeypatch.context() as m:
+            m.setattr(JobStore, "record_result", broken)
+            assert c.post(f"/api/jobs/{jid}/run").status_code == 500
+        assert JobStore().get(jid).claim is None
+        assert c.post(f"/api/jobs/{jid}/run").status_code == 200, "no stale claim"
+
+
+def test_cancelling_a_marked_but_unfinished_operation_asks_again(tmp_path):
+    import threading
+    import time
+
+    from fastapi import FastAPI
+
+    from localm.jobmanager import JobManager, _ActivityStore
+    from localm.plugins.gui.routes import jobs as routes
+    app = FastAPI()
+    mgr = JobManager(store=_ActivityStore(tmp_path / "activity"), reconcile=False)
+    routes.register(app, mgr)
+    gate = threading.Event()
+    job = mgr.start_fn("t", lambda j: gate.wait(10) or True)
+    try:
+        with TestClient(app) as c:
+            assert c.post(f"/api/jobs/{job.id}/cancel").json()["status"] == "cancelling"
+            assert job.status == "cancelled" and job.finished_at is None
+            assert c.post(f"/api/jobs/{job.id}/cancel").json()["status"] == "cancelling"
+    finally:
+        gate.set()
+        deadline = time.monotonic() + 10
+        while job.finished_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
