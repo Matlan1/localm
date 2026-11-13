@@ -320,15 +320,95 @@ test("Apply with an unread config never writes the markup's 999 and turns auto-f
   assert.ok(toasts.some((m) => /Nothing to apply/.test(m)), JSON.stringify(toasts));
 });
 
-test("Apply with nothing changed reloads the running model and writes nothing", async () => {
+test("Apply with nothing changed and a model loaded writes nothing and reloads nothing", async () => {
   const calls = [];
+  const toasts = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m" }) });
+  window.toast = (msg) => toasts.push(String(msg));
   await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
   assert.ok(await waitFor(() => window.document.getElementById("model-select").value === "m"));
   window.document.getElementById("perf-apply").click();
-  assert.ok(await waitFor(() => calls.some(
-    (c) => c.u.includes("/api/models/load") && c.method === "POST")));
+  assert.ok(await waitFor(() => toasts.some((m) => /Nothing to apply/.test(m))), JSON.stringify(toasts));
+  await settle(50);
+  assert.equal(calls.filter((c) => c.u.includes("/api/models/load") && c.method === "POST").length, 0);
   assert.deepEqual(patches(calls), []);
+});
+
+test("Apply after a control is moved away and back writes nothing", async () => {
+  const calls = [];
+  const toasts = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m" }) });
+  window.toast = (msg) => toasts.push(String(msg));
+  await waitFor(() => window.document.getElementById("perf-gpu-layers").value === "99");
+  setPerf(window, "perf-gpu-layers", "50");
+  setPerf(window, "perf-gpu-layers", "99");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => toasts.some((m) => /Nothing to apply/.test(m))), JSON.stringify(toasts));
+  assert.deepEqual(patches(calls), []);
+});
+
+test("Apply with the GPU layers box cleared is refused, not saved as 0", async () => {
+  const calls = [];
+  const toasts = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls) });
+  window.toast = (msg) => toasts.push(String(msg));
+  await waitFor(() => window.document.getElementById("perf-gpu-layers").value === "99");
+  setPerf(window, "perf-gpu-layers", "");
+  window.document.getElementById("perf-apply").click();
+  await settle(50);
+  assert.deepEqual(patches(calls), []);
+  assert.ok(toasts.some((m) => /whole number from 0 to 999/.test(m)), JSON.stringify(toasts));
+});
+
+test("with no model loaded the estimate says so instead of sizing nothing", async () => {
+  const calls = [];
+  const base = makeFetch(calls);
+  const fetchImpl = async (url, opts) => (String(url).includes("/api/vram-estimate")
+    ? { ok: true, status: 200, json: async () => ({ model: "", model_bytes: 0, weights: 0, kv_cache: 0.1 * GIB,
+        overhead: 1.4 * GIB, needed: 1.5 * GIB, free: 15 * GIB, total: 16 * GIB, fits: true }) }
+    : base(url, opts));
+  const { window } = loadApp({ fetchImpl });
+  const est = window.document.getElementById("perf-estimate");
+  assert.ok(await waitFor(() => /No model is loaded/.test(est.textContent)), est.textContent);
+  assert.doesNotMatch(est.textContent, /fits|needed/);
+});
+
+test("a redraw shows a value another card saved, and keeps a value being edited", async () => {
+  const calls = [];
+  const config = { n_ctx: 8192, n_gpu_layers: 99 };
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { config }) });
+  const gl = window.document.getElementById("perf-gpu-layers");
+  const ctx = window.document.getElementById("perf-ctx");
+  assert.ok(await waitFor(() => gl.value === "99"));
+  config.n_gpu_layers = 20;
+  config.n_ctx = 16384;
+  setPerf(window, "perf-ctx", "4096");
+  window.refreshPerfEstimate();
+  assert.ok(await waitFor(() => gl.value === "20"), `the untouched box shows the saved 20, got ${gl.value}`);
+  assert.equal(ctx.value, "4096", "the slider being edited keeps its value");
+});
+
+test("the Reload model help is hidden with its button", async () => {
+  const { window } = loadApp({ fetchImpl: makeFetch([]) });
+  await settle(30);
+  window.syncPerfReloadButton();
+  assert.equal(window.document.getElementById("perf-reload").hidden, true);
+  assert.equal(window.document.getElementById("perf-reload-help").hidden, true);
+});
+
+test("a refused Max resident models save puts the saved value back", async () => {
+  const calls = [];
+  const base = makeFetch(calls, { config: { n_ctx: 8192, n_gpu_layers: 99, max_resident_models: 2 } });
+  const fetchImpl = async (url, opts = {}) => ((opts.method || "GET") === "PATCH"
+    ? { ok: false, status: 403, statusText: "Forbidden", json: async () => ({ detail: "Key lacks config:write" }) }
+    : base(url, opts));
+  const { window } = loadApp({ fetchImpl });
+  const cap = window.document.getElementById("perf-max-resident");
+  assert.ok(await waitFor(() => cap.value === "2"));
+  cap.value = "5";
+  cap.dispatchEvent(new window.Event("change"));
+  await waitFor(() => cap.value === "2");
+  assert.equal(cap.value, "2", "the field shows what the server holds");
 });
 
 test("estimate flags a model that may not fit (negative)", async () => {
