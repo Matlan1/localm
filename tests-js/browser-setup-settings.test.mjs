@@ -162,7 +162,7 @@ test("a system engine with no browser lists what was looked for and offers the b
 test("without the browser extra the box says how to install it", async () => {
   const { win } = await render({ fields: [BROWSER_ENGINE], engine: {
     ...MISSING, problem: "playwright_missing", can_download: false } });
-  await until(() => box(win) && /pip install/.test(status(win)), "the status");
+  await until(() => box(win) && /Install dependencies/.test(status(win)), "the status");
 
   assert.equal(buttons(win).length, 0);
 });
