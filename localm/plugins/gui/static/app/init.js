@@ -12,7 +12,7 @@ import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, 
 import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
-import { capsReady, loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
+import { capsReady, loadClientPlugins, onVoicePick, pluginState, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard, voice } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
 // CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
@@ -144,22 +144,75 @@ export async function resetServiceWorkerAndCaches() {
 }
 window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 
-// Manual escape hatch (offered on the reconnect overlay): wipe EVERY client-side
-// artifact that could wedge boot/auth, then reload to a clean state (the key
-// gate). Each step is independently guarded so one failure never blocks the rest.
-// (The HttpOnly localm_session cookie cannot be cleared from JS, but a stale one
-// never wedges the client - it simply yields a 401 -> the key gate.)
-export async function resetClientState() {
+/** Sign this browser out: POST /api/session/logout with the session's CSRF
+ *  token (read from GET /api/session first when the page has none).
+ *  Returns {ok: true} when the server cleared the session cookie and ended the
+ *  session; otherwise {ok: false} with one of: *unreachable* true (the request
+ *  did not complete), *status* and *detail* (the server refused; the cookie is
+ *  kept), or *cookieCleared* true with *warnings* (the cookie is cleared but the
+ *  server could not end the session). Never throws. */
+export async function signOutSession() {
+  if (!window.__LOCALM_CSRF__) await refreshCsrf();
+  let r;
+  try {
+    r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders(), cache: "no-store" });
+  } catch {
+    return { ok: false, unreachable: true };
+  }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const detail = body && typeof body.detail === "string" ? body.detail : "";
+    return { ok: false, status: r.status, detail };
+  }
+  const body = await r.json().catch(() => ({}));
+  const warnings = Array.isArray(body && body.warnings) ? body.warnings.map(String) : [];
+  if (warnings.length) return { ok: false, cookieCleared: true, warnings };
+  return { ok: true };
+}
+
+/** Clear the page-session flags, the readable cookies, the service worker and
+ *  its caches. localStorage (chats kept in this browser, preferences) is kept. */
+async function _clearClientSession() {
   try {
     document.cookie.split(";").forEach((c) => {
       const n = c.split("=")[0].trim();
       if (n) document.cookie = n + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
     });
   } catch { /* ignore */ }
-  try { localStorage.clear(); } catch { /* ignore */ }
   try { sessionStorage.clear(); } catch { /* ignore */ }
   try { await resetServiceWorkerAndCaches(); } catch { /* ignore */ }
-  location.reload();
+}
+
+/** "Reset and re-enter key": sign this browser out on the server, clear the
+ *  page-session state and reload, so the key gate asks for the key again.
+ *  When the sign-out fails nothing is cleared and nothing reloads: the reason is
+ *  written into *note* (an element), or shown as an error toast without one.
+ *  When the cookie was cleared but the server kept the session, the client
+ *  state is cleared, the reason is shown, and *button* (when given) becomes a
+ *  Reload button. Returns true when the page reloads. */
+export async function resetClientState(note, button) {
+  const out = await signOutSession();
+  const say = (text) => {
+    if (note) note.textContent = text;
+    else toast(text, true);
+  };
+  if (out.ok) {
+    await _clearClientSession();
+    location.reload();
+    return true;
+  }
+  if (out.unreachable) { say(t("reconnect.resetUnreachable")); return false; }
+  if (!out.cookieCleared) {
+    say(t("reconnect.resetFailed", { reason: out.detail || "HTTP " + out.status }));
+    return false;
+  }
+  await _clearClientSession();
+  say(t("reconnect.resetServerKept", { reason: out.warnings.join("; ") }));
+  if (button) {
+    button.textContent = t("reconnect.reload");
+    button.onclick = () => location.reload();
+  }
+  return false;
 }
 window.resetClientState = resetClientState;
 
@@ -237,23 +290,46 @@ window.onShellTokenRejected = onShellTokenRejected;
 // so a dead server is not mistaken for a bad key and re-entered in a loop. When
 // it answers again, reload for a clean boot (which handles 200 vs 401 freshly).
 export let _reconnectTimer = null;
-export function showReconnectOverlay() {
+// Set once a shut down of the server was requested from this page; the overlay
+// then stays in its "shutdown" form.
+let _shutdownRequested = false;
+
+/** Show the full-page overlay for a server that does not answer.
+ *  *mode* "reconnecting" (default): a spinner, the unreachable text and the
+ *  "Reset and re-enter key" button. *mode* "shutdown": the shut down text and a
+ *  Reload button that reloads only once the server answers again. The panel is
+ *  rebuilt only when the mode changes, so a note written into it stays. */
+export function showReconnectOverlay(mode = "reconnecting") {
   let ov = $("reconnect-overlay");
   if (!ov) {
     ov = el("div", "reconnect-overlay");
     ov.id = "reconnect-overlay";
-    const panel = el("div", "reconnect-panel");
-    panel.appendChild(el("div", "reconnect-spinner"));
-    panel.appendChild(el("div", "reconnect-msg", t("reconnect.unreachable")));
-    // Escape hatch: a client must always have a manual way out, so no local
-    // artifact (a bad cookie, a wedged shell) can ever trap the user with no
-    // recovery. Reset clears all client-side state and reloads to the key gate.
-    const reset = el("button", "reconnect-reset", t("reconnect.reset"));
-    reset.type = "button";
-    reset.onclick = resetClientState;
-    panel.appendChild(reset);
-    ov.appendChild(panel);
     document.body.appendChild(ov);
+  }
+  if (ov.dataset.mode !== mode) {
+    const panel = el("div", "reconnect-panel");
+    const note = el("div", "reconnect-msg reconnect-note");
+    note.setAttribute("role", "status");
+    if (mode === "shutdown") {
+      panel.appendChild(el("div", "reconnect-msg", t("reconnect.shutDown")));
+      const again = el("button", "reconnect-reset", t("reconnect.reload"));
+      again.type = "button";
+      again.onclick = async () => {
+        if (await serverReachable()) location.reload();
+        else note.textContent = t("reconnect.stillDown");
+      };
+      panel.appendChild(again);
+    } else {
+      panel.appendChild(el("div", "reconnect-spinner"));
+      panel.appendChild(el("div", "reconnect-msg", t("reconnect.unreachable")));
+      const reset = el("button", "reconnect-reset", t("reconnect.reset"));
+      reset.type = "button";
+      reset.onclick = () => resetClientState(note, reset);
+      panel.appendChild(reset);
+    }
+    panel.appendChild(note);
+    ov.replaceChildren(panel);
+    ov.dataset.mode = mode;
   }
   ov.style.display = "flex";
 }
@@ -330,12 +406,25 @@ const _UP_POLLS_WITHOUT_DOWN = 3;   // ~9s at the 3s poll interval
 // through its own unload-and-wait sequence before it re-execs, so "still
 // reachable" does not mean "the new process is up" - only a DIFFERENT
 // instance_id does. Passed only by the Settings "Restart server" button.
+//
+// *reason* "shutdown" says the server was shut down on request: the overlay
+// says so, offers no key reset and does not poll; every later call on this page
+// keeps that overlay.
 export function onServerUnreachable(opts) {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";
   const gate = $("key-gate");
   if (gate) gate.style.display = "none";   // a connectivity problem, not a key one
+  if (opts && opts.reason === "shutdown") _shutdownRequested = true;
+  if (_shutdownRequested) {
+    if (_reconnectTimer) {
+      clearInterval(_reconnectTimer);
+      _reconnectTimer = null;
+    }
+    showReconnectOverlay("shutdown");
+    return;
+  }
   showReconnectOverlay();
   if (_reconnectTimer) return;
   let downSeen = !!(opts && opts.sawDown);
@@ -364,6 +453,44 @@ export function onServerUnreachable(opts) {
   }, 3000);
 }
 window.onServerUnreachable = onServerUnreachable;
+
+/** Grey the chat microphone as "voice plugin not installed". */
+function markVoiceNotInstalled() {
+  voice.available = false;
+  voice.reason = t("voice.notInstalledReason");
+  voice.canDownload = false;
+  const mic = $("chat-mic");
+  if (mic) { mic.classList.add("unavailable"); mic.title = voice.reason; }
+}
+
+/** The page-load reads of plugin routes: *run* reads the plugin's route, *absent*
+ *  (optional) sets the page state for a plugin that is not active. Every page-load
+ *  read of a plugin route is listed here and run through runPluginProbes. */
+export const PLUGIN_BOOT_PROBES = Object.freeze([
+  Object.freeze({ plugin: "rag", run: refreshKbSelect }),
+  Object.freeze({ plugin: "memory", run: refreshMemory }),
+  Object.freeze({ plugin: "voice", run: refreshVoiceStatus, absent: markVoiceNotInstalled }),
+  Object.freeze({ plugin: "coder", run: reattachSessions }),
+]);
+
+/** True when the /api/capabilities answer lists plugin *name* as installed and
+ *  enabled for this key. False before that answer arrives and when it failed. */
+export function pluginActive(name) {
+  return pluginState.some((p) => p && p.name === name && p.active === true);
+}
+
+/** Wait for the first /api/capabilities answer, then run each probe's *run* for
+ *  an active plugin and its *absent* for any other. Resolves when every started
+ *  read has settled; never rejects. */
+export async function runPluginProbes(probes = PLUGIN_BOOT_PROBES) {
+  await capsReady;
+  const started = [];
+  for (const probe of probes) {
+    if (pluginActive(probe.plugin)) started.push(probe.run());
+    else if (probe.absent) probe.absent();
+  }
+  await Promise.allSettled(started);
+}
 
 // Boot auth probe (AUTH-1b refactor). Returns true when authed (the caller then
 // loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
@@ -470,10 +597,8 @@ window.bootAuthProbe = bootAuthProbe;
   // function would have been a structural no-op for this exact race, since the
   // flag itself is not set until lockUI()/unlockUI() run, which is further
   // down this same async chain.
-  refreshKbSelect();
   refreshPersonas();
-  refreshMemory();
-  refreshVoiceStatus();
+  runPluginProbes();
   // Kept (not fired and forgotten) because the `?view=` deep link below has to
   // wait for the plugin tabs' view sections to exist before it can land on one.
   const clientPluginsReady = loadClientPlugins();
@@ -489,8 +614,7 @@ window.bootAuthProbe = bootAuthProbe;
   // The resolved ctx ceiling only exists once a model has loaded - keep the
   // compaction threshold in sync as models load or switch.
   setInterval(refreshCtxLimit, 30000);
-  reattachSessions();
-  reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operations
+  reattachActivity();  // ADR-0008 U4: cross-session/cross-tab background operations
 
   // Deep links + restore (P1a, second half). Every branch below ends in
   // showView(), and tabs.js's showView calls window.onViewShown(name) ->
