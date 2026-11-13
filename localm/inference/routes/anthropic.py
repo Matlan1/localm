@@ -145,7 +145,7 @@ def register(app: FastAPI, ctx) -> None:
             raise A.AnthropicError(400, str(exc)) from None
         route = await asyncio.get_running_loop().run_in_executor(
             None, functools.partial(_hs.plan_capability_route, req.model, messages, None,
-                                    autoswitch="loaded"))
+                                    resident_only=True))
         if not req.model and route.resolved is None:
             raise A.AnthropicError(400, "model is required")
         peer = peer_routing.get_route(route.resolved) if route.resolved else None
@@ -155,9 +155,12 @@ def register(app: FastAPI, ctx) -> None:
                 body=peer_routing.forward_body(peer, await request.body()))
         if tools or has_tool_history(messages):
             messages = render_messages(messages, list(tools), choice)
+        engine = None
         if route.routed:
-            engine = await _hs.get_engine(route.resolved, activate=False)
-        else:
+            engine = await _hs.get_engine(route.resolved, activate=False, load=False)
+            if not getattr(engine, "loaded", False):
+                engine = None
+        if engine is None:
             engine = await _hs.get_engine(req.model)
         _hs._pin(engine)
         try:

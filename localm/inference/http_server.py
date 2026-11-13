@@ -715,7 +715,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         on_status: Optional[Callable[[str], None]] = None,
                         allow_embedding: bool = False,
                         reserve_ctx: Optional[int] = None,
-                        keep_others: bool = False, own_pins: int = 0) -> dict:
+                        keep_others: bool = False, own_pins: int = 0,
+                        claim: bool = False) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
     An embedding-typed *name* (an embedding model, a reranker, a media text
     encoder) is refused with a 422 unless *allow_embedding*.
@@ -736,8 +737,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     ``_routing_loaded`` may be unloaded to make room, and when the load, measured
     again under the lease, would need the user's yes (``Fit.needs_ask``),
     ``RouteRefused`` is raised before anything loads; a routed load that loads
-    or reuses a model no user chose adds it to ``_routing_loaded``. An explicit
-    switch (*preempt*) removes *name* from it. *on_status*, when given, is called
+    or reuses a model no user chose adds it to ``_routing_loaded``; such a call
+    never unloads another model to reload a resident *name* for a better
+    placement. An explicit switch (*preempt*) and *claim* (a request that names
+    *name* and makes it active) remove *name* from it, again once its semaphore
+    is held. *on_status*, when given, is called
     on the event loop thread with ``WAITING_FOR_MODEL_STATUS`` while the load
     waits for a busy model to finish and with ``LOADING_MODEL_STATUS`` when it
     goes on.
@@ -810,7 +814,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             name, make_engine, lease, on_active=on_active, preempt=preempt,
             force=force, activate=activate, skip_if_latched=skip_if_latched, routed=routed,
             on_status=on_status, allow_embedding=allow_embedding,
-            reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins)
+            reserve_ctx=reserve_ctx, keep_others=keep_others, own_pins=own_pins,
+            claim=claim)
     finally:
         _forget_routing_reading()
         left = _loads_in_flight.get(name, 1) - 1
@@ -883,7 +888,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                                 on_status: Optional[Callable[[str], None]] = None,
                                 allow_embedding: bool = False,
                                 reserve_ctx: Optional[int] = None,
-                                keep_others: bool = False, own_pins: int = 0) -> dict:
+                                keep_others: bool = False, own_pins: int = 0,
+                                claim: bool = False) -> dict:
     """``switch_engine``'s body; takes *lease* before its first VRAM reading."""
     global _engine_factory, _switch_desired
 
@@ -906,9 +912,12 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
     async with exclusively(sem):
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
+        if preempt or claim:
+            _routing_loaded.discard(name)
 
         users_resident = (_is_reusable(_engines.get(name))
                           and name not in _routing_loaded)
+        restricted = not preempt and (routed or name in _routing_loaded)
         guarded = (not preempt and not users_resident
                    and (routed or (reserve_ctx is not None and name in _routing_loaded)))
         newly_routed = routed and not preempt and not _is_reusable(_engines.get(name))
@@ -954,7 +963,8 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 growing = False
                 heal_budget = heal_probe = None
         if healing is None and _is_reusable(resident):
-            if not preempt and _placement_heal_due(name, resident):
+            if not preempt and _placement_heal_due(
+                    name, resident, _users_models(name) if restricted else frozenset()):
                 try:
                     heal_budget = await loop.run_in_executor(
                         None, _switch_load_budget, name)
@@ -978,7 +988,9 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 if not fits:
                     _postpone_placement_recheck(resident)
                 if not (fits and _engines.get(name) is resident
-                        and _placement_heal_due(name, resident)):
+                        and _placement_heal_due(
+                            name, resident,
+                            _users_models(name) if restricted else frozenset())):
                     heal_budget = None
             if heal_budget is None and _engines.get(name) is resident and _is_reusable(resident):
                 if newly_routed:
@@ -1014,10 +1026,9 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
-        if guarded and budget is not None:
+        if restricted and budget is not None:
             budget = dataclasses.replace(
-                budget, pinned=budget.pinned | frozenset(
-                    n for n in list(_engines) if n != name and n not in _routing_loaded))
+                budget, pinned=budget.pinned | _users_models(name))
         prior_active = _active_model_name
         loaded = False
         try:
@@ -1087,6 +1098,20 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 _remember_evicted_active(prior_active, name)
                 if name not in _engines:
                     _routing_loaded.discard(name)
+
+
+def _eviction_order() -> list[str]:
+    """``_engines_lru`` with the models in ``_routing_loaded`` first, each part
+    least recently used first: the order eviction considers residents in."""
+    lru = list(_engines_lru)
+    return ([n for n in lru if n in _routing_loaded]
+            + [n for n in lru if n not in _routing_loaded])
+
+
+def _users_models(name: str) -> frozenset:
+    """The resident models other than *name* that capability routing did not
+    load (not in ``_routing_loaded``)."""
+    return frozenset(n for n in list(_engines) if n != name and n not in _routing_loaded)
 
 
 def _remember_evicted_active(prior: Optional[str], name: str) -> None:
@@ -1256,7 +1281,7 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     while True:
         probe = await _switch_probe_vram(loop, budget, reading=reading)
         decision = switch_admission.decide_admission(
-            probe, budget, _engines_lru, _engines)
+            probe, budget, _eviction_order(), _engines)
         if decision.action == switch_admission.ADMIT:
             return None
         if reading is not None and decision.action != switch_admission.ADMIT_OVER_CAP:
@@ -1975,7 +2000,7 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
     evicted even if a pin is still held. See
     TestBusyVictim.test_explicit_switch_never_cancels_a_busy_model_before_asking."""
     busy_name = switch_admission.busy_victim_candidate(
-        budget, _engines_lru, _engines, preempt=preempt,
+        budget, _eviction_order(), _engines, preempt=preempt,
         already_attempted=attempt.busy_attempted)
     if busy_name is None:
         return None
@@ -2010,7 +2035,7 @@ async def _switch_wait_for_busy_victim(budget: switch_admission.LoadBudget,
     ``LOADING_MODEL_STATUS`` after it."""
     from localm.debuglog import logger as _dbg
     busy_name = switch_admission.idle_wait_candidate(
-        budget, _engines_lru, _engines, preempt=preempt,
+        budget, _eviction_order(), _engines, preempt=preempt,
         already_waited=attempt.busy_waited)
     if busy_name is None:
         return None
@@ -2573,12 +2598,13 @@ def _full_placement_exceeds_total(sizing: dict) -> bool:
     return total > 0 and model > 0 and model + kv + overhead > total
 
 
-def _placement_heal_due(name: str, engine) -> bool:
+def _placement_heal_due(name: str, engine, protected: frozenset = frozenset()) -> bool:
     """Whether resident *engine* (model *name*) should be reloaded before it
     serves a request: it is still placed partly on the CPU, no request holds
     it, and its ``placement_heal`` names an unconfirmed release or a blocker
     that is now gone, unloaded or idle, or is a ``recheck`` heal whose
-    ``recheck_at`` has passed. Reads state only."""
+    ``recheck_at`` has passed. A loaded blocker in *protected* (models the
+    reload may not unload) never makes the heal due. Reads state only."""
     heal = getattr(engine, "placement_heal", None)
     if not isinstance(heal, PlacementHeal):
         return False
@@ -2595,6 +2621,8 @@ def _placement_heal_due(name: str, engine) -> bool:
         other = _engines.get(blocker)
         if other is None or not other.loaded:
             return True
+        if blocker in protected:
+            continue
         if (getattr(other, "active_requests", 0) == 0
                 and getattr(other, "unloading", False) is not True):
             return True
@@ -2797,7 +2825,7 @@ def _model_is_pinned(model_name: str | None) -> bool:
 
 def plan_capability_route(model_name: str | None, messages: list,
                           required_capabilities=None, *, pin_model=None,
-                          min_context=None, autoswitch=None):
+                          min_context=None, autoswitch=None, resident_only=False):
     """The capability-routing decision for one request, without applying it.
 
     Blocking (registry read plus per-candidate capability probes), so an async
@@ -2815,8 +2843,9 @@ def plan_capability_route(model_name: str | None, messages: list,
     window - plus *required_capabilities* and *min_context* for what nothing in
     an OpenAI-shaped request can express. *autoswitch*, one of the autoswitch
     modes, replaces the ``model_autoswitch`` setting for this request; None
-    leaves the setting in force. A loaded engine confirmed to accept
-    images does not count vision as a gap, whatever the registry records.
+    leaves the setting in force. With *resident_only* the decision moves only
+    to a resident model (``fit_resident_only``). A loaded engine confirmed to
+    accept images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
     one loads nothing here.
@@ -2856,7 +2885,8 @@ def plan_capability_route(model_name: str | None, messages: list,
                 if n not in peer_routes}
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
-                          fit=routing_fit_assessor(peers=peer_routes),
+                          fit=(_cr.fit_resident_only(resident) if resident_only
+                               else routing_fit_assessor(peers=peer_routes)),
                           current_known=known, skip=skip_set,
                           mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
@@ -2981,12 +3011,15 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     # unload-await race. An engine flagged unloading falls through to switch_engine
     # below, which reloads it cleanly under its per-model semaphore (the unloader
     # holds that semaphore for the native free, so the reload serializes AFTER it).
-    if activate and not routed and (model_name or "").strip() == name:
+    claim = activate and not routed and (model_name or "").strip() == name
+    if claim:
         _routing_loaded.discard(name)
+    protected = (_users_models(name) if routed or name in _routing_loaded
+                 else frozenset())
 
     if (name in _engines and _engines[name].loaded
             and getattr(_engines[name], "unloading", False) is not True
-            and not (load and _placement_heal_due(name, _engines[name]))):
+            and not (load and _placement_heal_due(name, _engines[name], protected))):
         if name in _engines_lru:
             _engines_lru.remove(name)
         _engines_lru.append(name)
@@ -3005,7 +3038,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     res = await switch_engine(name, _engine_factory, preempt=False,
                               activate=activate, skip_if_latched=skip_if_latched,
                               routed=routed, on_status=on_status,
-                              allow_embedding=allow_embedding)
+                              allow_embedding=allow_embedding, claim=claim)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
@@ -5513,6 +5546,8 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     GUI/tray Stop button and the shutdown route. Separated from the route so it
     can be tested without exiting."""
     _shutdown_teardown(instance_id=instance_id)
+    from localm.debuglog import flush_log_handlers
+    flush_log_handlers()
     import os
     os._exit(0)
 

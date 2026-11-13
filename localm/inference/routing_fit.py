@@ -60,7 +60,8 @@ class Resident:
 def classify(engine, free: Optional[int], reading: VramReading,
              ram_available: Optional[int], ram_total: Optional[int]) -> tuple[int, int]:
     """``(FIT_* class, bytes read from disk while answering)`` for loading
-    *engine* with *free* bytes of VRAM free on its GPU."""
+    *engine* with *free* bytes of VRAM free on its GPU. A placement that keeps
+    weights in system RAM is ``FIT_UNSIZED`` when *ram_available* is unknown."""
     if reading.gpu_present and (free is None or not reading.usable):
         return FIT_UNSIZED, 0
     gpu_free = int(free or 0) if reading.gpu_present else 0
@@ -80,6 +81,10 @@ def classify(engine, free: Optional[int], reading: VramReading,
     if isinstance(placement, dict):
         if placement.get("reads_from_disk"):
             return FIT_DISK, int(placement.get("cpu_read_bytes") or 0)
+        whole_on_gpu = (placement.get("full") and int(placement.get("layers") or 0) > 0
+                        and int(placement.get("n_cpu_moe") or 0) <= 0)
+        if ram_available is None and not whole_on_gpu:
+            return FIT_UNSIZED, 0
         if int(placement.get("layers") or 0) <= 0:
             return (FIT_CPU_ONLY if reading.gpu_present else FIT_PARTIAL), 0
         if placement.get("full"):
@@ -92,7 +97,9 @@ def classify(engine, free: Optional[int], reading: VramReading,
 def _classify_by_size(engine, free: int, reading: VramReading,
                       ram_available: Optional[int]) -> tuple[int, int]:
     """The fit class from the backend's offload needs, else the file size,
-    for a backend that cannot predict its placement."""
+    for a backend that cannot predict its placement. On two or more GPUs only
+    a whole fit in the free VRAM of all of them is sized; any other placement
+    is ``FIT_UNSIZED`` (or ``FIT_DISK`` for experts read from files)."""
     size = _file_bytes(engine)
     if size <= 0:
         return FIT_UNSIZED, 0
@@ -113,6 +120,8 @@ def _classify_by_size(engine, free: int, reading: VramReading,
         return FIT_GPU, 0
     if _experts_read_from_disk(engine):
         return FIT_DISK, max(0, size - free)
+    if reading.gpu_present and reading.devices >= 2:
+        return FIT_UNSIZED, 0
     in_ram = max(0, size - free) if reading.gpu_present else size
     if ram_available is None:
         return FIT_UNSIZED, 0

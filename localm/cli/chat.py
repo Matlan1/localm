@@ -655,7 +655,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if system:
             _first.append({"role": "system", "content": system})
         _first.append(_build_user_message(prompt, list(images), list(audios)))
-        if router.plan(_first).routed:
+        _decision = router.plan(_first)
+        if _decision.routed or _decision.suggested:
             engine = router.engine_for(_first)
             if router.current != model:
                 is_registered = False

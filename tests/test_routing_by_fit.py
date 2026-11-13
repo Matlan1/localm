@@ -559,3 +559,275 @@ def test_planning_reuses_a_recent_reading_until_a_load_ends(monkeypatch):
     monkeypatch.setattr(hs, "ROUTING_READING_MAX_AGE_S", -1.0)
     assert hs.planning_vram_reading().free == 3
     hs._forget_routing_reading()
+
+
+def test_a_routed_request_never_reloads_a_model_by_unloading_the_users(
+        vision_server, monkeypatch):
+    """The user's vision model sits partly on the CPU because the user's
+    current model holds the VRAM. A routed image request is answered by it as
+    loaded: no reload that would unload the current model."""
+    import asyncio
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    asyncio.run(hs.switch_engine("seer", None, preempt=True, activate=False))
+    seer = engines["seer"]
+    assert seer.loaded and "seer" not in hs._routing_loaded
+    seer.gpu_placement = {"degraded": True}
+    seer.placement_heal = hs.PlacementHeal(frozenset({"plain"}), False)
+    assert hs._placement_heal_due("seer", seer)
+    switches = []
+    real = hs.switch_engine
+
+    async def spy(name, *a, **k):
+        switches.append(name)
+        return await real(name, *a, **k)
+    monkeypatch.setattr(hs, "switch_engine", spy)
+    r = _post_image(client)
+    assert r.status_code == 200, r.text
+    assert _answering_model(engines) == ["seer"]
+    assert switches == []
+    assert engines["plain"].loaded
+
+
+def test_a_protected_blocker_never_makes_a_reload_due():
+    class _Eng:
+        loaded = True
+        active_requests = 0
+        unloading = False
+        gpu_placement = {"degraded": True}
+        placement_heal = hs.PlacementHeal(frozenset({"mine"}), False)
+    hs._engines["mine"] = _Eng()
+    try:
+        assert hs._placement_heal_due("x", _Eng())
+        assert not hs._placement_heal_due("x", _Eng(), frozenset({"mine"}))
+    finally:
+        hs._engines.pop("mine", None)
+
+
+def test_an_explicit_switch_that_waited_on_a_routed_load_makes_the_model_the_users(
+        vision_server, monkeypatch):
+    """A routed load of the model holds its semaphore and marks it routing
+    loaded while the user's explicit switch to it waits: once the switch runs
+    the model is the user's."""
+    import asyncio
+
+    from localm.inference.inference_gate import InferenceGate, exclusively
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+
+    async def scenario():
+        sem = hs._inference_sems.setdefault("seer", InferenceGate())
+        async with exclusively(sem):
+            switch = asyncio.create_task(
+                hs.switch_engine("seer", None, preempt=True, activate=False))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            hs._engine_factory("seer").load()
+            hs._engines["seer"] = engines["seer"]
+            hs._engines_lru.append("seer")
+            hs._routing_loaded.add("seer")
+        return await switch
+    result = asyncio.run(scenario())
+    assert result["status"] in ("already_active", "loaded"), result
+    assert "seer" not in hs._routing_loaded
+
+
+_COUNT_IMAGE = {"model": "localm", "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "what is this?"},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                 "data": "iVBORw0KGgo="}}]}]}
+
+
+def _counted_by(engines, monkeypatch):
+    counted = []
+    for name in ("plain", "seer"):
+        eng = hs._engine_factory(name)
+        monkeypatch.setattr(eng, "count_messages_tokens",
+                            lambda messages, _n=name: counted.append(_n) or 5)
+    return counted
+
+
+def _seer_resident(engines):
+    hs._engine_factory("seer").load()
+    hs._engines["seer"] = engines["seer"]
+    hs._engines_lru.insert(0, "seer")
+
+
+def test_count_tokens_keeps_the_configured_autoswitch_mode(vision_server, monkeypatch):
+    """With routing off, a resident vision model does not count an image
+    request's tokens in place of the user's model."""
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    _seer_resident(engines)
+    counted = _counted_by(engines, monkeypatch)
+    monkeypatch.setattr(cr, "configured_mode", lambda: "off")
+    r = client.post("/v1/messages/count_tokens", json=_COUNT_IMAGE)
+    assert r.status_code == 200, r.text
+    assert counted == ["plain"]
+
+
+def test_count_tokens_routes_to_a_resident_vision_model(vision_server, monkeypatch):
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    _seer_resident(engines)
+    counted = _counted_by(engines, monkeypatch)
+    r = client.post("/v1/messages/count_tokens", json=_COUNT_IMAGE)
+    assert r.status_code == 200, r.text
+    assert counted == ["seer"]
+
+
+def test_count_tokens_loads_nothing_when_the_routed_model_left(vision_server, monkeypatch):
+    """Planned on a resident vision model that is unloaded before the count:
+    the user's model counts, and the vision model is not loaded again."""
+    client, engines, _ = vision_server
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    _seer_resident(engines)
+    counted = _counted_by(engines, monkeypatch)
+    real = hs.plan_capability_route
+
+    def plan_then_unload(*a, **k):
+        decision = real(*a, **k)
+        engines["seer"].unload()
+        return decision
+    monkeypatch.setattr(hs, "plan_capability_route", plan_then_unload)
+    r = client.post("/v1/messages/count_tokens", json=_COUNT_IMAGE)
+    assert r.status_code == 200, r.text
+    assert counted == ["plain"]
+    assert not engines["seer"].loaded
+
+
+def test_a_headless_job_names_the_model_it_did_not_load_and_why(job_world, monkeypatch):
+    from localm.plugins.builtin.jobs import runner
+    _fix_classes(monkeypatch, cr.FIT_DISK)
+    notes = []
+    assert runner._headless_routed_model(job_world, notes=notes) == "plain"
+    reason = cr.Fit(cr.FIT_DISK, disk_read_bytes=7 << 30).ask_reason()
+    assert notes == [f"tooly could answer this job (plain lacks tool_use); "
+                     f"it was not loaded: {reason}"]
+
+
+def test_a_served_job_refused_at_load_time_runs_on_its_model_and_says_why(
+        job_world, monkeypatch):
+    import asyncio
+    import threading
+    from localm.plugins.builtin.jobs import runner
+    _fix_classes(monkeypatch, cr.FIT_GPU)
+    late = cr.Fit(cr.FIT_DISK, disk_read_bytes=9 << 30)
+    calls = []
+
+    async def fake_get_engine(name, **kw):
+        calls.append(name)
+        if name == "tooly":
+            raise hs.RouteRefused(name, late)
+        return f"engine-{name}"
+    monkeypatch.setattr(hs, "get_engine", fake_get_engine)
+    warned = []
+    monkeypatch.setattr(runner.logger, "warning", lambda *a, **k: warned.append(a))
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    monkeypatch.setattr(hs, "_server_loop", loop)
+    notes = []
+    try:
+        assert runner._served_engine(job_world, None, notes=notes) == "engine-plain"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(5)
+        loop.close()
+    assert calls == ["tooly", "plain"]
+    assert notes == [f"tooly was not loaded: {late.ask_reason()}"]
+    assert warned == []
+
+
+def test_a_job_record_carries_the_routing_note(job_world, monkeypatch):
+    from localm.plugins.builtin.jobs import runner
+    monkeypatch.setattr(runner, "_creator_refusal", lambda job: None)
+    monkeypatch.setattr(runner, "_served_engine",
+                        lambda job, live, notes=None: notes.append("why not") or "eng")
+    monkeypatch.setattr(runner, "_run_chat", lambda job, engine=None: "answer")
+    record = runner.run_job(job_world)
+    assert record["status"] == "ok", record
+    assert record["routing"] == "why not"
+
+
+def test_eviction_considers_models_routing_loaded_first(monkeypatch):
+    monkeypatch.setattr(hs, "_engines_lru", ["mine-old", "routed", "mine-new"])
+    monkeypatch.setattr(hs, "_routing_loaded", {"routed"})
+    assert hs._eviction_order() == ["routed", "mine-old", "mine-new"]
+
+
+def test_the_eviction_loop_picks_a_routed_model_before_the_users(monkeypatch):
+    """Every resident is idle and VRAM is short: the idle model routing
+    loaded is the first victim, even though the user's model was used less
+    recently."""
+    import asyncio
+    from types import SimpleNamespace
+    engines = {n: SimpleNamespace(loaded=True, active_requests=0, unloading=False)
+               for n in ("mine", "routed")}
+    monkeypatch.setattr(hs, "_engines", engines)
+    monkeypatch.setattr(hs, "_engines_lru", ["mine", "routed"])
+    monkeypatch.setattr(hs, "_routing_loaded", {"routed"})
+    seen = []
+    real_decide = switch_admission.decide_admission
+    short = switch_admission.VramProbe(free=0, probe_ok=True, process_scoped=False,
+                                       shortfall=None, shares_adaptive=False)
+
+    def decide(probe, budget, lru, live):
+        seen.append(real_decide(short, budget, lru, live).victim)
+        return switch_admission.AdmissionDecision(switch_admission.ADMIT, True, False)
+
+    async def probe(loop, budget, reading=None):
+        return None
+    monkeypatch.setattr(hs, "_switch_probe_vram", probe)
+    monkeypatch.setattr(switch_admission, "decide_admission", decide)
+    budget = switch_admission.LoadBudget(
+        name="new", vram_required=100, headroom=0, resident_cap=None, pinned=frozenset(),
+        check_split_fit=False)
+
+    async def run():
+        return await hs._switch_make_room(asyncio.get_running_loop(), budget,
+                                          preempt=False, force=False, activate=False)
+    assert asyncio.run(run()) is None
+    assert seen == ["routed"]
+
+
+class _Placed:
+    def __init__(self, placement):
+        self.placement = placement
+
+    def predict_placement(self, free, total, ram_available, ram_total):
+        return self.placement
+
+
+@pytest.mark.parametrize("placement,expected", [
+    ({"layers": 10, "full": False, "n_cpu_moe": 0, "reads_from_disk": False}, cr.FIT_UNSIZED),
+    ({"layers": 40, "full": True, "n_cpu_moe": 20, "reads_from_disk": False}, cr.FIT_UNSIZED),
+    ({"layers": 40, "full": True, "n_cpu_moe": 0, "reads_from_disk": False}, cr.FIT_GPU),
+])
+def test_without_a_ram_reading_only_a_whole_gpu_placement_is_sized(placement, expected):
+    cls, _ = routing_fit.classify(_Placed(placement), 8 << 30, _reading(free=8 << 30),
+                                  ram_available=None, ram_total=None)
+    assert cls == expected
+
+
+class TestTwoGpusWithoutAPrediction:
+    def _engine(self, tmp_path, monkeypatch, size):
+        f = tmp_path / "m.bin"
+        f.write_bytes(b"\0" * 16)
+        monkeypatch.setattr(routing_fit.residency, "model_footprint_bytes", lambda p: size)
+
+        class E:
+            model_path = str(f)
+        return E()
+
+    def test_a_model_that_fits_the_free_vram_of_both_whole_is_gpu(self, tmp_path, monkeypatch):
+        eng = self._engine(tmp_path, monkeypatch, 4 << 30)
+        cls, _ = routing_fit.classify(eng, 24 << 30, _reading(free=24 << 30, devices=2),
+                                      ram_available=20 << 30, ram_total=32 << 30)
+        assert cls == cr.FIT_GPU
+
+    def test_any_other_placement_is_unsized(self, tmp_path, monkeypatch):
+        eng = self._engine(tmp_path, monkeypatch, 30 << 30)
+        cls, _ = routing_fit.classify(eng, 24 << 30, _reading(free=24 << 30, devices=2),
+                                      ram_available=20 << 30, ram_total=32 << 30)
+        assert cls == cr.FIT_UNSIZED

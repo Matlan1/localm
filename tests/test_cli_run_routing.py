@@ -623,3 +623,33 @@ class TestAskBeforeUnloadingTheLoadedModel:
         assert eng is engines["plain"] and engines["plain"].loaded
         assert not getattr(engines.get("seer"), "loaded", False)
         assert ("unload", "plain") not in log
+
+
+def test_a_single_prompt_names_the_model_it_would_need_to_unload_for(
+        reg, monkeypatch):
+    """`localm run plain -p ... --image` without a terminal: the vision model
+    would run on the CPU only, so it is named with the reason and nothing is
+    loaded for it."""
+    from click.testing import CliRunner
+
+    from localm.inference import capability_routing as _cr
+    from localm.inference import http_server as hs
+    from localm.inference import routing_fit
+    _, img = reg
+    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
+        free=1, total=1000, usable=True))
+    monkeypatch.setattr(routing_fit, "classify",
+                        lambda engine, free, *a, **k: (_cr.FIT_CPU_ONLY, 0))
+    log = []
+    plain = _Engine("plain", log=log)
+    monkeypatch.setattr("localm.inference.engine.Engine", lambda *a, **k: plain)
+    monkeypatch.setattr(chat_mod, "_build_cli_engine",
+                        lambda name, **_: _Engine(name, images=True, log=log))
+    monkeypatch.setattr(chat_mod, "_maybe_persist_cli_mmproj", lambda *a, **k: None)
+    result = CliRunner().invoke(
+        chat_mod.run, ["plain", "--no-server", "-p", "what is this?", "--image", str(img)])
+    assert result.exception is None, result.output
+    said = " ".join(result.output.split())
+    assert "seer can answer this" in said, result.output
+    assert " ".join(_cr.Fit(_cr.FIT_CPU_ONLY).ask_reason().split()) in said
+    assert ("load", "seer") not in log
