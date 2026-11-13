@@ -233,3 +233,37 @@ def test_an_open_mode_stream_survives_the_first_key(monkeypatch):
         r = c.get("/v1/test-stream",
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert "data: 29" in r.text
+
+
+def test_the_credential_recheck_reads_key_files_once_per_stream_and_never_on_the_loop(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    from localm.inference.app_assembly.transport import CredentialRecheckMiddleware
+    calls = []
+    loop_threads = []
+    monkeypatch.setattr(auth, "any_key_configured",
+                        lambda: calls.append(threading.get_ident()) or True)
+    inner = FastAPI()
+
+    @inner.get("/plain")
+    async def _plain():
+        loop_threads.append(threading.get_ident())
+        return JSONResponse({"ok": True})
+
+    async def _gen():
+        loop_threads.append(threading.get_ident())
+        for i in range(20):
+            yield f"data: {i}\n\n"
+
+    @inner.get("/stream")
+    async def _stream():
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(CredentialRecheckMiddleware(inner)) as c:
+        hdr = {"Authorization": "Bearer some-key-some-key"}
+        assert c.get("/plain", headers=hdr).json() == {"ok": True}
+        assert calls == []
+        assert "data: 19" in c.get("/stream", headers=hdr).text
+    assert len(calls) == 1
+    assert calls[0] not in loop_threads

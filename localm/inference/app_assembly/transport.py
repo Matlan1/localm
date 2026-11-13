@@ -77,9 +77,11 @@ class CredentialRecheckMiddleware:
     :func:`localm.auth.revocation_epoch` moved since the last check or
     :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
     response is closed with an empty final chunk and the handler is cancelled
-    the way a client disconnect cancels it. A request that presented no
-    credential, or was made while no key was configured (open mode, where the
-    GUI's shell token is not a key), is not checked."""
+    the way a client disconnect cancels it. A response that presented no
+    credential, or whose first body chunk was sent while no key was configured
+    (open mode, where the GUI's shell token is not a key), is not checked.
+    Whether to check is decided once, off the event loop, at the first body
+    chunk that has more to follow; a response sent in one chunk never asks."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -103,7 +105,7 @@ class CredentialRecheckMiddleware:
         return True
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not self._has_credential(scope):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         from fastapi.concurrency import run_in_threadpool
@@ -111,12 +113,17 @@ class CredentialRecheckMiddleware:
         from localm import auth
         loop = asyncio.get_running_loop()
         state = {"epoch": auth.revocation_epoch(), "at": loop.time(),
-                 "chunks": 0, "gone": False}
+                 "chunks": 0, "gone": False, "checked_cred": None}
 
         async def _send(message):
             if state["gone"]:
                 raise _CredentialGone()
-            if message["type"] == "http.response.body" and message.get("more_body"):
+            if (message["type"] == "http.response.body" and message.get("more_body")
+                    and state["checked_cred"] is None):
+                state["checked_cred"] = await run_in_threadpool(
+                    self._has_credential, scope)
+            if (message["type"] == "http.response.body" and message.get("more_body")
+                    and state["checked_cred"]):
                 state["chunks"] += 1
                 epoch = auth.revocation_epoch()
                 if state["chunks"] > 1 and (
