@@ -58,8 +58,17 @@ from ._structs import (
     LlamaModelParamsV3,
 )
 
-# Env var that disables the check. Any non-empty value enables the bypass.
+# Env var that disables the check: 1, true, yes or on (any case) enables the bypass.
 SKIP_ENV = "LOCALM_SKIP_ABI_CHECK"
+
+_ENV_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def env_on(name: str) -> bool:
+    """True when the environment variable *name* is 1, true, yes or on (any case,
+    surrounding spaces ignored); False when it is unset or anything else, 0 and
+    false included."""
+    return os.environ.get(name, "").strip().lower() in _ENV_ON
 
 # The three llama_model_params layouts localm binds. V1 and V2 are both 72
 # bytes, so that reorder is not visible in sizeof; V3 is 80.
@@ -885,7 +894,7 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
              warn=True)
     refusals = [r for r in (contradiction, ctx_undecided) if r]
 
-    if os.environ.get(SKIP_ENV):
+    if env_on(SKIP_ENV):
         _log(f"{SKIP_ENV} is set - skipping the llama ABI self-check. A mismatched "
              "layout can corrupt memory; unset it once the runtime is known good.",
              warn=True)

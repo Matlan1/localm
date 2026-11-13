@@ -576,10 +576,8 @@ class TestAskBeforeUnloadingTheLoadedModel:
     @pytest.fixture
     def fits_only_without_plain(self, monkeypatch):
         from localm.inference import capability_routing as _cr
-        from localm.inference import http_server as hs
         from localm.inference import routing_fit
-        monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
-            free=1, total=1000, usable=True))
+        _rf.pin_vram_reading(monkeypatch, routing_fit.VramReading(free=1, total=1000, usable=True))
         monkeypatch.setattr(
             routing_fit, "classify",
             lambda engine, free, *a, **k: ((_cr.FIT_GPU, 0) if (free or 0) >= 100
@@ -633,11 +631,9 @@ def test_a_single_prompt_names_the_model_it_would_need_to_unload_for(
     from click.testing import CliRunner
 
     from localm.inference import capability_routing as _cr
-    from localm.inference import http_server as hs
     from localm.inference import routing_fit
     _, img = reg
-    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
-        free=1, total=1000, usable=True))
+    _rf.pin_vram_reading(monkeypatch, routing_fit.VramReading(free=1, total=1000, usable=True))
     monkeypatch.setattr(routing_fit, "classify",
                         lambda engine, free, *a, **k: (_cr.FIT_CPU_ONLY, 0))
     log = []

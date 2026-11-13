@@ -182,6 +182,13 @@ def _passes_content_policy(item: dict) -> bool:
     return item.get("minor") is not True
 
 
+def _saved_civitai_key() -> Optional[str]:
+    """The saved CivitAI API key (credentials file, else its environment
+    fallback), or None."""
+    from ..model_source_credentials import get_civitai_api_key
+    return get_civitai_api_key()
+
+
 def civitai_search(query: str = "", *, limit: int = 20,
                     types: Optional[list[str]] = None,
                     base_models: Optional[list[str]] = None,
@@ -199,7 +206,12 @@ def civitai_search(query: str = "", *, limit: int = 20,
     fact, since CivitAI's own `types` filter is not required for correctness
     here - the client-side filter is.
 
+    *api_key*: CivitAI API key; None (the default) sends the saved one
+    (``localm config civitai_api_key``, or its environment fallback), if any;
+    "" sends none.
+
     Returns {"items": [...], "next_cursor": str | None}."""
+    api_key = _saved_civitai_key() if api_key is None else api_key
     params: dict = {"limit": max(1, min(int(limit), 100)), "nsfw": "true" if nsfw else "false"}
     if query.strip():
         params["query"] = query.strip()
@@ -233,7 +245,9 @@ def civitai_list_files(version_id: object, *,
     """The downloadable files for one CivitAI model VERSION id, each still
     carrying its own hashes/scan-status/format fields for display. Defaults to
     CIVITAI_SAFE_FORMATS only; include_legacy_formats=True also returns
-    PickleTensor/Other/unset-format files."""
+    PickleTensor/Other/unset-format files. *api_key* as in
+    :func:`civitai_search`."""
+    api_key = _saved_civitai_key() if api_key is None else api_key
     data = _civitai_get(f"/api/v1/model-versions/{version_id}", api_key=api_key)
     out = []
     for f in data.get("files", []):

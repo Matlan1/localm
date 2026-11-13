@@ -1613,9 +1613,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # The worker never exposes create_embedding, so there is no RPC to make.
         # GGUFEmbedder is the real embedding path.
         raise NotImplementedError(
-            "Embeddings are not supported by the built-in GGUF binding yet. "
-            "Use a HuggingFace-format model for /v1/embeddings."
-        )
+            "The GGUF chat backend has no embedding call; embeddings come from the "
+            "dedicated embedding model (Engine.embed routes them there).")
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #
@@ -1731,13 +1730,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # generation stall, and an unload racing the stream. The console line is
             # one line; the traceback goes to the debug log only.
             summary = (str(failure).splitlines() or [""])[0]
+            stalled = summary.startswith("Generation stalled")
             if isinstance(failure, WorkerDiedError):
                 _dbg.debug("worker failure during generation - dropping model "
                            "instance: %s", summary)
+            elif stalled:
+                _dbg.warning("reply stopped by the stall limit - dropping model "
+                             "instance: %s", summary)
             else:
                 _dbg.error("worker failure during generation - dropping model "
                            "instance: %s", summary)
-            _dbg.debug("worker failure traceback", exc_info=True)
+            if not stalled:
+                _dbg.debug("worker failure traceback", exc_info=True)
             if self._runner is runner:
                 try:
                     self.unload()
@@ -1759,17 +1763,21 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             context = done.get("context")
             if isinstance(context, dict):
                 self.live_context = context
+            grammar_failed = False
             if done.get("grammar_unsupported") and not self._grammar_unsupported:
                 # First time this model has shown it cannot do grammar: latch it, so
                 # later calls skip sending grammar at all, and surface the degrade.
                 self._grammar_unsupported = True
                 from localm.debuglog import logger as _dbg
-                _dbg.warning("native grammar sampler faulted; degrading to "
-                             "unconstrained generation")
+                _dbg.warning("native grammar sampler faulted; this reply is "
+                             "reported as failed and later grammar requests to "
+                             "this model are refused")
                 console.print(
                     "[yellow]grammar is not supported by this native llama "
-                    "build; generating without constraint.[/yellow]"
+                    "build; this reply is reported as failed and later grammar "
+                    "requests to this model are refused.[/yellow]"
                 )
+                grammar_failed = bool(grammar)
             if done.get("chatml_fallback_reason") and not self._chatml_fallback:
                 # First time this model has needed the ChatML fallback: latch it and
                 # surface the degrade on the console, not only in the debug log.
@@ -1785,3 +1793,6 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     "understand - chat and vision output quality may be "
                     "degraded[/yellow]"
                 )
+            if grammar_failed:
+                from .base import GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError
+                raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_MESSAGE)

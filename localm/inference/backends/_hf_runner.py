@@ -564,6 +564,16 @@ FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
 # llamacpp/_runner.py's _STREAM_CHUNK_TIMEOUT.
 _STREAM_CHUNK_TIMEOUT = 120.0
 
+
+def _first_token_stall(budget: float) -> str:
+    """The error text for a reply that made no progress for *budget* seconds
+    before its first token."""
+    return (f"Generation stalled: the model process made no progress for "
+            f"{budget:.0f}s while reading the prompt. It has been unloaded and will "
+            "reload on the next request. Raise 'HuggingFace first-token timeout (s)' "
+            "in Settings > Model if one layer of this prompt genuinely needs longer "
+            "on this hardware.")
+
 # Bounded wait for a "done" envelope after requesting a mid-stream cancel.
 # Mirrors llamacpp/_runner.py's identical constant - a genuinely wedged
 # native call (the same uninterruptible-from-Python risk this whole module
@@ -842,8 +852,8 @@ class HFRunner:
                         f"{self._backend_label} model load timed out after {timeout:.0f}s "
                         f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
-                        "or raise hf_load_timeout_s if this model genuinely "
-                        "needs longer to load.") from e
+                        "or raise 'HuggingFace load timeout (s)' in Settings > Model "
+                        "if this model genuinely needs longer to load.") from e
         kind = result[0]
         if kind == "ok":
             return result[1]
@@ -926,13 +936,7 @@ class HFRunner:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
                                     raise RuntimeError(
-                                        f"Generation stalled: the model process "
-                                        f"produced no output within "
-                                        f"{first_budget:.0f}s of prompt "
-                                        "processing. It has been unloaded and "
-                                        "will reload on the next request. Raise "
-                                        "hf_first_token_timeout_s if this prompt "
-                                        "genuinely needs longer on this hardware.") from e
+                                        _first_token_stall(first_budget)) from e
                                 raise RuntimeError(
                                     "Generation stalled: the model process "
                                     "stopped responding. It has been unloaded "

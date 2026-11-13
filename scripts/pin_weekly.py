@@ -636,13 +636,14 @@ def _prefer_current_major(pin_key: tuple, keyed: list) -> str:
     return max(inside or keyed)[1]
 
 
-def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callable[[], tuple[str, str] | None]:
+def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key,
+                      keep=None) -> Callable[[], tuple[str, str] | None]:
     def find():
         pinned = cp._read_const(pin_file, pin_pattern)
         pin_key = key(pinned)
         if pin_key is None:
             raise cp.FetchError(f"cannot parse pinned version {pinned!r}")
-        keyed = [(key(t), t) for t, _ in cp._github_releases(repo)]
+        keyed = [(key(t), t) for t, _ in cp._github_releases(repo, keep)]
         keyed = [(k, t) for k, t in keyed if k is not None and k > pin_key]
         if not keyed:
             return None
@@ -849,7 +850,8 @@ def build_advancers() -> list[Advancer]:
         Advancer("sdcpp", "stable-diffusion.cpp", "scripts/confirm_sdcpp_runtime.py",
                  "scripts/bump_sdcpp_pin.py",
                  candidate=_github_candidate("leejet/stable-diffusion.cpp", "localm/media/sdcpp/pins.py",
-                                             r'^TAG = "([^"]+)"', cp._sdcpp_key),
+                                             r'^TAG = "([^"]+)"', cp._sdcpp_key,
+                                             keep=cp._sdcpp_runs_on_the_docker_ubuntu),
                  tests=("tests/test_sdcpp_binding.py", "tests/test_sdcpp_runner.py",
                         "tests/test_sdcpp_runtime.py", "tests/test_bump_sdcpp_pin.py"),
                  changelog=_bullet("stable-diffusion.cpp runtime",

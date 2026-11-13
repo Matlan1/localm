@@ -124,8 +124,9 @@ class Agent(
         set_model recomputes it for the new model. True: max_tokens was an
         explicit caller/project-config value and set_model leaves it alone.
     interactive_tools:
-        Offer ask_user and the plan-mode tools. Only a session with a terminal
-        the user answers on sets it; otherwise they are disabled.
+        Offer ask_user and the plan-mode tools; otherwise they are disabled. A
+        terminal session sets it, and a GUI session sets it with ask_user in
+        *disabled_tools* (plan approval is an approval card there).
     server_side:
         True for an agent that runs inside the server (a GUI coder session, a
         scheduled job): a backend 401/403 fails the turn instead of asking for an

@@ -141,8 +141,10 @@ def tool_enter_plan_mode(cwd: Path, reason=None,
         from .. import display as _display
         _display.print_info("  Plan mode on: the agent can only read until you "
                             "approve its plan (/plan off to leave).")
-    from ..agent.planmode import PLAN_MODE_NOTE
-    return ToolResult.success(PLAN_MODE_NOTE, summary="plan mode on")
+    from ..agent.planmode import plan_mode_note
+    return ToolResult.success(
+        plan_mode_note("ask_user" not in getattr(_session, "disabled_tools", frozenset())),
+        summary="plan mode on")
 
 
 def _approve_on_terminal(plan: str) -> tuple[str, str]:
@@ -205,6 +207,13 @@ def tool_exit_plan_mode(cwd: Path, plan=None,
         call = ToolCall(name="exit_plan_mode", args={"plan": plan},
                         raw="", start=0, end=0)
         approved = invoke_confirm(_session.confirm_handler, call, agent=None)
+        from ..confirm import consume_unanswered
+        if not approved and consume_unanswered():
+            return ToolResult.success(
+                "Nobody answered the plan approval before it timed out; the "
+                "user did not reject it. Plan mode stays on. Give the plan in "
+                "your reply, or call exit_plan_mode again later.",
+                summary="plan approval timed out")
         verdict, feedback = ("approve" if approved else "revise"), ""
     else:
         return ToolResult.error(

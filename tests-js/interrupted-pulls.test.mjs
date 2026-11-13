@@ -187,3 +187,22 @@ test("Resume re-reads the list again a little later", async () => {
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(win.interruptedState().downloads.length, 0);
 });
+
+test("Resume on the Models card says it is resuming and drops the entry while the download runs", async () => {
+  let running = false;
+  const { fetchImpl: base } = makeFetch(
+    () => ({ downloads: running ? [] : [DL], orphans: [] }),
+    () => { running = true; return { ok: true, body: { status: "started", job_id: "j1", spec: DL.spec, note: "" } }; });
+  const fetchImpl = (url, opts) => (String(url).includes("j1") ? new Promise(() => {}) : base(url, opts));
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await win.loadInterrupted();
+  const card = win.document.getElementById("interrupted-card");
+  assert.equal(card.querySelectorAll(".interrupted-row").length, 1);
+  const toasts = [];
+  win.toast = (msg) => { toasts.push(String(msg)); };
+  [...card.querySelectorAll("button")].find((b) => b.textContent === "Resume").click();
+  for (let i = 0; i < 8; i++) await tick();
+  assert.ok(toasts.some((m) => /^Resuming owner\/repo:tiny\.gguf/.test(m)), toasts.join(" | "));
+  assert.equal(card.querySelectorAll(".interrupted-row").length, 0,
+    "the entry leaves the list while its download is still running");
+});
