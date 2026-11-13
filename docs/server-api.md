@@ -224,7 +224,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 
 | Field | Behaviour |
 |---|---|
-| `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
+| `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. 0 means no request cap (the configured default applies), the same as leaving it out; a negative value is a 422. |
 | `temperature`, `top_p`, `seed`, `stop` | Applied. The finish chunk, or the non-streaming choice, carries `stop_sequence` (a localm extension): the stop sequence that ended the reply, or `null`. |
 | `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
 | `response_format` | See [Structured output](#structured-output). |
