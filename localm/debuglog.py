@@ -294,12 +294,19 @@ class _LogWriter:
         """Wait until every record queued before this call is written, up to
         *timeout* seconds. True when it was; True at once on the writer thread
         itself or when nothing was ever queued."""
+        done = self.mark()
+        return done is None or done.wait(timeout)
+
+    def mark(self) -> Optional[threading.Event]:
+        """An event set once every record queued before this call is written;
+        None when there is nothing to wait for (on the writer thread itself, or
+        nothing was ever queued)."""
         if self.on_writer_thread() or self._thread is None:
-            return True
+            return None
         self._ensure_thread()
         done = threading.Event()
         self._queue.put(done)
-        return done.wait(timeout)
+        return done
 
     def _run(self) -> None:
         while True:
@@ -357,13 +364,13 @@ class _Writers:
         return not self.stuck(timeout)
 
     def stuck(self, timeout: float = 5.0) -> list[_LogWriter]:
-        """The writers that did not drain within *timeout* seconds in all."""
+        """The writers that did not drain within *timeout* seconds; every
+        writer is drained at once against the same deadline."""
         deadline = time.monotonic() + timeout
-        stuck = []
-        for writer in self.all():
-            if not writer.drain(max(0.0, deadline - time.monotonic())):
-                stuck.append(writer)
-        return stuck
+        marks = [(writer, writer.mark()) for writer in self.all()]
+        return [writer for writer, done in marks
+                if done is not None
+                and not done.wait(max(0.0, deadline - time.monotonic()))]
 
 
 _log_writer = _Writers()

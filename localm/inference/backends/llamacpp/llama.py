@@ -3711,13 +3711,10 @@ class LlamaCpp:
         ``MtmdContext.eval_media_chunk``, so an image whose embeddings are cached
         is not encoded again, and the cache then keeps only this prompt's images.
 
-        Emits ``"Encoding image (GPU)..."`` or ``"Encoding image (CPU)..."``
-        through *on_status* when an image has to be encoded,
-        ``"Encoding audio (GPU)..."`` or ``"Encoding audio (CPU)..."`` when only
-        audio has to be, else ``"Processing prompt..."``; while the encoded
-        chunks are decoded it emits ``"Processing prompt..."``, and an encoding
-        status again before each further encode. A status equal to the one
-        before it is not repeated. Raises ``MtmdGpuEncodeFailed`` or
+        Through *on_status* it emits ``"Processing prompt..."`` when nothing has
+        to be encoded; otherwise ``"Encoding image (GPU)..."`` (or audio, or CPU)
+        before each encode and ``"Processing prompt..."`` while each encoded
+        chunk is decoded. A status equal to the one before it is not repeated. Raises ``MtmdGpuEncodeFailed`` or
         ``VisionInputError`` when evaluation fails, leaving ``_vision_kv`` None.
         Caller must hold ``_gen_lock``."""
         from localm.inference.backends.base import VisionInputError
@@ -3764,13 +3761,8 @@ class LlamaCpp:
                 chunk.kind for chunk, start in zip(vprompt.chunks, starts, strict=True)
                 if chunk.tokens is None and start >= keep
                 and not self._mtmd.has_embedding(chunk.key)}
-            noun = "audio" if encoding == {"audio"} else "image"
             if not encoding:
                 say_once("Processing prompt...")
-            elif self._mtmd.on_gpu:
-                say_once(f"Encoding {noun} (GPU)...")
-            else:
-                say_once(f"Encoding {noun} (CPU)...")
 
         n_ctx = api.llama_n_ctx(self._ctx_ptr)
         n_batch = min(n_ctx, 2048) if n_ctx else 512

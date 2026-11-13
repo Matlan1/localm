@@ -294,6 +294,7 @@ def _served_engine(job: Job, live, *, notes: Optional[list] = None):
             logger.info("jobs: %s", refused)
             if notes is not None:
                 notes.append(refused)
+            last_error = RuntimeError(refused)
             continue
         except Exception as e:
             detail = getattr(e, "detail", None) or str(e)

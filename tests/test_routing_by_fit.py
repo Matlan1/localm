@@ -729,12 +729,12 @@ def test_a_served_job_refused_at_load_time_runs_on_its_model_and_says_why(
     monkeypatch.setattr(hs, "_server_loop", loop)
     notes = []
     try:
-        assert runner._served_engine(job_world, None, notes=notes) == "engine-plain"
+        assert runner._served_engine(job_world, "live-engine", notes=notes) == "live-engine"
     finally:
         loop.call_soon_threadsafe(loop.stop)
         t.join(5)
         loop.close()
-    assert calls == ["tooly", "plain"]
+    assert calls == ["tooly"]
     assert notes == [f"tooly was not loaded: {late.ask_reason()}"]
     assert warned == []
 

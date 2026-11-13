@@ -211,6 +211,7 @@ def test_a_failure_to_queue_a_record_is_reported_not_raised(debug_logger, monkey
         raise RuntimeError("cannot start a thread")
     monkeypatch.setattr(handler, "writer", broken)
     debuglog.logger.debug("unqueued")
+    monkeypatch.undo()
     assert [r.getMessage() for r in reported] == ["unqueued"]
 
 
@@ -218,7 +219,8 @@ _CHILD_EXITS = r"""
 import os
 from localm import debuglog
 debuglog.attach_child_logging()
-print("TYPE " + ",".join(sorted(type(h).__name__ for h in debuglog.logger.handlers)))
+print("TYPE " + ",".join(sorted(type(h).__name__ for h in debuglog.logger.handlers)),
+      flush=True)
 debuglog.logger.critical("child-line-before-exit")
 os._exit(1)
 """
