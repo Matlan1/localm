@@ -135,6 +135,8 @@ _WORKFLOWS = (".github/workflows/*",)
 _RERANK_CORPUS = ("tests/fixtures/rag_rerank_eval/*",)
 _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_embedding_model_writers_refuse_a_chat_model.py": (
+        _LOCALM_PY, "reads every localm/*.py for embedding_model config writers"),
     "tests/test_update_steps_run_in_the_new_version.py": (
         _LOCALM_PY, "scans every localm module for updater.apply calls"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
