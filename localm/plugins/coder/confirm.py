@@ -19,11 +19,30 @@ Negotiation is by signature inspection.
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 from typing import Any, Optional
 
 # The optional keyword this module negotiates. One name, checked in one place.
 _AGENT_KW = "agent"
+
+
+# Set by a handler whose confirmation got no answer (it timed out).
+_UNANSWERED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "coder_confirm_unanswered", default=False)
+
+
+def mark_unanswered() -> None:
+    """Record that the confirmation the calling thread asked for got no answer
+    (it timed out). The handler then returns False."""
+    _UNANSWERED.set(True)
+
+
+def consume_unanswered() -> bool:
+    """Return and clear the flag :func:`mark_unanswered` set."""
+    value = _UNANSWERED.get()
+    _UNANSWERED.set(False)
+    return value
 
 
 def handler_accepts_agent(handler: Any) -> bool:
