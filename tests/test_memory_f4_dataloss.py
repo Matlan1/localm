@@ -86,7 +86,8 @@ def _put(store_root, text, monkeypatch, home):
     monkeypatch.setattr(plug, "_memory_root", lambda: store_root)
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
     monkeypatch.setenv("LOCALM_MODE", "log")
-    return asyncio.run(plug.memory_put(plug.MemoryUpdate(text=text)))
+    base = plug._rendered_text(plug._request_store(None))
+    return asyncio.run(plug.memory_put(plug.MemoryUpdate(text=text, base=base)))
 
 
 def test_put_preserves_untouched_record_provenance(tmp_path, monkeypatch):

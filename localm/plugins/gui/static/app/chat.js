@@ -1520,81 +1520,90 @@ export function audioPart(clip) {
            name: clip.name, seconds: clip.seconds || 0 };
 }
 
-/** The part list sent over the wire: display-only fields of an audio part
- *  are dropped, every other part is passed through. */
-export function wireParts(content) {
-  if (!Array.isArray(content)) return content;
-  return content
-    .filter((p) => p.type !== "input_audio" || p.input_audio?.data)
-    .map((p) => p.type === "input_audio"
-      ? { type: "input_audio",
-          input_audio: { data: p.input_audio.data, format: p.input_audio.format } }
-      : p);
+const IMAGE_LEFT_OUT = "[An image from an earlier message is not included in this request.]";
+const AUDIO_LEFT_OUT = "[An audio clip from an earlier message is not included in this request.]";
+const IMAGE_NOT_SENT = "[An attached image is not included: the server did not accept it.]";
+const AUDIO_NOT_SENT = "[An attached audio clip is not included: the server did not accept it.]";
+
+/** True for an image the user attached (a data: URI), not one the server
+ *  generated (an /api/ URL). */
+function isUserImage(p) {
+  return p.type === "image_url" && !p.image_url?.url?.startsWith("/api/");
 }
 
-/** The messages of *conv* an attachment strip acts on: all of them, or with
- *  *latestOnly* just the newest user message for which *carries* is true (the
- *  turn that was just sent). */
-function stripTargets(conv, latestOnly, carries) {
-  if (!latestOnly) return conv.messages;
+/** The part list sent over the wire for a message's *content* when *model*
+ *  answers. An image or clip the server refused (`notSent`) is sent as a text
+ *  note. With *latest* false (an earlier turn), an image or clip that *model*
+ *  refused (`refusedBy`) is sent as a text note too. Display-only fields
+ *  (`refusedBy`, `notSent`, a clip's name and seconds) are never sent; a clip
+ *  without data is dropped. */
+export function wireParts(content, { model = null, latest = true } = {}) {
+  if (!Array.isArray(content)) return content;
+  if (model !== null) model = model || "";
+  const out = [];
+  for (const p of content) {
+    if (p.type === "input_audio") {
+      if (!p.input_audio?.data) continue;
+      if (p.notSent) { out.push({ type: "text", text: AUDIO_NOT_SENT }); continue; }
+      if (!latest && model !== null && (p.refusedBy || []).includes(model)) {
+        out.push({ type: "text", text: AUDIO_LEFT_OUT });
+        continue;
+      }
+      out.push({ type: "input_audio",
+                 input_audio: { data: p.input_audio.data, format: p.input_audio.format } });
+    } else if (p.type === "image_url") {
+      if (p.notSent) { out.push({ type: "text", text: IMAGE_NOT_SENT }); continue; }
+      if (!latest && model !== null && (p.refusedBy || []).includes(model)) {
+        out.push({ type: "text", text: IMAGE_LEFT_OUT });
+        continue;
+      }
+      out.push({ type: "image_url", image_url: p.image_url });
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** The parts of type *type* ("image_url" or "input_audio") the user attached
+ *  in *conv*: in every user message, or with *latestOnly* in the newest user
+ *  message that has one (the turn just sent). */
+function attachedParts(conv, type, latestOnly) {
+  const carries = (p) => (type === "image_url" ? isUserImage(p) : p.type === type);
+  const parts = [];
   for (let i = conv.messages.length - 1; i >= 0; i--) {
     const m = conv.messages[i];
-    if (m.role === "user" && Array.isArray(m.content) && carries(m)) return [m];
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    const own = m.content.filter(carries);
+    if (!own.length) continue;
+    parts.push(...own);
+    if (latestOnly) break;
   }
-  return [];
+  return parts;
 }
 
-/** Drop user-attached audio clips from the conversation, leaving a text note,
- *  so a clip the server refused is never sent again: every clip, or with
- *  *latestOnly* only those of the newest message that has any. Returns the
- *  number of clips dropped. */
-export function stripUserAudio(conv, latestOnly = false) {
-  let dropped = 0;
-  const targets = stripTargets(conv, latestOnly,
-    (m) => m.content.some((p) => p.type === "input_audio"));
-  for (const m of targets) {
-    if (m.role !== "user" || !Array.isArray(m.content)) continue;
-    const clips = m.content.filter((p) => p.type === "input_audio");
-    if (!clips.length) continue;
-    dropped += clips.length;
-    const note = "[Audio removed: the server did not accept it.]";
-    const rest = m.content.filter((p) => p.type !== "input_audio");
-    if (rest.every((p) => p.type === "text")) {
-      const text = rest.map((p) => p.text).join("");
-      m.content = (text ? text + "\n" : "") + note;
-      continue;
-    }
-    const first = rest.find((p) => p.type === "text");
-    if (first) first.text = (first.text ? first.text + "\n" : "") + note;
-    else rest.unshift({ type: "text", text: note });
-    m.content = rest;
+/** Record that *model* refused the images (*type* "image_url") or audio clips
+ *  (*type* "input_audio") of *conv*: later requests to *model* leave those of
+ *  earlier turns out (wireParts). The conversation keeps every part. Returns
+ *  the number of parts marked. */
+export function markRefusedBy(conv, type, model) {
+  const parts = attachedParts(conv, type, false);
+  for (const p of parts) {
+    const by = p.refusedBy || (p.refusedBy = []);
+    const name = model || "";
+    if (!by.includes(name)) by.push(name);
   }
-  return dropped;
+  return parts.length;
 }
 
-/** VIS-1: replace every user-attached image (a data: URI) in the conversation
- *  with a short text note, so a model that rejected the image is never asked for
- *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
- *  in endless empty assistant replies; dropping it keeps the chat usable.
- *  Server-generated /api/ images are display-only (already mapped to text before
- *  sending), so they are left alone. With *latestOnly* only the newest message
- *  that carries an image is stripped. *note* replaces the default text note.
- *  Returns the number of images dropped. */
-export function stripUserImages(conv, latestOnly = false,
-                                note = "[Image removed: this model cannot read images.]") {
-  const isUserImage = (p) => p.type === "image_url" && !p.image_url?.url?.startsWith("/api/");
-  let dropped = 0;
-  const targets = stripTargets(conv, latestOnly, (m) => m.content.some(isUserImage));
-  for (const m of targets) {
-    if (m.role !== "user" || !Array.isArray(m.content)) continue;
-    const imgs = m.content.filter(isUserImage);
-    if (!imgs.length) continue;
-    dropped += imgs.length;
-    const text = m.content.filter((p) => p.type === "text")
-      .map((p) => p.text).join("");
-    m.content = (text ? text + "\n" : "") + note;
-  }
-  return dropped;
+/** Mark the images or audio clips (*type* as for markRefusedBy) of *conv*
+ *  that the server could not use, so no later request sends them
+ *  (wireParts): all of them, or with *latestOnly* those of the turn just sent.
+ *  The conversation keeps every part. Returns the number marked. */
+export function markNotSent(conv, type, latestOnly = false) {
+  const parts = attachedParts(conv, type, latestOnly);
+  for (const p of parts) p.notSent = true;
+  return parts.length;
 }
 
 /** Replace, in place, every image part of the wire *messages* with a text
@@ -1604,7 +1613,7 @@ export function elideImagesForWire(messages) {
   for (const m of messages) {
     if (!Array.isArray(m.content)) continue;
     m.content = m.content.map((p) => p.type === "image_url"
-      ? { type: "text", text: "[An image from an earlier message is not included in this request.]" }
+      ? { type: "text", text: IMAGE_LEFT_OUT }
       : p);
   }
   return messages;
@@ -1617,7 +1626,7 @@ export function elideAudioForWire(messages) {
   for (const m of messages) {
     if (!Array.isArray(m.content)) continue;
     m.content = m.content.map((p) => p.type === "input_audio"
-      ? { type: "text", text: "[An audio clip from an earlier message is not included in this request.]" }
+      ? { type: "text", text: AUDIO_LEFT_OUT }
       : p);
   }
   return messages;

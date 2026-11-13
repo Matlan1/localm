@@ -2564,7 +2564,7 @@ class LlamaCpp:
                 stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
-        with exclusive, self._inference_lock:
+        with exclusive, self._inference_lock, self._prefill_progress_to(on_status):
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
 
@@ -3507,7 +3507,7 @@ class LlamaCpp:
                 stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
-        with exclusive, self._inference_lock:
+        with exclusive, self._inference_lock, self._prefill_progress_to(on_status):
             if (not self._model_ptr or getattr(self, "_mtmd", None) is None
                     or decoded is None):
                 raise RuntimeError("vision is not available on this model")
@@ -5237,6 +5237,9 @@ class LlamaCpp:
         self._cached_tokens = list(prompt_tokens)
 
     CHECKPOINT_TAIL = CHECKPOINT_TAIL
+    # Called with (tokens done, prompt tokens) after each prompt batch
+    # _decode_prompt finishes, while _prefill_progress_to is active.
+    _prefill_progress: Optional[Callable[[int, int], None]] = None
     CHECKPOINTS_MAX = CHECKPOINTS_MAX
 
     def _resolve_moe_cache(self, requested: int, n_cpu_moe: int) -> int:
@@ -5318,7 +5321,35 @@ class LlamaCpp:
             if end == cut:
                 self._save_checkpoint(prompt_tokens[:cut])
             i = end
+            if self._prefill_progress is not None:
+                self._prefill_progress(i, n)
         return 0
+
+    @contextlib.contextmanager
+    def _prefill_progress_to(self, on_status: Optional[Callable[[str], None]]):
+        """While active, a prompt batch _decode_prompt finishes before the last
+        one reports ``protocol.prefill_progress_status`` through *on_status*, at
+        most once per ``protocol.PREFILL_PROGRESS_INTERVAL_S`` seconds. Each report also counts as the worker's sign of life for the
+        first-token deadline (``_runner.FIRST_TOKEN_TIMEOUT_DEFAULT``)."""
+        if on_status is None:
+            yield
+            return
+        from localm.inference import protocol
+        last = [time.monotonic()]
+
+        def report(done: int, total: int) -> None:
+            now = time.monotonic()
+            if done >= total or now - last[0] < protocol.PREFILL_PROGRESS_INTERVAL_S:
+                return
+            last[0] = now
+            on_status(protocol.prefill_progress_status(done, total))
+
+        previous = self._prefill_progress
+        self._prefill_progress = report
+        try:
+            yield
+        finally:
+            self._prefill_progress = previous
 
     def _read_seq_state(self, seq: int, flags: int, limit: Optional[int] = None):
         """Copy sequence *seq*'s state with *flags* (``llama_state_seq_flags``)
