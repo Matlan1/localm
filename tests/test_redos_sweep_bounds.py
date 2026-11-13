@@ -32,17 +32,12 @@ from localm.plugins.builtin.jobs.webtool import (
 from localm.plugins.coder.tools.files import (
     _WS_FALLBACK_MAX_TEXT, _WS_FALLBACK_MAX_TOKENS, _resolve_edit)
 
-BUDGET = 2.0
-
-
-def _timed(fn, *a, **kw):
-    start = time.perf_counter()
-    result = fn(*a, **kw)
-    return result, time.perf_counter() - start
+BUDGET = 0.5
 
 
 def _timed_cpu(fn, *a, **kw):
-    """Like _timed, but measures CPU time (time.process_time), not wall-clock.
+    """``(fn(*a, **kw), seconds)``, the seconds being CPU time
+    (time.process_time), not wall-clock.
 
     Wall-clock elapsed time includes time this process spent DESCHEDULED while
     an unrelated process on the same box used the CPU, so a sibling process
@@ -77,7 +72,7 @@ def _timed_cpu(fn, *a, **kw):
 def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
     """This runs on RAW MODEL OUTPUT in the jobs plugin, so every quantifier is
     reachable by whatever a poisoned page persuaded the model to emit."""
-    _, elapsed = _timed(parse_web_call, make_witness())
+    _, elapsed = _timed_cpu(parse_web_call, make_witness())
     assert elapsed < BUDGET, f"parse_web_call took {elapsed:.2f}s on {name}"
 
 
@@ -112,7 +107,7 @@ def test_parse_web_calls_is_bounded_when_a_real_call_precedes_the_hostile_tail(
     actually adds.
     """
     valid = '<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'
-    calls, elapsed = _timed(parse_web_calls, valid + make_witness(), 2)
+    calls, elapsed = _timed_cpu(parse_web_calls, valid + make_witness(), 2)
     assert elapsed < BUDGET, f"parse_web_calls took {elapsed:.2f}s on {name}"
     assert calls and calls[0]["name"] == "web_search", \
         "the bound must not have cost us the real call that precedes the junk"
@@ -200,7 +195,7 @@ def test_docx_tag_scans_are_bounded(label, pattern, make_witness):
     Excluding ``<`` as well stops each attempt at the next tag, which XML
     guarantees is where an attribute value ends."""
     witness = make_witness()
-    _, elapsed = _timed(lambda: pattern.findall(witness))
+    _, elapsed = _timed_cpu(lambda: pattern.findall(witness))
     assert elapsed < BUDGET, f"{label} took {elapsed:.2f}s"
 
 
@@ -223,7 +218,7 @@ def test_log_line_pattern_is_bounded_on_a_long_space_run():
     """``\\s+([^:]+)`` lets both quantifiers claim the same run, because whitespace
     is a SUBSET of ``[^:]``."""
     line = "2026-01-01 00:00:00,000 X" + " " * 8_000 + "y" * 8_000
-    _, elapsed = _timed(_LOG_LINE_RE.match, line)
+    _, elapsed = _timed_cpu(_LOG_LINE_RE.match, line)
     assert elapsed < BUDGET, f"log-line match took {elapsed:.2f}s"
 
 
@@ -286,6 +281,6 @@ def test_tolerant_edit_fallback_declines_a_pathological_input_quickly():
     token cap, so the fallback must refuse and return None rather than grind."""
     text = "a " * 100_000                      # 200 KB
     old = "a " * (_WS_FALLBACK_MAX_TOKENS + 50) + "b"   # over the token cap, no match
-    result, elapsed = _timed(_resolve_edit, text, old)
+    result, elapsed = _timed_cpu(_resolve_edit, text, old)
     assert result is None, "an over-cap tolerant search must be declined"
     assert elapsed < BUDGET, f"declining still took {elapsed:.2f}s"
