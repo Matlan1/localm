@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import stat
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -398,10 +399,16 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 return False
             job.push({"type": "line", "text":
                      f"Added {res.added} models, skipped {res.skipped} existing."})
-            total = res.added + res.skipped
+            if res.failed:
+                more = res.failed - len(res.failures)
+                job.push({"type": "line", "text":
+                         f"{res.failed} could not be added: " + "; ".join(res.failures)
+                         + (f" and {more} more" if more > 0 else "")})
+            total = res.added + res.skipped + res.failed
             job.progress(phase="done", done=total, total=total, unit="models",
-                        added=res.added, skipped=res.skipped, method=res.method)
-            return True
+                        added=res.added, skipped=res.skipped, method=res.method,
+                        failed=res.failed, failures=list(res.failures))
+            return not (res.failed and not res.added)
 
         job = jobs.start_fn("model-scan", _run_scan, owner=principal_id(request))
         return {"job_id": job.id}
@@ -436,6 +443,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                                    set_model_type)
         registry = _require_registered(req.model)
         entry = registry.get(req.model)
+        retyped_from: Optional[dict] = None
         if isinstance(entry, dict) and entry.get("model_type") == "embedding":
             loop = asyncio.get_running_loop()
             if not req.as_chat:
@@ -446,6 +454,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if not await loop.run_in_executor(
                     None, set_model_type, req.model, "llm"):
                 raise HTTPException(500, f"Could not mark {req.model} as a chat model")
+            retyped_from = {"model_type": "embedding",
+                            "type_user_set": entry.get("type_user_set")}
         else:
             refusal = await chat_load_refusal_off_loop(req.model, registry)
             if refusal is not None:
@@ -466,11 +476,42 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             options = {"keep_others": True, **({"activate": False} if not req.activate else {})}
         try:
             result = await switch_model(req.model, **options)
+        except HTTPException:
+            await _restore_type(req.model, retyped_from)
+            raise
         except Exception as e:
+            await _restore_type(req.model, retyped_from)
             raise HTTPException(500, f"Failed to load {req.model}: {e}") from e
         # A switch_model that does not report a status (a minimal/legacy callable)
         # still counts as a successful load of the requested model.
-        return result if result is not None else {"status": "loaded", "model": req.model}
+        if result is None:
+            return {"status": "loaded", "model": req.model}
+        if not (isinstance(result, dict)
+                and result.get("status") in ("loaded", "already_active")):
+            await _restore_type(req.model, retyped_from)
+        return result
+
+    async def _restore_type(name: str, saved: Optional[dict]) -> None:
+        """Put back the type "Load anyway" changed, when the model it retyped did
+        not load and its entry still carries the type that call set."""
+        if saved is None:
+            return
+        from localm.model_manager import update_registry
+
+        def _apply(r: dict) -> None:
+            e = r.get(name)
+            if isinstance(e, dict) and e.get("model_type") == "llm":
+                e["model_type"] = saved["model_type"]
+                if saved.get("type_user_set"):
+                    e["type_user_set"] = True
+                else:
+                    e.pop("type_user_set", None)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, update_registry, _apply)
+        except Exception as e:
+            logger.warning("could not restore the type of %s after its load failed: %s",
+                           name, e)
 
     @app.post("/api/models/unload", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_unload_model(req: UnloadModelRequest):
@@ -556,7 +597,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             gguf_is_diffusion_architecture, gguf_kv_bytes_per_token,
             gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
-        name = model or active_model()
+        switch_loading = _hs._switch_loading
+        name = model or active_model() or switch_loading
         model_bytes = 0
         n_layers = None
         kv_bytes_per_token = 0
@@ -570,8 +612,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         cfg = load_config()
         n_cpu_moe = int(cfg.get("n_cpu_moe") or 0)
         kv_cache_type = resolve_kv_cache_type(cfg)
+        from localm.inference.engine import _resolve_vram_overhead_bytes
+        overhead_bytes = _resolve_vram_overhead_bytes(cfg)
         running = _hs._engines.get(name) if name else None
-        loading = getattr(running, "loading", False) is True
+        loading = (getattr(running, "loading", False) is True
+                   or (bool(name) and name == switch_loading))
         if loading or not (running is not None and getattr(running, "loaded", False)
                 and getattr(running, "unloading", False) is not True):
             running = None
@@ -669,7 +714,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                             kv_bytes_per_token=kv_bytes_per_token,
                             moe_pinned_bytes=moe_pinned_bytes,
                             input_layer_bytes=input_layer_bytes,
-                            keeps_kv=keeps_kv, kv_cache_type=kv_cache_type)
+                            keeps_kv=keeps_kv, kv_cache_type=kv_cache_type,
+                            overhead_bytes=overhead_bytes)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it off the event
         # loop so a stats read never stalls the WebUI. return_status=True so a stale
         # (timed-out) or process-blind free reading is not weighed as current. When
@@ -695,7 +741,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                      moe_pinned_bytes=held_moe_pinned,
                                      input_layer_bytes=input_layer_bytes,
                                      keeps_kv=keeps_kv,
-                                     kv_cache_type=held_kv_type)["needed"]
+                                     kv_cache_type=held_kv_type,
+                                     overhead_bytes=overhead_bytes)["needed"]
         available = (free + held) if isinstance(free, int) and held is not None else None
         budget = available if available is not None else free
         fits = (est["needed"] <= budget) if isinstance(budget, int) and not loading else None

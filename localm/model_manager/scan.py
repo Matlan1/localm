@@ -60,10 +60,17 @@ SUBFOLDER_MAPPING = {
 _HEADER_TYPED_EXTS = frozenset({".safetensors", ".sft", ".gguf"})
 _COMPONENT_DIR_MARKERS = ("config.json", "model_index.json", "adapter_config.json")
 
+_FAILURES_SHOWN = 3
+
+
 class ScanResult(NamedTuple):
+    """``skipped`` counts files already registered; ``failed`` counts files whose
+    registration raised, and ``failures`` names the first few as ``"<file>: <reason>"``."""
     added: int
     skipped: int
     method: str
+    failed: int = 0
+    failures: tuple = ()
 
 class ScanPreview(NamedTuple):
     """Dry-run result: counts by model_type for NEW (not-yet-registered) files
@@ -323,6 +330,7 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
 
     added = 0
     skipped = 0
+    failures: list[str] = []
     total = len(found_files)
 
     for i, (path, mtype) in enumerate(found_files.items(), start=1):
@@ -338,19 +346,25 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
             reg = load_registry()
             from localm.model_manager.registry import _unique_registry_name
             unique_name = _unique_registry_name(reg, model_name)
-            _register_with_dedup(
+            registered = _register_with_dedup(
                 unique_name,
                 path,
                 source="local-scanned",
                 on_duplicate="register",
                 model_type=mtype
             )
-            added += 1
         except Exception as e:
             logger.error("Failed to register scanned model %s: %s", path, e)
-            skipped += 1
+            failures.append(f"{path.name}: {e}")
+            continue
+        if registered:
+            added += 1
+        else:
+            logger.warning("scanned model %s was not registered", path)
+            failures.append(f"{path.name}: not registered")
 
-    return ScanResult(added=added, skipped=skipped, method=method)
+    return ScanResult(added=added, skipped=skipped, method=method,
+                      failed=len(failures), failures=tuple(failures[:_FAILURES_SHOWN]))
 
 
 def preview_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None) -> ScanPreview:

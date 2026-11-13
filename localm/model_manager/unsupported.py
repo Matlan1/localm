@@ -202,7 +202,7 @@ def _quant_method_label(method: str) -> str:
 def unsupported_quant_method_refusal(config: dict) -> Optional[str]:
     """The reason a HuggingFace folder with this ``config.json`` uses a
     quantization localm cannot load, or None. EXL2 and EXL3 get a sentence naming
-    the runtime that does run them; any other ``quant_method`` string the loader
+    the runtime that does run them and localm's ExLlama plugin; any other ``quant_method`` string the loader
     has no quantizer for gets a sentence naming the method. A config without a
     non-empty string ``quant_method``, or one flagged ``load_in_4bit`` /
     ``load_in_8bit``, gets no verdict."""
@@ -216,8 +216,9 @@ def unsupported_quant_method_refusal(config: dict) -> Optional[str]:
     named = _UNSUPPORTED_QUANT_METHODS.get(method.lower())
     if named is not None:
         label, runtime = named
-        return (f"This model is quantized with {label}, a format only {runtime} can run, "
-                f"so localm cannot load it. {_ALTERNATIVE}")
+        return (f"This model is quantized with {label}, a format only {runtime} can run. "
+                "localm runs it only with its ExLlama plugin, on Linux with an NVIDIA "
+                f"GPU (Settings > Plugins). {_ALTERNATIVE}")
     if method in _LOADER_QUANT_METHODS:
         return None
     return (f"This model is quantized with {_quant_method_label(method)}, a method the "

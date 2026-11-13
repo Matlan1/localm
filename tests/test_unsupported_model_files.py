@@ -69,11 +69,13 @@ GGML_SENTENCE = ("This is an old-format GGML file (the pre-GGUF format used by e
 MLX_SENTENCE = ("This is an MLX-quantized model (mlx-community format), which runs "
                 "only in Apple's MLX and cannot be loaded here. Use the GGUF of the "
                 "same model, or the original non-MLX weights.")
-EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run, "
-                 "so localm cannot load it. Use a GGUF of the same model, or the "
+EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run. "
+                 "localm runs it only with its ExLlama plugin, on Linux with an "
+                 "NVIDIA GPU (Settings > Plugins). Use a GGUF of the same model, or the "
                  "original Hugging Face weights.")
-EXL3_SENTENCE = ("This model is quantized with EXL3, a format only ExLlamaV3 can run, "
-                 "so localm cannot load it. Use a GGUF of the same model, or the "
+EXL3_SENTENCE = ("This model is quantized with EXL3, a format only ExLlamaV3 can run. "
+                 "localm runs it only with its ExLlama plugin, on Linux with an "
+                 "NVIDIA GPU (Settings > Plugins). Use a GGUF of the same model, or the "
                  "original Hugging Face weights.")
 MISTRAL_SENTENCE = ("This is a Mistral-native model folder (params.json plus "
                     "consolidated*.safetensors, no config.json). localm loads GGUF "

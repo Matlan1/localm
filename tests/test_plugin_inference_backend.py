@@ -21,8 +21,9 @@ from localm.plugins.contract import InferenceBackendDescriptor
 EXL2_QUANT = json.loads(
     '{"quant_method":"exl2","version":"0.1.7","bits":4.0,"head_bits":6,'
     '"calibration":{"rows":115,"length":2048,"dataset":"(default)"}}')  # turboderp/...-exl2 @4.0bpw
-EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run, "
-                 "so localm cannot load it. Use a GGUF of the same model, or the "
+EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run. "
+                 "localm runs it only with its ExLlama plugin, on Linux with an "
+                 "NVIDIA GPU (Settings > Plugins). Use a GGUF of the same model, or the "
                  "original Hugging Face weights.")
 
 

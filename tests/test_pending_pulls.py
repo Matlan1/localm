@@ -194,7 +194,11 @@ class TestUrlPullRecord:
         [view] = pending_pulls.list_interrupted()
         monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY + b"x"))
         rec = pending_pulls.get_interrupted(view["id"])
-        assert pending_pulls.check_upstream(rec)["changed"] is True
+        check = pending_pulls.check_upstream(rec)
+        assert check["changed"] is True
+        assert "changed at the source" in check["detail"]
+        assert "cannot be continued" not in check["detail"], (
+            "the GUI dialog and the CLI add the verdict after the detail")
         called = []
         monkeypatch.setattr("localm.cli.models.pull_model",
                             lambda *a, **k: called.append(a) or True)

@@ -907,6 +907,8 @@ def check_upstream(rec: dict) -> dict:
     """Compare what the source serves now with what the record holds.
 
     Returns ``{"changed": True|False|None, "detail": str, "refused": bool}``:
+    ``detail`` names what changed (``"<file> changed at the source ..."``) or what
+    could not be checked, without a verdict, which the caller words. ``changed`` is
     True when the partial data cannot be continued safely (a recorded file's
     etag or size, a direct URL's size or etag, or a full repo's commit differs
     now, or a direct URL with no expected digest has neither size nor etag to
@@ -982,7 +984,7 @@ def check_upstream(rec: dict) -> dict:
                 unchecked.append(str(rec.get("repo")))
     if changed:
         return {"changed": True, "refused": refused,
-                "detail": "cannot be continued: " + "; ".join(changed)}
+                "detail": "; ".join(changed)}
     if unchecked:
         return {"changed": None, "refused": refused,
                 "detail": "could not check the source of: " + ", ".join(unchecked)}

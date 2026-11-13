@@ -1071,7 +1071,8 @@ def estimate_vram(model_bytes: int, n_ctx: int,
                   n_gpu_layers: int = 99, n_layers: int | None = None,
                   kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0,
                   input_layer_bytes: int = 0, keeps_kv: bool = True,
-                  kv_cache_type: str | None = None) -> dict:
+                  kv_cache_type: str | None = None,
+                  overhead_bytes: int | None = None) -> dict:
     """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
     *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
     needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
@@ -1105,6 +1106,10 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     ``localm.kv_cache.KV_CACHE_TYPES`` value, None for f16) rescales it, and the
     size-class fallback, to the type the KV cache is stored in. Raises
     ValueError for a *kv_cache_type* that is not a known type.
+
+    *overhead_bytes* is the fixed overhead charged when anything is loaded; None
+    charges ``localm.vram.VRAM_OVERHEAD_BYTES``. Pass the saved
+    ``vram_overhead_mb`` (``engine._resolve_vram_overhead_bytes``) to match a load.
 
     *keeps_kv* False (a diffusion language model, which llama.cpp gives no KV
     cache) charges no KV cache at all. Otherwise the KV cache is charged for the
@@ -1141,6 +1146,8 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     from localm.kv_cache import kv_bytes_for_type
     bytes_per_token = kv_bytes_for_type(bytes_per_token, kv_cache_type)
     kv_cache = int(n_ctx * bytes_per_token * frac)
-    overhead = _VRAM_OVERHEAD_BYTES if (weights or kv_cache) else 0
+    if overhead_bytes is None:
+        overhead_bytes = _VRAM_OVERHEAD_BYTES
+    overhead = overhead_bytes if (weights or kv_cache) else 0
     return {"weights": weights, "kv_cache": kv_cache, "overhead": overhead,
             "needed": weights + kv_cache + overhead}
