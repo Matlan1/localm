@@ -464,6 +464,14 @@ def _update_list(updater) -> None:
     console.print("[dim]Install one with: localm update --to <version>[/dim]")
 
 
+def _defer_update_steps(version) -> bool:
+    """Whether a terminal update to *version* leaves its runtime and component
+    steps to that version's next start: True unless *version* is older than the
+    running localm (a downgrade), whose steps the update carries out itself."""
+    from localm import _version, updater
+    return updater._direction(str(version or ""), _version.read_version()) != "older"
+
+
 def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> None:
     """Install the release *version* (``localm update --to``)."""
     from localm import _version
@@ -505,7 +513,9 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         try:
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
-                                expect_sha256=expect, say=_say_step)
+                                expect_sha256=expect,
+                                defer_runtime=_defer_update_steps(rel["version"]),
+                                steps_when="at the next start of localm", say=_say_step)
             break
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
@@ -721,7 +731,9 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
-        res = updater.apply(asset["id"], signature=info.get("signature"), say=_say_step)
+        res = updater.apply(asset["id"], signature=info.get("signature"),
+                            defer_runtime=_defer_update_steps(latest),
+                            steps_when="at the next start of localm", say=_say_step)
     except LocalmError as e:
         # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")

@@ -396,6 +396,14 @@ def _check_runtime_matches_release(build) -> None:
                       f"release [dim]({escape(str(e))})[/dim]")
         return
     fix = f"localm setup-llama --backend {backend} --force"
+    kept = updater_runtime.kept_runtime(setup_llama._repo_runtime_lib()) if backend else None
+    if (kept is not None and kept["backend"] == backend and kept["target"] == target
+            and kept["kept"] == build and not current):
+        console.print(f"  {_WARN_SYM}  kept the {escape(str(backend))} runtime {escape(build)}: "
+                      f"this release's {escape(str(target))} did not work here "
+                      f"({escape(kept['why'])})")
+        console.print(f"     [dim]to try it again: {escape(fix)}[/dim]")
+        return
     if pending is not None:
         console.print(f"  {_WARN_SYM}  the last localm update left the {escape(str(backend))} "
                       f"runtime update to {escape(str(pending.get('target')))} pending; it "
