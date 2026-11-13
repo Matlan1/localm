@@ -3714,7 +3714,10 @@ class LlamaCpp:
         Emits ``"Encoding image (GPU)..."`` or ``"Encoding image (CPU)..."``
         through *on_status* when an image has to be encoded,
         ``"Encoding audio (GPU)..."`` or ``"Encoding audio (CPU)..."`` when only
-        audio has to be, else ``"Processing prompt..."``. Raises ``MtmdGpuEncodeFailed`` or
+        audio has to be, else ``"Processing prompt..."``; while the encoded
+        chunks are decoded it emits ``"Processing prompt..."``, and an encoding
+        status again before each further encode. A status equal to the one
+        before it is not repeated. Raises ``MtmdGpuEncodeFailed`` or
         ``VisionInputError`` when evaluation fails, leaving ``_vision_kv`` None.
         Caller must hold ``_gen_lock``."""
         from localm.inference.backends.base import VisionInputError
@@ -3748,18 +3751,25 @@ class LlamaCpp:
             self._reset_kv_for_image()
         self._vision_kv = None
 
+        say = None
         if on_status:
+            said: list[Optional[str]] = [None]
+
+            def say(text: str) -> None:
+                if text != said[0]:
+                    said[0] = text
+                    on_status(text)
             encoding = {
                 chunk.kind for chunk, start in zip(vprompt.chunks, starts, strict=True)
                 if chunk.tokens is None and start >= keep
                 and not self._mtmd.has_embedding(chunk.key)}
             noun = "audio" if encoding == {"audio"} else "image"
             if not encoding:
-                on_status("Processing prompt...")
+                say("Processing prompt...")
             elif self._mtmd.on_gpu:
-                on_status(f"Encoding {noun} (GPU)...")
+                say(f"Encoding {noun} (GPU)...")
             else:
-                on_status(f"Encoding {noun} (CPU)...")
+                say(f"Encoding {noun} (CPU)...")
 
         n_ctx = api.llama_n_ctx(self._ctx_ptr)
         n_batch = min(n_ctx, 2048) if n_ctx else 512
@@ -3771,7 +3781,8 @@ class LlamaCpp:
                 if rest:
                     pos = self._decode_vision_text(rest, pos, n_batch)
             elif start >= keep:
-                pos = self._mtmd.eval_media_chunk(self._ctx_ptr, chunk, pos, n_batch)
+                pos = self._mtmd.eval_media_chunk(self._ctx_ptr, chunk, pos, n_batch,
+                                                  on_status=say)
         if pos <= 0 or (n_ctx and pos > n_ctx):
             raise VisionInputError(
                 f"the image prompt ended at an implausible position "
