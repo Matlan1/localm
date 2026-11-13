@@ -1,8 +1,9 @@
 import sys
 
 if __name__ == "__main__":
+    _cli = (".venv\\Scripts\\localm" if sys.platform == "win32"
+            else ".venv/bin/localm")
     sys.exit(
-        "Error: You are trying to run 'localm' directly with the system Python, "
-        "but it must be run from its virtual environment.\n"
-        "Please use '.venv\\Scripts\\localm' or activate the venv first."
-    )
+        "Error: this Python is not localm's own environment, and localm must be "
+        "run from it.\n"
+        f"Use '{_cli}' in the install folder, or activate that venv first.")
