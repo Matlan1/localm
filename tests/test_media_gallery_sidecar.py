@@ -34,7 +34,8 @@ def test_no_sidecar_is_no_settings_and_no_warning(tmp_path, caplog):
 
 
 @pytest.mark.parametrize("text,why", [("{not json", "Expecting property name"),
-                                      ("[1, 2]", "not a JSON object")])
+                                      ("[1, 2]", "not a JSON object"),
+                                      ("[" * 200_000 + "]" * 200_000, "recursion")])
 def test_an_unreadable_sidecar_is_no_settings_and_a_warning(tmp_path, caplog, text, why):
     caplog.set_level(logging.WARNING, logger="localm")
     (tmp_path / "clip.mp4.json").write_text(text, encoding="utf-8")

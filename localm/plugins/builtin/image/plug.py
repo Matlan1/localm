@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
 import re
 import shutil
@@ -884,15 +883,8 @@ async def imagine_upscale(name: str, req: UpscaleRequest, request: Request):
     if not self_url:
         raise HTTPException(503, "Upscaling needs this server's own address to free "
                                  "VRAM first, and it could not be determined.")
-    extra_meta = {}
-    sidecar = source.with_suffix(source.suffix + ".json")
-    if sidecar.is_file():
-        try:
-            loaded = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            extra_meta = {k: v for k, v in loaded.items() if k not in _UPSCALE_DROPPED_META}
+    extra_meta = {k: v for k, v in gallery.read_sidecar("image", source).items()
+                  if k not in _UPSCALE_DROPPED_META}
     images_dir = _images_dir()
     out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
     owner = principal_id(request)

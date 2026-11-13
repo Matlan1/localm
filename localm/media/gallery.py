@@ -348,8 +348,8 @@ def read_sidecar(media_kind: str, path: Path) -> dict:
         return {}
     try:
         meta = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        meta, why = None, str(e)
+    except (OSError, ValueError, RecursionError) as e:
+        meta, why = None, str(e) or type(e).__name__
     else:
         why = "it is not a JSON object"
     if isinstance(meta, dict):
