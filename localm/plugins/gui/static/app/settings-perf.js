@@ -2224,7 +2224,8 @@ export function reconcileActiveView() {
 /* ---- assistant memory ---- */
 
 export const memory = { text: "", writable: false, corrections: [],
-                         canDownloadEmbedder: false, embedderModel: null };
+                         canDownloadEmbedder: false, embedderModel: null,
+                         embedderMissing: null };
 
 export async function refreshMemory() {
   try {
@@ -2240,6 +2241,7 @@ export async function refreshMemory() {
     // embedding model, and this caller could fetch it in one click.
     memory.canDownloadEmbedder = !!data.can_download_embedder;
     memory.embedderModel = data.embedder_model || null;
+    memory.embedderMissing = data.embedder_missing || null;
   } catch { /* server unreachable */ }
 }
 
@@ -2389,6 +2391,12 @@ export async function openMemoryModal() {
         if (await downloadMemoryEmbedder(dlBtn)) { hint.remove(); dlBtn.remove(); }
       };
       body.appendChild(dlBtn);
+    } else if (memory.embedderMissing) {
+      const hint = el("div", "sub",
+        t("memory.embedder.setupHint", { model: memory.embedderMissing }));
+      hint.id = "mem-embed-setup-hint";
+      hint.style.marginTop = "6px";
+      body.appendChild(hint);
     }
     const ta = document.createElement("textarea");
     ta.value = memory.text;

@@ -858,6 +858,7 @@ class TestMemoryEmbedderDownloadHint:
                 body = c.get("/api/memory", headers=_hdr(OWNER_KEY)).json()
                 assert body["can_download_embedder"] is False
                 assert body["embedder_model"] is None
+                assert body["embedder_missing"] == "bge-small-en-v1.5"
                 # Confirm the premise the hint must respect: the route is
                 # genuinely absent, not merely unauthorized.
                 r = c.post("/api/rag/embedding/download", headers=_hdr(OWNER_KEY))
@@ -888,6 +889,7 @@ class TestMemoryEmbedderDownloadHint:
                 body = c.get("/api/memory", headers=_hdr(mem_writer)).json()
                 assert body["can_download_embedder"] is False
                 assert body["embedder_model"] is None
+                assert body["embedder_missing"] is None
                 # Confirm the premise: this exact key really is refused there.
                 r = c.post("/api/rag/embedding/download", headers=_hdr(mem_writer))
                 assert r.status_code == 403

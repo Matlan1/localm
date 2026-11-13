@@ -202,6 +202,20 @@ test("no can_download_embedder renders neither hint nor button", async () => {
     win.document.getElementById("modal-body").textContent, /Semantic recall is off/);
 });
 
+test("memory modal names the missing model and the CLI when no button can be offered", async () => {
+  const calls = [];
+  const body = { ...MEM_BLOCKED, can_download_embedder: false, embedder_model: null,
+                 embedder_missing: "bge-small-en-v1.5" };
+  const { window: win } = loadAppWithPages({ fetchImpl: memFetch(body, calls) });
+  await win.refreshMemory();
+  await win.openMemoryModal();
+  assert.equal(win.document.getElementById("mem-embed-download"), null);
+  const hint = win.document.getElementById("mem-embed-setup-hint");
+  assert.ok(hint, "the setup hint is shown");
+  assert.match(hint.textContent, /bge-small-en-v1\.5/);
+  assert.match(hint.textContent, /localm setup-embeddings/);
+});
+
 test("clicking Download-now POSTs the SAME route the Knowledge page uses, and clears on success",
   async () => {
     const calls = [];
