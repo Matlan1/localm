@@ -149,7 +149,6 @@ def register(app: FastAPI, ctx) -> None:
             response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
-            created = {**created, "owner_key_seeded": True}
             # CSRF is derived from the session (client fetches it from
             # GET /api/session); no separate CSRF cookie to set.
         # The plaintext key is returned exactly once - it is never recoverable.

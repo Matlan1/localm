@@ -1112,7 +1112,7 @@ export async function refreshKeysPanel() {
       ? t("settings.keys.newKeyIntro", { name: made.name, scopes: madeScopes.join(", ") })
       : t("settings.keys.newKeyIntroChatOnly", { name: made.name })));
     for (const w of made.warnings || []) box.appendChild(el("div", "key-warn", w));
-    if (made.owner_key_seeded) box.appendChild(el("div", "sub", t("settings.keys.ownerKeySeeded")));
+    if (made.owner_key_created === true) box.appendChild(el("div", "sub", t("settings.keys.ownerKeySeeded")));
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
@@ -1123,7 +1123,8 @@ export async function refreshKeysPanel() {
     $("key-name").value = "";
     scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
     refreshKeysPanel();
-    if (made.owner_key_seeded) refreshOwnerKeyPanel();
+    // The reply carries owner_key_created when it also signed this browser in as owner.
+    if ("owner_key_created" in made) refreshOwnerKeyPanel();
   };
 }
 

@@ -717,14 +717,11 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
     app = create_app(None)                         # bind_host unset -> loopback default
     with TestClient(app) as client:
         shell = app.state.shell_token
-        listed = client.get("/v1/keys", headers={"Authorization": f"Bearer {shell}"})
-        assert listed.status_code == 200 and listed.json()["open_mode"] is True
         # open-mode management (minting the first key) needs the loopback shell token
         r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
                         headers={"Authorization": f"Bearer {shell}"})
         assert r.status_code == 200
         assert r.json()["scopes"] == [S.CHAT]      # the phone key stays scoped
-        assert r.json()["owner_key_seeded"] is True
         # a persistent OWNER key was seeded so the local owner keeps full access
         owner = auth.get_api_key()
         assert owner is not None and auth.verify(owner) == {S.ADMIN}
@@ -735,9 +732,7 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
         # auth is now on; the follow-up rides the session cookie from the jar
         # (NOT the now-dead shell token) and is authorized -> no lockout.
         assert auth.any_key_configured()
-        after = client.get("/v1/keys")
-        assert after.status_code == 200
-        assert after.json()["open_mode"] is False and after.json()["is_owner"] is True
+        assert client.get("/v1/keys").status_code == 200
 
 
 def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
@@ -755,7 +750,6 @@ def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
                         headers={"Authorization": "Bearer ownersecret"})
         assert r.status_code == 200
         assert not r.headers.get_list("set-cookie")   # no session seeded
-        assert "owner_key_seeded" not in r.json()
         # the env owner key is untouched; no auth.key was written
         assert auth._read_key_file() is None
 

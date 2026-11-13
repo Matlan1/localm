@@ -133,7 +133,7 @@ test("the first key says an owner key was set too and shows the Owner key card",
     "POST /v1/keys": () => {
       seeded = true;
       return { status: 200,
-        body: { id: "n", name: "phone", scopes: ["chat"], key: "K", owner_key_seeded: true } };
+        body: { id: "n", name: "phone", scopes: ["chat"], key: "K", owner_key_created: true } };
     },
   });
   await window.refreshKeysPanel();
