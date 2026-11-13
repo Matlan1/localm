@@ -90,18 +90,19 @@ def main(model, no_images, no_coder, no_memory, memory_write, coder_shell,
             args += ["--coder-root", coder_root]
         if share_loaded:
             args += ["--share-loaded-models"]
+        # The command is this process's own interpreter running `-m localm`.
+        # Only the JSON goes to stdout; the notes after it go to stderr.
         block = {
             "mcpServers": {
                 "localm": {
-                    "command": "localm",
-                    "args": args,
+                    "command": sys.executable,
+                    "args": ["-m", "localm", *args],
                 }
             }
         }
-        import sys as _sys
-        if _sys.platform == "win32":
+        if sys.platform == "win32":
             cfg_path = "%APPDATA%\\Claude\\claude_desktop_config.json"
-        elif _sys.platform == "darwin":
+        elif sys.platform == "darwin":
             cfg_path = "~/Library/Application Support/Claude/claude_desktop_config.json"
         else:
             cfg_path = "~/.config/Claude/claude_desktop_config.json"
@@ -111,17 +112,21 @@ def main(model, no_images, no_coder, no_memory, memory_write, coder_shell,
             f"# Claude Desktop: {cfg_path}\n"
             "# The client launches/stops the server automatically.\n"
             "# First install the plugin:  localm plugin install mcp",
-            err=False,
+            err=True,
         )
         return
 
     # The MCP server plugin ships disabled, so `localm mcp` refuses to serve
     # until the user opts in. --print-config above is exempt.
     from localm.plugins.engine import PluginManager
-    if not PluginManager(None).is_active("mcp"):     # installed (on disk) AND enabled
+    mgr = PluginManager(None)
+    if not mgr.is_active("mcp"):     # installed (on disk) AND enabled
+        remedy = ("Enable it with:  localm plugin enable mcp"
+                  if mgr.is_installed("mcp") else
+                  "Install it with:  localm plugin install mcp")
         click.echo(
             "The MCP server plugin is not active.\n"
-            "Install it with:  localm plugin install mcp\n"
+            f"{remedy}\n"
             "(then your MCP client can launch this server).",
             err=True,
         )

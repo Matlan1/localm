@@ -34,7 +34,7 @@ localm config mdns_enabled false   # advertise nothing; reach localm by IP only
 
 Both settings need a **restart** to take effect: the mDNS advertiser starts once
 when the server starts, and the name is also written into the HTTPS
-certificate's SANs. Restart the process, or use *Settings > Restart server* in
+certificate's SANs. Restart the process, or use *Settings > Server & network > Restart server* in
 the GUI.
 
 The name is sanitized to a valid DNS label (lowercase letters, digits, hyphens).

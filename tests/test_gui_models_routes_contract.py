@@ -1110,7 +1110,7 @@ class TestDiscoverSearch:
         assert seen == {"q": "x", "limit": 20, "types": ["Checkpoint", "LORA"], "nsfw": True}
 
     @pytest.mark.parametrize("message,off,status", [
-        ("Network access is disabled (net_mode=off).", True, 403),
+        ("Network access is off (net_mode=off), so nothing was searched.", True, 403),
         ("HuggingFace request failed: timeout", False, 502),
         ("no files match the requested formats", False, 422),
     ])
@@ -1124,10 +1124,7 @@ class TestDiscoverSearch:
         with TestClient(harness.app) as c:
             r = c.get("/api/discover/search", params={"q": "x"})
         assert r.status_code == status
-        if off:
-            assert "Settings" in r.json()["detail"]
-        else:
-            assert r.json()["detail"] == message
+        assert r.json()["detail"] == message
 
     def test_civitai_refusal_maps_the_same_way(self, harness, monkeypatch):
         from localm.model_manager.sources import ModelSourceError

@@ -18,9 +18,8 @@ A test file is selected when any of these holds:
     package mapped in _REEXPORT_MODULE_FACADES also counts as a change to the
     module it is mapped from, for both rules above, and that module counts as
     importing every module the package's modules import;
-  - it is listed in _TREE_SCANNERS for the folder a changed .py file sits in
-    (it reads every file under that folder instead of importing the changed
-    one);
+  - it is listed in _TREE_SCANNERS with a pattern a changed path matches (it
+    lists a folder of the checkout instead of importing the changed file);
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -74,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import functools
 import json
 import os
@@ -111,41 +111,142 @@ _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
 # names of the modules in the package mapped to it.
 _REEXPORT_MODULE_FACADES = {"localm.rag.store": "localm.rag._store"}
-# Test files that read a whole source tree instead of importing the module that
-# changed, so the import graph never reaches them. Each maps to the path
-# prefixes whose .py files it reads and what it does with them. A .py file added,
-# changed or deleted under a prefix selects the tests listed for it.
-_LOCALM, _TESTS, _SCRIPTS = "localm/", "tests/", "scripts/"
-_ALL_SOURCES = (_LOCALM, _TESTS, _SCRIPTS)
+# Test files that list a folder of the checkout instead of importing the module
+# that changed, so neither the import graph nor a file-name match reaches a file
+# added there. Each maps to the fnmatch patterns of the repository-relative
+# paths it reads (`*` also matches `/`) and what it does with them. A file
+# added, changed or deleted at a matching path selects the test.
+# tests/test_tree_scanners_registered.py fails when a test file walks a folder
+# of the checkout and is in neither this table nor _NOT_TREE_SCANNERS.
+_PY = ("localm/*.py", "tests/*.py", "scripts/*.py")
+_LOCALM_PY = ("localm/*.py",)
+_TESTS_PY = ("tests/*.py",)
+_GUI_STATIC = "localm/plugins/gui/static/"
+_GUI_JS = (_GUI_STATIC + "*.js",)
+_BUILTIN_PLUGINS = ("localm/plugins/builtin/*",)
+_WORKFLOWS = (".github/workflows/*",)
+_RERANK_CORPUS = ("tests/fixtures/rag_rerank_eval/*",)
 _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
-    "tests/test_check_pins.py": ((_LOCALM,), "greps every tracked localm/*.py for pin-shaped constants"),
-    "tests/test_no_gitignored_path_leak.py": (_ALL_SOURCES, "scans the string literals of every tracked .py"),
-    "tests/test_no_stray_encoding_cookie.py": (_ALL_SOURCES, "reads the first lines of every .py"),
-    "tests/test_check_hygiene.py": (_ALL_SOURCES, "runs the hygiene checks over every tracked file"),
-    "tests/test_check_hygiene_layering.py": (_ALL_SOURCES, "checks import direction over every tracked localm file"),
-    "tests/test_check_hygiene_response_keys.py": (_ALL_SOURCES, "checks the JSON keys of every tracked route"),
-    "tests/test_bump_uv_pin.py": ((_LOCALM,), "lists every tracked file outside tests/ and scripts/ that pins uv"),
-    "tests/test_native_stderr_redirect_scope.py": ((_LOCALM,), "walks the AST of every localm .py for stderr redirects"),
-    "tests/test_terminal_control_safety.py": ((_LOCALM,), "walks the AST of every localm .py for rich Console imports"),
-    "tests/test_model_name_gate.py": ((_LOCALM,), "reads every localm .py for trust_remote_code=True"),
-    "tests/test_no_unguarded_json_parse.py": ((_LOCALM,), "walks the AST of every localm .py for unguarded JSON parses"),
-    "tests/test_owner_predicate_single_owner.py": ((_LOCALM,), "walks the AST of every localm .py for inline owner checks"),
-    "tests/test_no_bare_secret_chmod.py": ((_LOCALM,), "walks the AST of every localm .py for chmod 0o600 calls"),
+    "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_no_gitignored_path_leak.py": (_PY, "scans the string literals of every tracked .py"),
+    "tests/test_no_stray_encoding_cookie.py": (_PY, "reads the first lines of every .py"),
+    "tests/test_check_hygiene.py": (("*",), "runs the hygiene checks over every tracked file"),
+    "tests/test_check_hygiene_layering.py": (_LOCALM_PY, "checks import direction over every localm module"),
+    "tests/test_check_hygiene_response_keys.py": (_LOCALM_PY, "checks the JSON keys of every tracked route"),
+    "tests/test_check_hygiene_import_baseline.py": (_LOCALM_PY, "counts the deferred imports of every localm module"),
+    "tests/test_check_hygiene_import_cycles.py": (_LOCALM_PY, "checks every localm module for import cycles"),
+    "tests/test_check_hygiene_sw_cache.py": ((_GUI_STATIC + "*",), "checks the service worker against the static tree"),
+    "tests/test_bump_uv_pin.py": (("*",), "lists every tracked file outside tests/ and scripts/ that pins uv"),
+    "tests/test_bump_koboldcpp_pin.py": (("*",), "greps every tracked file for the koboldcpp pin"),
+    "tests/test_bump_sdcpp_pin.py": (("*",), "lists every tracked file for the sd.cpp pin"),
+    "tests/test_bump_tts_bundle.py": (("localm/plugins/builtin/tts/static/vendor/*",),
+                                      "lists the vendored TTS runtime"),
+    "tests/test_bump_vendored_js.py": ((_GUI_STATIC + "vendor/*",), "copies the vendored GUI libraries"),
+    "tests/test_merge_policy.py": (("*",), "checks every merge-policy pattern against the tracked files"),
+    "tests/test_native_stderr_redirect_scope.py": (_LOCALM_PY, "walks the AST of every localm .py for stderr redirects"),
+    "tests/test_terminal_control_safety.py": (_LOCALM_PY, "walks the AST of every localm .py for rich Console imports"),
+    "tests/test_model_name_gate.py": (_LOCALM_PY, "reads every localm .py for trust_remote_code=True"),
+    "tests/test_no_unguarded_json_parse.py": (_LOCALM_PY, "walks the AST of every localm .py for unguarded JSON parses"),
+    "tests/test_owner_predicate_single_owner.py": (_LOCALM_PY, "walks the AST of every localm .py for inline owner checks"),
+    "tests/test_no_bare_secret_chmod.py": (_LOCALM_PY, "walks the AST of every localm .py for chmod 0o600 calls"),
     "tests/test_no_untracked_authorization_header_writes.py": (
-        (_LOCALM,), "walks the AST of every localm .py for Authorization header writes"),
-    "tests/test_hwdetect_recommended_is_legacy.py": ((_LOCALM,), "walks the AST of every localm .py for .recommended reads"),
-    "tests/test_install_manifest.py": ((_LOCALM,), "walks the AST of every localm .py for data-dir children"),
-    "tests/test_gui_js_route_contract.py": ((_LOCALM,), "reads every localm .py for declared routes"),
-    "tests/test_ctrlc_clean_stop.py": ((_LOCALM,), "reads every localm .py for parent-death watchdog installs"),
-    "tests/test_residency.py": ((_LOCALM,), "greps every localm .py for active_requests mutations"),
-    "tests/test_discover.py": ((_LOCALM,), "walks the AST of every localm .py for calls to the discovery helpers"),
-    "tests/test_native_fault_debug_log_hint.py": (("localm/inference/",), "scans every localm/inference .py"),
-    "tests/test_debug_scrub.py": ((_TESTS,), "walks the AST of every test file for delenv of LOCALM_DEBUG"),
-    "tests/test_real_gguf_gate.py": ((_TESTS,), "scans every test file for broad skips around model loads"),
-    "tests/test_tk_root.py": ((_TESTS,), "scans every test file that builds Tk windows"),
-    "tests/test_bugreport_live_lookups.py": ((_TESTS,), "scans every test file that mentions bugreport"),
-    "tests/test_ci_runner_files.py": ((_SCRIPTS,), "reads every scripts/*.py for runner-file variable reads"),
-    "tests/test_pin_weekly.py": ((_SCRIPTS,), "reads the pin, bump and confirm scripts for gitignored paths"),
+        _LOCALM_PY, "walks the AST of every localm .py for Authorization header writes"),
+    "tests/test_hwdetect_recommended_is_legacy.py": (_LOCALM_PY, "walks the AST of every localm .py for .recommended reads"),
+    "tests/test_install_manifest.py": (_LOCALM_PY, "walks the AST of every localm .py for data-dir children"),
+    "tests/test_gui_js_route_contract.py": (_LOCALM_PY + _GUI_JS,
+                                            "reads every localm .py for declared routes and every GUI script"),
+    "tests/test_ctrlc_clean_stop.py": (_LOCALM_PY, "reads every localm .py for parent-death watchdog installs"),
+    "tests/test_residency.py": (_LOCALM_PY, "greps every localm .py for active_requests mutations"),
+    "tests/test_discover.py": (_LOCALM_PY, "walks the AST of every localm .py for calls to the discovery helpers"),
+    "tests/test_outbound_call_sites_contract.py": (_LOCALM_PY, "classifies every outbound call site under localm/"),
+    "tests/test_one_server_switch_path.py": (_LOCALM_PY, "checks every localm module for a second server switch path"),
+    "tests/test_session_mode_sentinel.py": (_LOCALM_PY, "scans every localm .py for session-mode writes"),
+    "tests/test_settings_place_names.py": (_LOCALM_PY + ("docs/*", "README.md"),
+                                           "checks the Settings places every localm .py and docs page names"),
+    "tests/test_fault_trace_threads.py": (_LOCALM_PY, "walks the AST of every localm .py for faulthandler calls"),
+    "tests/test_media_backend_capabilities.py": (_LOCALM_PY, "checks which localm modules reach the media generators"),
+    "tests/test_no_bare_uv_command.py": (_LOCALM_PY, "scans every localm .py for a bare uv command"),
+    "tests/test_media_delete_outputs_setting.py": (_LOCALM_PY,
+                                                   "checks every media call site under localm/ for delete_outputs"),
+    "tests/test_sysprog.py": (_LOCALM_PY, "walks the AST of every localm .py for system program calls"),
+    "tests/test_speech_engine.py": (_LOCALM_PY, "walks the AST of every localm .py for speech engine calls"),
+    "tests/test_remote_backend_gate.py": (_LOCALM_PY, "scans every localm .py for remote backend calls"),
+    "tests/test_event_loop_offload.py": (_LOCALM_PY, "runs the event-loop offload sweep over localm/"),
+    "tests/test_mtp_arch_allowlist.py": (_LOCALM_PY, "runs the MTP architecture gate over localm/"),
+    "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
+    "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
+    "tests/test_setup_llama_live_lookups.py": (("localm/setup_llama/*.py",), "reads every module of setup_llama"),
+    "tests/test_docs_reaudit_enumerations.py": (
+        ("docs/*", "localm/inference/routes/*.py", "localm/inference/backends/llamacpp/*.py"),
+        "compares the documented route and backend modules with the folders"),
+    "tests/test_pretokenizer_guard.py": (("localm/inference/routes/*.py",), "reads every inference route module"),
+    "tests/test_models_page.py": (_BUILTIN_PLUGINS + ("localm/media/*", "localm/inference/backends/*.py"),
+                                  "lists every plugin, media runtime and backend"),
+    "tests/test_builtin_manifests.py": (_BUILTIN_PLUGINS, "reads every built-in plugin manifest"),
+    "tests/test_builtin_plugins_contract.py": (_BUILTIN_PLUGINS, "reads every built-in plugin manifest"),
+    "tests/test_scopes.py": (_BUILTIN_PLUGINS, "reads every built-in plugin manifest"),
+    "tests/test_gui.py": (_GUI_JS, "serves one discovered GUI script"),
+    "tests/test_gui_esm_integrity.py": (_GUI_JS, "parses every GUI app and page module"),
+    "tests/test_gui_no_import_reassignment.py": (_GUI_JS, "parses every GUI app and page module"),
+    "tests/test_gui_render_loop.py": (_GUI_JS, "reads every GUI script"),
+    "tests/test_gui_slash_menu.py": (_GUI_JS, "reads every GUI script"),
+    "tests/test_static_cache.py": (_GUI_JS, "checks the cache headers of every GUI script"),
+    "tests/test_i18n_language_setting.py": ((_GUI_STATIC + "i18n/*",), "lists the GUI translation catalogs"),
+    "tests/test_protocol.py": ((_GUI_STATIC + "i18n/*",), "reads every GUI translation catalog"),
+    "tests/test_third_party_notices.py": (
+        (_GUI_STATIC + "vendor/*", "localm/plugins/builtin/tts/static/vendor/*"),
+        "lists the licence files of the vendored libraries"),
+    "tests/test_bugreport.py": (("docs/*",), "reads every docs page"),
+    "tests/test_docs_cli_examples_use_real_flags.py": (("docs/*", "README.md"),
+                                                       "checks every command line in the docs"),
+    "tests/test_export_openapi.py": (("docs/*",), "lists every docs page against the site navigation"),
+    "tests/test_ci_schedule_split.py": (_WORKFLOWS, "reads every workflow"),
+    "tests/test_supply_chain_workflows.py": (_WORKFLOWS, "checks the action pins of every workflow"),
+    "tests/test_workflow_pip_installs_are_hash_pinned.py": (
+        _WORKFLOWS + (".github/requirements/*",), "checks every workflow and requirement set"),
+    "tests/test_installer_batch.py": (("*.bat",), "checks every batch file at the repository root"),
+    "tests/test_rag_store_contract.py": (("tests/fixtures/rag_store_v1/*",), "lists the stored collections"),
+    "tests/test_rag_rerank_gate_real.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
+    "tests/test_rag_rerank_replay.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
+    "tests/test_rag_rerank_stage.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
+    "tests/test_affected_tests.py": (_PY, "selects over the real import graph of the checkout"),
+    "tests/test_tree_scanners_registered.py": (_PY, "finds the folder walks of every test and script"),
+    "tests/test_native_fault_debug_log_hint.py": (("localm/inference/*.py",), "scans every localm/inference .py"),
+    "tests/test_debug_scrub.py": (_TESTS_PY, "walks the AST of every test file for delenv of LOCALM_DEBUG"),
+    "tests/test_real_gguf_gate.py": (_TESTS_PY, "scans every test file for broad skips around model loads"),
+    "tests/test_tk_root.py": (_TESTS_PY, "scans every test file that builds Tk windows"),
+    "tests/test_bugreport_live_lookups.py": (_TESTS_PY + ("localm/bugreport/*.py",),
+                                             "scans every test file that mentions bugreport"),
+    "tests/test_no_console_window.py": (_TESTS_PY, "scans every test file for window-opening calls"),
+    "tests/test_ci_runner_files.py": (("scripts/*.py",), "reads every scripts/*.py for runner-file variable reads"),
+    "tests/test_pin_weekly.py": (("scripts/*.py", "tests/*.py"),
+                                 "reads the pin, bump and confirm scripts for gitignored paths"),
+}
+# Test files that walk a folder of the checkout, or load a module that does,
+# while their result does not depend on what that folder holds, with how.
+_NOT_TREE_SCANNERS: dict[str, str] = {
+    "tests/test_check_hygiene_non_ascii_paths.py": "runs the hygiene file list on a repository in tmp_path",
+    "tests/test_check_hygiene_no_child_console_print.py": "reads the fixed module list check_hygiene names",
+    "tests/test_conftest_isolation_guards.py": "runs one named test file",
+    "tests/test_confirm_sdcpp_runtime.py": "reads the sd.cpp pin file only",
+    "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",
+    "tests/test_dependabot_groups.py": "uses the selector's requirement parsing only",
+    "tests/test_run_affected_tests.py": "runs the selector with a stand-in or for one named file",
+    "tests/test_rollback_standalone.py": "lists the update backup folder of an install in tmp_path",
+    "tests/test_update_watchdog.py": "lists the update backup folder of an install in tmp_path",
+    "tests/test_update_all_or_nothing.py": "lists the update backup folder of an install in tmp_path",
+    "tests/test_bugreport_email_redaction.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_bugreport_host_redaction.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_bugreport_scrub_parity.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_bugreport_stdin_interactive.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_report_issue_standalone.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_report_issue_url.py": "the report script lists home/logs, which is not tracked",
+    "tests/test_installer_gui_journal.py": "reads the install journal of a root in tmp_path",
+    "tests/test_docker_image_files.py": "puts the checkout path into an environment mapping",
+    "tests/test_update_components.py": "reads named pin and archive files",
+    "tests/test_updater.py": "asks whether the checkout is a site-packages install",
+    "tests/test_uv_tool.py": "reads the uv pin file",
+    "tests/test_shell_entrypoints_executable.py": "reads the index mode of a fixed list of files",
 }
 _ROOT_DECLARATIONS = ("dependencies", "optional-dependencies", "dev-dependencies")
 _ROOT_METADATA_DECLARATIONS = ("requires-dist", "requires-dev", "provides-extras")
@@ -716,10 +817,8 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
                     add(t, why)
 
     for rel in changed:
-        if not rel.endswith(".py"):
-            continue
-        for t, (prefixes, why) in _TREE_SCANNERS.items():
-            under = [p for p in prefixes if rel.startswith(p)]
+        for t, (patterns, why) in _TREE_SCANNERS.items():
+            under = [p for p in patterns if fnmatch.fnmatchcase(rel, p)]
             if under and t in graph.test_imports:
                 add(t, f"{why} under {under[0]}: {rel} changed")
 

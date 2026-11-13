@@ -2089,3 +2089,86 @@ def get_free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+# --------------------------------------------------------------------------- #
+#  The Network access switch (net_mode). netpolicy builds the full policy on   #
+#  it; units below netpolicy in the layering (bugreport) read it here.         #
+# --------------------------------------------------------------------------- #
+
+NET_MODES = ("off", "ask", "allow")
+NET_MODE_ENV_VAR = "LOCALM_NET_MODE"
+
+#: How to turn network access back on, worded for every surface (GUI, CLI,
+#: model): the Settings field and the command.
+NET_OFF_REMEDY = ("Turn it on in Settings > Server & network > Network access, "
+                  "or run: localm config net_mode ask")
+
+
+def net_off_lead(what: str = "") -> str:
+    """The first part of a net_mode=off refusal, without a remedy: that network
+    access is off and, when given, *what* was refused."""
+    return (f"Network access is off (net_mode=off), so {what}" if what
+            else "Network access is off (net_mode=off)")
+
+
+def net_off_refusal(what: str = "") -> str:
+    """The text of a net_mode=off refusal: *what* was refused (optional) and
+    :data:`NET_OFF_REMEDY`."""
+    return f"{net_off_lead(what)}. {NET_OFF_REMEDY}."
+
+
+#: How to let a download through while network access is off.
+NET_OFF_DOWNLOAD_REMEDY = (
+    "Turn it on, or turn on \"Allow model downloads while network access is off\", "
+    "in Settings > Server & network; or run: localm config net_mode ask (or: "
+    "localm config net_allow_model_downloads true)")
+
+
+def net_off_download_refusal(what: str) -> str:
+    """The text of a net_mode=off refusal of a download: *what* was refused and
+    :data:`NET_OFF_DOWNLOAD_REMEDY`."""
+    return f"{net_off_lead(what)}. {NET_OFF_DOWNLOAD_REMEDY}."
+
+
+#: How to let the update channel through while network access is off.
+NET_OFF_UPDATE_REMEDY = (
+    "Turn it on in Settings > Server & network > Network access, or turn on "
+    "\"Check for updates even when network access is off\" in Settings > System > "
+    "Updates; or run: localm config net_mode ask (or: localm config "
+    "update_ignore_net_policy true)")
+
+
+def net_off_update_refusal(what: str) -> str:
+    """The text of a net_mode=off refusal on the update channel: *what* was
+    refused and :data:`NET_OFF_UPDATE_REMEDY`."""
+    return f"{net_off_lead(what)}. {NET_OFF_UPDATE_REMEDY}."
+
+
+def network_mode() -> str:
+    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
+
+    A config-read failure resolves to "off", not "ask", and logs a warning.
+    That covers both a load that raises and a config.json (with its .bak) that
+    is present but cannot be read, which load_config_checked reports as
+    read_ok False. An unset or unrecognised config value resolves to "ask"."""
+    import logging
+    logger = logging.getLogger("localm")
+    env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
+    if env in NET_MODES:
+        return env
+    try:
+        cfg, read_ok = load_config_checked()
+    except Exception as exc:
+        logger.warning("netpolicy: could not load config (%s); resolving "
+                       "net_mode to 'off' (fail-safe) so an unreadable config "
+                       "cannot silently re-enable network access", exc)
+        return "off"
+    if not read_ok:
+        logger.warning("netpolicy: config.json is present but unreadable; "
+                       "resolving net_mode to 'off' (fail-safe) so an "
+                       "unreadable config cannot silently re-enable network "
+                       "access")
+        return "off"
+    mode = str(cfg.get("net_mode", "ask")).strip().lower()
+    return mode if mode in NET_MODES else "ask"
