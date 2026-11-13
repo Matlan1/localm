@@ -141,6 +141,14 @@ class TestKeyAdvice:
                          trusted_peer=True)
         assert "localm key show --reveal" in be._auth_advice()
 
+    def test_a_custom_url_names_the_flag_the_variable_and_the_localm_command(self):
+        be = HTTPBackend("http://127.0.0.1:9000/v1", "m", trusted_peer=True)
+        advice = be._auth_advice()
+        assert "--api-key <key>" in advice
+        assert "LOCALM_API_KEY" in advice
+        assert "localm key show --reveal" in advice
+        assert "OPENAI_API_KEY" not in advice and "ANTHROPIC_API_KEY" not in advice
+
 
 class TestAnotherModelAnswered:
     def _headers(self, **payload):

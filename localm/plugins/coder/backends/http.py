@@ -546,7 +546,9 @@ class HTTPBackend(BaseLLMBackend):
                     "OpenAI API key.")
         if self._is_local_server:
             return _LOCALM_KEY_ADVICE
-        return "Pass the key this server expects with `--api-key <key>`."
+        return ("Pass the key this server expects with `--api-key <key>` or set "
+                "the LOCALM_API_KEY environment variable. For a localm server, "
+                "`localm key show --reveal` shows its key.")
 
     def set_model(self, model: str, *, pinned: Optional[bool] = None) -> None:
         """Repoint this backend at a different model NAME, in place. *pinned*,
