@@ -247,9 +247,11 @@ def test_the_data_dir_comes_from_localm_home_cfg(tmp_path, monkeypatch):
     data.mkdir()
     (data / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
     (tmp_path / "localm-home.cfg").write_text(f"\n{data}\n", encoding="utf-8")
+    (tmp_path / "home").mkdir()
+    assert ri.network_mode()[0] is None
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     assert ri.network_mode() == ("off", "")
     (tmp_path / "localm-home.cfg").unlink()
-    (tmp_path / "home").mkdir()
     (tmp_path / "home" / "config.json").write_text('{"net_mode": "allow"}',
                                                    encoding="utf-8")
     assert ri.network_mode() == ("allow", "")
