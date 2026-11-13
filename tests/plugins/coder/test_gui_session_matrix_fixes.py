@@ -262,5 +262,8 @@ class TestRoutes:
             r = client.get("/api/coder/episodes", headers=shared,
                            params={"cwd": str(proj)})
             assert r.status_code == 200 and r.json()["authorized"] is False
+            r = client.get("/api/coder/episodes/archive", headers=shared,
+                           params={"cwd": str(proj)})
+            assert r.status_code == 200 and r.json()["authorized"] is False
             r = client.get("/api/coder/hooks", headers=shared, params={"cwd": str(proj)})
             assert r.status_code == 200 and r.json()["authorized"] is False

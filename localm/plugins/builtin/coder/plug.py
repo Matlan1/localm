@@ -1848,9 +1848,12 @@ async def coder_episodes_archive(request: Request, cwd: str = ""):
     The CLI refuses that collapse by exiting non-zero; here it is a 503, because
     the condition is transient (another process holding the file) and a retry is
     the right next move.
+
+    A non-owner gets an empty list and ``authorized: false``, as for the
+    stored lessons.
     """
     if not _is_owner(request):
-        return {"archived": [], "cwd": None}
+        return {"archived": [], "cwd": None, "authorized": False}
     root = _episode_root(cwd)
 
     def _read():
