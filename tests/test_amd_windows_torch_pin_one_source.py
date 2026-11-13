@@ -119,7 +119,8 @@ def test_the_gui_setup_variants_hand_the_install_to_the_gui_installer(rel):
     assert re.search(r"installer[\\/]gui\.py", text), rel
 
 
-_OTHER_SOURCES = ("--extra-index-url", "--find-links", "-f", "--index-strategy")
+_OTHER_SOURCES = ("--extra-index-url", "--find-links", "-f", "--index-strategy", "--index",
+                  "--default-index")
 
 
 def _amd_install_args():
@@ -174,4 +175,6 @@ def test_the_manual_amd_commands_in_the_docs_use_the_family_index_alone():
         index = hwdetect.amd_rocm_win_index(family)
         assert f"--index-url {index}" in doc
         assert f"--extra-index-url {index}" not in doc
+        for req in hwdetect.amd_rocm_win_sdk_packages(family):
+            assert req in doc, req
     assert "unsafe-best-match" not in doc

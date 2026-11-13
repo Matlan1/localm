@@ -208,7 +208,7 @@ def test_amd_rocm_win_index_resolves_live(tmp_path, family):
     assertion below proves by making the same packages fail to resolve for a
     platform AMD does not publish them for."""
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
-    source = ["--index-url", hwdetect.amd_rocm_win_index(family)]
+    source = ["--index-url", hwdetect.amd_rocm_win_index(family), "--no-config"]
     sdk = list(hwdetect.amd_rocm_win_sdk_packages(family))
 
     venv = tmp_path / "disposable-venv"
