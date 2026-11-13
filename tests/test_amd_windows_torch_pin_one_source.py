@@ -30,8 +30,7 @@ _ROCM_BUILD = re.compile(
 
 def _pins() -> set:
     pins = set()
-    for req in (*hwdetect.amd_rocm_win_torch_packages(),
-                *hwdetect.amd_gfx103x_win_torch_packages()):
+    for req in hwdetect.amd_rocm_win_torch_packages():
         name, _, version = req.partition("==")
         pins.add((name, version))
     return pins
@@ -57,38 +56,56 @@ def test_every_amd_windows_torch_pin_matches_hwdetect():
                 if (name, f"{base}+{rocm}") not in pins:
                     wrong.append(f"{path.relative_to(ROOT).as_posix()}:{lineno}: "
                                  f"{name} {base}+{rocm}")
-    assert found >= 6, "the scan found fewer ROCm builds than hwdetect itself names"
+    assert found >= 3, "the scan found fewer ROCm builds than hwdetect itself names"
     assert not wrong, ("these name an AMD torch build hwdetect.py does not pin: "
                        + "; ".join(wrong))
 
 
-def test_the_gpu_extra_and_its_wheel_sources_pin_the_hwdetect_gfx103x_wheels():
+def test_the_gpu_extra_and_its_wheel_sources_pin_the_hwdetect_wheels():
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extra = {r.split(";")[0].strip() for r in data["project"]["optional-dependencies"]["gpu"]}
     sources = data["tool"]["uv"]["sources"]
-    for req in hwdetect.amd_gfx103x_win_torch_packages():
+    for req in hwdetect.amd_rocm_win_torch_packages():
         name, _, version = req.partition("==")
         assert req in extra, f"the gpu extra does not pin {req}"
         urls = [s["url"] for s in sources[name] if "url" in s]
-        assert [u for u in urls if u.startswith(hwdetect.amd_gfx103x_win_index())
+        assert [u for u in urls if u.startswith(hwdetect.amd_rocm_win_index("gfx103x"))
                 and f"/{name}-{version.replace('+', '%2B')}-" in u], (name, urls)
 
 
-def test_the_managed_comfyui_installs_the_hwdetect_gfx103x_wheels(monkeypatch):
+@pytest.mark.parametrize("card, family", [("AMD Radeon RX 6800", "gfx103x"),
+                                          ("AMD Radeon RX 7900 XTX", "gfx110x"),
+                                          ("AMD Radeon RX 9070 XT", "gfx120x")])
+def test_the_managed_comfyui_installs_the_hwdetect_wheels_of_each_family(monkeypatch, card,
+                                                                        family):
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
-    det = SimpleNamespace(vendors=["amd"], gpu_names=["AMD Radeon RX 6800"],
-                          gpu_state="found", probe_ok=True)
+    det = SimpleNamespace(vendors=["amd"], gpu_names=[card], gpu_state="found", probe_ok=True)
     spec = fresh.comfy_torch_spec(det)
     assert spec.variant == "rocm"
-    assert spec.packages[:3] == hwdetect.amd_gfx103x_win_torch_packages()
-    assert spec.extra_index_url == hwdetect.amd_gfx103x_win_index()
+    assert spec.packages == (hwdetect.amd_rocm_win_torch_packages()
+                             + hwdetect.amd_rocm_win_sdk_packages(family))
+    assert spec.extra_index_url == hwdetect.amd_rocm_win_index(family)
 
 
 def test_the_rx_7000_9000_instructions_in_the_docs_name_the_hwdetect_wheels():
     doc = (ROOT / "docs" / "gpu-setup.md").read_text(encoding="utf-8")
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
-    assert torch in doc and torchvision in doc and hwdetect.amd_rocm_win_find_links() in doc
+    assert torch in doc and torchvision in doc
+    for family in ("gfx110x", "gfx120x"):
+        assert hwdetect.amd_rocm_win_index(family) in doc
+        assert f"rocm-sdk-libraries-{family}-all" in doc
+
+
+def test_the_wheels_bump_checks_every_family_hwdetect_installs_from():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "bump_amd_wheels_pin_for_family_test", ROOT / "scripts" / "bump_amd_wheels_pin.py")
+    bump = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bump)
+    families = {bump.INDEX_BASE.rsplit("/", 1)[1], *bump.OTHER_FAMILIES}
+    assert {u.rstrip("/").rsplit("/", 1)[1] for u in hwdetect._AMD_ROCM_WIN_INDEX.values()} \
+        == families
 
 
 @pytest.mark.parametrize("rel", ["setup.bat", "setup.sh", "installer/gui.py"])

@@ -103,11 +103,10 @@ version = "0.25.0+rocm7.13.0"
 source = {{ url = "{BASE}/torchvision-0.25.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }}
 '''
 
-HWDETECT = """_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"
-_AMD_GFX103X_WIN_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_WIN_TORCH = "torch==2.10.0+rocm7.13.0"
-_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.25.0+rocm7.13.0"
-_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.10.0+rocm7.13.0"
+HWDETECT = """_AMD_ROCM_WIN_INDEX = {"gfx103x": "https://repo.amd.com/rocm/whl/gfx103X-all/"}
+_AMD_ROCM_WIN_TORCH = "torch==2.10.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.25.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.10.0+rocm7.13.0"
 """
 
 NEW = {"torch": "2.11.0+rocm7.13.0", "torchvision": "0.26.0+rocm7.13.0",
@@ -153,7 +152,8 @@ def index_page(names):
 class FakeIndex:
     """AMD's index pages: every wheel the NEW request names, plus older torch builds."""
 
-    def __init__(self, drop=(), extra=()):
+    def __init__(self, drop=(), extra=(), other_drop=()):
+        self.other_drop = set(other_drop)
         from_new = {
             "torch": ["torch-2.10.0+rocm7.13.0-cp312-cp312-win_amd64.whl",
                       "torch-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl"],
@@ -174,9 +174,16 @@ class FakeIndex:
 
     def __call__(self, url):
         self.requested.append(url)
-        m = re.fullmatch(re.escape(BASE) + r"/([^/]+)/", url)
+        m = re.fullmatch(r"https://repo\.amd\.com/rocm/whl/(gfx1\d\dX-all)/([^/]+)/", url)
         assert m, url
-        return index_page(self.pages[m.group(1)])
+        family, package = m.group(1), m.group(2)
+        if family == "gfx103X-all":
+            return index_page(self.pages[package])
+        if package == f"rocm-sdk-libraries-{family.lower()}":
+            libs = self.pages["rocm-sdk-libraries-gfx103x-all"]
+            return index_page([n.replace("gfx103x", family.lower()[:7]) for n in libs
+                               if n not in self.other_drop])
+        return index_page([n for n in self.pages[package] if n not in self.other_drop])
 
 
 class FakeUv:
@@ -308,8 +315,8 @@ def test_a_tree_that_is_not_in_the_edited_shape_is_refused(bump, mutate, fragmen
 @pytest.mark.parametrize("hwdetect, fragment", [
     (HWDETECT.replace('"torch==2.10.0+rocm7.13.0"', '"torch==2.9.0+rocm7.13.0"'),
      "localm/hwdetect.py names 2.9.0"),
-    (HWDETECT.replace('_AMD_GFX103X_WIN_TORCHVISION = ', '_AMD_GFX103X_VISION = '),
-     "_AMD_GFX103X_WIN_TORCHVISION: expected exactly one match, found 0"),
+    (HWDETECT.replace('_AMD_ROCM_WIN_TORCHVISION = ', '_AMD_ROCM_VISION = '),
+     "_AMD_ROCM_WIN_TORCHVISION: expected exactly one match, found 0"),
 ])
 def test_a_hwdetect_pin_that_disagrees_with_pyproject_is_refused(bump, hwdetect, fragment):
     with pytest.raises(bump.Refused, match=fragment):
@@ -324,12 +331,12 @@ def test_a_torchaudio_pin_off_torchs_version_is_refused(bump):
         bump.read_current(py, LOCK, hw)
 
 
-def test_the_hwdetect_rewrite_moves_the_three_gfx103x_constants_and_nothing_else(bump):
+def test_the_hwdetect_rewrite_moves_the_three_constants_and_nothing_else(bump):
     new = bump.rewrite_hwdetect(HWDETECT, NEW)
-    assert '_AMD_GFX103X_WIN_TORCH = "torch==2.11.0+rocm7.13.0"' in new
-    assert '_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"' in new
-    assert '_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"' in new
-    assert '_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"' in new
+    assert '_AMD_ROCM_WIN_TORCH = "torch==2.11.0+rocm7.13.0"' in new
+    assert '_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"' in new
+    assert '_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"' in new
+    assert new.split("\n")[0] == HWDETECT.split("\n")[0]
     assert len(new.split("\n")) == len(HWDETECT.split("\n"))
 
 
@@ -374,6 +381,15 @@ def test_a_wheel_the_index_does_not_list_is_refused(bump, drop, fragment):
     with pytest.raises(bump.Refused, match=fragment):
         bump.verify_on_index(NEW, {"torch": NEW["torch"]}, FakeIndex(drop=(drop,)))
 
+
+@pytest.mark.parametrize("drop, fragment", [
+    ("torchaudio-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl", "gfx110X-all index lists no torchaudio"),
+    ("rocm_sdk_libraries_gfx103x_all-7.13.0-py3-none-win_amd64.whl",
+     "gfx110X-all index lists no rocm_sdk_libraries_gfx110x_all-7.13.0"),
+])
+def test_a_wheel_another_family_index_does_not_list_is_refused(bump, drop, fragment):
+    with pytest.raises(bump.Refused, match=fragment):
+        bump.verify_on_index(NEW, {"torch": NEW["torch"]}, FakeIndex(other_drop=(drop,)))
 
 def test_a_cp313_only_torch_is_not_a_cp312_wheel(bump):
     index = FakeIndex(drop=("torch-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl",),

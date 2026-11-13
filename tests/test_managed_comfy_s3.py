@@ -127,7 +127,7 @@ def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6900 XT"))
     from localm import hwdetect
-    assert hwdetect.amd_gfx103x_win_torch_packages()[2] in spec.packages
+    assert hwdetect.amd_rocm_win_torch_packages()[2] in spec.packages
 
 
 def test_comfy_amd_torch_pins_match_pyproject_gpu_extra():
@@ -147,7 +147,7 @@ def test_comfy_amd_torch_pins_match_pyproject_gpu_extra():
     assert set(wanted) == {"torch", "torchvision", "torchaudio"}
     assert all("+rocm" in req for req in wanted.values())
     from localm import hwdetect
-    assert sorted(hwdetect.amd_gfx103x_win_torch_packages()) == sorted(wanted.values())
+    assert sorted(hwdetect.amd_rocm_win_torch_packages()) == sorted(wanted.values())
 
 
 def test_torch_spec_nvidia_is_cuda(monkeypatch):
@@ -225,9 +225,7 @@ def test_torch_spec_amd_linux_is_upstream_rocm(monkeypatch):
 
 
 def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
-    """RX 7000/9000 get AMD's official Windows ROCm preview wheels: pinned exact
-    versions via find_links (a flat wheel listing, not a pip package index),
-    never index_url/extra_index_url - those resolve no candidates there."""
+    """RX 7000/9000 get AMD's Windows ROCm wheels from their family's index."""
     from localm.media import managed_comfy_fresh as fresh
     from localm import hwdetect
     monkeypatch.setattr(sys, "platform", "win32")
@@ -237,9 +235,10 @@ def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
     assert torch in spec.packages
     assert torchvision in spec.packages
     assert torchaudio in spec.packages
-    assert spec.find_links == hwdetect.amd_rocm_win_find_links()
+    assert "rocm-sdk-libraries-gfx110x-all==7.13.0" in spec.packages
+    assert spec.extra_index_url == hwdetect.amd_rocm_win_index("gfx110x")
     assert spec.index_url is None
-    assert spec.extra_index_url is None
+    assert spec.find_links is None
 
 
 def test_torch_spec_unknown_amd_windows_degrades_to_cpu_with_note(monkeypatch):
@@ -265,10 +264,9 @@ def test_torch_install_args_amd_uses_extra_index(monkeypatch):
     assert "https://repo.amd.com/rocm/whl/gfx103X-all/" in args
 
 
-def test_torch_install_args_amd_rocm_win_uses_find_links(monkeypatch):
-    """The pip args builder: AMD's official Windows ROCm preview packages go in
-    with --find-links (a flat wheel listing, not a pip index), never
-    --index-url/--extra-index-url, which resolve no candidates there."""
+def test_torch_install_args_amd_rocm_win_uses_its_family_index(monkeypatch):
+    """The pip args builder: RX 7000/9000 packages go in with their family's AMD
+    index as --extra-index-url, never --find-links."""
     from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
@@ -278,10 +276,10 @@ def test_torch_install_args_amd_rocm_win_uses_find_links(monkeypatch):
     assert torch in args
     assert torchvision in args
     assert torchaudio in args
-    assert "--find-links" in args
-    assert hwdetect.amd_rocm_win_find_links() in args
+    assert "--extra-index-url" in args
+    assert hwdetect.amd_rocm_win_index("gfx110x") in args
+    assert "--find-links" not in args
     assert "--index-url" not in args
-    assert "--extra-index-url" not in args
 
 
 def test_torch_install_args_cuda_uses_index_url(monkeypatch):

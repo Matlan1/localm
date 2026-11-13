@@ -457,23 +457,17 @@ _TORCH_BACKEND = {
     "cpu": "cpu",
 }
 
-# AMD's official Windows ROCm preview for RX 7000/9000 (gfx110X/gfx120X) is a
-# flat wheel listing with no per-package "simple" directory layout, reachable
-# only via --find-links with an exact pinned version - never --index-url,
-# --extra-index-url or --torch-backend, which resolve no candidates there.
-# See test_amd_rocm_win_find_links_resolves_live.
-_AMD_ROCM_WIN_FIND_LINKS = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/"
-_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"
-_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.24.1+rocm7.2.1"
-_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.9.1+rocm7.2.1"
-
-# AMD's Windows ROCm wheels for RX 6000 (gfx103X), a PEP 503 index. The `gpu`
-# extra in pyproject.toml pins the same three versions; scripts/bump_amd_wheels_pin.py
-# moves both. See test_every_amd_windows_torch_pin_matches_hwdetect.
-_AMD_GFX103X_WIN_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_WIN_TORCH = "torch==2.11.0+rocm7.13.0"
-_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"
-_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"
+# AMD's Windows ROCm wheels: one PEP 503 index per GPU family, each publishing the
+# same torch release with its family's rocm-sdk-libraries package. The `gpu` extra
+# in pyproject.toml pins the same three versions for gfx103X;
+# scripts/bump_amd_wheels_pin.py moves both. See
+# test_every_amd_windows_torch_pin_matches_hwdetect.
+_AMD_ROCM_WIN_INDEX = {"gfx103x": "https://repo.amd.com/rocm/whl/gfx103X-all/",
+                       "gfx110x": "https://repo.amd.com/rocm/whl/gfx110X-all/",
+                       "gfx120x": "https://repo.amd.com/rocm/whl/gfx120X-all/"}
+_AMD_ROCM_WIN_TORCH = "torch==2.11.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"
+_AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"
 
 # Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
 # capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
@@ -521,7 +515,7 @@ def pytorch_index_url(variant: str) -> str | None:
     "rocm-linux" | "cpu"), or None if unknown. Public accessor, so other
     callers (the managed-ComfyUI fresh install picks the ComfyUI torch here)
     share this ONE index table. AMD-on-Windows is NOT among these variants -
-    see amd_rocm_win_torch_packages/amd_rocm_win_find_links.
+    see amd_rocm_win_torch_packages/amd_rocm_win_index.
 
     For "cuda" specifically, this ALSO detects whether any installed NVIDIA GPU
     needs the Blackwell-and-newer wheel line and returns that instead of the
@@ -534,30 +528,25 @@ def pytorch_index_url(variant: str) -> str | None:
 
 def amd_rocm_win_torch_packages() -> tuple[str, str, str]:
     """(torch, torchvision, torchaudio) pinned requirement strings for AMD's
-    official Windows ROCm preview (gfx110X/gfx120X, RX 7000/9000) - the exact
-    build published at amd_rocm_win_find_links(), so this project and a fresh
-    ComfyUI venv both pin the same wheels rather than drifting apart."""
+    Windows ROCm wheels, the same for every family amd_rocm_win_index() names."""
     return (_AMD_ROCM_WIN_TORCH, _AMD_ROCM_WIN_TORCHVISION, _AMD_ROCM_WIN_TORCHAUDIO)
 
 
-def amd_gfx103x_win_torch_packages() -> tuple[str, str, str]:
-    """(torch, torchvision, torchaudio) pinned requirement strings for AMD's
-    Windows ROCm wheels for RX 6000 (gfx103X), published at
-    amd_gfx103x_win_index()."""
-    return (_AMD_GFX103X_WIN_TORCH, _AMD_GFX103X_WIN_TORCHVISION, _AMD_GFX103X_WIN_TORCHAUDIO)
+def amd_rocm_win_index(family: str) -> str:
+    """The PEP 503 index URL of AMD's Windows ROCm wheels for *family*
+    (``"gfx103x"``, ``"gfx110x"`` or ``"gfx120x"``, as amd_gfx_family() names it).
+    Raises KeyError for any other family."""
+    return _AMD_ROCM_WIN_INDEX[family]
 
 
-def amd_gfx103x_win_index() -> str:
-    """The PEP 503 index URL of AMD's Windows ROCm wheels for RX 6000 (gfx103X)."""
-    return _AMD_GFX103X_WIN_INDEX
-
-
-def amd_rocm_win_find_links() -> str:
-    """The --find-links URL for AMD's official Windows ROCm preview wheels
-    (gfx110X/gfx120X). Callers MUST pass this via --find-links, never
-    --index-url/--extra-index-url/--torch-backend - see
-    amd_rocm_win_torch_packages and _AMD_ROCM_WIN_FIND_LINKS."""
-    return _AMD_ROCM_WIN_FIND_LINKS
+def amd_rocm_win_sdk_packages(family: str) -> tuple[str, str, str]:
+    """(rocm, rocm-sdk-core, rocm-sdk-libraries-<family>-all) pinned at the ROCm
+    release of amd_rocm_win_torch_packages(). Raises KeyError for a family
+    amd_rocm_win_index() does not name."""
+    amd_rocm_win_index(family)
+    release = _AMD_ROCM_WIN_TORCH.rsplit("+rocm", 1)[1]
+    return (f"rocm=={release}", f"rocm-sdk-core=={release}",
+            f"rocm-sdk-libraries-{family}-all=={release}")
 
 
 def torch_pip_args(backend: str, det: Detection | None = None) -> str:
@@ -578,7 +567,7 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
                            build, the ``[gpu]`` extra (no upstream Windows wheel for it)
       * rocm, Windows, gfx110X / gfx120X (RX 7000 / 9000) -> AMD's Windows ROCm
-                           wheels (public preview)
+                           wheels from that family's index (amd_rocm_win_index)
       * rocm, Windows, other / unknown AMD       -> "" (no verified prebuilt; the
                            installer skips and prints how to add torch by hand)
       * none            -> ""
@@ -598,7 +587,9 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
             return "-e .[gpu]"          # bundled gfx1030 self-contained build
         if fam in ("gfx110x", "gfx120x"):
             torch, torchvision, _ = amd_rocm_win_torch_packages()
-            return f"{torch} {torchvision} --find-links {amd_rocm_win_find_links()}"
+            sdk = " ".join(amd_rocm_win_sdk_packages(fam))
+            return (f"{torch} {torchvision} {sdk} --extra-index-url {amd_rocm_win_index(fam)} "
+                    "--index-strategy=unsafe-best-match")
         return ""                        # unknown AMD on Windows: no verified prebuilt
     return ""
 
