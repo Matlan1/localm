@@ -4,11 +4,11 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, copyTextWithFeedback, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
-import { loginWithKey, modelCache } from "../app/models-sidebar.js";
+import { keyGateErrorText, loginWithKeyResult, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
@@ -786,6 +786,20 @@ export async function refreshCompanion() {
   list.style.display = view.urls.length ? "block" : "none";
   hintEl.textContent = view.hint;
   hintEl.style.display = view.hint ? "block" : "none";
+  showBindFallbackNote(info.bind_fallback || "");
+}
+
+/** Under the Bind address field: a note with *reason* (the server's
+ *  bind_fallback text) when a configured network bind was not applied at
+ *  startup; no note when *reason* is empty. */
+export function showBindFallbackNote(reason) {
+  const field = document.querySelector('[data-field-key="bind_host"]');
+  const old = document.getElementById("bind-fallback-note");
+  if (!reason || !field) { if (old) old.remove(); return; }
+  const note = old || el("div", "sub key-warn bind-fallback-note");
+  note.id = "bind-fallback-note";
+  note.textContent = t("settings.field.bindHost.fallbackNote", { reason });
+  if (!old) field.appendChild(note);
 }
 
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
@@ -810,8 +824,13 @@ export const KEY_SCOPES = [
   ["web", "settings.keyScopes.web"],
   ["browser", "settings.keyScopes.browser"],
   ["mcp", "settings.keyScopes.mcp"],
+  ["jobs", "settings.keyScopes.jobs"],
+  ["memory", "settings.keyScopes.memory"],
+  ["tts", "settings.keyScopes.tts"],
+  ["exllama", "settings.keyScopes.exllama"],
   ["config:read", "settings.keyScopes.configRead"],
   ["config:write", "settings.keyScopes.configWrite"],
+  ["plugins:read", "settings.keyScopes.pluginsRead"],
   ["plugins:admin", "settings.keyScopes.pluginsAdmin"],
   ["keys:admin", "settings.keyScopes.keysAdmin"],
   ["admin", "settings.keyScopes.admin"],
@@ -869,15 +888,31 @@ export function applyKeyPreset(want) {
 // Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
 // keys:admin device cannot even try to mint a coder:full / admin / keys:admin /
 // plugins:admin / config:write key (the API would 403 anyway; this avoids the
-// confusing failed-submit round-trip).
-export function applyOwnerGate(isOwner) {
+// confusing failed-submit round-trip). A disabled box carries a tooltip, and the
+// #key-owner-note line under the boxes says why they are disabled: in open mode
+// (no key on the server yet) or for a device without the owner key.
+export function applyOwnerGate(isOwner, openMode) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
     const ownerOnly = PRIVILEGED_KEY_SCOPES.has(cb.value);
     cb.disabled = ownerOnly && !isOwner;
     if (cb.disabled) cb.checked = false;
     const lab = cb.closest(".key-scope");
-    if (lab) lab.classList.toggle("key-scope-disabled", cb.disabled);
+    if (lab) {
+      lab.classList.toggle("key-scope-disabled", cb.disabled);
+      if (cb.disabled) lab.title = t("settings.keys.ownerOnlyTitle");
+      else lab.removeAttribute("title");
+    }
   }
+  const box = $("key-scopes");
+  if (!box) return;
+  let note = $("key-owner-note");
+  if (isOwner) { if (note) note.remove(); return; }
+  if (!note) {
+    note = el("div", "sub key-owner-note");
+    note.id = "key-owner-note";
+    ($("key-scope-note") || box).insertAdjacentElement("afterend", note);
+  }
+  note.textContent = t(openMode ? "settings.keys.ownerOnlyOpenNote" : "settings.keys.ownerOnlyNote");
 }
 
 // Owner-only: persist an edited preset list (PATCH /v1/config needs config:write).
@@ -936,19 +971,24 @@ export async function renderKeyQR(box, key) {
   } catch { unavailable(); }
 }
 
+/** The expiry tag of a key whose deadline is *expires* (epoch seconds; falsy =
+ *  never). The time left is rounded to the nearest hour, shown in days (rounded)
+ *  from 24 hours up and in hours (at least 1) below. */
 export function keyExpiryLabel(expires) {
   if (!expires) return t("settings.keyExpiry.never");
   const ms = expires * 1000 - Date.now();
   if (ms <= 0) return t("settings.keyExpiry.expired");
-  const days = Math.floor(ms / 86400000);
-  if (days >= 1) return t("settings.keyExpiry.days", { days });
-  return t("settings.keyExpiry.hours", { hours: Math.max(1, Math.floor(ms / 3600000)) });
+  const hours = Math.round(ms / 3600000);
+  if (hours >= 24) return t("settings.keyExpiry.days", { days: Math.round(hours / 24) });
+  return t("settings.keyExpiry.hours", { hours: Math.max(1, hours) });
 }
 
+/** The last-used tag of a key last used at *ts* (epoch seconds; falsy = never).
+ *  Under a minute ago, or a stamp ahead of this clock, reads "just now". */
 export function keyLastUsedLabel(ts) {
   if (!ts) return t("settings.lastUsed.never");
   const ms = Date.now() - ts * 1000;
-  if (ms < 0) return t("settings.lastUsed.justNow");
+  if (ms < 60000) return t("settings.lastUsed.justNow");
   const days = Math.floor(ms / 86400000);
   if (days >= 1) return t("settings.lastUsed.days", { days });
   const hrs = Math.floor(ms / 3600000);
@@ -988,7 +1028,7 @@ export async function refreshKeysPanel() {
     card.classList.toggle("sec-hidden", hidden);
     if (typeof buildSettingsNav === "function") buildSettingsNav();
   };
-  let keys, isOwner, presets;
+  let keys, isOwner, presets, openMode;
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
     if (!r.ok) { setHidden(true); return; }   // 401/403 -> not a key minter
@@ -996,9 +1036,10 @@ export async function refreshKeysPanel() {
     const data = await r.json();
     keys = data.keys || [];
     isOwner = !!data.is_owner;
+    openMode = !!data.open_mode;
     presets = data.presets || [];
   } catch { setHidden(true); return; }
-  applyOwnerGate(isOwner);           // hide owner-only scopes from a keys:admin device
+  applyOwnerGate(isOwner, openMode);   // owner-only scopes disabled, with the reason
   buildKeyPresets(presets, isOwner);
 
   list.replaceChildren();
@@ -1016,10 +1057,14 @@ export async function refreshKeysPanel() {
     rm.onclick = () => {
       confirmDanger(t("settings.keys.revokeConfirmTitle", { name: k.name || k.id }),
         t("settings.keys.revokeConfirmBody"), t("settings.keys.revokeButton"), async () => {
-          const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
-                                { method: "DELETE", headers: authHeaders() });
-          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); }
-          else { toast(t("settings.keys.revokeFailedToast")); }
+          let d;
+          try {
+            d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
+                            { method: "DELETE", headers: authHeaders() });
+          } catch { toast(t("settings.keys.revokeFailedToast"), true); return; }
+          if (d.ok) { toast(t("settings.keys.revokedToast")); refreshKeysPanel(); return; }
+          const e = await d.json().catch(() => ({}));
+          toast((typeof e.detail === "string" && e.detail) || t("settings.keys.revokeFailedToast"), true);
         });
     };
     row.appendChild(rm);
@@ -1028,7 +1073,7 @@ export async function refreshKeysPanel() {
 
   $("key-create").onclick = async () => {
     const name = ($("key-name").value || "").trim();
-    if (!name) { toast(t("settings.keys.enterNameToast")); return; }
+    if (!name) { toast(t("settings.keys.enterNameToast"), true); return; }
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
     // A zero-scope key is valid: it can still chat (chat is baseline). Confirm so
@@ -1049,10 +1094,11 @@ export async function refreshKeysPanel() {
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-    } catch { toast(t("settings.keys.createFailedToast")); return; }
+    } catch { toast(t("settings.keys.createFailedToast"), true); return; }
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      toast(e.detail || t("settings.keys.createFailedToast")); return;
+      toast((typeof e.detail === "string" && e.detail) || t("settings.keys.createFailedToast"), true);
+      return;
     }
     const made = await r.json();
     // The first key on an open-mode server turns authentication on: the shell
@@ -1061,25 +1107,37 @@ export async function refreshKeysPanel() {
     if (!window.__LOCALM_CSRF__ && SHELL_TOKEN) await refreshCsrf();
     const box = $("key-secret");
     box.replaceChildren();
-    box.appendChild(el("div", "sub",
-      t("settings.keys.newKeyIntro", { name: made.name, scopes: (made.scopes || []).join(", ") })));
+    const madeScopes = made.scopes || [];
+    box.appendChild(el("div", "sub", madeScopes.length
+      ? t("settings.keys.newKeyIntro", { name: made.name, scopes: madeScopes.join(", ") })
+      : t("settings.keys.newKeyIntroChatOnly", { name: made.name })));
+    for (const w of made.warnings || []) box.appendChild(el("div", "key-warn", w));
+    if (made.owner_key_seeded) box.appendChild(el("div", "sub", t("settings.keys.ownerKeySeeded")));
     const secret = document.createElement("input");
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
-      secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(made.key);
-      toast(t("settings.keys.copiedToast"));
-    };
-    box.appendChild(copy);
+    box.appendChild(keySecretCopyButton(secret, made.key));
     await renderKeyQR(box, made.key);
     box.style.display = "";
     $("key-name").value = "";
     scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
     refreshKeysPanel();
+    if (made.owner_key_seeded) refreshOwnerKeyPanel();
   };
+}
+
+/** The Copy button beside a shown key *secret* (an input holding *key*): selects
+ *  the text and writes *key* to the clipboard; a blocked clipboard keeps the
+ *  button's label and shows an error toast (copyTextWithFeedback). */
+function keySecretCopyButton(secret, key) {
+  const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
+  copy.type = "button";
+  copy.onclick = () => {
+    secret.select();
+    return copyTextWithFeedback(copy, key, t("settings.keys.copyButton"), t("settings.keys.copiedToast"));
+  };
+  return copy;
 }
 
 // Settings -> Owner key: roll or set the ONE key that grants full access. The GUI
@@ -1156,13 +1214,7 @@ export async function refreshOwnerKeyPanel() {
     secret.type = "text"; secret.readOnly = true; secret.value = out.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
-      secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(out.key);
-      toast(t("settings.keys.copiedToast"));
-    };
-    box.appendChild(copy);
+    box.appendChild(keySecretCopyButton(secret, out.key));
     box.style.display = "";
     $("owner-key-value").value = "";
   };
@@ -1240,8 +1292,8 @@ const guiKeySave = $("gui-key-save");
 if (guiKeySave) guiKeySave.onclick = async () => {
   const key = $("gui-api-key").value.trim();
   if (key) {
-    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
-    if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
+    const res = await loginWithKeyResult(key);   // POST /api/session -> server sets the HttpOnly cookie
+    if (!res.ok) { toast(keyGateErrorText(res), true); return; }
     try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast(t("settings.signIn.keySaved"));
     setTimeout(() => location.reload(), 600);
