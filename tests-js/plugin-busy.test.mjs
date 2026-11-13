@@ -93,7 +93,7 @@ for (const [label, workingLabel] of [
     await tick();
     g.gates.list.splice(0).forEach((r) => r());
     await tick(20);
-    assert.equal(win.document.getElementById("toast").textContent, "image: done");
+    assert.equal(win.document.getElementById("toast").textContent, "Images (image): done");
   });
 }
 

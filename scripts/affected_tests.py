@@ -219,6 +219,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                              "scans every test file that mentions bugreport"),
     "tests/test_no_console_window.py": (_TESTS_PY, "scans every test file for window-opening calls"),
     "tests/test_ci_runner_files.py": (("scripts/*.py",), "reads every scripts/*.py for runner-file variable reads"),
+    "tests/test_bugreport_network_off.py": (_LOCALM_PY,
+                                            "scans the string literals of every localm module for a "
+                                            "net-off refusal not taken from config"),
     "tests/test_pin_weekly.py": (("scripts/*.py", "tests/*.py"),
                                  "reads the pin, bump and confirm scripts for gitignored paths"),
 }
