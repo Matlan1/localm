@@ -1281,13 +1281,15 @@ export function renderModelSplitLine(split) {
 
 // Set once a failed read of the media runtimes was logged.
 let _mediaReadWarned = false;
+// True while an unload of the media runtimes runs.
+let _mediaUnloading = false;
 
 /** Read GET /api/media/runtimes and show the native media runtimes this server
  *  holds loaded (see renderMediaRuntimes). A server without the route (404)
  *  shows none. Any other failed read keeps the list as it was and logs one
- *  console warning per page. Never throws. */
+ *  console warning per page. Does nothing while an unload runs. Never throws. */
 export async function refreshMediaRuntimes() {
-  if (!document.getElementById("media-runtimes")) return;
+  if (!document.getElementById("media-runtimes") || _mediaUnloading) return;
   let rows;
   try {
     const r = await fetch("/api/media/runtimes", { headers: authHeaders() });
@@ -1335,8 +1337,10 @@ export function renderMediaRuntimes(rows) {
 
 /** POST /api/media/runtimes/unload and say per runtime what happened (unloaded,
  *  kept running for a job, or failed), then read the list again. *btn* is
- *  disabled while the request runs. */
+ *  disabled while the request runs; a call while one runs does nothing. */
 export async function unloadMediaRuntimes(btn) {
+  if (_mediaUnloading) return;
+  _mediaUnloading = true;
   if (btn) btn.disabled = true;
   try {
     const r = await fetch("/api/media/runtimes/unload", { method: "POST", headers: authHeaders() });
@@ -1350,6 +1354,7 @@ export async function unloadMediaRuntimes(btn) {
   } catch (e) {
     toast(t("sidebar.media.unloadFailed", { message: e.message }), true);
   } finally {
+    _mediaUnloading = false;
     if (btn) btn.disabled = false;
     await refreshMediaRuntimes();
   }

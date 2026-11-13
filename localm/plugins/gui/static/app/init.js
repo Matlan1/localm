@@ -279,18 +279,25 @@ window.showShellStaleOverlay = showShellStaleOverlay;
 /** Reload the page. While Settings holds unsaved edits it first asks in the
  *  in-page dialog (the reconnect overlays are hidden for it): the page reloads
  *  only when the person chooses to, and the browser's own leave prompt is not
- *  shown for that reload. Resolves true when the reload starts, false when the
- *  person chose to stay. Every reload this page starts itself goes through
- *  here. */
+ *  shown for that reload. When the person chooses to stay, every overlay it hid
+ *  is shown again. Resolves true when the reload starts, false when the person
+ *  chose to stay. Every reload this page starts itself goes through here. */
 export async function reloadApp() {
   if (window.settingsDirty && window.settingsDirty()) {
+    const hidden = [];
     for (const id of ["reconnect-overlay", "shell-stale-overlay"]) {
       const ov = $(id);
-      if (ov) ov.style.display = "none";
+      if (ov && ov.style.display !== "none") {
+        hidden.push([ov, ov.style.display]);
+        ov.style.display = "none";
+      }
     }
     const go = await confirmDangerAsync(t("nav.leaveSettings.title"),
       t("reconnect.reloadUnsaved"), t("reconnect.reloadDiscard"));
-    if (!go) return false;
+    if (!go) {
+      for (const [ov, display] of hidden) ov.style.display = display;
+      return false;
+    }
     window.__localmUnloadConfirmed = true;
   }
   location.reload();
@@ -317,25 +324,38 @@ async function _readShellToken() {
 }
 
 // Refused shell token -> the promise of the token read after that refusal.
+// A read that brought no new token is dropped from the map when it settles.
 const _shellRenewals = new Map();
+// Refused shell token -> Date.now() of its last read that brought no new token.
+const _shellRenewalMisses = new Map();
+// After a read brought no new token, no new read for the same token starts
+// within this many ms.
+const _SHELL_RENEW_RETRY_MS = 5000;
 
 /** The live open-mode shell token after the server refused *sent*.
  *  When *sent* is not the token this page now holds (an earlier one), the
  *  current token is the answer and nothing is read. Otherwise the page shell is
- *  read once per refused token, however many requests were refused with it, and
- *  the token it carries becomes the one authHeaders() sends. Resolves the new
+ *  read, once for all the requests refused with *sent* while that read runs,
+ *  and the token it carries becomes the one authHeaders() sends. A read that
+ *  brings no new token is not repeated for *sent* within 5 s. Resolves the new
  *  token, or "" when no token different from *sent* could be read. Never
  *  rejects. */
 export function renewShellToken(sent) {
   if (sent && SHELL_TOKEN && sent !== SHELL_TOKEN) return Promise.resolve(SHELL_TOKEN);
-  if (!_shellRenewals.has(sent)) {
-    _shellRenewals.set(sent, _readShellToken().then((tok) => {
-      if (!tok || tok === sent) return "";
+  if (_shellRenewals.has(sent)) return _shellRenewals.get(sent);
+  const missed = _shellRenewalMisses.get(sent);
+  if (missed !== undefined && Date.now() - missed < _SHELL_RENEW_RETRY_MS) return Promise.resolve("");
+  const read = _readShellToken().then((tok) => {
+    if (tok && tok !== sent) {
       setShellToken(tok);
       return tok;
-    }));
-  }
-  return _shellRenewals.get(sent);
+    }
+    _shellRenewals.delete(sent);
+    _shellRenewalMisses.set(sent, Date.now());
+    return "";
+  });
+  _shellRenewals.set(sent, read);
+  return read;
 }
 window.renewShellToken = renewShellToken;
 
@@ -355,7 +375,7 @@ export async function onShellTokenRejected() {
   if (!(await serverReachable())) { onServerUnreachable({ sawDown: true }); return; }
   try { sessionStorage.setItem("localm.shellReset", "1"); } catch { /* ignore */ }
   await resetServiceWorkerAndCaches();
-  await reloadApp();
+  if (!(await reloadApp())) _shellRecoveryStarted = false;
 }
 window.onShellTokenRejected = onShellTokenRejected;
 
@@ -371,7 +391,8 @@ let _shutdownRequested = false;
 /** Show the full-page overlay for a server that does not answer.
  *  *mode* "reconnecting" (default): a spinner, the unreachable text and the
  *  "Reset and re-enter key" button. *mode* "shutdown": the shut down text and a
- *  Reload button that reloads only once the server answers again. The panel is
+ *  Reload button that, once the server answers again, reloads through
+ *  reloadApp or, when the person stays, shows the page again. The panel is
  *  rebuilt only when the mode changes, so a note written into it stays. */
 export function showReconnectOverlay(mode = "reconnecting") {
   let ov = $("reconnect-overlay");
@@ -389,7 +410,7 @@ export function showReconnectOverlay(mode = "reconnecting") {
       const again = el("button", "reconnect-reset", t("reconnect.reload"));
       again.type = "button";
       again.onclick = async () => {
-        if (await serverReachable()) reloadApp();
+        if (await serverReachable()) _serverBack();
         else note.textContent = t("reconnect.stillDown");
       };
       panel.appendChild(again);
@@ -537,6 +558,7 @@ window.onServerUnreachable = onServerUnreachable;
  *  page is shown again, with a renewed shell token in open mode. */
 async function _serverBack() {
   if (await reloadApp()) return;
+  _shutdownRequested = false;
   if (SHELL_TOKEN) await renewShellToken(SHELL_TOKEN);
   unlockUI();
 }

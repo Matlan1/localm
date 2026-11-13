@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { signOutSession } from "../app/init.js";
+import { reloadApp, signOutSession } from "../app/init.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
@@ -1216,7 +1216,7 @@ export async function refreshOwnerKeyPanel() {
           toast(t("settings.ownerKey.removedToast"));
           // That call invalidates this session cookie, so re-read the page state
           // rather than leaving a view authed by a session that no longer exists.
-          window.location.reload();
+          reloadApp();
           return;
         }
         // Not fully cleared. The session cookie is already gone regardless (the
@@ -1255,7 +1255,7 @@ if (guiKeySave) guiKeySave.onclick = async () => {
     if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
     try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast(t("settings.signIn.keySaved"));
-    setTimeout(() => location.reload(), 600);
+    setTimeout(() => reloadApp(), 600);
     return;
   }
   // Empty -> sign out on the server (which clears the session cookie).
@@ -1267,7 +1267,7 @@ if (guiKeySave) guiKeySave.onclick = async () => {
     return;
   }
   toast(t("settings.signIn.signedOut"));
-  setTimeout(() => location.reload(), 600);
+  setTimeout(() => reloadApp(), 600);
 };
 
 // Friendly section label per plugin owner (falls back to the capitalized scope).

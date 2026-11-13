@@ -195,3 +195,52 @@ test("the service worker passes a no-store request to the network and caches not
   assert.ok(normal.responded, "premise: an ordinary GET of / is answered from the cache");
   assert.equal(cached.length, 0);
 });
+
+test("staying after the shut down overlay's Reload shows the page again", async () => {
+  const server = restartServer();
+  const { window, reload } = await bootOpen(server);
+  window.settingsDirty = () => true;
+  window.onServerUnreachable({ reason: "shutdown" });
+  const ov = window.document.getElementById("reconnect-overlay");
+  ov.querySelector("button").click();
+  const modal = window.document.getElementById("modal");
+  assert.ok(await waitFor(() => modal.style.display === "flex"), "the server answers: the in-page dialog asks");
+  window.document.getElementById("modal-body").querySelector(".btn-secondary:not(.btn-danger)").click();
+  assert.ok(await waitFor(() => window.__localmLocked === false), "the page is shown again, not left blank");
+  assert.equal(reload.reloads, 0);
+});
+
+test("staying after the stale page overlay's Reload keeps that overlay on screen", async () => {
+  const { dom, window } = loadApp({ fetchImpl: async () => ok(), shellToken: OLD });
+  const reload = countReloads(dom);
+  window.settingsDirty = () => true;
+  window.showShellStaleOverlay();
+  const ov = window.document.getElementById("shell-stale-overlay");
+  ov.querySelector("button").click();
+  const modal = window.document.getElementById("modal");
+  assert.ok(await waitFor(() => modal.style.display === "flex"));
+  assert.equal(ov.style.display, "none", "hidden while the dialog asks");
+  window.document.getElementById("modal-body").querySelector(".btn-secondary:not(.btn-danger)").click();
+  assert.ok(await waitFor(() => ov.style.display === "flex"), "shown again after staying");
+  assert.equal(reload.reloads, 0);
+});
+
+test("a token read that brought no new token is not kept: a later restart is still renewed", async () => {
+  let served = OLD;
+  const server = restartServer(() => served);
+  const { window } = await bootOpen(server);
+  server.restarted = true;
+  assert.equal(await window.renewShellToken(OLD), "", "premise: the shell still carries the same token");
+  const reads = server.shellReads;
+  served = NEW;
+  assert.equal(await window.renewShellToken(OLD), "", "no new read right after a miss");
+  assert.equal(server.shellReads, reads);
+  const realNow = window.Date.now;
+  window.Date.now = () => realNow() + 6000;
+  try {
+    assert.equal(await window.renewShellToken(OLD), NEW, "a later read finds the restarted server's token");
+  } finally {
+    window.Date.now = realNow;
+  }
+  assert.equal(window.authHeaders().Authorization, "Bearer " + NEW);
+});
