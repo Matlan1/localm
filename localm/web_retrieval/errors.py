@@ -11,6 +11,7 @@ request can help.
 from __future__ import annotations
 
 import errno
+import re
 import http.client
 import urllib.parse
 from typing import Optional
@@ -148,6 +149,10 @@ def is_transient(exc: BaseException) -> bool:
                               "connect-timeout", "read-timeout", "incomplete")
 
 
+# The host in netpolicy.UnresolvableHost's message ("Could not resolve '<host>' ...").
+_UNRESOLVED_HOST_RE = re.compile(r"resolve '([^'\s]{1,253})'")
+
+
 def describe_failure(exc: BaseException, url: str = "") -> str:
     """A plain-language clause (no trailing period) saying why a request to
     *url* failed, naming its host. *url* defaults to the URL the exception
@@ -160,7 +165,10 @@ def describe_failure(exc: BaseException, url: str = "") -> str:
     from .contracts import SearchProviderError
 
     if isinstance(exc, UnresolvableHost):
-        host = _host_of(url or _exc_url(exc)) or "the site"
+        # The host that failed is the one the exception names: after a
+        # redirect it is not the host of *url*.
+        named = _UNRESOLVED_HOST_RE.search(str(exc))
+        host = (named.group(1) if named else _host_of(url or _exc_url(exc))) or "the site"
         return (f"could not find {host}: its name did not resolve (no network "
                 "connection, or a DNS failure)")[:_TEXT_CAP]
     if isinstance(exc, (NetworkPolicyError, SearchProviderError)):

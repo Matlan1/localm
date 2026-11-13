@@ -84,3 +84,11 @@ def test_retrieve_records_an_unresolvable_search_as_failed():
     assert bundle.search_status == R.SEARCH_FAILED
     assert "did not resolve" in bundle.search_error
 
+
+
+def test_describe_failure_names_the_host_that_did_not_resolve_after_a_redirect():
+    exc = netpolicy.UnresolvableHost(
+        "Could not resolve 'nx.example' to an address; refusing the request rather "
+        "than connecting through an unvalidated re-resolution.")
+    text = describe_failure(exc, "https://a.example/start")
+    assert text.startswith("could not find nx.example:")
