@@ -104,6 +104,11 @@ If the coder legitimately needs to talk to a local dev server
 localm config net_allow_private true
 ```
 
+Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`,
+`fd00:ec2::/32`, in any embedded IPv6 form) stay refused with it on; a name that
+also resolves to another address (a LAN machine with an `fe80::` address) is
+reached on that other address.
+
 The hostname is resolved and validated once, then the connection is pinned to
 the validated addresses of that lookup, so the connect cannot re-resolve to a
 different address. When the first address cannot be connected to (for example
@@ -181,7 +186,7 @@ addresses (`169.254.x.x`, in any IPv6 form) are refused for the search backend
 too. Do not
 turn on `net_allow_private` for this: it removes the private-address check from
 every model-driven request, including ones to `127.0.0.1` (the localm API
-itself) and `169.254.169.254`.
+itself).
 
 ## Chat: two ways to use the web
 
