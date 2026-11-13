@@ -341,3 +341,133 @@ def test_healthy_check_survives_a_poisoned_global_opener(tmp_path, monkeypatch):
             thread.join(timeout=2)
     finally:
         held.close()
+
+
+# ------------------------ after a rollback: start again ------------------------
+
+def _relaunch_recorder(calls, pid=4242):
+    def relaunch(argv, *, restart_history, now_epoch, log_path):
+        calls.append(list(argv))
+        return pid
+    return relaunch
+
+
+def test_a_rollback_that_succeeded_starts_the_previous_version_and_records_why(tmp_path,
+                                                                              monkeypatch):
+    wd = _load_wd()
+    inst, home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"])
+    calls: list = []
+    monkeypatch.setattr(wd, "_load_relaunch", lambda: _relaunch_recorder(calls))
+    held, closed_port = _held_port()
+    argv = [sys.executable, "-m", "localm", "gui", "-p", str(closed_port)]
+    try:
+        logfile = tmp_path / "watchdog.log"
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(closed_port),
+            "--expect-version", "9.9.9", "--install-root", str(inst),
+            "--timeout", "2", "--poll-interval", "0.2", "--request-timeout", "0.3",
+            "--log-file", str(logfile), "--relaunch-argv", json.dumps(argv)])
+    finally:
+        held.close()
+    assert code == wd.EXIT_ROLLED_BACK
+    assert (inst / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
+    assert calls == [argv]
+    assert "started the previous version again (pid 4242)" in logfile.read_text(
+        encoding="utf-8")
+    status = json.loads((home / "updates" / "runtime-update.json").read_text(encoding="utf-8"))
+    assert status["state"] == "rolled_back"
+    assert "because localm 9.9.9 did not start within 2 seconds" in status["note"]
+
+
+def test_a_failed_rollback_starts_nothing(tmp_path, monkeypatch):
+    wd = _load_wd()
+    inst, _home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"],
+                         with_helper=False)
+    calls: list = []
+    monkeypatch.setattr(wd, "_load_relaunch", lambda: _relaunch_recorder(calls))
+    held, closed_port = _held_port()
+    try:
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(closed_port),
+            "--expect-version", "9.9.9", "--install-root", str(inst),
+            "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3",
+            "--relaunch-argv", json.dumps(["python", "-m", "localm", "gui"])])
+    finally:
+        held.close()
+    assert code == wd.EXIT_ROLLBACK_FAILED
+    assert calls == []
+
+
+def test_the_previous_version_is_not_started_when_something_answers(tmp_path):
+    wd = _load_wd()
+    server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "1.0.0"})
+    calls: list = []
+    try:
+        started = wd.relaunch_previous(f"http://127.0.0.1:{port}/whoami", ["x"],
+                                       request_timeout=1, log_path=None,
+                                       relaunch=_relaunch_recorder(calls))
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+    assert started is False
+    assert calls == []
+
+
+def test_a_relaunch_that_cannot_start_is_reported_not_claimed(tmp_path):
+    wd = _load_wd()
+    held, closed_port = _held_port()
+    log = tmp_path / "wd.log"
+    try:
+        started = wd.relaunch_previous(
+            f"http://127.0.0.1:{closed_port}/whoami", ["x"], request_timeout=0.3,
+            log_path=log, relaunch=lambda argv, **k: None)
+    finally:
+        held.close()
+    assert started is False
+    assert "could not be started; start localm again" in log.read_text(encoding="utf-8")
+
+
+def test_a_bad_relaunch_argv_is_logged_and_ignored(tmp_path, monkeypatch):
+    wd = _load_wd()
+    inst, _home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"])
+    calls: list = []
+    monkeypatch.setattr(wd, "_load_relaunch", lambda: _relaunch_recorder(calls))
+    held, closed_port = _held_port()
+    log = tmp_path / "wd.log"
+    try:
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(closed_port),
+            "--expect-version", "9.9.9", "--install-root", str(inst),
+            "--timeout", "1.0", "--poll-interval", "0.2", "--request-timeout", "0.3",
+            "--log-file", str(log), "--relaunch-argv", '{"not": "a list"}'])
+    finally:
+        held.close()
+    assert code == wd.EXIT_ROLLED_BACK
+    assert calls == []
+    assert "bad --relaunch-argv" in log.read_text(encoding="utf-8")
+
+
+def test_the_relaunch_helper_is_the_crash_watchdogs_own():
+    wd = _load_wd()
+    relaunch = wd._load_relaunch()
+    assert relaunch is not None
+    assert relaunch.__name__ == "relaunch"
+    assert Path(relaunch.__code__.co_filename).name == "crash_recovery_watchdog.py"
+
+
+def test_a_rollback_script_without_a_reason_parameter_still_runs():
+    wd = _load_wd()
+
+    class Old:
+        @staticmethod
+        def main(argv=None, *, install_root=None, code_root=None):
+            return 0
+
+    class New:
+        @staticmethod
+        def main(argv=None, *, install_root=None, code_root=None, why=None):
+            return 0
+
+    assert wd._rollback_kwargs(Old, "it did not start") == {}
+    assert wd._rollback_kwargs(New, "it did not start") == {"why": "it did not start"}
+    assert wd._rollback_kwargs(New, None) == {}

@@ -535,8 +535,8 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
                       f"{escape(res['data_backup'])} (to restore it, copy those files back "
                       "into the data folder while localm is stopped)[/dim]")
     if res["klass"] == "setup":
-        console.print("[yellow]This version needs setup.bat re-run (a Python/venv change) "
-                      "before it will start.[/yellow]")
+        console.print(f"[yellow]This version needs {updater.setup_script()} re-run (a "
+                      "Python/venv change) before it will start.[/yellow]")
     else:
         console.print("[bold]Restart localm to load it.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")
@@ -588,9 +588,11 @@ def _say_step(text: str) -> None:
 
 def _print_update_extras(res: dict) -> None:
     """Print what an applied update did to the native runtime and the other
-    components, and on a selected install which parts of the current version
-    the installed one keeps."""
+    components, on a selected install which parts of the current version the
+    installed one keeps, and on a git clone that git lists the replaced files."""
     from rich.markup import escape
+
+    from localm import updater
     note = res.get("runtime_note")
     status = res.get("runtime") or {}
     if note:
@@ -605,6 +607,9 @@ def _print_update_extras(res: dict) -> None:
     for part in res.get("kept_for_updates") or []:
         console.print(f"[dim]Kept from the version you had, so this one can update "
                       f"again: {escape(part)}[/dim]")
+    if res.get("git_clone"):
+        note = updater.GIT_CLONE_NOTE
+        console.print(f"[dim]{note[0].upper()}{escape(note[1:])}.[/dim]")
 
 
 @main.command("update")
@@ -727,8 +732,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
                   f"({updater.class_summary(res['klass'])}).")
     _print_update_extras(res)
     if res["klass"] == "setup":
-        console.print("[yellow]This update needs setup.bat re-run (a Python/venv change) "
-                      "before it will start.[/yellow]")
+        console.print(f"[yellow]This update needs {updater.setup_script()} re-run (a "
+                      "Python/venv change) before it will start.[/yellow]")
     else:
         console.print("[bold]Restart localm to load the new version.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")

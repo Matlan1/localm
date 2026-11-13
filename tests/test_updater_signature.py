@@ -477,8 +477,10 @@ def test_refused_update_leaves_trust_unchanged(tmp_path, trust, apply_cfg, home,
     else:
         data = b"not a zip"
         sig = envelope(data, [r2], keyset=ks)
-    with pytest.raises(ValueError if case == "bad_zip" else LocalmError):
+    with pytest.raises(LocalmError) as ei:
         _apply(inst, data, sig)
+    if case == "bad_zip":
+        assert ei.value.summary == "refusing to install: the download is not a localm build"
     assert not _trust_file(home).exists()
     _assert_untouched(inst)
 

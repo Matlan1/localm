@@ -533,8 +533,14 @@ def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
 def test_do_restart_spawns_watchdog_when_given(monkeypatch):
     from localm import updater
     calls = []
-    monkeypatch.setattr(updater, "spawn_health_watchdog",
-                        lambda **kw: calls.append(kw) or True)
+    env_at_spawn = []
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+
+    def _spawn(**kw):
+        calls.append(kw)
+        env_at_spawn.append(os.environ.get("LOCALM_RESTART_IN_PROGRESS"))
+        return True
+    monkeypatch.setattr(updater, "spawn_health_watchdog", _spawn)
     monkeypatch.setattr(http_server, "_engine", None)
 
     def _stop_here(*_a):
@@ -545,11 +551,15 @@ def test_do_restart_spawns_watchdog_when_given(monkeypatch):
     watchdog = {"host": "127.0.0.1", "port": 8642, "scheme": "http",
                "expect_version": "0.2.0"}
     try:
-        http_server._do_restart(update_watchdog=watchdog)
+        http_server._do_restart(update_watchdog=watchdog, port=8642)
     except SystemExit:
         pass
     assert calls == [{"host": "127.0.0.1", "port": 8642, "scheme": "http",
-                      "expect_version": "0.2.0"}]
+                      "expect_version": "0.2.0",
+                      "relaunch_argv": http_server._restart_argv(8642)}]
+    assert env_at_spawn[0] is not None, (
+        "the watchdog's copy of the environment carries the restart marker, so a "
+        "previous version it starts again does not open a new browser tab")
 
 
 def test_do_restart_no_watchdog_by_default(monkeypatch):

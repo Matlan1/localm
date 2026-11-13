@@ -332,8 +332,8 @@ def register(app: FastAPI, ctx) -> None:
 
     def _restart_after_apply(res: dict) -> None:
         """Restart in place after a successful apply so the swapped code loads,
-        except for a setup-class update, which needs setup.bat re-run by the user.
-        Sets ``res["restarting"]`` when it restarts."""
+        except for a setup-class update, which needs the setup script
+        (setup.bat or setup.sh) re-run by the user. Sets ``res["restarting"]`` when it restarts."""
         if res.get("klass") == "setup":
             return
         # This is the only restart trigger that transitions automatically with no

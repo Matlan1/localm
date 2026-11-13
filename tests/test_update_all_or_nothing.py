@@ -1924,6 +1924,8 @@ def test_the_health_check_still_rolls_back_a_build_that_never_answers_its_versio
     assert [r.returncode for r in ran] == [1], [(r.stdout, r.stderr) for r in ran]
     assert not sentinel.exists()
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert "something already answers on" in ran[0].stdout, (
+        "with a server answering on the port, the previous version is not started again")
 
 
 def test_a_restart_whose_steps_worked_gets_its_health_check(install, home, monkeypatch):

@@ -14,7 +14,11 @@ It polls the restarted instance's own unauthenticated ``GET /whoami`` (never
 ``/health``, which 503s whenever no model is loaded yet) until it answers with
 the expected VERSION, or a bounded timeout elapses. On timeout it loads
 ``scripts/rollback_update.py`` - a sibling file, by file path - and calls its
-``main(["--yes"], install_root=...)`` to restore the previous build.
+``main(["--yes"], install_root=...)`` to restore the previous build. After a
+rollback that succeeded, and when it was given ``--relaunch-argv`` (the command
+line the server re-exec'd with), it starts the previous version again with that
+command line, through ``scripts/crash_recovery_watchdog.py``'s ``relaunch`` (loaded
+by file path), unless something already answers on the port.
 
 A rollback that did not happen is NEVER reported as success: three distinct exit
 codes distinguish "came back up healthy" from "rolled back" from "rollback
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 import ssl
 import time
@@ -133,15 +138,29 @@ def _load_rollback_module(install_root: Path):
         return None
 
 
+def _rollback_kwargs(rb, why: Optional[str]) -> dict:
+    """``{"why": why}`` when *rb*'s ``main`` takes a ``why`` keyword and *why* is
+    given, else an empty dict (a rollback script from an older build has none)."""
+    if not why:
+        return {}
+    try:
+        params = inspect.signature(rb.main).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"why": why} if "why" in params else {}
+
+
 def _invoke_rollback(install_root: Path, log_path: Optional[Path],
-                     code_root: Optional[Path] = None) -> int:
+                     code_root: Optional[Path] = None, why: Optional[str] = None) -> int:
     """Run the rollback of *code_root* (the tree of the build that applied the
     update, ``--code-root``) when it has one, else the install's, and map its exit
-    code to this watchdog's."""
+    code to this watchdog's. *why*, the reason for the rollback, is passed to a
+    rollback script that records it (:func:`_rollback_kwargs`)."""
     rb = _load_rollback_module(code_root) if code_root else None
     if rb is not None:
         try:
-            rc = int(rb.main(["--yes"], install_root=install_root, code_root=code_root))
+            rc = int(rb.main(["--yes"], install_root=install_root, code_root=code_root,
+                             **_rollback_kwargs(rb, why)))
         except Exception as e:
             _log(log_path, f"rollback raised an unexpected error: {e}")
             return EXIT_ROLLBACK_FAILED
@@ -155,7 +174,7 @@ def _invoke_rollback(install_root: Path, log_path: Optional[Path],
             "/ rollback.sh in the install folder once the helper is fixed.")
         return EXIT_ROLLBACK_FAILED
     try:
-        rc = int(rb.main(["--yes"], install_root=install_root))
+        rc = int(rb.main(["--yes"], install_root=install_root, **_rollback_kwargs(rb, why)))
     except Exception as e:
         _log(log_path, f"rollback raised an unexpected error: {e}")
         return EXIT_ROLLBACK_FAILED
@@ -169,6 +188,45 @@ def _rollback_result(rc: int, log_path: Optional[Path]) -> int:
     _log(log_path, f"rollback_update.py reported failure (exit {rc}) - the backup "
                    "is kept; manual recovery needed")
     return EXIT_ROLLBACK_FAILED
+
+
+def _load_relaunch():
+    """``relaunch`` of ``crash_recovery_watchdog.py`` beside this script, loaded by
+    file path, or None when it cannot be loaded."""
+    path = Path(__file__).resolve().parent / "crash_recovery_watchdog.py"
+    if not path.is_file():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_localm_update_watchdog_relaunch", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.relaunch
+    except Exception:
+        return None
+
+
+def relaunch_previous(url: str, argv: list, *, request_timeout: float,
+                      log_path: Optional[Path], relaunch=None) -> bool:
+    """Start the version a rollback restored with *argv*, unless something already
+    answers on *url*. Returns True when it was started. *relaunch* is injectable
+    (default :func:`_load_relaunch`)."""
+    if probe_once(url, request_timeout) is not None:
+        _log(log_path, f"something already answers on {url}; not starting the "
+                       "previous version again")
+        return False
+    relaunch = relaunch or _load_relaunch()
+    if relaunch is None:
+        _log(log_path, "could not load the relaunch helper (crash_recovery_watchdog.py); "
+                       "start localm again to use the previous version")
+        return False
+    pid = relaunch(argv, restart_history=[], now_epoch=time.time(), log_path=log_path)
+    if pid is None:
+        _log(log_path, "the previous version could not be started; start localm again "
+                       "to use it")
+        return False
+    _log(log_path, f"started the previous version again (pid {pid})")
+    return True
 
 
 def main(argv=None) -> int:
@@ -187,7 +245,21 @@ def main(argv=None) -> int:
     ap.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL_S)
     ap.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT_S)
     ap.add_argument("--log-file", type=Path, default=None)
+    ap.add_argument("--relaunch-argv", default=None,
+                    help="JSON list: the command line to start the previous version "
+                         "with after a rollback that succeeded")
     args = ap.parse_args(argv)
+    relaunch_argv = None
+    if args.relaunch_argv:
+        try:
+            relaunch_argv = json.loads(args.relaunch_argv)
+            if not (isinstance(relaunch_argv, list) and relaunch_argv
+                    and all(isinstance(a, str) for a in relaunch_argv)):
+                raise ValueError("not a non-empty list of strings")
+        except ValueError as e:
+            _log(args.log_file, f"bad --relaunch-argv ({e}); the previous version will "
+                                "not be started after a rollback")
+            relaunch_argv = None
 
     install_root = args.install_root.resolve()
     # Bracket an IPv6 host so the URL authority parses.
@@ -207,8 +279,14 @@ def main(argv=None) -> int:
         code = EXIT_HEALTHY
     else:
         _log(args.log_file, "health check failed - invoking automatic rollback")
+        why = (f"localm {args.expect_version} did not start within "
+               f"{args.timeout:.0f} seconds")
         code = _invoke_rollback(install_root, args.log_file,
-                                args.code_root.resolve() if args.code_root else None)
+                                args.code_root.resolve() if args.code_root else None,
+                                why=why)
+        if code == EXIT_ROLLED_BACK and relaunch_argv:
+            relaunch_previous(url, relaunch_argv, request_timeout=args.request_timeout,
+                              log_path=args.log_file)
 
     _log(args.log_file, f"watchdog exiting with code {code}")
     return code

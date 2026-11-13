@@ -551,6 +551,43 @@ def is_site_packages_install(root=None) -> bool:
     return False
 
 
+#: Set to "1" by the localm container image (``docker/Dockerfile``).
+CONTAINER_IMAGE_ENV = "LOCALM_CONTAINER_IMAGE"
+
+
+def in_container_image() -> bool:
+    """True when this localm runs from the localm container image
+    (:data:`CONTAINER_IMAGE_ENV` is "1"). Its code and venv belong to the image,
+    so an update or repair applied inside a container is lost when the container
+    is replaced."""
+    import os
+    return os.environ.get(CONTAINER_IMAGE_ENV, "").strip() == "1"
+
+
+def refuse_in_container_image(what: str) -> None:
+    """Raise LocalmError naming *what* ("update", "rollback", "repair") when
+    :func:`in_container_image`; return otherwise."""
+    if not in_container_image():
+        return
+    from localm.bugreport import LocalmError
+    raise LocalmError(
+        f"this localm runs from its container image, so no {what} was made: a change "
+        "made inside a container is lost when the container is replaced",
+        reason="pull the newer localm image and recreate the container instead; your "
+               "models and settings stay in the /data volume")
+
+
+def is_git_clone(root=None) -> bool:
+    """True when the install at *root* (default the running one) is a git clone
+    (a ``.git`` entry at its top level)."""
+    return (Path(root or repo_root()) / ".git").exists()
+
+
+GIT_CLONE_NOTE = ("this install is a git clone, so git now lists the files the update "
+                  "replaced as changed; keep updating it with localm update, or with git, "
+                  "not both")
+
+
 def _prerelease_channel_enabled() -> bool:
     """Whether this install opted into the prerelease update channel
     (settings_schema.py's ``update_allow_prerelease``, admin_only, default
@@ -848,13 +885,18 @@ def classify(staged_dir, installed_dir=None, manifest: Optional[dict] = None) ->
     return klass
 
 
+def setup_script() -> str:
+    """The setup script of this platform: setup.bat on Windows, else setup.sh."""
+    return "setup.bat" if sys.platform == "win32" else "setup.sh"
+
+
 def class_summary(klass: str) -> str:
     """A one-line, user-facing description of what applying *klass* entails."""
     return {
         "reboot": "applies with just a restart",
         "deps": "reinstalls dependencies, then restarts",
         "runtime": "re-provisions the native runtime (re-downloads binaries), then restarts",
-        "setup": "needs setup.bat re-run (a Python/venv-level change)",
+        "setup": f"needs {setup_script()} re-run (a Python/venv-level change)",
     }.get(klass, "applies and restarts")
 
 
@@ -1362,7 +1404,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
     downgrade, data_backup, runtime, runtime_note, components, components_note,
-    kept_for_updates}``.
+    kept_for_updates, git_clone}``. ``git_clone`` is whether the install is a git
+    clone (:func:`is_git_clone`), whose git status then lists the replaced files
+    (:data:`GIT_CLONE_NOTE`).
+
+    Refused with LocalmError before anything is downloaded for a pip install
+    (:func:`is_site_packages_install`) and, when *installed* is None, inside the
+    localm container image (:func:`refuse_in_container_image`).
 
     THE NATIVE RUNTIME. When the build pins a different llama.cpp build for the
     installed backend than the one installed (``updater_runtime.plan``), the
@@ -1474,6 +1522,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             "would overwrite unrelated packages in site-packages and leave "
             "pip unaware of what is installed",
             reason="run 'pip install --upgrade localm' instead")
+    if installed is None:
+        refuse_in_container_image("update")
     if allow_unverified and not expect_sha256:
         raise LocalmError("refusing to install an unverified build without its sha256",
                           reason="pass the sha256 the verification warning named")
@@ -1512,7 +1562,11 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     "signature was checked",
                     reason="the file on disk no longer matches the verified bytes; "
                            "try the update again")
-            au.verify_zip(zip_path)
+            try:
+                au.verify_zip(zip_path)
+            except ValueError as e:
+                raise LocalmError("refusing to install: the download is not a localm build",
+                                  reason=str(e)) from None
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
             new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
@@ -1588,10 +1642,14 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             _drop_run_dir(run_dir)
             raise LocalmError("could not keep a copy of the current version, so nothing was "
                               "updated", reason=str(e)) from None
-        except Exception:
+        except Exception as e:
             if not run_backup_dir.exists():
                 _drop_run_dir(run_dir)
-            raise
+                raise LocalmError("the update could not replace the installed files, so it "
+                                  "was rolled back", reason=str(e)) from None
+            raise LocalmError("the update could not replace the installed files AND "
+                              "putting the previous version back failed - manual recovery "
+                              "needed", reason=f"{e}; restore from {run_backup_dir}") from None
         # Promote this run's backup to the stable path before the manifest write or
         # the post-swap command's own rollback touches `backup_dir`, so both use the
         # fixed path rollback_last() expects.
@@ -1771,7 +1829,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "data_backup": str(data_backup) if data_backup else None,
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
-                "kept_for_updates": kept}
+                "kept_for_updates": kept, "git_clone": is_git_clone(target)}
 
 
 def retry_hint(root, args: str) -> str:
@@ -1804,7 +1862,7 @@ def _require_runnable(cmd, klass: str) -> None:
     if Path(program).is_absolute() and uv_tool.usable(program):
         return
     what = "is not a full path" if program and not Path(program).is_absolute() else "was not found"
-    setup = "setup.bat" if sys.platform == "win32" else "setup.sh"
+    setup = setup_script()
     raise LocalmError(
         f"this update cannot run its {klass} step, so nothing was changed",
         reason=f"the program it needs ({program or 'none'}) {what}. Run {setup} in the "
@@ -1934,6 +1992,7 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                           timeout: float = WATCHDOG_TIMEOUT_S,
                           poll_interval: float = WATCHDOG_POLL_INTERVAL_S,
                           request_timeout: float = WATCHDOG_REQUEST_TIMEOUT_S,
+                          relaunch_argv: Optional[list] = None,
                           popen=None) -> bool:
     """Spawn ``scripts/update_watchdog.py`` DETACHED to verify the build
     ``_do_restart`` is about to re-exec into actually comes back up, auto-rolling
@@ -1945,7 +2004,12 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
     When :func:`apply` pinned this process to the update backup, the backup's
     watchdog runs, with ``--code-root`` naming that tree, so a failed health check
     rolls back with this build's own rollback (code and venv), not the
-    installed build's."""
+    installed build's.
+
+    *relaunch_argv*, when given, is the command line the server re-execs with
+    (``http_server._restart_argv``); after a rollback that succeeded the watchdog
+    starts the previous version with it, unless something already answers on the
+    port."""
     try:
         import os
         import subprocess
@@ -1969,7 +2033,9 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                *(["--code-root", str(code_root)] if code_root else []),
                "--timeout", str(timeout), "--poll-interval", str(poll_interval),
                "--request-timeout", str(request_timeout),
-               "--log-file", str(log_file)]
+               "--log-file", str(log_file),
+               *(["--relaunch-argv", _json.dumps([str(a) for a in relaunch_argv])]
+                 if relaunch_argv else [])]
         env = os.environ.copy()
         # So the watchdog's rollback call re-derives the same data home this server
         # was using, via rollback_update.py's own _detect_home() precedence.
@@ -2261,9 +2327,15 @@ def rollback_last(*, installed=None, say=None) -> dict:
     NOT signature- or freshness-checked; the owner gate on its HTTP callers
     (``inference/routes/admin.py``) is the control on this operation. Use
     :func:`rollback_info` to ask whether a rollback is possible; calling this one
-    to find out performs it."""
+    to find out performs it.
+
+    A restore that fails partway raises LocalmError naming the kept backup,
+    whatever the error was. With *installed* None, refused inside the localm
+    container image (:func:`refuse_in_container_image`)."""
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
+    if installed is None:
+        refuse_in_container_image("rollback")
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
     backup_dir = _backup_dir(create=True)
@@ -2309,6 +2381,14 @@ def rollback_last(*, installed=None, say=None) -> dict:
                               "was rolled back", reason=str(e)) from None
         try:
             _restore_all(target, backup_dir, names, say=say)
+        except LocalmError:
+            unpin()
+            raise
+        except Exception as e:
+            unpin()
+            raise LocalmError("the rollback did not finish - some of the previous version "
+                              "could not be put back",
+                              reason=f"{e}; the backup is kept at {backup_dir}") from None
         except BaseException:
             unpin()
             raise

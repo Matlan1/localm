@@ -2805,7 +2805,7 @@ export const I18N_EN = {
   "settings.update.upToDate": "localm is up to date (running {current}).",
   "settings.update.downloading": "Downloading and applying ...",
   "settings.update.updatedRestarting": "Updated to {version}. Restarting ...",
-  "settings.update.updatedSetup": "Updated to {version}. Re-run setup.bat to finish.",
+  "settings.update.updatedSetup": "Updated to {version}. Re-run setup in the install folder (setup.bat on Windows, setup.sh on Linux and macOS) to finish.",
   "settings.update.updatedPlain": "Updated to {version}.",
   "settings.update.failedRolledBack": "Update failed (rolled back): {error}",
   "settings.update.nothingToApply": "Nothing to apply.",
@@ -2849,6 +2849,7 @@ export const I18N_EN = {
   "settings.update.runtimeNote": "Native runtime: {note}.",
   "settings.update.componentsNote": "Components: {note}.",
   "settings.update.keptForUpdates": "Kept from the version you had, so this one can update again: {parts}.",
+  "settings.update.gitClone": "This install is a git clone, so git now lists the files the update replaced as changed. Keep updating it with Update now, or with git, not both.",
 
   // ---- Settings > Updates > Roll back ----
   "settings.rollback.subHead": "Roll back",
