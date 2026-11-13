@@ -90,3 +90,26 @@ def test_log_mode_current_finish_records_the_check_on_disk(install, plan_calls,
     assert uc.finish_pending(root=install)["state"] == "current"
     data = json.loads((_updates() / uc.CHECKED_FILE).read_text(encoding="utf-8"))
     assert data == {"root": str(install.resolve()), "version": _VERSION}
+
+
+@pytest.mark.parametrize("argv, written", [
+    (["serve", "--mode", "privacy", "--help"], False),
+    (["serve", "--mode=PRIVACY", "--help"], False),
+    (["serve", "--help"], True),
+])
+def test_a_mode_flag_reaches_the_start_up_check(install, plan_calls, monkeypatch,
+                                                argv, written):
+    from click.testing import CliRunner
+
+    from localm import updater, updater_runtime
+    from localm.cli._core import main
+    for name in ("LOCALM_MODE", "LOCALM_UPDATE_STEPS_DONE", "LOCALM_RESTART_IN_PROGRESS"):
+        monkeypatch.delenv(name, raising=False)
+    config.update_config(lambda c: c.update(mode="log"))
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    monkeypatch.setattr(updater_runtime, "read_pending", lambda: None)
+    monkeypatch.setattr(updater_runtime, "catch_up", lambda *a, **k: None)
+    result = CliRunner().invoke(main, argv)
+    assert result.exit_code == 0, result.output
+    assert len(plan_calls) == 1
+    assert (_updates() / uc.CHECKED_FILE).exists() is written

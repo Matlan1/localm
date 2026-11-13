@@ -271,6 +271,36 @@ def _stdout_is_a_pipe() -> bool:
         return False
 
 
+SUBCOMMAND_ARGS = "localm.subcommand_args"
+
+
+def _export_subcommand_mode(ctx) -> None:
+    """When the subcommand in *ctx* takes ``--mode`` and was given a valid one,
+    export it as ``audit.MODE_ENV_VAR``, as that subcommand does itself, so the
+    steps the group runs before it follow the same session mode. The arguments
+    are parsed by the subcommand's own parser without callbacks; arguments it
+    cannot parse export nothing (the subcommand then reports them)."""
+    import os
+    from localm.audit import MODE_ENV_VAR, SessionMode
+    args = ctx.meta.get(SUBCOMMAND_ARGS)
+    if not args:
+        return
+    try:
+        name, cmd, rest = ctx.command.resolve_command(ctx, list(args))
+        if cmd is None or not any(p.name == "mode" for p in cmd.params):
+            return
+        sub = cmd.make_context(name, list(rest), parent=ctx, resilient_parsing=True)
+    except click.ClickException:
+        return
+    mode = sub.params.get("mode")
+    if not isinstance(mode, str):
+        return
+    try:
+        os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
+    except ValueError:
+        return
+
+
 class _GracefulGroup(click.Group):
     """Single, cross-cutting failure handler for the whole CLI.
 
@@ -283,6 +313,13 @@ class _GracefulGroup(click.Group):
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
+
+    def parse_args(self, ctx, args):
+        """Parse as ``click.Group`` does and keep the subcommand's name and
+        arguments in ``ctx.meta[SUBCOMMAND_ARGS]`` for the group callback."""
+        rest = super().parse_args(ctx, args)
+        ctx.meta[SUBCOMMAND_ARGS] = [*getattr(ctx, "_protected_args", ()), *ctx.args]
+        return rest
 
     def invoke(self, ctx):
         try:
@@ -518,7 +555,9 @@ def main() -> None:
     # semantics. No-op unless the env var is set.
     honor_env_debug()
     bugreport.install_global_handlers()
-    _update_steps_at_start(click.get_current_context().invoked_subcommand)
+    ctx = click.get_current_context()
+    _export_subcommand_mode(ctx)
+    _update_steps_at_start(ctx.invoked_subcommand)
 
 
 def _update_steps_at_start(command) -> None:
