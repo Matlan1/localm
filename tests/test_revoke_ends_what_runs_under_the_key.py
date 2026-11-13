@@ -464,9 +464,11 @@ def test_a_revoked_stream_s_body_is_closed_before_its_response_returns(monkeypat
 
 
 class _EndlessEngine:
-    """A model whose generation never ends on its own and holds a lock while
-    it runs, as the llama.cpp runner holds its inference lock; closing its
-    generator sets ``cancelled``."""
+    """A model whose generation runs to ``CAP`` tokens unless it is closed,
+    and holds a lock while it runs, as the llama.cpp runner holds its
+    inference lock; closing its generator sets ``cancelled``."""
+
+    CAP = 4000
 
     def __init__(self):
         self.display_name = "endless-model"
@@ -492,7 +494,7 @@ class _EndlessEngine:
             self.entered.set()
             i = 0
             try:
-                while True:
+                while i < self.CAP:
                     yield f"t{i} "
                     i += 1
                     time.sleep(0.005)
@@ -550,6 +552,7 @@ def test_a_revoked_chat_stream_stops_its_generation(monkeypatch):
     revoker.join(10)
     assert r.status_code == 200
     assert "t0" in r.text
+    assert f"t{_EndlessEngine.CAP - 1} " not in r.text
     assert order == ["body closed", "app returned"]
     assert model.cancelled.wait(5)
     deadline = time.monotonic() + 5

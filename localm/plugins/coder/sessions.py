@@ -1148,9 +1148,9 @@ class SessionManager:
         """Close and remove every session whose creating keystore key is no
         longer live (revoked, removed or expired,
         ``auth.key_hash_live_checked``). A keystore that cannot be read ends
-        nothing; the first such call is logged at WARNING, later ones are not,
-        and the first call after that reads the keystore again logs one INFO
-        line. Returns the ids ended."""
+        nothing; the first such call of an outage is logged at WARNING, later
+        ones in the same outage are not, and the first call that reads the
+        keystore again logs one INFO line. Returns the ids ended."""
         from localm import auth
         from localm.debuglog import logger
         with self._lock:
