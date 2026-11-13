@@ -77,6 +77,8 @@ class LoadBudget:
     ``unload_policy`` is the ``unload_for_room`` setting (``UNLOAD_POLICIES``).
     ``experts_on_disk`` is True for a checkpoint whose routed experts the backend reads from
     its files as they are needed when it does not fit.
+    ``cpu_only`` is True for a load whose configuration puts no layer on the GPU
+    (``routing_fit.configured_cpu_layers``): it needs no free VRAM.
     """
 
     name: str
@@ -91,6 +93,7 @@ class LoadBudget:
     min_need: Optional[int] = None
     unload_policy: str = UNLOAD_ALWAYS
     experts_on_disk: bool = False
+    cpu_only: bool = False
 
     @property
     def needed_bytes(self) -> int:
@@ -259,15 +262,15 @@ def decide_admission(probe: VramProbe, budget: LoadBudget, lru: Iterable[str],
     which idle resident model to evict first.
 
     ADMIT when free VRAM covers ``budget.needed_bytes`` alongside the
-    residents (``residency.fits_alongside_residents``) and the load stays
-    within the resident cap.
+    residents (``residency.fits_alongside_residents``), or the load is
+    ``budget.cpu_only``, and the load stays within the resident cap.
     Otherwise the least-recently-used safe victim
     (``residency.pick_eviction_victim``) is EVICT_IDLE; with no victim it is
     ADMIT_OVER_CAP when VRAM fits and only the cap wanted room, and EXHAUSTED
     when VRAM does not fit. The victim is only looked up when admission fails.
     """
     over_cap = residency.exceeds_resident_cap(lru, budget.name, budget.resident_cap)
-    vram_ok = residency.fits_alongside_residents(
+    vram_ok = budget.cpu_only or residency.fits_alongside_residents(
         free_vram=probe.free, vram_required=budget.needed_bytes,
         probe_ok=probe.probe_ok, headroom=0,
         shortfall=probe.shortfall, is_process_scoped=probe.process_scoped)

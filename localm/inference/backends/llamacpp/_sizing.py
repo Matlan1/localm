@@ -1109,12 +1109,13 @@ class VramSizingMixin:
         n_ctx_max as configured. A placement that leaves layers on the CPU is
         also held to the window whose KV cache for those layers fits free
         system RAM (:meth:`_ram_ctx_tokens`), the reserved window included.
-        None for a model that keeps no KV cache."""
+        Every ceiling is held to :meth:`_within_trained`. None for a model that
+        keeps no KV cache."""
         if self._keeps_no_kv_cache():
             return None
         n_ctx_max = getattr(self, "n_ctx_max", None)
         if not getattr(self, "ctx_auto", False):
-            return n_ctx_max
+            return self._within_trained(n_ctx_max)
         unlimited = n_ctx_max == 0
         share = -(-embedder_ctx_reservation_bytes() // max(1, len(placement.loads)))
         tokens = placement.max_ctx(self.n_ctx, reserve_each=share)
@@ -1144,9 +1145,12 @@ class VramSizingMixin:
             tokens = min(self._AUTO_CTX_MAX, tokens)
         tokens = int(max(self._AUTO_CTX_MIN, floor, tokens))
         extra = "; no max (n_ctx_max=0)" if unlimited else ""
-        console.print(f"[dim]  ctx auto : window may grow to {tokens:,} tokens "
+        held = self._within_trained(tokens)
+        if held < tokens:
+            extra += f"; held to the {held:,}-token trained window"
+        console.print(f"[dim]  ctx auto : window may grow to {held:,} tokens "
                       f"({source}{extra})[/dim]")
-        return tokens
+        return held
 
     @staticmethod
     def _placement_summary(placement) -> str:
@@ -2272,7 +2276,8 @@ class VramSizingMixin:
         lifts the conservative _AUTO_CTX_MAX safety clamp so the window can use
         the full budget. When ctx_auto is off, n_ctx_max is used verbatim
         (0/None already mean unlimited downstream). ``split_budget`` is passed
-        to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a diffusion
+        to :meth:`_auto_ctx_max`. Either ceiling is held to
+        :meth:`_within_trained`. A model that keeps no KV cache (a diffusion
         model) gets None: its fixed window is reported by the worker at load."""
         if self._keeps_no_kv_cache():
             return None
@@ -2281,12 +2286,25 @@ class VramSizingMixin:
             auto, source = self._auto_ctx_sized(capped=not unlimited,
                                                 split_budget=split_budget)
             extra = "; no max (n_ctx_max=0)" if unlimited else ""
+            held = self._within_trained(auto)
+            if held < auto:
+                extra += f"; held to the {held:,}-token trained window"
             console.print(
-                f"[dim]  ctx auto : window may grow to {auto:,} tokens "
+                f"[dim]  ctx auto : window may grow to {held:,} tokens "
                 f"({source}{extra})[/dim]"
             )
-            return auto
-        return self.n_ctx_max
+            return held
+        return self._within_trained(self.n_ctx_max)
+
+    def _within_trained(self, ceiling: Optional[int]) -> Optional[int]:
+        """*ceiling* (0 or None: no ceiling) held to the model's trained
+        window (:meth:`_trained_ctx`), or to ``n_ctx`` when that is larger;
+        *ceiling* unchanged when the trained window is unknown."""
+        trained = self._trained_ctx()
+        if not trained:
+            return ceiling
+        most = max(int(trained), int(self.n_ctx))
+        return most if not ceiling else min(int(ceiling), most)
 
     # The "offload everything" sentinel: n_gpu_layers left at this value means
     # the user did NOT pin a specific layer count, so auto may size it.

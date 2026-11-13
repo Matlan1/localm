@@ -1026,6 +1026,9 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
+                from localm.inference import routing_fit
+                if routing_fit.configured_cpu_layers(sized) is not None:
+                    budget = dataclasses.replace(budget, cpu_only=True)
         if restricted and budget is not None:
             budget = dataclasses.replace(
                 budget, pinned=budget.pinned | _users_models(name))
@@ -7468,7 +7471,7 @@ async def _stream_sse_body(
                 prompt_tokens, capacity,
                 encoder_decoder=_engine_is_encoder_decoder(engine),
                 reply_reserve=_engine_reply_reserve(engine),
-                limit=engine_context_limit(engine)[1])
+                limit=context_limit_reason(engine, capacity))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -8193,6 +8196,17 @@ def engine_context_limit(engine) -> tuple[Optional[int], Optional[str]]:
                    getattr(engine, "display_name", engine), type(exc).__name__, exc)
         return None, None
     return answer if isinstance(answer, tuple) and len(answer) == 2 else (None, None)
+
+
+def context_limit_reason(engine, capacity) -> Optional[str]:
+    """The reason of :func:`engine_context_limit` (``context_overflow_detail``'s
+    *limit*) when *engine*'s window of *capacity* tokens is exactly that limit;
+    None when the window stopped short of it or went past it, or the limit is
+    unknown. Reads the model file's header; never raises."""
+    limit, reason = engine_context_limit(engine)
+    if reason and isinstance(limit, int) and isinstance(capacity, int) and capacity == limit:
+        return reason
+    return None
 
 
 # Growth targets round up to whole multiples of this many tokens.

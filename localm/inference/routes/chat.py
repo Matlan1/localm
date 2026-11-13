@@ -522,8 +522,8 @@ def register(app: FastAPI, ctx) -> None:
 
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-                _limit, reason = await loop.run_in_executor(
-                    None, _hs.engine_context_limit, engine)
+                reason = await loop.run_in_executor(
+                    None, _hs.context_limit_reason, engine, capacity)
                 raise HTTPException(
                     413, _hs.context_overflow_detail(
                         prompt_tokens, capacity,
@@ -1073,8 +1073,8 @@ def register(app: FastAPI, ctx) -> None:
                 capacity = engine.context_capacity()
             if (isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-                _limit, reason = await loop.run_in_executor(
-                    None, _hs.engine_context_limit, engine)
+                reason = await loop.run_in_executor(
+                    None, _hs.context_limit_reason, engine, capacity)
                 raise HTTPException(
                     413, _hs.context_overflow_detail(prompt_tokens, capacity,
                                                      limit=reason))

@@ -856,9 +856,9 @@ An unregistered `{id}` is a 404.
 
 Public - no authentication, even when a key is configured. 200 with
 `{"status": "ok", "model": "...", "loaded": true|false}`, where `"loaded": false`
-names a model kept for a reload on the next request; when no model is loaded or
-kept and one is being loaded, 200 names it with `"loaded": false` and
-`"loading": true`; 503 when none of these applies.
+names the model the next request without a `model` reloads (`"loading": true`
+while it loads); when there is none and a model is being loaded, 200 names it
+with `"loaded": false` and `"loading": true`; 503 when none of these applies.
 
 ## Model lifecycle
 

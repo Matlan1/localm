@@ -32,14 +32,23 @@ def register(app: FastAPI, ctx) -> None:
                 "model":  _hs._engine.display_name,
                 "loaded": _hs._engine.loaded,
             }
-        # No engine is warm. An eviction (unload_all_models) keeps the Engine in
-        # _engines for a lazy reload, so resolve the unnamed model the way
-        # get_engine does; a model being loaded is reported as loading; 503
-        # only when there is nothing to recover and nothing loading.
+        # No engine is warm. The model an unnamed request resolves to is
+        # reloaded by the next request (get_engine), so it is reported unloaded
+        # (loading while its load runs); else a model being loaded is reported
+        # as loading; 503 when there is nothing to recover and nothing loading.
+        # With an empty registry get_engine reloads only a model still in
+        # _engines or the startup model.
         name = _hs._resolve_unnamed_model_name()
-        if name and name in _hs._engines:
-            return {"status": "ok", "model": name, "loaded": False}
+        if name and name not in _hs._engines and name != _hs._default_model_name:
+            from localm.config import load_registry
+            if not await run_in_threadpool(load_registry):
+                name = None
         loading = _hs.loading_model_name()
+        if name:
+            body = {"status": "ok", "model": name, "loaded": False}
+            if loading == name:
+                body["loading"] = True
+            return body
         if loading:
             return {"status": "ok", "model": loading, "loaded": False, "loading": True}
         raise HTTPException(503, "No engine initialised")

@@ -134,7 +134,7 @@ def _classify_by_size(engine, free: int, reading: VramReading,
     return FIT_PARTIAL, 0
 
 
-def _configured_cpu_layers(engine) -> Optional[int]:
+def configured_cpu_layers(engine) -> Optional[int]:
     """The GPU layer count *engine*'s configuration sets when it puts no layer
     on the GPU (``configured_gpu_layers`` at or below 0), else None, also for
     an engine that does not report its configured count."""
@@ -234,7 +234,7 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
             cls, disk = classify(engine, free, reading, ram_available, ram_total)
             options.append(Fit(cls, evicts_user=evicts, load_bytes=size,
                                disk_read_bytes=disk,
-                               configured_layers=(_configured_cpu_layers(engine)
+                               configured_layers=(configured_cpu_layers(engine)
                                                   if cls == FIT_CPU_ONLY else None)))
         out[name] = min(options, key=lambda f: (f.needs_ask, f.cls, len(f.evicts_user)))
     return out
