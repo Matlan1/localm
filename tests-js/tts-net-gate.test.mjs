@@ -181,14 +181,37 @@ test("requestDownloadConsent: dismissing via the shared modal chrome (Escape/x) 
   assert.equal(await p, false);
 });
 
-test("requestDownloadConsent: no GUI shell falls back to native confirm(), matching jobs.js's own fallback", async () => {
+function installBareDocument() {
+  const dom = new JSDOM(`<!DOCTYPE html><html><body></body></html>`,
+    { url: "http://localhost:8642/" });
   delete global.window;
-  delete global.document;
-  global.confirm = (msg) => { global.confirm.lastMessage = msg; return true; };
+  global.document = dom.window.document;
+  global.confirm = () => { throw new Error("the browser's own confirm() must not be used"); };
+  return dom.window.document;
+}
+
+test("requestDownloadConsent: no GUI shell asks in an in-page dialog; Download resolves true", async () => {
+  const doc = installBareDocument();
   const { requestDownloadConsent } = await importFresh(TTS_JS);
-  assert.equal(await requestDownloadConsent(), true);
-  assert.match(global.confirm.lastMessage, /huggingface\.co/);
+  const p = requestDownloadConsent();
+  const box = doc.querySelector('.tts-consent[role="dialog"]');
+  assert.ok(box, "an in-page dialog is shown");
+  assert.match(box.textContent, /huggingface\.co/);
+  [...box.querySelectorAll("button")].find((b) => b.textContent === "Download").click();
+  assert.equal(await p, true);
+  assert.equal(doc.querySelector(".tts-consent"), null, "the dialog is gone after the answer");
   delete global.confirm;
+  delete global.document;
+});
+
+test("requestDownloadConsent: no GUI shell, Not now resolves false", async () => {
+  const doc = installBareDocument();
+  const { requestDownloadConsent } = await importFresh(TTS_JS);
+  const p = requestDownloadConsent();
+  [...doc.querySelectorAll(".tts-consent button")].find((b) => b.textContent === "Not now").click();
+  assert.equal(await p, false);
+  delete global.confirm;
+  delete global.document;
 });
 
 // ---- load()/register(): the gate actually wired in ---------------------- //

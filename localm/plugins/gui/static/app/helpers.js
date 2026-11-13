@@ -1996,7 +1996,7 @@ export function confirmDangerAsync(title, message, confirmLabel) {
       resolve(value);
     };
     openModal(title, (body) => {
-      body.appendChild(el("p", "", message));
+      body.appendChild(el("p", "modal-message", message));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(false);
@@ -2015,8 +2015,8 @@ export function confirmDangerAsync(title, message, confirmLabel) {
 /** Ask with the in-page modal and resolve to the key of the button chosen,
  *  or null when the dialog was cancelled or dismissed (x / Escape).
  *  *choices* are ``{key, label, danger}`` in display order; a Cancel button
- *  comes first. */
-export function chooseAsync(title, message, choices) {
+ *  comes first, labelled *opts.cancelLabel* when given. */
+export function chooseAsync(title, message, choices, opts = {}) {
   return new Promise((resolve) => {
     let settled = false;
     let watch = null;
@@ -2028,9 +2028,9 @@ export function chooseAsync(title, message, choices) {
       resolve(value);
     };
     openModal(title, (body) => {
-      body.appendChild(el("p", "", message));
+      body.appendChild(el("p", "modal-message", message));
       const row = el("div", "actions");
-      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+      const cancel = el("button", "btn-secondary", opts.cancelLabel || t("common.modal.cancel"));
       cancel.onclick = () => finish(null);
       row.appendChild(cancel);
       for (const choice of choices) {
@@ -2045,6 +2045,32 @@ export function chooseAsync(title, message, choices) {
       if ($("modal").style.display === "none") finish(null);
     }, 200);
   });
+}
+
+/** Reload the page. When Settings holds unsaved edits, first ask in the
+ *  in-page dialog: save them and reload, discard them and reload, or stay
+ *  (no reload). A save that leaves any edit unsaved keeps the page and says
+ *  so. Resolves true when the reload was started, false when the page stays.
+ *  Never opens a native browser dialog. */
+export async function reloadApp() {
+  if (window.settingsDirty && window.settingsDirty()) {
+    const pick = await chooseAsync(t("nav.leaveSettings.title"), t("settings.unsaved.reloadBody"), [
+      { key: "discard", label: t("settings.unsaved.discard"), danger: true },
+      { key: "save", label: t("settings.unsaved.save") },
+    ], { cancelLabel: t("settings.unsaved.stay") });
+    if (pick === null) return false;
+    if (pick === "save") {
+      const saved = window.saveDirtySettings ? await window.saveDirtySettings() : false;
+      if (!saved) {
+        toast(t("settings.unsaved.notSaved"), true);
+        return false;
+      }
+    } else if (window.discardSettingsDraft) {
+      window.discardSettingsDraft();
+    }
+  }
+  location.reload();
+  return true;
 }
 
 /** In-page text-input equivalent of confirmDanger, for the free-text half of

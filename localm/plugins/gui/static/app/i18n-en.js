@@ -1639,6 +1639,12 @@ export const I18N_EN = {
   "settings.sections": "Settings sections",
   "settings.title": "Settings",
   "settings.unsavedConfirm": "You have unsaved settings changes. Leave without saving?",
+  "settings.unsaved.reloadBody": "You have unsaved settings changes, and the page is about to reload. Save them first?",
+  "settings.unsaved.save": "Save and reload",
+  "settings.unsaved.discard": "Discard and reload",
+  "settings.unsaved.stay": "Stay",
+  "settings.unsaved.notSaved": "Some settings changes could not be saved, so the page did not reload.",
+  "settings.unsaved.restored": "Your unsaved settings changes from before the reload are back. Save them to keep them.",
 
   // ---- Settings > schema-driven fields (settings_schema.py CORE_FIELDS) ----
   "settings.field.inheritOption": "(inherit)",
@@ -1748,6 +1754,7 @@ export const I18N_EN = {
   "voice.micReadyTitle": "Hold a thought, speak it - click to record, click again to transcribe",
   "voice.micDownloadSuffix": "Click the mic to download it now (one-time; changes no settings).",
   "voice.downloadConfirm": "Download the Whisper \"{model}\" speech model once now? This changes no settings; transcription runs fully offline afterwards.",
+  "voice.downloadTitle": "Download the speech model?",
   "voice.downloadingToast": "Downloading the speech model…",
   "voice.downloadIncomplete": "download did not complete",
   "voice.readyToast": "Speech model ready - click the mic to record",
@@ -1867,6 +1874,7 @@ export const I18N_EN = {
   "reconnect.reset": "Reset and re-enter key",
   "reconnect.starting": "Starting LocaLM... loading the model. The first run can take a moment.",
   "init.pullConfirm": "Download model \"{spec}\"?\n\nA link or page just asked localm to start this download. Only continue if you started this yourself (e.g. via \"localm gui --pull\").",
+  "init.pullTitle": "Download a model?",
   "plugins.deps.failedToast": "install deps failed: {message}",
   "plugins.deps.onHostToast": "Install {name}'s dependencies on the host, e.g.:  localm plugin install-deps {name}",
   "plugins.deps.refusedToast": "install deps: {detail}",
