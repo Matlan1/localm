@@ -898,8 +898,8 @@ def test_jobs_in_catalog():
     from localm.plugins import catalog
     entry = catalog.get("jobs")
     assert entry is not None
-    assert "job" in entry.commands
-    assert catalog.commands().get("job") == "jobs"
+    assert entry.commands == ()
+    assert "job" not in catalog.commands()
 
 
 def test_jobs_client_entry_is_served(home, monkeypatch):
@@ -936,7 +936,7 @@ def test_jobs_available_in_api_state(home, monkeypatch):
     assert "jobs" in names
     jobs = next(p for p in state["plugins"] if p["name"] == "jobs")
     assert jobs["available"] is True       # bundled, not yet installed
-    assert "job" in jobs["commands"]
+    assert jobs["commands"] == []
 
 
 def test_jobs_manifest_parses():

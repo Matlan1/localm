@@ -104,8 +104,25 @@ def test_events_without_task_404(app_mgr, monkeypatch):
 #  Happy path: start + stream                                                 #
 # --------------------------------------------------------------------------- #
 
+def _install_voice(mgr):
+    mgr.set_installed_state("voice", True, enable=False)
+    assert mgr.is_installed("voice")
+
+
+def test_install_deps_refuses_a_plugin_that_is_not_installed(app_mgr, monkeypatch):
+    app, mgr = app_mgr
+    started = []
+    monkeypatch.setattr(mgr, "start_dep_install", lambda name: started.append(name))
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/voice/install-deps")
+    assert r.status_code == 409
+    assert "not installed" in r.json()["detail"]
+    assert started == []
+
+
 def test_install_deps_starts_and_streams(app_mgr, monkeypatch):
     app, mgr = app_mgr
+    _install_voice(mgr)
     _fake_install(monkeypatch, ok=True, lines=("resolving...", "installed x"))
     with TestClient(app) as c:
         r = c.post("/api/plugins/voice/install-deps")
@@ -121,6 +138,7 @@ def test_install_deps_starts_and_streams(app_mgr, monkeypatch):
 
 def test_install_deps_failure_streams_error(app_mgr, monkeypatch):
     app, mgr = app_mgr
+    _install_voice(mgr)
     _fake_install(monkeypatch, ok=False, lines=("resolving...", "ERROR: boom"))
     with TestClient(app) as c:
         c.post("/api/plugins/voice/install-deps")
