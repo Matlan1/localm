@@ -1513,7 +1513,7 @@ def test_tag_default_clears_the_pin_and_reinstalls_the_confirmed_build(world):
     r = world.invoke("--backend", "vulkan", "--tag", "default")
     assert r.exit_code == 0, r.output
     assert (f"Back to localm's confirmed build ({PIN}) - the one this release was tested with. "
-            "Re-run setup-llama --force to install it now.") in r.text
+            "Installing it now.") in r.text
     assert world.pin() is None
     assert world.marker() == f"vulkan {PIN}\n"
 

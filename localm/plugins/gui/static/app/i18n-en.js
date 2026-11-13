@@ -2863,7 +2863,7 @@ export const I18N_EN = {
   // ---- Settings > Updates > Inference runtime ----
   "settings.runtime.subHead": "Inference runtime",
   "settings.runtime.help":
-    "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. You always start it - it never re-provisions on its own. A build that fails to load on this machine is never kept: setup-llama walks back to an older one that does.",
+    "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. When localm starts with a runtime that is not the build this release uses and no build is pinned, it updates the runtime first. A build that fails to load on this machine is not kept.",
   "settings.runtime.backendLabel": "Backend",
   "settings.runtime.optKeepBackend": "Keep the installed backend",
   "settings.runtime.optAuto": "auto - detect this machine's GPU",
@@ -2875,7 +2875,7 @@ export const I18N_EN = {
   "settings.runtime.optMetal": "metal - Apple Silicon",
   "settings.runtime.optAmdRocm": "amd-rocm - AMD RX 6000, self-contained",
   "settings.runtime.backendHelp":
-    "Which prebuilt to install. Changing this re-downloads the runtime; nothing is replaced while a model is loaded, and your pick is never swapped silently if it turns out not to load here.",
+    "Which prebuilt to install. Changing this re-downloads the runtime. On Windows it is refused while a model is loaded; on Linux and macOS a loaded model keeps its build until it is loaded again. Your pick is never swapped silently if it turns out not to load here.",
   "settings.runtime.buildLabel": "Build",
   "settings.runtime.tagPlaceholder": "leave blank to keep the current build",
   "settings.runtime.tagHelp":
@@ -2916,7 +2916,7 @@ export const I18N_EN = {
   "settings.runtime.labelInstallRuntime": "Install runtime",
   "settings.runtime.switchTitle": "Switch the inference runtime",
   "settings.runtime.switchBody":
-    "This replaces the installed {installed} runtime with {target}. It cannot run while a model is loaded, and if the new build does not work here localm says so rather than leaving it installed.",
+    "This replaces the installed {installed} runtime with {target}. On Windows it cannot run while a model is loaded. If the new build does not work here, localm says so and does not keep it.",
   "settings.runtime.switchTargetAuto": "whichever backend localm detects for this machine",
   "settings.runtime.switchTargetNamed": "a {wanted} build",
   "settings.runtime.switchConfirm": "Switch",

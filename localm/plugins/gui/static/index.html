@@ -1309,10 +1309,7 @@
                    reads THIS file. Do not add, rename or drop one here alone. -->
               <div class="update-subsection">
                 <h4 class="update-sub-head" data-i18n="settings.runtime.subHead">Inference runtime</h4>
-                <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed
-                backend, or install one on a machine that has none yet. You always start it -
-                it never re-provisions on its own. A build that fails to load on this machine
-                is never kept: setup-llama walks back to an older one that does.</div>
+                <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. When localm starts with a runtime that is not the build this release uses and no build is pinned, it updates the runtime first. A build that fails to load on this machine is not kept.</div>
                 <div id="runtime-choice" class="key-warn" hidden>
                   <span id="runtime-choice-text"></span>
                   <div class="actions">
@@ -1332,9 +1329,7 @@
                   <option value="metal" data-i18n="settings.runtime.optMetal">metal - Apple Silicon</option>
                   <option value="amd-rocm" data-i18n="settings.runtime.optAmdRocm">amd-rocm - AMD RX 6000, self-contained</option>
                 </select>
-                <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the
-                runtime; nothing is replaced while a model is loaded, and your pick is never
-                swapped silently if it turns out not to load here.</div>
+                <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the runtime. On Windows it is refused while a model is loaded; on Linux and macOS a loaded model keeps its build until it is loaded again. Your pick is never swapped silently if it turns out not to load here.</div>
                 <label for="runtime-tag" data-i18n="settings.runtime.buildLabel">Build</label>
                 <input type="text" id="runtime-tag" style="max-width:340px"
                        placeholder="leave blank to keep the current build" data-i18n-placeholder="settings.runtime.tagPlaceholder">
