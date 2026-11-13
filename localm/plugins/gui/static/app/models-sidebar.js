@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { recordGuiError } from "./client-log.js";
-import { $, GIB, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
+import { $, GIB, SHELL_TOKEN, authHeaders, cancelJob, chooseAsync, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, readSSE, streamJob, toast } from "./helpers.js";
 import { applyI18n, t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
@@ -21,14 +21,22 @@ let _statusBusy = false;
 // True while the busy state on the pill was written by refreshModels() itself
 // (the server reported a load in flight that this page did not start).
 let _statusFromPoll = false;
+// A failed load keeps its "load failed" pill through the model re-read that
+// follows it, until the next load or unload starts or the active model changes.
+let _holdLoadFailed = false;
+// The model switchModel() is loading, "" when none; modelCache.loading carries
+// it until the load ends, whatever the polled list says.
+let _switchingTo = "";
 let _loadingPollTimer = null;
 const LOADING_POLL_MS = 2000;
 
-// State renders as a .job-state pill; busy maps to st-running.
-const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
+// State renders as a .job-state pill; busy maps to st-running. "note" is an ok
+// state the pill keeps visible (a chat routed to another instance).
+const STATUS_STATE_CLASS = { ok: "st-ok", note: "st-ok", busy: "st-running", err: "st-error" };
 
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
+  if (state === "busy") _holdLoadFailed = false;
   _statusFromPoll = false;
   const pill = $("status-text");
   // An error is recorded when it newly appears, not on every repeat of it.
@@ -102,7 +110,7 @@ export function renderHwStats(data) {
     // path below is unaffected.
     if (multi) {
       v.devices.forEach((d, i) => {
-        const label = d.index == null ? `GPU${i}` : `GPU${d.index}`;
+        const label = d.index == null ? `GPU ${i}` : `GPU ${d.index}`;
         // Column 1 carries the card's IDENTITY, not a utilisation percent:
         // /api/stats reports gpu.percent as ONE system-wide figure (nvidia-smi,
         // NVIDIA only), which belongs to no single card.
@@ -677,8 +685,27 @@ export function showKeyGate(message) {
   const input = $("key-gate-input");
   if (input) {
     input.value = "";   // HttpOnly key is unreadable; the gate only shows unauthed
+    input.type = "password";
+    const reveal = input.parentNode && input.parentNode.querySelector(".reveal-btn");
+    if (reveal) reveal.textContent = t("keygate.show");
     input.focus();
   }
+}
+
+/** Show *message* as the key gate's error line, or clear it with "". */
+export function setKeyGateError(message) {
+  let line = $("key-gate-error");
+  if (!line) {
+    const input = $("key-gate-input");
+    const anchor = input && (input.closest(".input-reveal") || input);
+    if (!anchor || !anchor.parentNode) return;
+    line = el("div", "key-gate-error");
+    line.id = "key-gate-error";
+    line.setAttribute("role", "alert");
+    anchor.parentNode.insertBefore(line, anchor.nextSibling);
+  }
+  line.textContent = message || "";
+  line.hidden = !message;
 }
 
 // Decide whether the key gate should offer "Install certificate".
@@ -710,36 +737,62 @@ window.updateKeyGateCertStep = updateKeyGateCertStep;
 // cookie (the key never lives in JS) and returns the session CSRF token. Stash
 // the token so a write issued before the reload already has it (the boot
 // re-fetches it via refreshCsrf too), then reload to re-run authenticated.
-export async function loginWithKey(key) {
+//
+// Resolves {ok, status, detail}: status is the HTTP status (0 when the server
+// could not be reached) and detail the server's refusal text ("" when it sent
+// none). Never rejects.
+export async function loginWithKeyResult(key) {
   try {
     const r = await fetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
     });
-    if (r.ok) {
-      try { window.__LOCALM_CSRF__ = (await r.json()).csrf || ""; } catch { /* body optional */ }
-    }
-    return r.ok;
-  } catch { return false; }
+    let body = null;
+    try { body = await r.json(); } catch { /* body optional */ }
+    if (r.ok) window.__LOCALM_CSRF__ = (body && body.csrf) || "";
+    const detail = body && typeof body.detail === "string" ? body.detail : "";
+    return { ok: r.ok, status: r.status, detail };
+  } catch { return { ok: false, status: 0, detail: "" }; }
 }
 
-// Submit the gate: log in with the entered key (trimmed) then reload. An empty
-// entry just reloads (still unauthenticated -> the gate shows again).
+/** True when the server accepted *key* (loginWithKeyResult(key).ok). */
+export async function loginWithKey(key) {
+  return (await loginWithKeyResult(key)).ok;
+}
+
+/** The key gate's error line for a failed loginWithKeyResult *res*. */
+export function keyGateErrorText(res) {
+  if (res.status === 0) return t("keygate.unreachable");
+  if (res.status === 401) return t("keygate.wrongKey");
+  return res.detail || t("keygate.refused", { status: res.status });
+}
+
+// Log in with *key*: on success mark the login and reload into the app; on a
+// failure stay on the gate and show why. Resolves the login result.
+async function _loginFromGate(key) {
+  const res = await loginWithKeyResult(key);
+  if (res.ok) {
+    // Mark a SUCCESSFUL login so a still-401 boot after the reload self-heals a
+    // stale shell instead of looping the gate (AUTH-1b).
+    try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
+    location.reload();
+    return res;
+  }
+  setKeyGateError(keyGateErrorText(res));
+  const input = $("key-gate-input");
+  if (input) { input.focus(); input.select(); }
+  return res;
+}
+
+// Submit the gate: log in with the entered key (trimmed). An empty entry asks
+// for a key and sends nothing. Resolves the login result, or null.
 export function submitKeyGate() {
   const input = $("key-gate-input");
   const key = (input ? input.value : "").trim();
-  if (key) {
-    loginWithKey(key).then((ok) => {
-      // Mark a SUCCESSFUL login so a still-401 boot after the reload self-heals a
-      // stale shell instead of looping the gate (AUTH-1b). A failed login (wrong
-      // key / server down) sets nothing, so the gate just shows again.
-      if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ } }
-      location.reload();
-    });
-  } else {
-    location.reload();
-  }
+  if (!key) { setKeyGateError(t("keygate.enterKey")); return Promise.resolve(null); }
+  setKeyGateError("");
+  return _loginFromGate(key);
 }
 
 // Add a show/hide reveal toggle to a masked API-key input (AUTH-2), like the
@@ -800,10 +853,7 @@ export function handleScannedKey(text) {
   if (typeof text !== "string" || !text.startsWith(prefix)) return false;
   const key = text.slice(prefix.length).trim();
   if (!key) return false;
-  loginWithKey(key).then((ok) => {
-    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ } }
-    location.reload();
-  });
+  _loginFromGate(key);
   return true;
 }
 
@@ -870,6 +920,7 @@ export async function startQrScan() {
     try {
       const value = await decodeFrame();
       if (value && handleScannedKey(value)) { stopQrScan(); return; }
+      if (value && status) status.textContent = t("qr.notPairing");
     } catch { /* transient detect error - keep scanning */ }
     finally { busy = false; }
   }, detector ? 300 : 200);
@@ -1036,8 +1087,9 @@ export async function refreshModels() {
       // No working key (e.g. a network bind, where the loopback key is never
       // auto-seeded). Show the in-page key gate, not window.prompt() - mobile/PWA
       // browsers suppress prompt(), leaving a phone/LAN client on a blank page
-      // (NET-1). The gate stores the key and reloads on submit.
-      showKeyGate(t("models.keyRequired"));
+      // (NET-1). After a first successful read the key had been accepted, so
+      // the gate says the session ended.
+      showKeyGate(t(_modelsEverRefreshed ? "keygate.sessionEnded" : "models.keyRequired"));
       return;
     }
     if (r.status === 403) {
@@ -1049,7 +1101,12 @@ export async function refreshModels() {
       // all that is owed here is a status line that names the real cause. The
       // generic branch below would say "models unavailable (HTTP 403)", which
       // reads as a server fault rather than a page that needs reloading.
-      setStatus("err", t("sidebar.status.pageStale"));
+      // A 403 the auth layer did not mark as a shell-token refusal is a scope
+      // refusal (a key without models:read); a shell refusal on a page that
+      // was served no shell token at all is a server that needs a key.
+      const shellRefused = !!(r.headers && r.headers.get && r.headers.get("X-Localm-Shell-Rejected"));
+      setStatus("err", t(!shellRefused ? "sidebar.status.noModelsScope"
+        : SHELL_TOKEN ? "sidebar.status.pageStale" : "sidebar.status.needsKey"));
       return;
     }
     if (!r.ok) {
@@ -1068,6 +1125,8 @@ export async function refreshModels() {
     modelCache = (data && Array.isArray(data.models))
       ? data
       : { models: [], active: (data && data.active) || "" };
+    if (_switchingTo && !modelCache.loading) modelCache.loading = _switchingTo;
+    if (modelCache.active !== previousActive) _holdLoadFailed = false;
     // A model answered through an accepted peer route stays the selection
     // while the server still holds that route; a cleared route drops it.
     const peerRoute = _peerSelected && data && data.peer_routes
@@ -1145,9 +1204,9 @@ export async function refreshModels() {
         refreshModels();
       }, LOADING_POLL_MS);
     }
-    if (!_statusBusy) {
+    if (!_statusBusy && !_holdLoadFailed) {
       if (peerRoute) {
-        setStatus("ok", t("sidebar.peerRoute.routedStatus", {
+        setStatus("note", t("sidebar.peerRoute.routedStatus", {
           model: _peerSelected, host: peerRoute.host, port: peerRoute.port,
         }));
       } else {
@@ -1186,6 +1245,11 @@ export async function refreshModels() {
     window.dispatchEvent(new CustomEvent("localm:models-refreshed"));
   } catch {
     setStatus("err", t("sidebar.status.serverUnreachable"));
+    // A server that is really gone gets the reconnect overlay, which reloads
+    // the page once the server answers again.
+    if (window.serverReachable && window.onServerUnreachable && !(await window.serverReachable())) {
+      window.onServerUnreachable({ sawDown: true });
+    }
   }
 }
 
@@ -1296,7 +1360,7 @@ async function _maybeRoutePeer(model) {
     return null;
   }
   const data = await r2.json();
-  setStatus("ok", t("sidebar.peerRoute.routedStatus", {
+  setStatus("note", t("sidebar.peerRoute.routedStatus", {
     model, host: offer.peer.host, port: offer.peer.port,
   }));
   _peerSelected = model;
@@ -1419,6 +1483,13 @@ export function confirmLoadText(data) {
 // active model. *select* false leaves this tab's selection as it is: the peer
 // route and modelCache.active are kept, no localm:model-switched is dispatched,
 // and the status line returns to the selected model once modelCache is re-read.
+/** End switchModel()'s own loading mark for *model*. */
+function _endSwitch(model) {
+  if (_switchingTo !== model) return;
+  _switchingTo = "";
+  if (modelCache.loading === model) modelCache.loading = "";
+}
+
 export async function switchModel(model, { local = false, activate = true, select = true } = {}) {
   let data;
   try {
@@ -1426,6 +1497,8 @@ export async function switchModel(model, { local = false, activate = true, selec
     if (routed) return routed;
     if (select) _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
+    _switchingTo = model;
+    modelCache.loading = model;
     let force = false;
     let asChat = false;
     let keepOthers = false;
@@ -1442,6 +1515,7 @@ export async function switchModel(model, { local = false, activate = true, selec
           { key: "unload", label: t("models.switch.unloadForThis", { names }), danger: true },
         ]);
         if (!choice) {
+          _endSwitch(model);
           setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
           _showServedModel();
           refreshModels().then(_showServedModel);
@@ -1460,6 +1534,7 @@ export async function switchModel(model, { local = false, activate = true, selec
         t(notChat ? "models.notChat.confirmLabel"
           : unloadAsk ? "models.switch.unloadAskLabel" : "models.switch.confirmLabel"));
       if (!confirmed) {
+        _endSwitch(model);
         setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
         _showServedModel();
         refreshModels().then(_showServedModel);
@@ -1472,11 +1547,14 @@ export async function switchModel(model, { local = false, activate = true, selec
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
+    _endSwitch(model);
     setStatus("err", t("sidebar.status.loadFailed"));
+    _holdLoadFailed = true;
     _showServedModel();
     refreshModels().then(_showServedModel);
     throw e;
   }
+  _endSwitch(model);
   if (data.status === "superseded" || data.status === "cancelled") return data;
   if (!select) {
     await refreshModels();
