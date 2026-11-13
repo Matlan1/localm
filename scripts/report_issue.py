@@ -743,6 +743,10 @@ def _timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
+#: The start of the line ``--save-only`` ends with, followed by the saved path.
+SAVED_REPORT_PREFIX = "SAVED_REPORT="
+
+
 def send_saved(path: Path, summary: str) -> int:
     """Send the report saved at *path* as it is, titled *summary*: the second
     step of a caller that first had the report saved (no terminal) and then
@@ -789,6 +793,9 @@ def main(argv=None) -> int:
     ap.add_argument("--detail", default="")
     ap.add_argument("--log", default="")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--save-only", action="store_true",
+                    help="save the report and send nothing; the last line of the "
+                         f"output is {SAVED_REPORT_PREFIX}<path>")
     ap.add_argument("--send-saved", default="",
                     help="send the report already saved at this path, without "
                          "building or saving another one")
@@ -841,6 +848,15 @@ def main(argv=None) -> int:
     print()
 
     when = _timestamp()
+
+    if args.save_only:
+        path = save_report(body, when)
+        if path is None:
+            print("  The report could not be saved.")
+            return 1
+        print(f"  The report is saved at {path}.")
+        print(f"{SAVED_REPORT_PREFIX}{path}")
+        return 0
 
     mode, why = network_mode() if url else ("ask", "")
     if mode == "off":

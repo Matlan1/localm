@@ -2006,14 +2006,17 @@ class TestReportProblem:
     """The window offers a bug report when setup could not finish, as the console
     installers do; nothing is sent without a second yes."""
 
-    def _reporter(self, gui):
-        script = gui.ROOT / "scripts" / "report_issue.py"
+    def _reporter(self, gui, *, says_where=True):
+        script = gui.reporter_script()
         script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text("import sys\nprint('REPORTER', ' '.join(sys.argv[1:]))\n",
+        saved = "print('SAVED_REPORT=' + sys.argv[0] + '.md')\n" if says_where else ""
+        script.write_text("import sys\nprint('REPORTER', ' '.join(sys.argv[1:]))\n"
+                          "if '--save-only' in sys.argv:\n    " + (saved or "pass\n"),
                           encoding="utf-8")
+        return str(script) + ".md"
 
-    def test_yes_then_send_runs_the_reporter_twice(self, gui):
-        self._reporter(gui)
+    def test_yes_then_send_sends_the_one_saved_report(self, gui):
+        saved = self._reporter(gui)
         asked, logged = [], []
 
         def confirm(text, default):
@@ -2025,16 +2028,27 @@ class TestReportProblem:
                             "needed)?", gui.spec.default_yes("report-problem"))
         assert "Send it to the maintainer now?" in asked[1][0]
         runs = [line for line in logged if line.startswith("REPORTER")]
-        assert runs == ["REPORTER --summary setup broke --detail uv exited 2",
-                        "REPORTER --summary setup broke --detail uv exited 2 --yes"]
+        assert runs == ["REPORTER --summary setup broke --detail uv exited 2 --save-only",
+                        "REPORTER --summary setup broke --detail uv exited 2 "
+                        f"--send-saved {saved}"]
+        assert not [line for line in logged if line.startswith("SAVED_REPORT=")]
 
     def test_saved_but_not_sent_without_the_second_yes(self, gui):
         self._reporter(gui)
         answers = iter([True, False])
         logged = []
         gui.report_problem("s", "d", lambda t, d: next(answers), logged.append)
-        assert [line for line in logged if "--yes" in line] == []
+        assert [line for line in logged if "--send-saved" in line] == []
         assert len([line for line in logged if line.startswith("REPORTER")]) == 1
+
+    def test_a_reporter_that_does_not_say_where_it_saved_is_not_asked_to_send(self, gui):
+        self._reporter(gui, says_where=False)
+        asked, logged = [], []
+        code = gui.report_problem("s", "d", lambda t, d: asked.append(t) or True,
+                                  logged.append)
+        assert code == 1
+        assert len(asked) == 1
+        assert any("cannot be sent from here" in line for line in logged)
 
     def test_no_runs_nothing(self, gui):
         self._reporter(gui)
@@ -2047,3 +2061,27 @@ class TestReportProblem:
         assert gui.report_problem("s", "d", lambda t, d: asked.append(t) or True,
                                   lambda s: None) is None
         assert asked == []
+
+
+def test_the_problem_report_runs_off_the_window_thread(gui, monkeypatch):
+    import queue
+    import threading
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    threads, done = [], threading.Event()
+
+    def fake_report(summary, detail, confirm, emit):
+        threads.append(threading.current_thread())
+        done.set()
+        return 0
+    monkeypatch.setattr(gui, "report_problem", fake_report)
+    root = build_tk_root(tk.Tk)
+    root.withdraw()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog)
+        wizard.lines = queue.Queue()
+        wizard._start_report("setup broke")
+        assert done.wait(10)
+        assert threads and threads[0] is not threading.main_thread()
+    finally:
+        root.destroy()

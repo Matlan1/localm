@@ -706,21 +706,34 @@ def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None
     raise StopSetup(f"stopped after the runtime failed. Retry with: {retry}")
 
 
+#: The line scripts/report_issue.py --save-only ends with: this, then the saved path.
+_SAVED_REPORT_PREFIX = "SAVED_REPORT="
+
+
+def reporter_script() -> Path:
+    """The standalone problem reporter of this clone, scripts/report_issue.py."""
+    return ROOT / "scripts" / "report_issue.py"
+
+
 def report_problem(summary: str, detail: str, confirm: Callable[[str, bool], bool],
                    emit: Callable[[str], None]) -> Optional[int]:
     """Offer to file a bug report for a setup that could not finish, as the
     console installers do: on yes, scripts/report_issue.py (stdlib only) builds
-    the report and saves it without sending, its output goes to *emit*, and a
-    second question sends it. *confirm(text, default)* asks a yes/no question.
-    Returns the reporter's last exit code, or None when nothing ran (no reporter,
-    or the person declined)."""
-    script = ROOT / "scripts" / "report_issue.py"
+    the report and saves it without sending (``--save-only``), its output goes
+    to *emit*, and a second question sends that saved file as it is
+    (``--send-saved``), so one report is saved. *confirm(text, default)* asks a
+    yes/no question. Runs the reporter in a subprocess and waits for it, so
+    call it off the window thread. Returns the reporter's last exit code, or
+    None when nothing ran (no reporter, or the person declined)."""
+    script = reporter_script()
     if not script.is_file():
         return None
     # SETUP-Q: report-problem
     if not confirm("Report this problem to the maintainer (no GitHub account needed)?",
                    spec.default_yes("report-problem")):
         return None
+
+    saved: list = []
 
     def reporter(*extra: str) -> int:
         try:
@@ -733,16 +746,23 @@ def report_problem(summary: str, detail: str, confirm: Callable[[str, bool], boo
             emit(f"[!] the problem reporter could not run: {e}")
             return 1
         for line in (out.stdout or "").splitlines() + (out.stderr or "").splitlines():
-            emit(line)
+            if line.startswith(_SAVED_REPORT_PREFIX):
+                saved.append(line[len(_SAVED_REPORT_PREFIX):].strip())
+            else:
+                emit(line)
         return out.returncode
 
-    code = reporter()
+    code = reporter("--save-only")
     if code != 0:
         return code
+    if not saved:
+        emit("[!] the problem reporter did not say where it saved the report, so it "
+             "cannot be sent from here.")
+        return 1
     if not confirm("The report above was saved on this computer. Send it to the "
                    "maintainer now?", True):
         return code
-    return reporter("--yes")
+    return reporter("--send-saved", saved[-1])
 
 
 def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
@@ -1883,6 +1903,9 @@ class Wizard:
                 elif kind == "uninstalled":
                     self._finish_uninstall(payload)
                     return
+                elif kind == "reported":
+                    self.action.configure(state="normal")
+                    return
         except queue.Empty:
             pass
         self.root.after(80, self._pump)
@@ -1995,8 +2018,27 @@ class Wizard:
             self.action.configure(text="Close", state="normal",
                                   command=self.root.destroy)
             if self.messagebox is not None:
-                report_problem("localm setup could not finish", str(error),
-                               self._confirm, self._log_line)
+                self._start_report(str(error))
+
+    def _start_report(self, error: str) -> None:
+        """Run report_problem on a worker thread: its questions are asked on the
+        window thread through the queue, its output goes to the log."""
+        self.action.configure(state="disabled")
+        threading.Thread(target=self._report_worker, args=(error,), daemon=True).start()
+        self.root.after(80, self._pump)
+
+    def _confirm_from_worker(self, text: str, default: bool) -> bool:
+        """A yes/no question for a worker thread, asked on the window thread."""
+        return self._ask_from_worker(
+            {"kind": "yesno", "text": text, "default": "y" if default else "n"}) == "y"
+
+    def _report_worker(self, error: str) -> None:
+        try:
+            report_problem("localm setup could not finish", error,
+                           self._confirm_from_worker, self._emit)
+        except Exception as e:                  # never leave the UI hanging
+            self._emit(f"[!] the problem report could not be made: {e}")
+        self.lines.put(("reported", None))
 
     def _launch(self) -> None:
         exe = venv_bin(ROOT) / ("localm.exe" if IS_WINDOWS else "localm")
