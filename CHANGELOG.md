@@ -21,6 +21,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
+- **The coder's `memory_file` project setting now works.** A `memory_file` key in `.localcoder/config.toml` names the project memory file, relative to the project folder; it replaces the default `LOCALCODER.md` and `.localcoder/memory.md` lookup. It must stay inside the project (an absolute path, `..` or a link leading outside is refused with a warning) and takes effect only once the project is trusted; a restricted session cannot change the file.
 
 ### Changed
 - **Every update package states exactly what it changes.** It lists each localm file with its checksum, and each component (the llama.cpp runtime, its CUDA libraries, PyTorch, stable-diffusion.cpp, KoboldCpp, ComfyUI, uv) with its version and the checksum of every platform and backend build. An update replaces only what its package states. A package that is cut off, damaged or does not match its statement, or that the free disk space cannot hold, is refused before anything changes, and a failure while the files are written puts everything back.
