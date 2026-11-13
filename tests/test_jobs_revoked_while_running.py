@@ -135,8 +135,7 @@ def test_the_key_watch_keeps_a_run_when_the_keystore_cannot_be_read(monkeypatch)
     monkeypatch.setattr(runner, "_KEY_WATCH_INTERVAL_S", 0.02)
     monkeypatch.setattr(runner, "_key_watch_running", False)
     monkeypatch.setattr(auth, "key_hash_live_checked", lambda h: None)
-    monkeypatch.setattr(runner, "_creator_refusal",
-                        lambda job: pytest.fail("no verdict without a keystore read"))
+    monkeypatch.setattr(runner, "_creator_refusal", lambda job: "key not found")
     live = runner._register_live_run(_job())
     try:
         time.sleep(0.2)
