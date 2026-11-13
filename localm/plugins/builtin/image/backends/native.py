@@ -344,7 +344,7 @@ def _load_init_image(src, width: Optional[int], height: Optional[int],
     with _open_image(src) as im:
         im = _upright(im).convert("RGB")
         requested = width is not None and height is not None
-        if not requested:
+        if width is None or height is None:
             width, height = fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
             note = sampling.resize_note((im.width, im.height), (width, height), "input image")

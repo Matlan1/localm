@@ -378,7 +378,7 @@ def unsupported_music(reg: Optional[dict] = None) -> list:
             continue
         info = families.music_entry(entry)
         version = info.detail.get("acestep") if info is not None else None
-        reason = {"v1": ACESTEP_V1_REASON, "1.5": ACESTEP_15_SAFETENSORS_REASON}.get(version)
+        reason = {"v1": ACESTEP_V1_REASON, "1.5": ACESTEP_15_SAFETENSORS_REASON}.get(str(version))
         if reason:
             out.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
                         "reason": reason})
