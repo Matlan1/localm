@@ -291,8 +291,10 @@ class Host(Protocol):
         Hooks are transforms, not controls: a hook that raises is skipped, and
         only the ``/v1/chat/completions`` and ``/v1/completions`` handlers run
         them (not the ``localm run`` REPL, a turn forwarded to a peer, jobs, the
-        MCP chat tool, the coder's own engine calls, background generation or
-        the Ollama-compatible routes). Do not rely on a hook to enforce a
+        MCP chat tool, the coder's own engine calls or background generation).
+        The routes that answer through the chat handler (``/v1/messages``,
+        ``/v1/responses``, Ollama ``/api/chat`` and ``/api/generate``) run
+        them too. Do not rely on a hook to enforce a
         privacy or security rule.
 
         Hooks see scrubbed content text, not model control markers. In a

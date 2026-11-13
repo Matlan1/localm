@@ -198,8 +198,6 @@ def _get_status(scheme: str, port: int, timeout: float, dial: str,
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
-    except FileNotFoundError:
-        verify = False
     except Exception as e:
         logger.debug("gpu_registry: could not determine TLS verification for %s: %s",
                      url, e)
@@ -420,8 +418,6 @@ def _post_json(url: str, body: dict, timeout: float):
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
-    except FileNotFoundError:
-        verify = False
     except Exception as e:
         logger.debug("gpu_registry: could not determine TLS verification for %s: %s",
                      url, e)
