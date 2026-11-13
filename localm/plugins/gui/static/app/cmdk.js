@@ -128,8 +128,10 @@ document.addEventListener("keydown", (e) => {
 });
 
 // Trigger the browser's native unsaved-changes prompt on tab close or reload
-// while Settings has unsaved edits. An empty returnValue triggers it.
+// while Settings has unsaved edits. An empty returnValue triggers it. A reload
+// the person already confirmed in reloadApp's in-page dialog is not asked again.
 window.addEventListener("beforeunload", (e) => {
+  if (window.__localmUnloadConfirmed) return;
   if (window.settingsDirty && window.settingsDirty()) {
     e.preventDefault();
     e.returnValue = "";

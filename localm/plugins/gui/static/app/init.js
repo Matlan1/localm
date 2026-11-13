@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken, toast } from "./helpers.js";
+import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
 import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
@@ -59,10 +59,22 @@ window.fetch = async function (input, init) {
     // routes/session.py returns csrf="" while no key is configured, so
     // authHeaders() sends the shell-token bearer instead. That left the one
     // credential open mode actually uses with no recovery path of any kind.
-    else if (res.status === 403 && sentShellToken(hdrs)) {
+    else if (res.status === 403 && _shellTokenRejectedBy(res)
+             && (sentShellToken(hdrs) || sentPreviousShellToken(hdrs))) {
       const url = typeof input === "string" ? input : (input && input.url) || "";
-      if ((url.startsWith("/") || url.startsWith(location.origin)) && _shellTokenRejectedBy(res)) {
-        onShellTokenRejected();
+      if (url.startsWith("/") || url.startsWith(location.origin)) {
+        const sentToken = String(hdrs instanceof Headers ? hdrs.get("Authorization")
+          : hdrs["Authorization"]).slice(7);
+        const fresh = await renewShellToken(sentToken);
+        if (!fresh) {
+          onShellTokenRejected();
+        } else if (typeof input === "string" && !(typeof ReadableStream !== "undefined"
+                                                   && init.body instanceof ReadableStream)) {
+          const h2 = hdrs instanceof Headers ? new Headers(hdrs) : { ...hdrs };
+          if (h2 instanceof Headers) h2.set("Authorization", "Bearer " + fresh);
+          else h2["Authorization"] = "Bearer " + fresh;
+          return await _rawFetch(input, { ...init, headers: h2 });
+        }
       }
     }
   } catch { /* fall through with the original response */ }
@@ -198,8 +210,7 @@ export async function resetClientState(note, button) {
   };
   if (out.ok) {
     await _clearClientSession();
-    location.reload();
-    return true;
+    return await reloadApp();
   }
   if (out.unreachable) { say(t("reconnect.resetUnreachable")); return false; }
   if (!out.cookieCleared) {
@@ -210,7 +221,7 @@ export async function resetClientState(note, button) {
   say(t("reconnect.resetServerKept", { reason: out.warnings.join("; ") }));
   if (button) {
     button.textContent = t("reconnect.reload");
-    button.onclick = () => location.reload();
+    button.onclick = () => reloadApp();
   }
   return false;
 }
@@ -256,7 +267,7 @@ export function showShellStaleOverlay() {
     panel.appendChild(el("div", "reconnect-msg", t("reconnect.stalePage")));
     const again = el("button", "reconnect-reset", t("reconnect.reload"));
     again.type = "button";
-    again.onclick = () => location.reload();
+    again.onclick = () => reloadApp();
     panel.appendChild(again);
     ov.appendChild(panel);
     document.body.appendChild(ov);
@@ -264,6 +275,69 @@ export function showShellStaleOverlay() {
   ov.style.display = "flex";
 }
 window.showShellStaleOverlay = showShellStaleOverlay;
+
+/** Reload the page. While Settings holds unsaved edits it first asks in the
+ *  in-page dialog (the reconnect overlays are hidden for it): the page reloads
+ *  only when the person chooses to, and the browser's own leave prompt is not
+ *  shown for that reload. Resolves true when the reload starts, false when the
+ *  person chose to stay. Every reload this page starts itself goes through
+ *  here. */
+export async function reloadApp() {
+  if (window.settingsDirty && window.settingsDirty()) {
+    for (const id of ["reconnect-overlay", "shell-stale-overlay"]) {
+      const ov = $(id);
+      if (ov) ov.style.display = "none";
+    }
+    const go = await confirmDangerAsync(t("nav.leaveSettings.title"),
+      t("reconnect.reloadUnsaved"), t("reconnect.reloadDiscard"));
+    if (!go) return false;
+    window.__localmUnloadConfirmed = true;
+  }
+  location.reload();
+  return true;
+}
+window.reloadApp = reloadApp;
+
+// Matches the shell-token snippet the server writes into the page shell.
+const _SHELL_TOKEN_RE = /window\.__LOCALM_SHELL_TOKEN__=("(?:[^"\\]|\\.)*")/;
+
+/** Read the open-mode shell token from a fresh copy of the page shell
+ *  (GET / with cache "no-store", which the service worker passes to the
+ *  network). Resolves the token, or "" when the server did not answer, the
+ *  answer was not ok, or it carried no token. Never rejects. */
+async function _readShellToken() {
+  try {
+    const r = await _rawFetch("/", { cache: "no-store", credentials: "same-origin" });
+    if (!r.ok) return "";
+    const m = _SHELL_TOKEN_RE.exec(await r.text());
+    return m ? String(JSON.parse(m[1])) : "";
+  } catch {
+    return "";
+  }
+}
+
+// Refused shell token -> the promise of the token read after that refusal.
+const _shellRenewals = new Map();
+
+/** The live open-mode shell token after the server refused *sent*.
+ *  When *sent* is not the token this page now holds (an earlier one), the
+ *  current token is the answer and nothing is read. Otherwise the page shell is
+ *  read once per refused token, however many requests were refused with it, and
+ *  the token it carries becomes the one authHeaders() sends. Resolves the new
+ *  token, or "" when no token different from *sent* could be read. Never
+ *  rejects. */
+export function renewShellToken(sent) {
+  if (sent && SHELL_TOKEN && sent !== SHELL_TOKEN) return Promise.resolve(SHELL_TOKEN);
+  if (!_shellRenewals.has(sent)) {
+    _shellRenewals.set(sent, _readShellToken().then((tok) => {
+      if (!tok || tok === sent) return "";
+      setShellToken(tok);
+      return tok;
+    }));
+  }
+  return _shellRenewals.get(sent);
+}
+window.renewShellToken = renewShellToken;
 
 export let _shellRecoveryStarted = false;
 export async function onShellTokenRejected() {
@@ -281,7 +355,7 @@ export async function onShellTokenRejected() {
   if (!(await serverReachable())) { onServerUnreachable({ sawDown: true }); return; }
   try { sessionStorage.setItem("localm.shellReset", "1"); } catch { /* ignore */ }
   await resetServiceWorkerAndCaches();
-  location.reload();
+  await reloadApp();
 }
 window.onShellTokenRejected = onShellTokenRejected;
 
@@ -315,7 +389,7 @@ export function showReconnectOverlay(mode = "reconnecting") {
       const again = el("button", "reconnect-reset", t("reconnect.reload"));
       again.type = "button";
       again.onclick = async () => {
-        if (await serverReachable()) location.reload();
+        if (await serverReachable()) reloadApp();
         else note.textContent = t("reconnect.stillDown");
       };
       panel.appendChild(again);
@@ -446,17 +520,26 @@ export function onServerUnreachable(opts) {
       }
       clearInterval(_reconnectTimer);
       _reconnectTimer = null;
-      location.reload();
+      _serverBack();
       return;
     }
     if (!(await serverReachable())) { downSeen = true; return; }   // still down - keep waiting
     if (!downSeen && ++upPolls < _UP_POLLS_WITHOUT_DOWN) return;    // may be the OLD process
     clearInterval(_reconnectTimer);
     _reconnectTimer = null;
-    location.reload();                         // back up -> clean boot handles 200/401
+    _serverBack();                             // back up -> clean boot handles 200/401
   }, 3000);
 }
 window.onServerUnreachable = onServerUnreachable;
+
+/** The server answers again after the reconnect overlay: reload through
+ *  reloadApp. When the person chooses to stay (unsaved Settings edits), the
+ *  page is shown again, with a renewed shell token in open mode. */
+async function _serverBack() {
+  if (await reloadApp()) return;
+  if (SHELL_TOKEN) await renewShellToken(SHELL_TOKEN);
+  unlockUI();
+}
 
 /** Grey the chat microphone as "voice plugin not installed". */
 function markVoiceNotInstalled() {
@@ -541,7 +624,7 @@ export async function bootAuthProbe() {
       sessionStorage.removeItem("localm.loginOk");
       sessionStorage.setItem("localm.swReset", "1");   // one-shot guard - no loop
       await resetServiceWorkerAndCaches();
-      location.reload();
+      await reloadApp();
       return false;
     }
     lockUI();

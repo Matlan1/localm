@@ -1826,8 +1826,10 @@ if ($("server-shutdown")) {
                                 { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
           toast(t("settings.server.shuttingDownToast"));
-          // Show the reconnect overlay while the server goes away.
-          if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+          // Show the shut down overlay while the server goes away.
+          if (window.onServerUnreachable) {
+            setTimeout(() => onServerUnreachable({ reason: "shutdown" }), 800);
+          }
         } catch (e) { toast(t("settings.server.shutdownFailed", { message: e.message }), true); }
       });
   };

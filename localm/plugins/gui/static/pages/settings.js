@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
+import { signOutSession } from "../app/init.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
@@ -1257,13 +1258,14 @@ if (guiKeySave) guiKeySave.onclick = async () => {
     setTimeout(() => location.reload(), 600);
     return;
   }
-  // Empty -> sign out (clear the session cookie).
-  let signedOut = false;
-  try {
-    const r = await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
-    signedOut = r.ok;
-  } catch { /* fetch failed */ }
-  if (!signedOut) { toast(t("settings.signIn.signOutFailed"), true); return; }
+  // Empty -> sign out on the server (which clears the session cookie).
+  const out = await signOutSession();
+  if (!out.ok) {
+    toast(out.unreachable ? t("reconnect.resetUnreachable")
+      : out.cookieCleared ? t("reconnect.resetServerKept", { reason: out.warnings.join("; ") })
+      : t("reconnect.resetFailed", { reason: out.detail || "HTTP " + out.status }), true);
+    return;
+  }
   toast(t("settings.signIn.signedOut"));
   setTimeout(() => location.reload(), 600);
 };

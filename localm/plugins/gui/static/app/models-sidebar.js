@@ -1222,6 +1222,7 @@ export async function refreshModels() {
     // its click handler well-defined.
     if (sidebarUnloadBtn) sidebarUnloadBtn.hidden = !modelCache.active || !!peerRoute;
     renderModelSplitLine(data.active_gpu_split);
+    refreshMediaRuntimes();
     // The active model can change from OUTSIDE this tab too - another tab,
     // another device, the CLI, an MCP client - while Settings is already open. A
     // same-tab switch refreshes the Live Tuning VRAM estimate itself (switchModel's
@@ -1276,6 +1277,82 @@ export function renderModelSplitLine(split) {
     : split.source === "equal" ? "sidebar.split.lineEqual" : "sidebar.split.line";
   line.textContent = t(key, { parts });
   line.hidden = false;
+}
+
+// Set once a failed read of the media runtimes was logged.
+let _mediaReadWarned = false;
+
+/** Read GET /api/media/runtimes and show the native media runtimes this server
+ *  holds loaded (see renderMediaRuntimes). A server without the route (404)
+ *  shows none. Any other failed read keeps the list as it was and logs one
+ *  console warning per page. Never throws. */
+export async function refreshMediaRuntimes() {
+  if (!document.getElementById("media-runtimes")) return;
+  let rows;
+  try {
+    const r = await fetch("/api/media/runtimes", { headers: authHeaders() });
+    if (r.status === 404) rows = [];
+    else if (!r.ok) throw new Error("HTTP " + r.status);
+    else {
+      const d = await r.json();
+      rows = d && Array.isArray(d.runtimes) ? d.runtimes : [];
+    }
+  } catch (e) {
+    if (!_mediaReadWarned) console.warn("could not read the media runtimes:", e);
+    _mediaReadWarned = true;
+    return;
+  }
+  renderMediaRuntimes(rows);
+}
+
+/** List *rows* (the runtimes of GET /api/media/runtimes: name, state "busy",
+ *  "idle" or "unknown", idle_unload_seconds) under the model status, one line
+ *  each, plus one Unload button while any of them is idle. Hidden when *rows*
+ *  is empty. */
+export function renderMediaRuntimes(rows) {
+  const box = document.getElementById("media-runtimes");
+  if (!box) return;
+  box.replaceChildren();
+  for (const row of rows) {
+    const name = String((row && row.name) || "");
+    const secs = Number(row && row.idle_unload_seconds);
+    const state = row && row.state;
+    const key = state === "busy" ? "sidebar.media.busy"
+      : state !== "idle" ? "sidebar.media.loaded"
+      : secs > 0 ? "sidebar.media.idle" : "sidebar.media.idleNoTimer";
+    box.appendChild(el("div", "media-runtime-row",
+      t(key, { name, minutes: Math.max(1, Math.round(secs / 60)) })));
+  }
+  if (rows.some((row) => row && row.state === "idle")) {
+    const btn = el("button", "btn-secondary", t("sidebar.media.unload"));
+    btn.type = "button";
+    btn.title = t("sidebar.media.unloadTitle");
+    btn.onclick = () => unloadMediaRuntimes(btn);
+    box.appendChild(btn);
+  }
+  box.hidden = rows.length === 0;
+}
+
+/** POST /api/media/runtimes/unload and say per runtime what happened (unloaded,
+ *  kept running for a job, or failed), then read the list again. *btn* is
+ *  disabled while the request runs. */
+export async function unloadMediaRuntimes(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/media/runtimes/unload", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText || "HTTP " + r.status);
+    for (const o of Array.isArray(d.outcomes) ? d.outcomes : []) {
+      if (o.outcome === "stopped") toast(t("sidebar.media.stopped", { name: o.name }));
+      else if (o.outcome === "busy") toast(t("sidebar.media.stillBusy", { name: o.name }));
+      else toast(t("sidebar.media.stopFailed", { name: o.name }), true);
+    }
+  } catch (e) {
+    toast(t("sidebar.media.unloadFailed", { message: e.message }), true);
+  } finally {
+    if (btn) btn.disabled = false;
+    await refreshMediaRuntimes();
+  }
 }
 
 // Ask a live sibling instance to be routed to instead of loading a local

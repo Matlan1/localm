@@ -9,7 +9,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { loadApp, runScript } from "./harness.mjs";
+import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const APP = join(ROOT, "localm", "plugins", "gui", "static", "app");
@@ -295,4 +295,97 @@ test("an accepted route is kept for a reload of the tab and restored while the s
   runScript(window, "chat.serverPrivacy = true;");
   await window.refreshModels();
   assert.equal(window.sessionStorage.getItem("localm.peerSelected"), null, "not kept in privacy mode");
+});
+
+function mediaSetup(runtimes, unload) {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ url: u, method: opts.method || "GET" });
+    if (u === "/api/media/runtimes") return typeof runtimes === "function" ? runtimes() : json({ runtimes });
+    if (u === "/api/media/runtimes/unload") return unload();
+    if (u.startsWith("/api/models")) return json({ models: [], active: "" });
+    return json({});
+  };
+  const { window } = loadApp({ fetchImpl });
+  return { window, calls };
+}
+
+test("the sidebar lists the media runtimes a job left loaded and unloads the idle ones", async () => {
+  let rows = [
+    { name: "stable-diffusion.cpp", state: "idle", idle_unload_seconds: 600 },
+    { name: "KoboldCpp", state: "busy", idle_unload_seconds: 600 },
+  ];
+  const { window, calls } = mediaSetup(() => json({ runtimes: rows }), () => {
+    rows = [rows[1]];
+    return json({ outcomes: [{ name: "stable-diffusion.cpp", outcome: "stopped" },
+                             { name: "KoboldCpp", outcome: "busy" }] });
+  });
+  await tick();
+  await window.refreshMediaRuntimes();
+  const box = window.document.getElementById("media-runtimes");
+  assert.equal(box.hidden, false, "loaded runtimes are shown");
+  assert.match(box.textContent, /stable-diffusion\.cpp: loaded, not in use \(unloads itself after 10 min\)/);
+  assert.match(box.textContent, /KoboldCpp: loaded, a job is using it/);
+  const btn = box.querySelector("button");
+  assert.ok(btn, "an idle runtime offers Unload");
+  await window.unloadMediaRuntimes(btn);
+  assert.equal(calls.filter((c) => c.url === "/api/media/runtimes/unload" && c.method === "POST").length, 1);
+  assert.match(window.document.getElementById("toast").textContent, /KoboldCpp is in use by a job and keeps running/);
+  assert.doesNotMatch(box.textContent, /stable-diffusion/, "the list is read again after the unload");
+  assert.equal(box.querySelector("button"), null, "no Unload while nothing is idle");
+});
+
+test("a failed media runtime unload is said, and a server without the route shows no rows", async () => {
+  const { window } = mediaSetup(() => json({ detail: "Not Found" }, 404),
+    () => json({ detail: "Stopping the media runtimes timed out" }, 504));
+  await tick();
+  window.renderMediaRuntimes([{ name: "KoboldCpp", state: "idle", idle_unload_seconds: 600 }]);
+  const box = window.document.getElementById("media-runtimes");
+  await window.unloadMediaRuntimes(box.querySelector("button"));
+  assert.match(window.document.getElementById("toast").textContent,
+    /Could not unload the media runtimes: Stopping the media runtimes timed out/);
+  assert.equal(box.hidden, true, "a 404 from an older server shows no rows");
+});
+
+test("Shut down in Settings shows the shut down overlay, not the reconnecting one", async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u === "/v1/server/shutdown") return json({ status: "shutting_down" });
+    if (u.startsWith("/api/models")) return json({ models: [], active: "" });
+    return json({});
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  await tick();
+  window.document.getElementById("server-shutdown").click();
+  window.document.getElementById("modal-body").querySelector(".btn-danger").click();
+  const ov = await (async () => {
+    for (let i = 0; i < 100; i++) {
+      const o = window.document.getElementById("reconnect-overlay");
+      if (o) return o;
+      await tick(1);
+    }
+    return null;
+  })();
+  assert.ok(ov, "an overlay is shown after the shut down");
+  assert.match(ov.textContent, /was shut down/);
+  assert.doesNotMatch(ov.textContent, /re-enter key/i);
+});
+
+test("a blank key in Settings signs out on the server and says when the server kept the session", async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u === "/api/session") return json({ authed: true, csrf: "tok-1" });
+    if (u === "/api/session/logout") return json({ authed: false, warnings: ["session store not written"] });
+    if (u.startsWith("/api/models")) return json({ models: [], active: "" });
+    return json({});
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  await tick();
+  window.document.getElementById("gui-api-key").value = "";
+  window.document.getElementById("gui-key-save").click();
+  await tick(3);
+  const msg = window.document.getElementById("toast").textContent;
+  assert.match(msg, /could not end the session on its side: session store not written/);
+  assert.doesNotMatch(msg, /Signed out/);
 });

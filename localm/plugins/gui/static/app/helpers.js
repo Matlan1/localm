@@ -131,7 +131,20 @@ export function reconcileInstanceId(serverInstanceId) {
 // rides the HttpOnly session cookie (opaque session id, auto-sent same-origin)
 // plus a session-DERIVED CSRF token authHeaders() reads from window.__LOCALM_CSRF__
 // (fetched from GET /api/session).
-export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+export let SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+
+// Shell tokens this page sent before the current one.
+const _previousShellTokens = new Set();
+
+/** Make *token* the open-mode shell token authHeaders() sends. The token it
+ *  replaces is remembered (see sentPreviousShellToken). An empty *token*, or
+ *  the current one, changes nothing. */
+export function setShellToken(token) {
+  if (!token || token === SHELL_TOKEN) return;
+  if (SHELL_TOKEN) _previousShellTokens.add(SHELL_TOKEN);
+  SHELL_TOKEN = token;
+  window.__LOCALM_SHELL_TOKEN__ = token;
+}
 
 export function readCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
@@ -186,6 +199,17 @@ export function sentShellToken(headers) {
     ? headers.get("Authorization")
     : (typeof headers === "object" ? headers["Authorization"] : null);
   return auth === "Bearer " + SHELL_TOKEN;
+}
+
+/** True when *headers* carries, as its bearer, a shell token this page used
+ *  before setShellToken() replaced it. */
+export function sentPreviousShellToken(headers) {
+  if (!headers || !_previousShellTokens.size) return false;
+  const auth = headers instanceof Headers
+    ? headers.get("Authorization")
+    : (typeof headers === "object" ? headers["Authorization"] : null);
+  return typeof auth === "string" && auth.startsWith("Bearer ")
+    && _previousShellTokens.has(auth.slice(7));
 }
 
 // Fetch the CSRF token for the current session and stash it for authHeaders().
