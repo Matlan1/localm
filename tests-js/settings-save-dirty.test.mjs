@@ -57,6 +57,13 @@ test("R09: Ctrl+S on the Settings page saves the active section", async () => {
   makeSettingsActive(win);
   assert.ok(win.document.querySelector("#settings-content .settings-section.active"),
     "a settings section is active");
+  // A save sends only edited values, so give every section an edit.
+  const nctx = win.document.querySelector('input[data-key="n_ctx"]');
+  nctx.value = "8192";
+  nctx.dispatchEvent(new win.Event("input", { bubbles: true }));
+  const auth = win.document.querySelector('input[data-key="require_auth"]');
+  auth.checked = true;
+  auth.dispatchEvent(new win.Event("change", { bubbles: true }));
   ctrlS(win);
   await drain();
   assert.ok(patches.length >= 1, "Ctrl+S saved the active section (a PATCH was sent)");
@@ -73,7 +80,7 @@ test("R09: Ctrl+S off the Settings page does not save", async () => {
   assert.equal(patches.length, 0, "Ctrl+S on a non-Settings view saves nothing");
 });
 
-test("R10: editing a setting marks the page dirty; a fresh render is clean", async () => {
+test("R10: editing a setting marks the page dirty; a re-render keeps the unsaved edit", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
   assert.equal(win.settingsDirty(), false, "clean right after render");
@@ -82,7 +89,10 @@ test("R10: editing a setting marks the page dirty; a fresh render is clean", asy
   nctx.dispatchEvent(new win.Event("input", { bubbles: true }));
   assert.equal(win.settingsDirty(), true, "editing a control marks it dirty");
   await render(win);
-  assert.equal(win.settingsDirty(), false, "a re-render resets the baseline");
+  await drain();
+  assert.equal(win.document.querySelector('input[data-key="n_ctx"]').value, "8192",
+    "the redrawn control still holds the unsaved value");
+  assert.equal(win.settingsDirty(), true, "and the page still has an unsaved edit");
 });
 
 test("R10: leaving Settings with unsaved edits warns; declining stays put", async () => {
