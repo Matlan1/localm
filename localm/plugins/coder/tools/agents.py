@@ -596,6 +596,7 @@ def tool_spawn_agent_background(
     # inheriting the terminal prompt (_confirm_tool) is specifically forbidden
     # here. An explicit confirm_handler (GUI/web) is a real async channel and is
     # fine; auto_approve means the user already said yes to everything.
+    explicit_handler = getattr(_parent_agent, "confirm_handler", None)
     launch_refusal = background_spawn_refusal(_parent_agent)
     if launch_refusal is not None:
         return ToolResult.error(launch_refusal)
