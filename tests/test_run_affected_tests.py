@@ -614,6 +614,41 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
         "the gate runs the selection only, never the whole suite")
 
 
+def test_the_windows_gate_runs_the_linux_gate_selection_on_windows():
+    ci = _load_workflow(_CI)
+    linux = ci["jobs"]["python-pr-gate"]
+    win = ci["jobs"]["python-pr-gate-windows"]
+    assert win["runs-on"] == "windows-latest"
+    assert _norm(win["if"]) == _norm(linux["if"]), "the same pull requests as the Linux gate"
+    assert win["timeout-minutes"] == linux["timeout-minutes"]
+    assert "strategy" not in win
+    checkout = win["steps"][0]
+    assert checkout["uses"] == linux["steps"][0]["uses"]
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
+
+    def by_name(job, name):
+        hits = [s for s in job["steps"] if s.get("name") == name]
+        assert len(hits) == 1, f"{name!r} must appear exactly once in {job.get('name')}"
+        return hits[0]
+    for name in ("Create the project venv", "Install", "Affected tests"):
+        assert by_name(win, name)["run"] == by_name(linux, name)["run"], (
+            f"{name!r} must stay identical to the Linux gate's step")
+    shard = ci["jobs"]["test-shard"]
+    shard_path = by_name(shard, "Put the venv on PATH (Windows)")
+    win_path = by_name(win, "Put the venv on PATH")
+    assert (win_path["run"], win_path.get("shell")) == (shard_path["run"], shard_path.get("shell")), (
+        "the venv goes on PATH the way the Windows test shard puts it there")
+    assert by_name(win, "Install").get("shell") == by_name(shard, "Install").get("shell")
+    assert "defaults" not in win and "defaults" not in shard
+    assert by_name(win, "Affected tests").get("shell") is None, (
+        "pytest runs under the runner's default shell, as in the Windows test shard")
+    assert by_name(shard, "Tests (this shard)").get("shell") is None
+    for step in win["steps"]:
+        assert not step.get("continue-on-error"), f"{step.get('name')} must be able to fail the job"
+        assert step.get("if") is None, f"{step.get('name')} must run unconditionally"
+
+
 def test_the_full_ci_matrix_is_left_in_place_as_its_own_gate():
     ci = _load_workflow(_CI)
     assert "full-ci" in ci["jobs"]["test"]["if"]

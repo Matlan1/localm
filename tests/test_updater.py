@@ -1416,3 +1416,34 @@ def test_apply_records_one_update_applied_event(tmp_path, monkeypatch, sig_env):
     (ev,) = [json.loads(x) for x in lines]
     assert ev["kind"] == "update_applied"
     assert (ev["version_from"], ev["version_to"]) == ("0.1.0", "0.2.0")
+
+
+def test_apply_refuses_a_build_that_changes_on_disk_after_the_signature_check(
+        tmp_path, monkeypatch, sig_env):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    op, sig = _signed_build("0.2.0", ["click"])
+    written = {}
+
+    def _opener(url, headers, timeout, dest):
+        op(url, headers, timeout, dest)
+        written["dest"] = dest
+
+    real_verify = updater.verify_signature
+
+    def _verify_then_tamper(data, signature):
+        result = real_verify(data, signature)
+        written["dest"].write_bytes(b"not the signed bytes")
+        return result
+
+    monkeypatch.setattr(updater, "verify_signature", _verify_then_tamper)
+    extracted = []
+    from localm import _apply_update as au
+    monkeypatch.setattr(au, "extract",
+                        lambda *a, **k: extracted.append(a) or None)
+    with pytest.raises(LocalmError) as e:
+        updater.apply(5, installed=inst, signature=sig, download_opener=_opener)
+    assert "changed after its signature was checked" in str(e.value)
+    assert extracted == []
+    assert (inst / "VERSION").read_text().strip() != "0.2.0"

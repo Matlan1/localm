@@ -1214,8 +1214,8 @@ export function renderModelSplitLine(split) {
 // copy: shows a modal naming the peer and resolves what the user chose.
 // A peer that needs its own API key gets a password input and resolves the
 // entered key; a peer in open mode needs none, so the modal only asks, and
-// resolves "" when accepted. Resolves null on Cancel/Escape/backdrop
-// dismiss. Modeled on promptText() in helpers.js.
+// resolves "" when accepted. Resolves null on Cancel, Escape or the x
+// (dismiss). Modeled on promptText() in helpers.js.
 function _offerPeerRoute(model, peer) {
   const needsKey = peer.requires_key !== false;
   return new Promise((resolve) => {
@@ -1258,7 +1258,7 @@ function _offerPeerRoute(model, peer) {
       else ok.onkeydown = onKey;
     });
     (input || document.querySelector("#modal .actions button:last-child"))?.focus();
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // Dismissing via the shared modal chrome (x / Escape) sets display:none;
     // poll for it and treat as cancel - same pattern promptText() uses.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(null);

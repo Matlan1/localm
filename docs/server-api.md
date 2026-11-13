@@ -99,6 +99,8 @@ While a streaming reply is being prepared, localm reports what it is doing in
 chunks whose `delta` carries `status` (English text) and `status_code` (a
 stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
+`processing_progress` (a long prompt is still being read; its delta also carries
+`status_args` with `done` and `total`, the prompt tokens read so far and in all),
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
 `audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
@@ -1077,7 +1079,7 @@ and every row it returns carries that `error` instead of a state.
 Scope: `admin`. Off by default.
 
 Prometheus text-format metrics. The route does not exist until you turn on the
-`metrics_enabled` setting (Settings > Server, or `localm config metrics_enabled
+`metrics_enabled` setting (Settings > Server & network, or `localm config metrics_enabled
 true`; `LOCALM_METRICS=1` does the same for one run) and restart. With it off
 nothing is collected and `/metrics` answers 404.
 
@@ -1374,7 +1376,7 @@ namespace.
 | Route | Purpose |
 |---|---|
 | `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. Returns `{"text", "writable", "items": [{"id", "text", "importance", "source", "kind", "uses", "updated"}], "corrections": [{"id", "action", "proposed_text", "target_id", "target_text", "confidence", "created", "target_updated"}], "path", "can_download_embedder", "embedder_model"}`; `corrections` is empty when writes are not allowed. |
-| `PUT /api/memory` | Bulk edit. A line matching an existing fact keeps that record; new lines are added; omitted lines are deleted. Body `{"text": ...}`; returns `{"status": "saved", "count"}`. `413` past the 256-record or 64k-char cap. |
+| `PUT /api/memory` | Bulk edit. Body `{"text", "base"}`: `text` is the edited list, `base` the `text` that `GET /api/memory` returned when the edit started. A line matching an existing fact keeps that record; new lines are added; a fact in `base` that is no longer in `text` is deleted; a fact added since `base` was read is kept. Returns `{"status": "saved", "count", "kept_newer"}` (`kept_newer`: facts added since `base` that were kept). `base` is required: without it the request is refused with `422` (`"loc": ["body", "base"], "msg": "Field required"`) and nothing changes. `413` past the 256-record or 64k-char cap. |
 | `POST /api/memory/append` | Add one fact. Body `{"text": ...}`; returns `{"status": "appended", "id"}`; `400` for empty text, `413` at the record cap. |
 | `PATCH /api/memory/{id}` | Edit one record's text or importance. Returns `{"status": "saved", "item"}`; `404` for an unknown id. |
 | `DELETE /api/memory/{id}` | Delete one record. Returns `{"status", "id"}` with `status` `deleted` or `absent`; an unknown id is a `200` with `absent`. |

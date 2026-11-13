@@ -7,6 +7,14 @@ Looks for memory files in cwd (in priority order):
   2. .localcoder/memory.md (injected only once the project is trusted,
      hook_trust.py)
 
+A ``memory_file`` setting in the project config (project_config.py) replaces
+that order with one file, named relative to the project root (the folder that
+holds ``.localcoder``). It takes effect only once the project is trusted, and a
+path that is absolute, contains ``..``, or resolves (through a symlink or
+junction) outside the project root, or names a file under ``.git`` or under
+``.localcoder`` other than ``memory.md``, is refused with a warning and the
+default order is used.
+
 Both files use free-form markdown. The content is injected into the system
 prompt under a "## Project Memory" heading so the LLM always sees it, capped at
 _MAX_MEMORY_CHARS so it cannot crowd out the repo map and the conversation.
@@ -106,8 +114,68 @@ def _overflow_warning(path: Optional[Path], raw: str, limit: int,
     )
 
 
+def configured_memory_path(cwd: Path) -> tuple:
+    """
+    The project config's ``memory_file`` for *cwd*, as ``(path, problem)``.
+
+    *path* is the file resolved and confined under the project root
+    (pathsafe.confined_under), whether or not it exists; None when the config
+    sets no ``memory_file``, cannot be read, or the value is refused. *problem*
+    is a one-line reason when the value is refused, else "". Trust is not
+    consulted: see :func:`active_memory_path`.
+    """
+    from localm import pathsafe
+    from .project_config import (ProjectConfigUnreadable, find_project_config,
+                                 read_project_config_file)
+    try:
+        config = find_project_config(cwd)
+        if config is None:
+            return None, ""
+        raw = read_project_config_file(config)
+    except (ProjectConfigUnreadable, OSError):
+        return None, ""
+    if "memory_file" not in raw:
+        return None, ""
+    value = raw["memory_file"]
+    if not isinstance(value, str) or not value.strip():
+        return None, "memory_file must be a non-empty path string"
+    root = config.resolve().parent.parent
+    try:
+        path = pathsafe.confined_under(root, value)
+    except ValueError:
+        return None, f"memory_file {value!r} is not inside the project"
+    parts = [part.rstrip(" .").casefold() for part in path.relative_to(root).parts]
+    if ".git" in parts or (".localcoder" in parts
+                           and parts != [".localcoder", "memory.md"]):
+        return None, (f"memory_file {value!r} names a repository or coder "
+                      "configuration file")
+    return path, ""
+
+
+def active_memory_path(cwd: Path) -> tuple:
+    """
+    The configured memory file in force for *cwd*, as ``(path, problem)``.
+
+    Like :func:`configured_memory_path`, but None with a *problem* while the
+    project is not trusted (hook_trust.py), because ``memory_file`` is a trust
+    gated key.
+    """
+    path, problem = configured_memory_path(cwd)
+    if path is None:
+        return None, problem
+    if not _project_trusted(cwd):
+        return None, ("memory_file in the project config is not used: the "
+                      "project is not trusted (/hooks to review and trust it)")
+    return path, ""
+
+
 def find_memory_file(cwd: Path) -> Optional[Path]:
-    """Return the first memory file that exists under cwd, or None."""
+    """Return the memory file for cwd that exists, or None: the project's
+    configured ``memory_file`` when one is in force, else the first of the
+    default search order."""
+    configured, _ = active_memory_path(cwd)
+    if configured is not None:
+        return configured if configured.is_file() else None
     for name in _CANDIDATES:
         p = cwd / name
         if p.is_file():
@@ -143,7 +211,11 @@ def find_injected_memory_file(cwd: Path) -> Optional[Path]:
 
 
 def default_memory_file(cwd: Path) -> Path:
-    """Preferred path when creating a new memory file from scratch."""
+    """Preferred path when creating a new memory file from scratch: the
+    configured ``memory_file`` when one is in force, else ``LOCALCODER.md``."""
+    configured, _ = active_memory_path(cwd)
+    if configured is not None:
+        return configured
     return cwd / "LOCALCODER.md"
 
 
@@ -186,8 +258,12 @@ def memory_warning(cwd: Path) -> str:
     A user-facing warning about the project-memory file, or "" when all is well.
 
     Covers both ways the injected memory can differ from what is on disk: the
-    file is over the injection budget, or it exists but could not be read.
+    file is over the injection budget, or it exists but could not be read. A
+    refused or untrusted ``memory_file`` setting is reported first.
     """
+    _, problem = active_memory_path(cwd)
+    if problem:
+        return f"{problem}; using the default memory file."
     p = find_memory_file(cwd)
     if p is not None and find_injected_memory_file(cwd) is None:
         return (f"Project memory {p} is not used: the project is not trusted "
