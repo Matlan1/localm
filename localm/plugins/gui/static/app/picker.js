@@ -694,7 +694,7 @@ export function pickPath(opts = {}) {
       const languageHandler = () => retranslate();
       document.addEventListener("localm:language", languageHandler);
 
-      // Dismissing via the shared modal chrome (x / backdrop) sets
+      // Dismissing via the shared modal chrome (x / Escape) sets
       // display:none; poll for that and resolve null.
       const watch = setInterval(() => {
         if ($("modal").style.display === "none") { clearInterval(watch); finish(null); }

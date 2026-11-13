@@ -251,7 +251,10 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     KeyError).
 
     ``generate`` takes the extra keyword ``privacy`` (default False), which is
-    not passed to the backend. When the backend declares
+    not passed to the backend. It passes the backend ``delete_outputs`` as
+    True when ``privacy`` is set and as the settings' ``delete_outputs``
+    otherwise; a caller that passes ``delete_outputs`` itself gets a TypeError.
+    When the backend declares
     ``EMBEDS_OUTPUT_METADATA`` and the generation succeeded and left a non-empty
     file at *out_path*, ``generate`` strips
     the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
@@ -282,8 +285,13 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
 
     def generate(s: dict, prompt: str, out_path, *args, privacy: bool = False,
                  **kwargs) -> tuple[bool, str]:
+        if "delete_outputs" in kwargs:
+            raise TypeError("generate() sets delete_outputs from the settings "
+                            "and privacy; do not pass it")
         impl = resolve(s)
-        ok, message = impl.generate(s, prompt, out_path, *args, **kwargs)
+        ok, message = impl.generate(
+            s, prompt, out_path, *args,
+            delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
         if (not ok or not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
                 or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
             return ok, message

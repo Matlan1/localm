@@ -278,9 +278,6 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             if _backend.supports(s, "NEEDS_COMFY_SERVER"):
                 job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
             is_privacy = media_session_is_private()
-            # privacy mode forces deletion of ComfyUI's own output copy: no traces
-            # left anywhere, regardless of the configured delete_outputs preference.
-            delete_outputs = bool(s.get("delete_outputs")) or is_privacy
             size_kwargs = ({"width": width, "height": height}
                            if width is not None and height is not None else {})
 
@@ -314,7 +311,6 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 lora_strength_model=req.lora_strength_model,
                 lora_strength_clip=req.lora_strength_clip,
                 swap=gen_swap,
-                delete_outputs=delete_outputs,
                 cancel_check=lambda: job.cancel_requested,
                 placement=placement,
                 on_progress=lambda t: job.push({"type": "line", "text": t}),

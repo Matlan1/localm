@@ -713,6 +713,16 @@ _SIMPLE_CMD_TIMEOUT = 30.0
 _STREAM_PROGRESS_INTERVAL = 50
 
 
+def _first_token_stall(budget: float) -> str:
+    """The error text for a reply that made no progress for *budget* seconds
+    before its first token."""
+    return (f"Generation stalled: the model process made no progress for "
+            f"{budget:.0f}s while reading the prompt. It has been unloaded and will "
+            "reload on the next request. Raise 'GGUF first-token timeout (s)' in "
+            "Settings > Model if one step of this prompt genuinely needs longer on "
+            "this hardware.")
+
+
 def _stream_error(result: tuple) -> Exception:
     """The exception a stream's ``error`` envelope stands for: its tagged type
     for a refusal that leaves the model loaded, else RuntimeError (the worker
@@ -1303,15 +1313,7 @@ class ModelRunner:
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
-                                    raise RuntimeError(
-                                        f"Generation stalled: the model process "
-                                        f"produced no output within "
-                                        f"{first_budget:.0f}s of prompt processing. "
-                                        "It has been unloaded and will reload on the "
-                                        "next request. Raise gguf_first_token_timeout_s "
-                                        "if this prompt genuinely needs longer on this "
-                                        "hardware."
-                                    ) from e
+                                    raise RuntimeError(_first_token_stall(first_budget)) from e
                                 raise RuntimeError(
                                     "Generation stalled: the model process stopped "
                                     "responding. It has been unloaded and will "
@@ -1547,13 +1549,7 @@ class ModelRunner:
                         if time.monotonic() > deadline:
                             self.shutdown(grace=0)
                             if awaiting_first:
-                                raise RuntimeError(
-                                    f"Generation stalled: the model process produced "
-                                    f"no output within {first_budget:.0f}s of prompt "
-                                    "processing. It has been unloaded and will reload "
-                                    "on the next request. Raise "
-                                    "gguf_first_token_timeout_s if this prompt "
-                                    "genuinely needs longer on this hardware.") from e
+                                raise RuntimeError(_first_token_stall(first_budget)) from e
                             raise RuntimeError(
                                 "Generation stalled: the model process stopped "
                                 "responding. It has been unloaded and will reload on "

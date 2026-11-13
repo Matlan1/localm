@@ -155,9 +155,8 @@ async def music(req: MusicRequest, request: Request):
         # See test_comfy_media_routes_offloaded.
         _cfg = load_config()
         s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
-        # Privacy mode forces no on-disk traces: it suppresses the sidecar AND
-        # forces ComfyUI's own output copy to be deleted, regardless of the
-        # opt-in delete_outputs setting.
+        # Privacy mode suppresses the sidecar; the backend facade also forces
+        # ComfyUI's own output copy to be deleted.
         is_privacy = media_session_is_private()
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
@@ -256,9 +255,6 @@ async def music(req: MusicRequest, request: Request):
                 self_url=self_url,
                 instance_token=instance_token,
                 write_sidecar=not is_privacy,
-                # Delete ComfyUI's own copy when the user opted in OR privacy mode
-                # forces no traces.
-                delete_outputs=bool(s.get("delete_outputs")) or is_privacy,
                 on_progress=lambda t: job.push({"type": "line", "text": t}),
                 lyrics=req.lyrics,
                 duration_seconds=req.duration_seconds,

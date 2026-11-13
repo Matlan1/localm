@@ -113,7 +113,7 @@ def settings(full_config: dict) -> dict:
         or full_config.get("comfy_output_dir", "") or "",
         # Opt-in output containment: per-plugin delete_outputs wins, else the
         # global comfy_delete_outputs (default False = keep ComfyUI's own copy).
-        # Privacy mode forces deletion later in plug.py regardless of this.
+        # The backend facade forces it on in privacy mode.
         "delete_outputs": bool(comfy_blk.get(
             "delete_outputs", full_config.get("comfy_delete_outputs", False))),
         "float_type": float_type,
@@ -226,10 +226,8 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     delete_outputs: Optional[bool] = None,
                     cancel_check=None,
                     **kwargs) -> tuple[bool, str]:
-    # delete_outputs: None means "use the configured preference"; the privacy-
-    # aware caller (plug.py) passes an explicit bool that already folds in
-    # privacy mode, so honour that when given and fall back to the setting only
-    # when it is not.
+    # delete_outputs: the backend facade passes the configured value, or True
+    # in privacy mode; a direct call without it uses the configured value.
     if delete_outputs is None:
         delete_outputs = bool(s.get("delete_outputs", False))
     # generate_video has no comfy_output_dir param; feed the per-plugin value

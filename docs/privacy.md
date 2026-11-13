@@ -335,7 +335,7 @@ policy](network.md) instead.
   web fetch does, since the update endpoint is fixed by localm itself rather
   than a URL you or a fetched page supplied - see
   [network.md](network.md#what-the-policy-does-not-govern). Turn on "Check
-  for updates even when network access is off" in **Settings > Updates** to
+  for updates even when network access is off" in **Settings > System > Updates** to
   exempt just this one channel; it is off by default. `net_mode=off` blocks
   the update check and everything a model triggers unless you opt back in; the
   separate admin-only `net_allow_model_downloads` setting (also off by default)

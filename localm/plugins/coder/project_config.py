@@ -11,7 +11,9 @@ model           = "gemma4-4b"
 max_turns       = 20
 auto_approve    = false
 always_confirm  = ["run_shell", "run_shell_background"]  # prompt even under auto_approve
-memory_file     = ".localcoder/memory.md" # overrides default search order
+memory_file     = ".localcoder/memory.md" # replaces the default memory search order;
+                                          # relative to the project root, must stay
+                                          # inside it
 max_tokens      = 2048
 temperature     = 0.7
 mode            = "privacy"               # privacy | log | full
@@ -25,7 +27,7 @@ compaction_flush = false                  # skip the durable-notes pass before
 auto_allow_read_only_shell = true         # run provably read-only shell commands
                                           # inside the project without asking
 
-``auto_approve``, ``verify``, ``model`` and a ``mode`` that records more than
+``auto_approve``, ``verify``, ``model``, ``memory_file`` and a ``mode`` that records more than
 the user's own coder mode take effect only once the project is trusted
 (hook_trust.py).
 
@@ -128,7 +130,7 @@ def load_project_config(cwd: Path, *, trusted: bool | None = None) -> dict[str, 
 
     While the project is not trusted (``hook_trust.project_trusted``; *trusted*
     overrides that lookup), ``auto_approve``, ``verify`` and ``model`` are left
-    out, and so is a ``mode`` that records more than the coder mode resolved
+    out (``memory_file`` as well), and so is a ``mode`` that records more than the coder mode resolved
     without the project.
     """
     path = find_project_config(cwd)
@@ -141,7 +143,7 @@ def load_project_config(cwd: Path, *, trusted: bool | None = None) -> dict[str, 
               "seed", "verify", "diagnostics", "auto_allow_read_only_shell",
               "compaction_flush"}
     cfg = {k: v for k, v in raw.items() if k in _KNOWN}
-    gated = [k for k in ("auto_approve", "verify", "model") if k in cfg]
+    gated = [k for k in ("auto_approve", "verify", "model", "memory_file") if k in cfg]
     widening = "mode" in cfg and mode_widens(cfg["mode"])
     if not gated and not widening:
         return cfg
