@@ -60,6 +60,30 @@ test("enabled with no reranker installed: the line says so and gives the pull co
   assert.match(status.textContent, /localm pull ggml-org\/Qwen3-Reranker/);
 });
 
+test("enabled with no reranker installed: a Download button pulls the suggested reranker", async () => {
+  const state = { current: { enabled: true, installed: [], model: null, candidates: 20, note: null } };
+  const { window, calls } = setup(state);
+  runScript(window, `streamJob = async () => ({ status: "done" });`);
+  runScript(window, "refreshRerankPanel();");
+  await tick(); await tick();
+  const btn = [...panel(window).status.querySelectorAll("button")]
+    .find((b) => b.textContent === window.t("knowledge.rerank.download"));
+  assert.ok(btn, "a Download button next to the status");
+  btn.click();
+  for (let i = 0; i < 6; i++) await tick();
+  const pulls = calls.filter((c) => c.url.endsWith("/api/models/pull"));
+  assert.equal(pulls.length, 1);
+  assert.match(JSON.parse(pulls[0].opts.body).spec, /^ggml-org\/Qwen3-Reranker-0\.6B-Q8_0-GGUF:/);
+});
+
+test("a usable reranker: no Download button", async () => {
+  const state = { current: { enabled: true, installed: ["qwen"], model: "qwen", candidates: 20, note: null } };
+  const { window } = setup(state);
+  runScript(window, "refreshRerankPanel();");
+  await tick(); await tick();
+  assert.equal(panel(window).status.querySelectorAll("button").length, 0);
+});
+
 test("switched off: the line says results are returned as searched", async () => {
   const state = { current: { enabled: false, installed: ["qwen"], model: "qwen",
                              candidates: 20, note: null } };

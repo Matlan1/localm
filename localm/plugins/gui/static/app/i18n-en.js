@@ -935,8 +935,7 @@ export const I18N_EN = {
   // ---- Knowledge page ----
   "knowledge.addDocs": "add docs",
   "knowledge.addDocs.pickerConfirm": "Add",
-  "knowledge.addDocs.pickerHint":
-    "Folders are indexed recursively. Supported: txt, md, pdf, docx, html, code.",
+  "knowledge.addDocs.pickerHint": "Folders are indexed recursively. Supported: text and code files, pdf, docx, html, notebooks, images (described by a vision model) and archives.",
   "knowledge.addDocs.pickerTitle": "Add documents to '{name}'",
   "knowledge.addRoots.addedIndexing": "Added to your allowed folders. Indexing…\n",
   "knowledge.addRoots.cancelled": "Cancelled - folders not added.\n",
@@ -950,8 +949,7 @@ export const I18N_EN = {
   "knowledge.addRoots.title": "Add to allowed folders?",
   "knowledge.addRoots.updateFailed": "Could not update allowed folders",
   "knowledge.addRoots.updateFailedMsg": "Could not update allowed folders: {message}",
-  "knowledge.badge.reembed.titleReady":
-    "The embedding model is ready, but this collection was indexed before that (or its vector index went stale), so it is BM25/lexical-only until you click 're-embed'.",
+  "knowledge.badge.reembed.titleReady": "This collection has no vectors for the embedding model now set up (it was indexed without one, or its vector index went stale), so it is BM25/lexical-only until you click 're-embed'.",
   "knowledge.badge.reembed.titleStale":
     "This collection's stored vectors were built under a different embedding model than the one currently active, so a query here silently falls back to BM25 until you click 're-embed'.",
   "knowledge.badge.reembedNeeded": "re-embed needed",
@@ -961,7 +959,7 @@ export const I18N_EN = {
   "knowledge.chunksCount.one": "{count} chunk",
   "knowledge.chunksCount.other": "{count} chunks",
   "knowledge.clearConvs.button": "Delete all conversations",
-  "knowledge.clearConvs.confirm.body": "This can't be undone.",
+  "knowledge.clearConvs.confirm.body": "This can't be undone. Not deleted here: the session logs and transcripts the log and full modes keep, coder sessions, and conversations the server stored before privacy mode was turned on.",
   "knowledge.clearConvs.confirm.title": "Delete all saved conversations {where}?",
   "knowledge.clearConvs.failed.one": "{count} conversation could not be deleted from the server store and is still there. The others were deleted.",
   "knowledge.clearConvs.failed.other": "{count} conversations could not be deleted from the server store and are still there. The others were deleted.",
@@ -979,14 +977,14 @@ export const I18N_EN = {
   "knowledge.corrupt.counted": "{count} malformed chunk line(s) in this collection's index.",
   "knowledge.corrupt.generic": "Part of this collection's index is corrupt or malformed on disk.",
   "knowledge.createButton": "Create",
-  "knowledge.createFailed": "Create failed",
   "knowledge.created": "Collection '{name}' created - now add files or folders",
+  "knowledge.createFailedMsg": "Create failed: {message}",
   "knowledge.deleteButton": "delete",
   "knowledge.deleteConfirm.body": "Only the index is removed - your original files are untouched.",
   "knowledge.deleteConfirm.confirm": "Delete",
   "knowledge.deleteConfirm.title": "Delete collection '{name}'?",
-  "knowledge.deleteFailed": "Delete failed",
   "knowledge.deleted": "Deleted {name}",
+  "knowledge.deleteFailedMsg": "Delete failed: {message}",
   "knowledge.docsCount.one": "{count} document",
   "knowledge.docsCount.other": "{count} documents",
   "knowledge.embed.alreadyInstalled": "Already installed.\n",
@@ -994,8 +992,7 @@ export const I18N_EN = {
   "knowledge.embed.download.failed": "Embedding model download did not complete - see the log",
   "knowledge.embed.download.requesting": "Requesting the one-time download…\n",
   "knowledge.embed.downloadFailedMsg": "Download failed: {message}",
-  "knowledge.embed.downloadHint":
-    "One-time download of the configured model, blocked so far by the network policy. Changes no settings.",
+  "knowledge.embed.downloadHint": "One-time download of the configured model. Changes no settings.",
   "knowledge.embed.downloadModelNow": "Download model now",
   "knowledge.embed.downloadNow": "Download '{model}' now",
   "knowledge.embed.label.bgeSmall": "Internal - bge-small-en-v1.5 (recommended, ~24 MB)",
@@ -1021,10 +1018,12 @@ export const I18N_EN = {
   "knowledge.rerank.status.off": "Reranking is off. Results are returned as searched.",
   "knowledge.rerank.status.on": "Reranking the best {n} matches with {model}.",
   "knowledge.rerank.status.unusable": "Reranking cannot run: {note}",
-  "knowledge.rerank.status.noneInstalled":
-    "No reranker model is installed, so results are returned as searched. " +
-    "Install one with: {command}",
+  "knowledge.rerank.status.noneInstalled": "No reranker model is installed, so results are returned as searched. Download one with the button, or run: {command}",
   "knowledge.rerank.saveFailed": "Could not save the reranking setting: {message}",
+  "knowledge.rerank.downloadFailed": "Reranker download failed: {message}",
+  "knowledge.rerank.downloadStatus": "Reranker download {status}",
+  "knowledge.rerank.downloaded": "Reranker model downloaded",
+  "knowledge.rerank.download": "Download the reranker",
   "knowledge.rerank.skipped": "Knowledge results were not reranked: {note}",
   "knowledge.embed.status.lastError": "  Last error: {error}",
   "knowledge.embed.status.notSetUp":
@@ -1033,6 +1032,7 @@ export const I18N_EN = {
     "Ready: {model} ({dim}-dim) - semantic search is on for new indexing. Existing collections may need \"re-embed\" below.",
   "knowledge.embed.status.readyNoDim":
     "Ready: {model} is installed - semantic search is on for new indexing. Existing collections may need \"re-embed\" below.",
+  "knowledge.embed.status.readyLastFailed": "Installed: {model}, but its last use failed, so semantic search may not work. Pick a model below and click \"Set up / apply\", or fix the cause shown after this line.",
   "knowledge.embed.status.unknown":
     "The embedding model is set to a file chosen by the owner. Its status is not shown for this key, and only the owner can change it.",
   "knowledge.embed.statusLoadFailed": "Could not load embedding status: {message}",
@@ -1062,17 +1062,17 @@ export const I18N_EN = {
   "knowledge.info.empty.hint": "Use add docs above to index a file or folder.",
   "knowledge.info.empty.title": "No documents yet",
   "knowledge.info.fileMissing": "file missing",
-  "knowledge.info.loadFailed": "Load failed",
   "knowledge.info.missingDocs.one":
     "{count} document is no longer on disk. It is still indexed and searchable, flagged rather than deleted, so nothing is lost if that was temporary. Remove one below when you are sure.",
   "knowledge.info.missingDocs.other":
     "{count} documents are no longer on disk. They are still indexed and searchable, flagged rather than deleted, so nothing is lost if that was temporary. Remove one below when you are sure.",
   "knowledge.info.repairButton": "Repair",
   "knowledge.info.title": "Collection - {name}",
+  "knowledge.info.loadFailedMsg": "Could not load the collection: {message}",
   "knowledge.info.vectorDegrade": "Semantic search fell back to BM25: {reason}",
   "knowledge.infoButton": "info",
   "knowledge.intro":
-    "Index folders or files into collections, then pick a collection in the chat parameters drawer - replies get grounded in the most relevant excerpts, with citations. Retrieval is BM25 (always works offline); when an embedding model is set up, semantic (vector) search is blended in. Collections live in the localm data directory under <code>rag/</code>.",
+    "Index folders or files into collections, then pick a collection in the chat parameters drawer - replies get grounded in the most relevant excerpts; the excerpts used are listed under the reply as its sources. Retrieval is BM25 (always works offline); when an embedding model is set up, semantic (vector) search is blended in. Collections live in the localm data directory under <code>rag/</code>.",
   "knowledge.itemsCount": "{count} items",
   "knowledge.loadFailed": "Could not load collections: {message}",
   "knowledge.name.placeholder": "name (spaces & emoji ok)",
@@ -1091,8 +1091,8 @@ export const I18N_EN = {
   "knowledge.reembedConfirm.confirm": "Re-embed",
   "knowledge.reembedConfirm.title": "Re-embed '{name}'?",
   "knowledge.removeButton": "remove",
-  "knowledge.removeFailed": "Remove failed",
   "knowledge.removed": "Removed",
+  "knowledge.removeFailedMsg": "Remove failed: {message}",
   "knowledge.repair.failedMsg": "Repair failed: {message}",
   "knowledge.repair.finished": "Repair finished",
   "knowledge.repair.log.start": "Repairing '{name}'…\n",
@@ -1114,6 +1114,7 @@ export const I18N_EN = {
   "knowledge.search.searching": "searching…",
   "knowledge.search.title": "Search - {name}",
   "knowledge.searchButton": "search",
+  "knowledge.search.rerankScore": "rerank {rerank} (search {score})",
   "knowledge.title": "Knowledge",
   "knowledge.upload.failedMsg": "Upload failed: {message}",
   "knowledge.upload.fileReadErrorReason": "could not read {filename}",
