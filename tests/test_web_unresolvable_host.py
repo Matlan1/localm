@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from localm import netpolicy
 from localm.web_retrieval.contracts import SearchProviderError
 from localm.web_retrieval.errors import describe_failure
-from localm.web_retrieval.providers import is_policy_refusal
 from tests.test_gui import web_app  # noqa: F401
 
 
@@ -21,6 +20,7 @@ def _unresolvable(*a, **kw):
 
 
 def test_unresolvable_is_not_a_policy_refusal():
+    from localm.web_retrieval.providers import is_policy_refusal
     assert is_policy_refusal(netpolicy.NetworkPolicyError("off")) is True
     assert is_policy_refusal(netpolicy.UnresolvableHost("x")) is False
 
