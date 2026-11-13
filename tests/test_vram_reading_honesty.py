@@ -473,7 +473,7 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         self.engine.active_requests = 1          # a request is mid-generation
 
         def fake_self_request(method, path, *, json=None, timeout=30, base_url=None,
-                              instance_token=None):
+                              instance_token=None, headers=None):
             return self._Adapter(self.client.post(f"/v1{path}"))
 
         from localm import vram as vram_mod
@@ -501,7 +501,7 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         self.engine.active_requests = 1          # a request is mid-generation
 
         def fake_self_request(method, path, *, json=None, timeout=30, base_url=None,
-                              instance_token=None):
+                              instance_token=None, headers=None):
             return self._Adapter(self.client.post(f"/v1{path}"))
 
         from localm import vram as vram_mod

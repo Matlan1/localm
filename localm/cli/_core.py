@@ -356,18 +356,23 @@ class _GracefulGroup(click.Group):
         # report falls back to a one-line message.
         try:
             from localm import bugreport
+            from localm.audit import automatic_write_allowed, request_privacy
             interactive = bugreport.stdin_is_interactive()
-            if isinstance(e, bugreport.LocalmError):
-                bugreport.report_failure(
-                    summary=e.summary, reason=e.reason,
-                    error=e.__cause__ or e, context=e.context,
-                    interactive=interactive)
-            else:
-                bugreport.report_failure(
-                    summary="localm hit an unexpected error",
-                    reason=str(e), error=e,
-                    context={"command": getattr(ctx, "invoked_subcommand", None)},
-                    interactive=interactive)
+            command = getattr(ctx, "invoked_subcommand", None)
+            # A failed chat command reports under the chat surface's mode.
+            with request_privacy(command == "run"
+                                 and not automatic_write_allowed("chat")):
+                if isinstance(e, bugreport.LocalmError):
+                    bugreport.report_failure(
+                        summary=e.summary, reason=e.reason,
+                        error=e.__cause__ or e, context=e.context,
+                        interactive=interactive)
+                else:
+                    bugreport.report_failure(
+                        summary="localm hit an unexpected error",
+                        reason=str(e), error=e,
+                        context={"command": command},
+                        interactive=interactive)
         except Exception:
             # Broken-pipe is handled above, so stdout is live here for a real
             # failure.

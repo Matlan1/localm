@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import json
 import os
 import re
@@ -117,6 +118,10 @@ class Job:
     # process had in the previous run, or None. Only ever reported, never
     # signalled. Absent on a live job, which has _proc.
     restored_child_pid: Optional[int] = None
+    # True when the job was started inside an ``audit.request_privacy`` block:
+    # its work runs inside one, and the activity record keeps no finished row of
+    # it unless diagnostics are kept on purpose.
+    private: bool = False
 
     # ---- durable record -------------------------------------------------- #
     # A row carries only what a listing and an ownership check need: no argv and
@@ -133,7 +138,7 @@ class Job:
                 pid = int(proc.pid)
             except Exception:
                 pass
-        return {
+        row = {
             "id": self.id,
             "kind": self.kind,
             "label": self.label,
@@ -145,6 +150,9 @@ class Job:
             "owner": self.owner,
             "child_pid": pid,
         }
+        if self.private:
+            row["private"] = True
+        return row
 
     @classmethod
     def from_record(cls, data: dict) -> Job:
@@ -187,7 +195,14 @@ class Job:
             owner=owner if isinstance(owner, str) else None,
         )
         job.restored_child_pid = pid
+        job.private = data.get("private") is True
         return job
+
+    def self_request_headers(self) -> dict:
+        """Headers for a request this job makes to the server's own API:
+        ``audit.privacy_headers(self.private)``."""
+        from localm.audit import privacy_headers
+        return privacy_headers(self.private)
 
     @property
     def cancel_requested(self) -> bool:
@@ -478,6 +493,26 @@ def _keeps_finished_records() -> bool:
         return diagnostics_allowed()
     except Exception:
         return False
+
+
+def _keeps_private_finished_records() -> bool:
+    """Whether the activity record may keep a private job's finished row and
+    result: ``audit.diagnostics_allowed(private_request=True)``. False when that
+    check raises."""
+    try:
+        from localm.audit import diagnostics_allowed
+        return diagnostics_allowed(private_request=True)
+    except Exception:
+        return False
+
+
+def _in_private_request() -> bool:
+    """``audit.request_is_privacy()``; True when that check raises."""
+    try:
+        from localm.audit import request_is_privacy
+        return request_is_privacy()
+    except Exception:
+        return True
 
 
 def activity_dir() -> Path:
@@ -924,8 +959,10 @@ class JobManager:
     # ---- durability ------------------------------------------------------- #
     def _register(self, job: Job) -> None:
         """Track *job*, sweep expired records, and persist - the shared tail of
-        start_cli and start_fn."""
+        start_cli and start_fn. A job registered inside an
+        ``audit.request_privacy`` block is marked private."""
         job._notify = self._persist
+        job.private = _in_private_request()
         with self._lock:
             # _gc() runs here and nowhere else, so this one write also carries any
             # eviction it just made.
@@ -943,13 +980,24 @@ class JobManager:
         """Mirror the registry to disk. Caller holds _lock.
 
         When ``audit.diagnostics_allowed()`` is False only running jobs are
-        written, each with ``result`` set to None. Best-effort:
+        written, each with ``result`` set to None; a private job's row gets the
+        same treatment unless ``audit.diagnostics_allowed(private_request=True)``
+        is True. Both are decided outside any ``audit.request_privacy`` block the
+        calling thread is in, so a private job's own write keeps the other jobs'
+        rows. Best-effort:
         _ActivityStore.write reports its own failures and returns False instead
         of raising. An EMPTY set of rows removes the file instead of writing an
         empty one."""
         rows = [j.to_record() for j in self._jobs.values()]
-        if not _keeps_finished_records():
-            rows = [{**r, "result": None} for r in rows if r["status"] == "running"]
+        keep_open = contextvars.Context().run(_keeps_finished_records)
+        keep_private = contextvars.Context().run(_keeps_private_finished_records)
+        kept = []
+        for r in rows:
+            if keep_private if r.get("private") else keep_open:
+                kept.append(r)
+            elif r["status"] == "running":
+                kept.append({**r, "result": None})
+        rows = kept
         if rows:
             self._store.write(rows)
         else:
@@ -1210,13 +1258,19 @@ class JobManager:
         binds the job to the creating key's principal id so only that key (or an
         admin/owner) may stream/cancel it. label, when given, is the
         human-readable operation name a listing shows; there is no console
-        mirroring for in-thread jobs.
+        mirroring for in-thread jobs. Called inside an ``audit.request_privacy``
+        block, ``fn`` and the job's terminal bookkeeping run inside one too.
         """
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
                   owner=owner, label=label)
         self._register(job)
 
         def _run():
+            from localm.audit import request_privacy
+            with request_privacy(job.private):
+                _work()
+
+        def _work():
             try:
                 ok = fn(job)
                 if job.status != "cancelled":
