@@ -54,19 +54,22 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
 
 
 def _installed_plugins() -> tuple[set, Optional[OSError]]:
-    """``(names, error)``: the plugins physically present in the installed
-    folder, and the OSError that stopped the scan of that folder, or None. A
+    """``(names, error)``: the plugins installed from the bundled store
+    (physically present in the installed folder, without a third-party
+    provenance marker), and the OSError that stopped the scan of that folder,
+    or None. A third-party folder under a first-party name is not counted. A
     failed scan is logged at debug level; *names* then holds what was found
     before it failed."""
     from pathlib import Path
 
     from localm.debuglog import logger
     from localm.plugins.loader import plugins_dir
+    from localm.plugins.lookup import installed_from_store
     installed: set = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
             if (not child.name.startswith(".") and child.is_dir()
-                    and (child / "plugin.toml").is_file()):
+                    and installed_from_store(child)):
                 installed.add(child.name)
     except OSError as exc:
         logger.debug("active_plugins: failed to scan plugins dir %s: %s",
@@ -76,8 +79,8 @@ def _installed_plugins() -> tuple[set, Optional[OSError]]:
 
 
 def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names: installed (physically present in the
-    installed folder) AND enabled (config). "Installed" is disk presence in the
+    """The set of ACTIVE plugin names: installed from the bundled store
+    (``_installed_plugins``) AND enabled (config). "Installed" is disk presence in the
     store to installed model, NOT a config flag, so this scans the installed
     folder. A scan that fails returns what it found before failing."""
     installed, _error = _installed_plugins()

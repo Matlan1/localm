@@ -182,7 +182,6 @@ class TestRegisterPluginTools:
             names, _ = register_plugin_tools()
             assert "plugin_issues_tool_echo" in names
             td = coder_tools.TOOL_REGISTRY["plugin_issues_tool_echo"]
-            assert td.destructive is False
             assert td.description.startswith("[plugin:issues]")
             assert "Echo the text" in td.description
             assert td.params["text"]["type"] == "string"
@@ -210,6 +209,33 @@ class TestRegisterPluginTools:
             # tool_danger sets no tool_destructive attr -> default True
             assert coder_tools.TOOL_REGISTRY[
                 "plugin_issues_tool_danger"].destructive is True
+
+    def test_plugin_tool_confirms_like_an_untrusted_mcp_tool(self, tmp_path, monkeypatch):
+        # tool_echo sets tool_destructive = False; the plugin's own label is ignored.
+        self._setup(tmp_path, monkeypatch)
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            register_plugin_tools()
+            for name in ("plugin_issues_tool_echo", "plugin_issues_tool_danger"):
+                td = coder_tools.TOOL_REGISTRY[name]
+                assert (td.destructive, td.executes_project_code, td.confirm_always) == (
+                    True, True, True), name
+
+    def test_a_register_only_plugin_exports_its_tools(self, tmp_path, monkeypatch):
+        d = tmp_path / "regonly"
+        d.mkdir()
+        (d / "plugin.toml").write_text(
+            '[plugin]\nname = "regonly"\nregister = "plug"\n\n'
+            '[tools]\nexports = ["tool_ping"]\n', encoding="utf-8")
+        (d / "plug.py").write_text(
+            "def register(host):\n    pass\n\n\ndef unregister():\n    pass\n\n\n"
+            "def tool_ping(cwd):\n    \"\"\"Answer pong.\"\"\"\n    return 'pong'\n",
+            encoding="utf-8")
+        _isolate(tmp_path, monkeypatch, enabled=("regonly",))
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warnings = register_plugin_tools()
+            assert names == ["plugin_regonly_tool_ping"], warnings
+            fn = coder_tools.TOOL_REGISTRY["plugin_regonly_tool_ping"].fn
+            assert fn(tmp_path).output == "pong"
 
     def test_non_callable_export_warns(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)

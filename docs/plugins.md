@@ -27,7 +27,8 @@ A plugin moves along two independent axes:
 Out of the box **only chat is active**. Nothing else exists until you install it,
 so the base install is small and the attack surface is opt-in. `chat` is
 `protected` (cannot be disabled or uninstalled) and `default_enabled` (active on
-first run).
+first run). Both flags count only for a plugin installed from the bundled store;
+a third-party manifest that sets them is treated as if it did not.
 
 Manage plugins from the CLI:
 
@@ -102,7 +103,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
 capabilities = ["feature"]   # declared capabilities; "inference-backend" is the one the engine reads (see Inference backends)
-data_subdir = "my_data"      # storage under the data dir (<data dir>/my_data); "" = none
+data_subdir = "my_data"      # one folder name; "" = none. Get the folder from host.data_dir() (third-party: <data dir>/plugin-data/<name>/my_data)
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
 cli = "module:attr"          # optional legacy Click command entry point
@@ -176,7 +177,8 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 | `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. Every route path must start with `/api/` or `/v1/`: any other path makes `register()` raise `ValueError` and the plugin fails to load. With no server app (a backend-only load) nothing is mounted. |
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
-| `register_tab(surface)` | Accepted but currently ignored: it does not add a tab. A plugin's tab comes from the `[surface]` table in `plugin.toml`. |
+| `data_dir()` | The plugin's own data folder as a `Path`, created on first call: `<data dir>/plugin-data/<name>/<data_subdir>` for a third-party plugin. Keep the plugin's data there and never build `<data dir>/<data_subdir>` yourself: an uninstall that deletes the plugin's data removes this folder and nothing else. Raises `ValueError` when the manifest declares no `data_subdir`. |
+| `register_tab(surface)` | Replace the plugin's `[surface]` (tab, label, icon, group, settings group, `assets_dir`, `client_entry`) with a `Surface` while the plugin is loaded; the GUI's plugin listing shows it and its `assets_dir` is served at `/plugins/<name>` like a manifest one, replacing a folder served there before. Once the plugin is unloaded the manifest's `[surface]` applies again. |
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
 | `caller_is_owner(request)` | Inside a route: `True` when the caller is the owner (open mode, or the owner key or session). |
@@ -316,16 +318,16 @@ reported as a load failure if that module is missing.
 
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
-keyword. Three optional attributes describe it to the model:
+keyword. Two optional attributes describe it to the model:
 
 | Attribute | Meaning |
 |---|---|
 | `tool_description` | One-line description; falls back to the docstring's first line |
 | `tool_params` | `{param: {"type", "description", "required"}}` |
-| `tool_destructive` | Whether it asks before running. **Defaults to `True`** |
 
-`tool_destructive` defaulting to true is deliberate: a tool that forgets to
-declare itself asks for confirmation rather than silently acting.
+Every exported tool is treated like a tool of an untrusted MCP server: it counts
+as destructive and as running code, and the coder asks before every call, with
+auto-approve on too. A `tool_destructive` attribute on the function is ignored.
 
 Registered names are namespaced `plugin_<plugin>_<export>`, with hyphens in the
 plugin name converted to underscores, so an export cannot shadow a built-in.
@@ -496,8 +498,14 @@ def register(host):
 - Built-ins always win: a `.gguf` file, and a Hugging Face folder the HF
   backend loads, never reach a plugin. A registered backend is asked only for
   a path both built-ins refuse, and the first one that claims it builds it.
+  Backends of plugins installed from the bundled store are asked before those
+  of third-party plugins, each group in the order they registered.
 - Disabling or uninstalling the plugin removes the backend, and the model's
-  refusal returns unchanged.
+  refusal returns unchanged. In a running server it also unloads every model
+  the server holds loaded on that backend (it waits for requests in flight,
+  then stops them); a load still running on it is undone when it finishes, and
+  an unloaded model is not loaded on it again. A scheduled job that already
+  loaded its own model on that backend keeps it until that run ends.
 - Run the model in its own child process. Core's
   `localm.inference.backends._hf_runner.HFRunner(worker_target=(file, class))`
   hosts your worker class in the same isolated process the HF backend uses
@@ -563,7 +571,11 @@ localm plugin install /path/to/my-plugin     # --force overwrites an existing in
 `plugin install` takes either a first-party plugin NAME (from the bundled store)
 or a path to a DIRECTORY containing a `plugin.toml`; a directory is validated,
 copied into `<data dir>/plugins/`, and enabled, then loaded with the same contract
-as a first-party plugin. Third-party plugins run unsandboxed in-process, so
+as a first-party plugin. A directory plugin may not take the name of a built-in
+command or of a plugin that ships with localm (`chat`, `coder`, `browser`,
+`image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `mcp`, `jobs`,
+`exllama`), with `--force` too, and its `protected` and `default_enabled` flags
+are ignored. Third-party plugins run unsandboxed in-process, so
 install only code you trust. See [plugin-interop.md](plugin-interop.md) for the
 adapter approach to wrapping extensions from other ecosystems.
 

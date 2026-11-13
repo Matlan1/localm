@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A plugin writes a global config key through ``set_global_config_key``, which
-applies the schema's owner tier, and no plugin module calls ``update_config``
-itself."""
+applies the schema's owner tier, and no plugin module uses a ``localm.config``
+function that writes ``config.json`` itself."""
 
 from __future__ import annotations
 
@@ -107,26 +107,78 @@ def test_the_host_method_applies_the_owner_tier_to_the_requests_caller(
     assert _stored("embedding_model") == "bge-small-en-v1.5"
 
 
-def _update_config_uses(source: str) -> list:
-    """Line numbers where *source* imports, names or calls ``update_config``."""
+def _config_writers() -> frozenset:
+    """Names in ``localm.config`` a plugin module may not use: every function
+    whose body writes ``CONFIG_FILE`` through ``_atomic_write_json``, every
+    function in the module that calls a public one of those (to a fixed point),
+    the write primitive ``_atomic_write_json`` and the ``CONFIG_FILE`` path
+    itself. A private writer is denied but does not make its callers writers:
+    ``load_config`` persists a stored-config migration through one."""
+    tree = ast.parse((_PKG / "config.py").read_text(encoding="utf-8"))
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def called(fn):
+        return {c.func.id for c in ast.walk(fn)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+
+    def writes_config_file(fn):
+        return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                   and c.func.id == "_atomic_write_json" and c.args
+                   and isinstance(c.args[0], ast.Name) and c.args[0].id == "CONFIG_FILE"
+                   for c in ast.walk(fn))
+
+    writers = {name for name, fn in funcs.items() if writes_config_file(fn)}
+    grew = True
+    while grew:
+        grew = False
+        for name, fn in funcs.items():
+            public = {w for w in writers if not w.startswith("_")}
+            if name not in writers and called(fn) & public:
+                writers.add(name)
+                grew = True
+    return frozenset(writers | {"_atomic_write_json", "CONFIG_FILE"})
+
+
+_DENIED = _config_writers()
+
+
+def _config_writer_uses(source: str, denied=_DENIED) -> list:
+    """(line, name) pairs where *source* imports, names or calls a name in
+    *denied*."""
     hits = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ImportFrom):
-            if any(a.name == "update_config" for a in node.names):
-                hits.append(node.lineno)
-        elif (isinstance(node, ast.Name) and node.id == "update_config") or (
-                isinstance(node, ast.Attribute) and node.attr == "update_config"):
-            hits.append(node.lineno)
+            hits += [(node.lineno, a.name) for a in node.names if a.name in denied]
+        elif isinstance(node, ast.Name) and node.id in denied:
+            hits.append((node.lineno, node.id))
+        elif isinstance(node, ast.Attribute) and node.attr in denied:
+            hits.append((node.lineno, node.attr))
     return sorted(set(hits))
 
 
-def test_the_scanner_sees_each_way_a_module_reaches_update_config():
-    assert _update_config_uses("from localm.config import update_config\n") == [1]
-    assert _update_config_uses("import localm.config as c\nc.update_config(f)\n") == [2]
-    assert _update_config_uses("update_config(f)\n") == [1]
-    assert _update_config_uses("def f():\n    from localm import config\n"
-                               "    config.update_config(g)\n") == [3]
-    assert _update_config_uses("set_global_config_key('k', 1, is_owner=True)\n") == []
+def test_the_denied_set_is_derived_from_every_config_writer():
+    assert {"update_config", "save_config", "_atomic_write_json",
+            "CONFIG_FILE"} <= _DENIED
+    assert "_persist_migrated_config" in _DENIED
+    assert not {"load_config", "load_config_checked", "save_registry",
+                "update_registry"} & _DENIED
+
+
+def test_the_scanner_sees_each_way_a_module_reaches_a_config_writer():
+    assert _config_writer_uses("from localm.config import update_config\n") == [
+        (1, "update_config")]
+    assert _config_writer_uses("import localm.config as c\nc.update_config(f)\n") == [
+        (2, "update_config")]
+    assert _config_writer_uses("update_config(f)\n") == [(1, "update_config")]
+    assert _config_writer_uses("def f():\n    from localm import config\n"
+                               "    config.update_config(g)\n") == [(3, "update_config")]
+    assert _config_writer_uses("from localm.config import save_config\n") == [
+        (1, "save_config")]
+    assert _config_writer_uses("import localm.config as c\n"
+                               "c._atomic_write_json(c.CONFIG_FILE, {})\n") == [
+        (2, "CONFIG_FILE"), (2, "_atomic_write_json")]
+    assert _config_writer_uses("set_global_config_key('k', 1, is_owner=True)\n") == []
+    assert _config_writer_uses("from localm.config import load_config\n") == []
 
 
 def test_no_plugin_module_writes_global_config_directly():
@@ -135,10 +187,11 @@ def test_no_plugin_module_writes_global_config_directly():
     for root in _PLUGIN_ROOTS:
         for path in sorted(root.rglob("*.py")):
             scanned += 1
-            for line in _update_config_uses(path.read_text(encoding="utf-8")):
-                offenders.append(f"{path.relative_to(_PKG.parent).as_posix()}:{line}")
+            for line, name in _config_writer_uses(path.read_text(encoding="utf-8")):
+                offenders.append(
+                    f"{path.relative_to(_PKG.parent).as_posix()}:{line} {name}")
     assert scanned > 50, "the plugin source roots were not found"
     assert not offenders, (
         "plugin modules must write global config through "
-        "Host.set_global_config (or config_write.set_global_config_key), not "
-        "update_config:\n  " + "\n  ".join(offenders))
+        "Host.set_global_config (or config_write.set_global_config_key), not a "
+        "config.py writer:\n  " + "\n  ".join(offenders))
