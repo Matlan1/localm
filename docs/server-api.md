@@ -991,7 +991,8 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
-`GET /v1/config` returns the whole config plus ten read-only extras:
+`GET /v1/config` returns the whole config plus up to ten read-only extras (the
+two network ones only for the owner):
 `effective_mode`, `effective_chat_mode`, `effective_coder_mode`,
 `effective_net_mode` (the network access mode in force: the stored `net_mode`,
 or the server's `LOCALM_NET_MODE` when set), `net_mode_from_env` (true when

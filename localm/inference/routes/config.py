@@ -99,13 +99,15 @@ def register(app: FastAPI, ctx) -> None:
         cfg["effective_chat_mode"] = (effective_mode("chat").value if owner
                                       else cfg["effective_mode"])
         cfg["effective_coder_mode"] = effective_mode("coder").value
-        # The network access mode in force: LOCALM_NET_MODE in the server's
-        # environment sets it over the stored net_mode.
-        from localm import netpolicy
-        cfg["effective_net_mode"] = netpolicy.network_mode()
-        cfg["net_mode_from_env"] = (
-            os.environ.get(netpolicy.NET_MODE_ENV_VAR, "").strip().lower()
-            in netpolicy.NET_MODES)
+        # The network access mode in force, for the operator only (net_mode
+        # itself is owner-only): LOCALM_NET_MODE in the server's environment
+        # sets it over the stored net_mode.
+        if owner:
+            from localm import netpolicy
+            cfg["effective_net_mode"] = netpolicy.network_mode()
+            cfg["net_mode_from_env"] = (
+                os.environ.get(netpolicy.NET_MODE_ENV_VAR, "").strip().lower()
+                in netpolicy.NET_MODES)
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
@@ -223,14 +225,18 @@ def register(app: FastAPI, ctx) -> None:
         # than a report naming collections. Gated on an actual value change and on
         # there being collections at risk, so an ordinary settings save needs no
         # extra confirm round trip.
-        # An embedding model that cannot be one (a reranker, another model type,
-        # a name that names nothing) is refused, confirmed or not.
+        # A NEW embedding model that cannot be one (a reranker, another model
+        # type, a name that names nothing) is refused, confirmed or not; the
+        # stored value sent back unchanged by a section save is not re-checked.
         if "embedding_model" in body and str(body["embedding_model"] or "").strip():
+            from localm.config import load_config as _load_cfg
             from localm.inference.embedder import embedding_model_refusal
-            embed_why = await run_in_threadpool(
-                embedding_model_refusal, str(body["embedding_model"]).strip())
-            if embed_why:
-                raise HTTPException(400, embed_why)
+            asked = str(body["embedding_model"]).strip()
+            stored = str((await run_in_threadpool(_load_cfg)).get("embedding_model") or "").strip()
+            if asked != stored:
+                embed_why = await run_in_threadpool(embedding_model_refusal, asked)
+                if embed_why:
+                    raise HTTPException(400, embed_why)
         if "embedding_model" in body and not confirm:
             from localm.config import load_config
             new_model = str(body["embedding_model"]).strip()

@@ -345,7 +345,8 @@ def embedding_model_refusal(spec: str) -> str:
     when it can.
 
     Accepted: a KNOWN_EMBEDDING_MODELS key, a registered model whose recorded
-    type is ``embedding`` (or that records no type) and is not a reranker, and a
+    type is ``embedding`` or ``unknown`` (or that records no type) and is not a
+    reranker, and a
     local GGUF file that is not a reranker. Refused: a reranker (see
     :func:`reranker_as_embedding_model`), a registered model of another recorded
     type, a UNC/device path or URL, and a name that is none of the accepted
@@ -359,7 +360,7 @@ def embedding_model_refusal(spec: str) -> str:
     entry = load_registry().get(spec)
     if isinstance(entry, dict):
         kind = entry.get("model_type")
-        if has_recorded_model_type(entry) and kind != "embedding":
+        if has_recorded_model_type(entry) and kind not in ("embedding", "unknown"):
             return (f"'{spec}' is registered as a {kind} model, not an embedding "
                     "model. Choose an embedding model, or if it is one, run "
                     f"'localm set-type {spec} embedding' first.")

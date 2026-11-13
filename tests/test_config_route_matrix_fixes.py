@@ -114,3 +114,22 @@ def test_owner_only_refusal_names_code_the_server_may_run(app_env):
                 json={"hf_trust_remote_code": True})
     assert r.status_code == 403
     assert "programs and model code it may run" in r.json()["detail"]
+
+
+def test_a_section_save_sending_the_stored_value_back_is_not_rechecked(app_env, tmp_path):
+    c, _scoped_key, _ = app_env
+    from localm.config import load_config, save_config
+    moved = str(tmp_path / "moved-away.gguf")
+    cfg = load_config()
+    cfg["embedding_model"] = moved
+    save_config(cfg)
+    r = c.patch("/v1/config", headers=_owner(),
+                json={"embedding_model": moved, "embedding_gpu_layers": 0})
+    assert r.status_code == 200, r.text
+    assert load_config()["embedding_gpu_layers"] == 0
+
+
+def test_the_network_extras_are_for_the_owner_only(app_env):
+    c, scoped, _ = app_env
+    cfg = c.get("/v1/config", headers=_scoped(scoped)).json()
+    assert "effective_net_mode" not in cfg and "net_mode_from_env" not in cfg
