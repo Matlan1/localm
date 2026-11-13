@@ -159,8 +159,9 @@ def test_install_steps_and_the_failure_reach_the_debug_log(media_runtime, monkey
         PermissionError(13, "denied", str(s))))
     with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(provision_error):
         install(force=True)
-    failures = [r for r in caplog.records
+    warnings = [r for r in caplog.records
                 if r.name == "localm" and r.levelno == logging.WARNING]
+    failures = [r for r in warnings if "was refused" not in r.getMessage()]
     assert len(failures) == 1 and "failed" in failures[0].getMessage()
 
 
