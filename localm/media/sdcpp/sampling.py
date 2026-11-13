@@ -100,8 +100,12 @@ def settings_refusal(blk: dict, media: str, steps=None) -> Optional[str]:
     try:
         check_sample_method(blk.get("sample_method"))
     except ValueError as e:
-        return f"Settings > Media > {media.capitalize()} > Native sampler: {e}"
+        return f"{_SAMPLER_FIELD[media]}: {e}"
     return None
+
+
+_SAMPLER_FIELD = {"image": "Settings > Media > Image > Native sampler",
+                  "video": "Settings > Media > Video > Native sampler"}
 
 
 def resize_note(source: tuple, target: tuple, what: str) -> Optional[str]:

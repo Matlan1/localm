@@ -1585,7 +1585,7 @@ def test_a_cancel_stops_the_worker_and_a_finished_job_keeps_it(fake_native, tmp_
 
 
 @pytest.mark.parametrize("src_size,size,said", [
-    ((300, 200), (512, 512), "stretched to 512x512; its aspect ratio is not kept"),
+    ((300, 200), (512, 512), "stretched to 512x512; its aspect ratio is not kept."),
     ((256, 128), (512, 256), "scaled to 512x256."),
     ((512, 512), (512, 512), None),
 ])
