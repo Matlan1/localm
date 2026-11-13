@@ -1961,7 +1961,7 @@
   "settings.field.comfyFloatType.label": "Medien-Gewichts-Dtype (gemeinsam)",
   "settings.field.comfyFuncShim.help": "Umgeht einen bekannten Absturz in den eigenen ACE-Step-Audio-Nodes von ComfyUI (das native Musik-Backend von localm nutzt kein ComfyUI). Standardmäßig aus. Patcht nur ein von localm gestartetes ComfyUI, ab dessen nächstem Start, im Arbeitsspeicher - in Ihre Installation wird nichts geschrieben.",
   "settings.field.comfyFuncShim.label": "ComfyUI-ACE-Step-__func__-Absturz beheben (im Arbeitsspeicher)",
-  "settings.field.comfyGpuPlacement.help": "EXPERIMENTELL, standardmäßig aus. Nennt Auf mehrere GPUs aufteilen (Einstellungen > Modell > Live-Anpassung) zwei oder mehr GPUs, Text-Encoder und VAE auf eine zweite Karte legen. Systeme mit einer GPU sind nicht betroffen. Braucht ein aktuelles ComfyUI.",
+  "settings.field.comfyGpuPlacement.help": "EXPERIMENTELL, standardmäßig aus. Nennt Auf mehrere GPUs aufteilen, auf der Karte Live-Anpassung der Seite Modell, zwei oder mehr GPUs, Text-Encoder und VAE auf eine zweite Karte legen. Systeme mit einer GPU sind nicht betroffen. Braucht ein aktuelles ComfyUI.",
   "settings.field.comfyGpuPlacement.label": "Medien auf mehrere GPUs aufteilen (experimentell)",
   "settings.field.comfyLaunchCmd.help": "Launcher-Skript (.bat/.sh), das ComfyUI startet. Leer erkennt eines im ComfyUI-Ordner automatisch. Nicht verwendet, solange Zu verwendendes ComfyUI auf own steht und localms eigenes ComfyUI installiert ist.",
   "settings.field.comfyLaunchCmd.label": "ComfyUI-Startbefehl",

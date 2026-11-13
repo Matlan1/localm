@@ -1179,9 +1179,10 @@ CORE_FIELDS: list = [
                  # The help must keep BOTH halves: that placement is not promised
                  # everywhere, and that single-GPU setups are unaffected. See
                  # test_placement_help_still_states_the_two_gpu_precondition.
-                 "EXPERIMENTAL, off by default. When Split across GPUs (Settings > "
-                 "Model > Live tuning) names two or more GPUs, put the text encoder and VAE on a second card. Single-GPU setups "
-                 "are unaffected. Needs a recent ComfyUI.",
+                 "EXPERIMENTAL, off by default. When Split across GPUs, on the Model "
+                 "page's Live tuning card, names two or more GPUs, put the text "
+                 "encoder and VAE on a second card. Single-GPU setups are "
+                 "unaffected. Needs a recent ComfyUI.",
                  group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",

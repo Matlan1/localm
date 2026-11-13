@@ -2120,7 +2120,7 @@
   "settings.field.comfyFloatType.label": "Dtype des poids média (partagé)",
   "settings.field.comfyFuncShim.help": "Contourne un crash connu dans les nœuds audio ACE-Step propres à ComfyUI (le backend musical natif de localm n'utilise pas ComfyUI). Désactivé par défaut. Ne corrige que le ComfyUI que localm démarre, dès son prochain démarrage, en mémoire - rien n'est écrit dans votre installation.",
   "settings.field.comfyFuncShim.label": "Corriger le crash __func__ ACE-Step de ComfyUI (en mémoire)",
-  "settings.field.comfyGpuPlacement.help": "EXPÉRIMENTAL, désactivé par défaut. Lorsque Répartir sur plusieurs GPU (Paramètres > Modèle > Réglage en direct) désigne deux GPU ou plus, place l'encodeur de texte et le VAE sur une deuxième carte. Sans effet sur les configurations à un seul GPU. Nécessite un ComfyUI récent.",
+  "settings.field.comfyGpuPlacement.help": "EXPÉRIMENTAL, désactivé par défaut. Lorsque Répartir sur plusieurs GPU, sur la carte Réglage en direct de la page Modèle, désigne deux GPU ou plus, place l'encodeur de texte et le VAE sur une deuxième carte. Sans effet sur les configurations à un seul GPU. Nécessite un ComfyUI récent.",
   "settings.field.comfyGpuPlacement.label": "Répartir les médias sur plusieurs GPU (expérimental)",
   "settings.field.comfyLaunchCmd.help": "Script de lancement (.bat/.sh) qui démarre ComfyUI. Vide en détecte un dans le dossier ComfyUI. Non utilisé tant que ComfyUI à utiliser vaut own et que le ComfyUI de localm est installé.",
   "settings.field.comfyLaunchCmd.label": "Commande de lancement ComfyUI",

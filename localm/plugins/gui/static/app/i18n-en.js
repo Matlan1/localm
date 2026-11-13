@@ -2102,7 +2102,7 @@ export const I18N_EN = {
   "settings.field.comfyFuncShim.label": "Fix ComfyUI ACE-Step __func__ crash (in-memory)",
   "settings.field.comfyFuncShim.help": "Work around a known crash in ComfyUI's own ACE-Step audio nodes (localm's native music backend does not use ComfyUI). Off by default. Patches only a ComfyUI that localm starts, from its next start, in memory - nothing is written into your install.",
   "settings.field.comfyGpuPlacement.label": "Split media across GPUs (experimental)",
-  "settings.field.comfyGpuPlacement.help": "EXPERIMENTAL, off by default. When Split across GPUs (Settings > Model > Live tuning) names two or more GPUs, put the text encoder and VAE on a second card. Single-GPU setups are unaffected. Needs a recent ComfyUI.",
+  "settings.field.comfyGpuPlacement.help": "EXPERIMENTAL, off by default. When Split across GPUs, on the Model page's Live tuning card, names two or more GPUs, put the text encoder and VAE on a second card. Single-GPU setups are unaffected. Needs a recent ComfyUI.",
   "settings.field.reloadLlmAfterImagine.label": "Reload chat model after generating",
   "settings.field.reloadLlmAfterImagine.help": "Free the media model's VRAM and reload the chat model after a gen. Turn off when making many in a row.",
   "settings.field.modelAutoswitch.label": "Model autoswitch",
