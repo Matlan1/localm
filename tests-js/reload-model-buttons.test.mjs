@@ -291,11 +291,17 @@ test("with a peer route selected no reload is offered and a save does not load a
   assert.equal(window.__peer, "peer", "the tab keeps its selection");
 });
 
-async function renderSettings(s) {
+async function renderSettings(s, { edit = true } = {}) {
   const ctx = await boot(s);
   runScript(ctx.window, "refreshSettingsPage();");
   assert.ok(await waitFor(() => ctx.window.document.querySelector("#settings-sec-core-Engine")),
     "the Engine section renders");
+  if (edit) {
+    // A save sends only edited values, so the Engine card gets an edit.
+    const probe = ctx.window.document.querySelector('select[data-key="engine_probe"]');
+    probe.value = "b";
+    probe.dispatchEvent(new ctx.window.Event("change", { bubbles: true }));
+  }
   return ctx;
 }
 
@@ -308,6 +314,14 @@ test("Settings: plain Save in the Engine section never unloads or loads", async 
   assert.ok(await waitFor(() => calls.some((c) => c.method === "PATCH")), "saved");
   await settle(150);
   assert.deepEqual(sideEffects(calls), ["patch"]);
+});
+
+test("Settings: Save and reload model with nothing changed still reloads the running model", async () => {
+  const { window, calls } = await renderSettings(
+    { active: "run", models: [LLM("run", { active: true, loaded: true })] }, { edit: false });
+  saveReloadButton(window).click();
+  assert.ok(await waitFor(() => sideEffects(calls).length >= 2), "unload, load ran");
+  assert.deepEqual(sideEffects(calls), ["unload", "load"], "nothing to save, so no PATCH");
 });
 
 test("Settings: Save and reload model saves, then unloads and loads the running model", async () => {

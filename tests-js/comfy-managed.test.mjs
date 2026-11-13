@@ -178,7 +178,7 @@ test("installed + target field in schema -> the coexistence control renders insi
   // The top box has its own Save button, distinct from the per-plugin
   // ".media-save" buttons and the Remove button.
   const saveButtons = [...box.querySelectorAll(".actions button")]
-    .filter((b) => b.textContent === "Save");
+    .filter((b) => b.textContent === "Save localm's own ComfyUI");
   assert.equal(saveButtons.length, 1, "the top box has exactly one Save button");
 });
 
@@ -194,7 +194,7 @@ test("changing comfy_target and clicking the top box's Save PATCHes /v1/config w
   targetCtrl.dispatchEvent(new win.Event("change", { bubbles: true }));
 
   const save = [...box.querySelectorAll(".actions button")]
-    .find((b) => b.textContent === "Save");
+    .find((b) => b.textContent === "Save localm's own ComfyUI");
   assert.ok(save, "Save button present");
   save.onclick();
   await new Promise((r) => setTimeout(r, 0));
