@@ -718,6 +718,7 @@
   "common.reasoning.thinking": "Pensando…",
   "common.reasoning.thoughts": "Razonamiento",
   "common.reply.empty": "(respuesta sin texto)",
+  "common.reply.unformatted": "No se pudo dar formato a una respuesta y se muestra como texto sin formato: {error}",
   "common.toolCall.readPage": "leer página: {arg}",
   "common.toolCall.webRequest": "solicitud web: {arg}",
   "common.toolCall.webRequestBare": "solicitud web",

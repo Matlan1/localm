@@ -1069,16 +1069,99 @@ export function protectMath(text) {
   return { text: protectedText, restore, finish };
 }
 
-/** *text* with every run of eight or more `*` or `_` outside code escaped
- *  (`\\*`), so the run is plain text, unless the line holds nothing but such
- *  marks and spaces (a thematic break). Bounds marked's emphasis scan, which
- *  is quadratic in an unmatched delimiter run (markedjs/marked#4196). See
- *  tests-js/markdown-degenerate-bound.test.mjs. */
+/** A block of Markdown text holding more emphasis marks (`*`, `_`) than this,
+ *  outside code, gets every mark escaped. A block ends at a blank line, a
+ *  fenced code block, a thematic break and a line that opens a list item the
+ *  way marked lets one interrupt a paragraph (`-`, `+`, `*`, `1.` or `1)`). */
+export const EMPHASIS_MARKS_PER_BLOCK = 200;
+
+// A backslash escape pair, or a run of eight or more `*`/`_` in any mix. Stays
+// linear: each alternative is a fixed shape with no nested quantifier, and a
+// failed run attempt reads at most seven characters. See the test
+// "a 1 MB line of mixed marks is escaped in linear time".
+const _MARK_RUN = /\\[\s\S]|[*_]{8,}/g;
+// A backslash escape pair, or one `*`/`_`. Linear for the same reason.
+const _MARK_ONE = /\\[\s\S]|[*_]/g;
+// A line that opens a list item which can interrupt a paragraph in marked.
+const _LIST_START = /^ {0,3}(?:[*+-]|1[.)])[ \t]+[^ \t\n]/;
+// A bullet list marker that opens a line.
+const _BULLET = /^ {0,3}[*+-][ \t]/;
+
+// Whether *line* is a thematic break made of `*` or `_`: at most three spaces,
+// then three or more of one of them with nothing else but spaces and tabs.
+function _isMarkBreak(line) {
+  if (!/^ {0,3}[*_]/.test(line)) return false;
+  const bare = line.replace(/[ \t]/g, "");
+  return bare.length >= 3 && (/^\*+$/.test(bare) || /^_+$/.test(bare));
+}
+
+// *line* with every match of *re* that is not an escape pair escaped. A
+// thematic break is returned as is; a bullet marker that opens the line is kept
+// when *atStart* (the line is the start of a Markdown line).
+function _escapeMarksIn(line, re, atStart) {
+  if (atStart && _isMarkBreak(line)) return line;
+  const lead = atStart ? (_BULLET.exec(line) || [""])[0] : "";
+  return lead + line.slice(lead.length).replace(re, (m) => (m[0] === "\\" ? m : m.replace(/[*_]/g, "\\$&")));
+}
+
+// The number of unescaped `*`/`_` in *line*, from *from* on.
+function _countMarks(line, from) {
+  let n = 0;
+  for (let i = from; i < line.length; i += 1) {
+    const c = line[i];
+    if (c === "\\") i += 1;
+    else if (c === "*" || c === "_") n += 1;
+  }
+  return n;
+}
+
+/** *text* with its emphasis marks bounded for marked, whose emphasis scan is
+ *  quadratic in unmatched delimiters (markedjs/marked#4196). Outside code:
+ *  every run of eight or more `*`/`_` in any mix is escaped (`\\*`) so it shows
+ *  as plain text, and a block (see EMPHASIS_MARKS_PER_BLOCK) holding more than
+ *  EMPHASIS_MARKS_PER_BLOCK marks gets every mark escaped. A thematic break
+ *  and a bullet marker that opens a line are left alone. Linear in the length
+ *  of *text*. See tests-js/markdown-degenerate-bound.test.mjs. */
 export function escapeDelimiterRuns(text) {
-  return String(text || "").split(_CODE_SPAN).map((part, i) => (i % 2 === 1 ? part
-    : part.split("\n").map((line) => (/^[ \t]*(?:[*_][ \t]*)+$/.test(line) ? line
-      : line.replace(/(?<!\\)([*_])\1{7,}/g, (run) => run.replace(/[*_]/g, "\\$&"))))
-      .join("\n"))).join("");
+  const parts = String(text || "").split(_CODE_SPAN);
+  const counts = [0];
+  const lineBlocks = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    if (i % 2 === 1) {
+      const prev = parts[i - 1];
+      const fence = parts[i].startsWith("```") || parts[i].startsWith("~~~");
+      if (fence && /^[ \t]*$/.test(prev.slice(prev.lastIndexOf("\n") + 1))) counts.push(0);
+      continue;
+    }
+    const lines = parts[i].split("\n");
+    const blocks = new Array(lines.length);
+    for (let k = 0; k < lines.length; k += 1) {
+      const atStart = k > 0 || i === 0;
+      const whole = atStart && (k < lines.length - 1 || i === parts.length - 1);
+      let line = _escapeMarksIn(lines[k], _MARK_RUN, atStart);
+      lines[k] = line;
+      if (whole && /^[ \t]*$/.test(line)) {
+        counts.push(0);
+      } else if (atStart && (_isMarkBreak(line) || _LIST_START.test(line))) {
+        counts.push(0);
+        if (_isMarkBreak(line)) line = "";
+      }
+      blocks[k] = counts.length - 1;
+      counts[counts.length - 1] += _countMarks(line, atStart ? (_BULLET.exec(line) || [""])[0].length : 0);
+    }
+    parts[i] = lines;
+    lineBlocks[i] = blocks;
+  }
+  for (let i = 0; i < parts.length; i += 2) {
+    const lines = parts[i];
+    for (let k = 0; k < lines.length; k += 1) {
+      if (counts[lineBlocks[i][k]] > EMPHASIS_MARKS_PER_BLOCK) {
+        lines[k] = _escapeMarksIn(lines[k], _MARK_ONE, k > 0 || i === 0);
+      }
+    }
+    parts[i] = lines.join("\n");
+  }
+  return parts.join("");
 }
 
 // Open or shut, for each reasoning text whose Thoughts box the person toggled,
@@ -1093,6 +1176,20 @@ function _rememberThinkChoice(det, key, open) {
   _thinkChoices.delete(key);
   _thinkChoices.set(key, open);
   if (_thinkChoices.size > _THINK_CHOICES_MAX) _thinkChoices.delete(_thinkChoices.keys().next().value);
+}
+
+/** Fill *box* with the sanitised HTML of the Markdown *source*. When marked or
+ *  DOMPurify throws, *box* gets *source* as plain text instead, with a note on
+ *  the console and in the Recent errors list. Never throws. */
+function _renderMarkdownInto(box, source) {
+  try {
+    box.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(source)));
+  } catch (e) {
+    const why = String((e && e.message) || e);
+    console.warn("localm: Markdown rendering failed, the text is shown unformatted:", e);
+    recordGuiError(t("common.reply.unformatted", { error: why }), "render");
+    box.replaceChildren(el("div", "md-plain", source));
+  }
 }
 
 /** Render one model reply into *target*.
@@ -1145,7 +1242,7 @@ export function renderMarkdown(target, text, opts = {}) {
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     const thinkMath = protectMath(think);
     const thinkBody = det.querySelector("div");
-    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(thinkMath.text)));
+    _renderMarkdownInto(thinkBody, thinkMath.text);
     thinkMath.restore(thinkBody);
     thinkFinish = () => thinkMath.finish(thinkBody);
     if (!det.dataset.userset) det.open = open;
@@ -1162,7 +1259,7 @@ export function renderMarkdown(target, text, opts = {}) {
     target.appendChild(main);
   }
   const restMath = protectMath(rest || "");
-  main.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(restMath.text)));
+  _renderMarkdownInto(main, restMath.text);
   restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is

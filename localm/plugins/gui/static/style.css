@@ -2923,6 +2923,12 @@ div:has(> .data-table) { overflow-x: auto; }
   font-size: 13px;
 }
 
+/* A reply body that Markdown rendering failed on, shown as its plain text. */
+.md-plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* A checkbox with its label, standing alone in a card (Report a bug's two
    attach toggles, Appearance's .mmproj toggle). `.check` was already the name
    used in index.html and had NO rule at all, so those rows fell back to the
