@@ -134,7 +134,7 @@ def network_mode() -> tuple:
         bak = main.with_name("config.json.bak")
         present = [p for p in (main, bak) if p.is_file()]
     except OSError as e:
-        return None, f"the data directory could not be read ({e.__class__.__name__})"
+        return None, f"the data directory could not be read ({e or e.__class__.__name__})"
     if not present:
         return None, f"{main} does not exist"
     path = present[0]
