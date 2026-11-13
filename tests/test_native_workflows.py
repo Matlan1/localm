@@ -72,7 +72,7 @@ class TestParse:
         ({"models": {"model": {"name": "m", "file": "dir/x.gguf"}}}, "plain file name"),
         ({"models": {"model": {"name": "m", "colour": 1}}}, "unknown field"),
         ({"params": {"bogus": 1}}, "Unknown image workflow parameter"),
-        ({"params": {"steps": 151}}, "between"),
+        ({"params": {"steps": 201}}, "between"),
         ({"params": {"steps": 2.5}}, "whole number"),
         ({"params": {"steps": True}}, "number"),
         ({"params": {"cfg": float("nan")}}, "number"),
