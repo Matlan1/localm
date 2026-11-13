@@ -6,10 +6,17 @@ than guessed.
 A test file is selected when any of these holds:
   - it changed itself;
   - it imports a changed module directly (with --depth N, also a module that
-    imports the changed one, up to N hops);
-  - it names a route path a changed module registers (the static prefix of
-    the path, so a test that calls the route by URL is found even when it
-    never imports the module);
+    imports the changed one, up to N hops; when that selection would exceed
+    --max-share, the importer that the most test files import directly (a
+    hub such as the app factory or the config module) is not followed, then
+    the next, until it fits; nothing is left out when the selection exceeds
+    --max-share even at depth 0, and a changed module is never left out);
+  - it names a route path a changed module registers, or a module that
+    imports a changed module directly registers, at every depth (the static
+    prefix of the path, so a test that calls the route by URL is found even
+    when it never imports the module; a prefix cut by a placeholder after its
+    first segment, such as `/api/` of `/api/{media}/workflows`, names no
+    route);
   - it names a changed module by its dotted name (a monkeypatch target, an
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
@@ -128,6 +135,10 @@ _WORKFLOWS = (".github/workflows/*",)
 _RERANK_CORPUS = ("tests/fixtures/rag_rerank_eval/*",)
 _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_amd_windows_torch_pin_one_source.py": (
+        ("localm/*", "docs/*", "scripts/*", "installer/*", "docker/*", "README.md", "pyproject.toml",
+         "uv.lock", "setup.bat", "setup.sh", "setup-gui.bat", "setup-gui.sh"),
+        "greps the checkout for AMD ROCm torch builds"),
     "tests/test_no_gitignored_path_leak.py": (_PY, "scans the string literals of every tracked .py"),
     "tests/test_no_stray_encoding_cookie.py": (_PY, "reads the first lines of every .py"),
     "tests/test_check_hygiene.py": (("*",), "runs the hygiene checks over every tracked file"),
@@ -216,6 +227,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_rag_rerank_replay.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
     "tests/test_rag_rerank_stage.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
     "tests/test_affected_tests.py": (_PY, "selects over the real import graph of the checkout"),
+    "tests/test_affected_tests_indirect_reach.py": (_PY, "selects over the real import graph of the checkout"),
+    "tests/test_gui_tests_scope.py": (("tests-js/*", "localm/plugins/builtin/*"),
+                                      "resolves the files every tests-js source reads"),
     "tests/test_tree_scanners_registered.py": (_PY, "finds the folder walks of every test and script"),
     "tests/test_native_fault_debug_log_hint.py": (("localm/inference/*.py",), "scans every localm/inference .py"),
     "tests/test_debug_scrub.py": (_TESTS_PY, "walks the AST of every test file for delenv of LOCALM_DEBUG"),
@@ -233,6 +247,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_doctor_exit_and_findings.py": (_LOCALM_PY,
                                                "reads every localm module for test-only "
                                                "environment switches"),
+    "tests/test_store_lock_create_refused.py": (_LOCALM_PY,
+                                                "walks the AST of every localm .py for O_EXCL lock-file creates"),
 }
 # Test files that walk a folder of the checkout, or load a module that does,
 # while their result does not depend on what that folder holds, with how.
@@ -241,6 +257,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_check_hygiene_no_child_console_print.py": "reads the fixed module list check_hygiene names",
     "tests/test_conftest_isolation_guards.py": "runs one named test file",
     "tests/test_confirm_sdcpp_runtime.py": "reads the sd.cpp pin file only",
+    "tests/test_confirm_comfyui_runtime.py": "writes a source record into a ComfyUI tree in tmp_path",
     "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",
     "tests/test_dependabot_groups.py": "uses the selector's requirement parsing only",
     "tests/test_run_affected_tests.py": "runs the selector with a stand-in or for one named file",
@@ -331,7 +348,9 @@ def _top_levels(names: set[str]) -> set[str]:
 
 def route_prefixes(source: str) -> set[str]:
     """The static prefix of every literal or f-string route path a decorated
-    handler in *source* registers."""
+    handler in *source* registers. A prefix cut short by a placeholder that
+    keeps fewer than two path segments (`/api/` of `/api/{media}/workflows`)
+    is left out."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -346,13 +365,18 @@ def route_prefixes(source: str) -> set[str]:
                 continue
             arg = dec.args[0]
             text = None
+            cut = False
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 text = arg.value
             elif isinstance(arg, ast.JoinedStr) and arg.values \
                     and isinstance(arg.values[0], ast.Constant):
                 text = str(arg.values[0].value)
+                cut = len(arg.values) > 1
             if text and text.startswith("/"):
                 prefix = text.split("{", 1)[0]
+                cut = cut or prefix != text
+                if cut and len([seg for seg in prefix.split("/") if seg]) < 2:
+                    continue
                 if len(prefix) > 1:
                     out.add(prefix)
     return out
@@ -420,6 +444,11 @@ class Graph:
                     break
                 parts.pop()
         return found
+
+    def tests_importing(self, modules: set[str] | dict[str, int]) -> set[str]:
+        """The test files that import any of *modules* directly."""
+        wanted = set(modules)
+        return {t for t in self.test_files if self.test_imports[t] & wanted}
 
     def importers(self, modules: set[str], depth: int) -> dict[str, int]:
         """{module: hops} for *modules* (0 hops) and everything that imports
@@ -788,9 +817,62 @@ def changed_files(base: str) -> tuple[list[str], str]:
     return sorted(f.replace("\\", "/") for f in files if f), merge_base
 
 
-def select(changed: list[str], graph: Graph, depth: int = 0,
-           base_ref: str = "HEAD") -> dict[str, list[str]]:
-    """{test file: reasons} for the test files *changed* affects."""
+def follow(graph: Graph, modules: set[str], depth: int, max_share: float | None = None,
+           others: set[str] | frozenset[str] = frozenset()) -> tuple[dict[str, int], dict[str, float]]:
+    """{module: hops} for *modules* and their importers within *depth* hops,
+    and {module: share} for the importers left out.
+
+    With *max_share*, while the test files importing a followed module plus
+    *others* (the test files other rules select) exceed that share of all test
+    files, the followed importer that the most test files import directly (a
+    hub, ties broken by name) is left out with every module reached only
+    through it, until the selection fits or only *modules* remain. *modules*
+    themselves are never left out, and nothing is left out when the selection
+    exceeds the share even at depth 0. The share recorded for a left-out
+    importer is the share of the test files importing it directly."""
+    held: dict[str, float] = {}
+    total = len(graph.test_files)
+
+    def reach() -> dict[str, int]:
+        hops = {m: 0 for m in modules}
+        frontier = set(modules)
+        for hop in range(1, depth + 1):
+            nxt: set[str] = set()
+            for m in frontier:
+                for importer in graph.reverse.get(m, ()):
+                    if importer not in hops and importer not in held:
+                        hops[importer] = hop
+                        nxt.add(importer)
+            frontier = nxt
+        return hops
+
+    hops = reach()
+    if not (depth and max_share is not None and total):
+        return hops, held
+    if len(set(others) | graph.tests_importing(modules)) > max_share * total:
+        return hops, held
+    direct: dict[str, int] = {}
+    while len(set(others) | graph.tests_importing(hops)) > max_share * total:
+        free = [m for m, hop in hops.items() if hop]
+        if not free:
+            break
+        for m in free:
+            if m not in direct:
+                direct[m] = len(graph.tests_importing({m}))
+        hub = min(free, key=lambda m: (-direct[m], m))
+        held[hub] = direct[hub] / total
+        hops = reach()
+    return hops, held
+
+
+def select(changed: list[str], graph: Graph, depth: int = 0, base_ref: str = "HEAD",
+           max_share: float | None = None,
+           held: dict[str, float] | None = None) -> dict[str, list[str]]:
+    """{test file: reasons} for the test files *changed* affects. With
+    *max_share*, the importers of the changed modules that the most test files
+    import are left out until the selection fits that share of the test
+    files, as `follow` describes; the left-out importers and their shares go
+    into *held* when a dict is passed."""
     reasons: dict[str, list[str]] = {}
 
     def add(test: str, why: str) -> None:
@@ -838,6 +920,7 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
     changed_modules: set[str] = set()
     facades: set[str] = set()
     needles: list[tuple[str, re.Pattern[str]]] = []
+    routes: set[str] = set()
     for rel in changed:
         if rel in graph.test_imports:
             add(rel, "changed")
@@ -860,7 +943,8 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
                            if (mod == pkg or mod.startswith(pkg + "."))
                            and f in graph.sources)
             text = _read(rel) + "\n" + _read_at(base_ref, rel)
-            for prefix in sorted(route_prefixes(text)):
+            for prefix in sorted(route_prefixes(text) - routes):
+                routes.add(prefix)
                 needles.append((f"names route {prefix}", re.compile(re.escape(prefix))))
             if rel.startswith("localm/"):
                 needles.append((f"names {mod}", re.compile(re.escape(mod) + r"\b")))
@@ -873,16 +957,25 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
     for facade in sorted(facades - changed_modules):
         changed_modules.add(facade)
         needles.append((f"names {facade}", re.compile(re.escape(facade) + r"\b")))
+    for mod in sorted(changed_modules):
+        for user in sorted(graph.reverse.get(mod, set()) - changed_modules):
+            for prefix in sorted(route_prefixes(_read(graph.sources[user])) - routes):
+                routes.add(prefix)
+                needles.append((f"names route {prefix} of {user}, which imports {mod}",
+                                re.compile(re.escape(prefix))))
 
-    hops = graph.importers(changed_modules, depth)
+    named = {t: [label for label, rx in needles if rx.search(test_text(t))]
+             for t in graph.test_files} if needles else {}
+    others = set(reasons) | set(dependency_reasons) | {t for t, labels in named.items() if labels}
+    hops, held_here = follow(graph, changed_modules, depth, max_share, others)
+    if held is not None:
+        held.update(held_here)
     for t in graph.test_files:
         hit = graph.test_imports[t] & set(hops)
         for mod in sorted(hit, key=lambda m: (hops[m], m)):
             add(t, f"imports {mod}" if hops[mod] == 0 else f"imports {mod} ({hops[mod]} hop(s) from a change)")
-        if needles:
-            for label, rx in needles:
-                if rx.search(test_text(t)):
-                    add(t, label)
+        for label in named.get(t, ()):
+            add(t, label)
         for why in dependency_reasons.get(t, []):
             add(t, why)
     return reasons
@@ -918,7 +1011,9 @@ def _run(args) -> int:
         changed, base_ref = sorted(f.replace("\\", "/") for f in args.files), "HEAD"
     else:
         changed, base_ref = changed_files(args.base)
-    reasons = select(changed, graph, depth=args.depth, base_ref=base_ref)
+    held: dict[str, float] = {}
+    reasons = select(changed, graph, depth=args.depth, base_ref=base_ref,
+                     max_share=args.max_share, held=held)
     selected = sorted(reasons)
     total = len(graph.test_files)
     share = len(selected) / total if total else 0.0
@@ -933,6 +1028,9 @@ def _run(args) -> int:
         print(_NOTHING_AFFECTED)
     print(f"{len(selected)} of {total} test files affected by {len(changed)} changed file(s)",
           file=sys.stderr)
+    for mod, mod_share in sorted(held.items()):
+        print(f"not followed: {mod}, which {mod_share:.0%} of the test files import, so "
+              f"following it would exceed --max-share {args.max_share:.0%}", file=sys.stderr)
     if wide:
         print(f"WIDE: {share:.0%} of the suite exceeds --max-share {args.max_share:.0%}; "
               "the change touches a module most tests import, so a targeted run "

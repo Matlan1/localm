@@ -16,6 +16,8 @@ from click.testing import CliRunner
 
 from localm import setup_llama as sl
 
+CUDA13 = "%d.%d" % sl._MIN_DRIVER_CUDA["cuda-13"]
+
 
 @pytest.fixture(autouse=True)
 def _x64_process(monkeypatch):
@@ -89,7 +91,7 @@ class TestStartCheck:
         assert probes["load_calls"] == 0
 
     def test_a_blackwell_gpu_on_the_cuda_12_image_is_pointed_at_the_cuda13_tag(self, staged, probes):
-        probes["info"] = _gpu(name="NVIDIA GeForce RTX 5090", compute="12.0", cuda="13.4")
+        probes["info"] = _gpu(name="NVIDIA GeForce RTX 5090", compute="12.0", cuda=CUDA13)
         ok, lines = sl.check_staged_cuda_runtime(staged("cuda-12"))
         assert ok is False
         text = " ".join(lines)
@@ -127,7 +129,7 @@ class TestStartCheck:
         assert probes["load_calls"] == 1
 
     def test_blackwell_passes_on_the_cuda_13_line(self, staged, probes):
-        probes["info"] = _gpu(name="NVIDIA GeForce RTX 5090", compute="12.0", cuda="13.4")
+        probes["info"] = _gpu(name="NVIDIA GeForce RTX 5090", compute="12.0", cuda=CUDA13)
         ok, _ = sl.check_staged_cuda_runtime(staged("cuda-13"))
         assert ok is True
 

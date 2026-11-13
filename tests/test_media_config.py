@@ -176,3 +176,22 @@ def test_a_plugin_sharing_the_image_config_keeps_its_comfyui_backend(monkeypatch
     s = music_backend.settings(cfg)
     assert s["backend_choice"] == "auto" and s["native"] == {}
     assert s["warning"] is None
+
+
+def test_a_third_party_folder_under_a_media_plugin_name_is_not_active(tmp_path, monkeypatch):
+    from localm.plugins import loader
+    from localm.plugins.engine import _write_marker, _write_store_install
+    store = tmp_path / "store"
+    for name in ("image", "music"):
+        (store / name).mkdir(parents=True)
+        (store / name / "plugin.toml").write_text(
+            f'[plugin]\nname = "{name}"\n', encoding="utf-8")
+    root = tmp_path / "plugins"
+    (root / "image").mkdir(parents=True)
+    _write_store_install(root / "image", store / "image")
+    (root / "music").mkdir()
+    (root / "music" / "plugin.toml").write_text('[plugin]\nname = "music"\n',
+                                                encoding="utf-8")
+    _write_marker(root / "music", "external", "0")
+    monkeypatch.setattr(loader, "plugins_dir", lambda: root)
+    assert mc.active_plugins({"plugins_enabled": ["image", "music"]}) == {"image"}

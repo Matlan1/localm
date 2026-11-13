@@ -353,29 +353,73 @@ def real_repo(tmp_path):
     return repo, old
 
 
-def test_requirements_changed_true_when_it_differs(confirm, real_repo):
+def _files(by_commit: dict):
+    calls = []
+
+    def fetch(repo, commit, rel):
+        calls.append((repo, commit, rel))
+        value = by_commit[commit]
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return fetch, calls
+
+
+def test_requirements_changed_true_when_it_differs(confirm):
+    fetch, calls = _files({"a" * 40: b"torch\n", "b" * 40: b"torch\nnumpy\n"})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is True
+    assert calls == [("https://github.com/o/r.git", "a" * 40, "requirements.txt"),
+                     ("https://github.com/o/r.git", "b" * 40, "requirements.txt")]
+
+
+def test_requirements_changed_false_when_it_does_not(confirm):
+    fetch, _calls = _files({"a" * 40: b"torch\n", "b" * 40: b"torch\n"})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is False
+
+
+def test_requirements_changed_none_when_it_cannot_be_determined(confirm):
+    fetch, _calls = _files({"a" * 40: b"torch\n", "b" * 40: OSError("unreachable")})
+    assert confirm._requirements_changed("https://github.com/o/r.git", "a" * 40, "b" * 40,
+                                         fetch=fetch) is None
+
+
+def test_fetch_repo_file_refuses_a_repository_that_is_not_on_github(confirm):
+    with pytest.raises(ValueError, match="not a GitHub repository"):
+        confirm._fetch_repo_file("https://example.invalid/o/r.git", "a" * 40, "requirements.txt")
+
+
+# --------------------------------------------------------------------------- #
+#  _tag_commit: against a REAL git repo, through git ls-remote                #
+# --------------------------------------------------------------------------- #
+
+def test_a_lightweight_tag_resolves_to_its_commit(confirm, real_repo):
     repo, old = real_repo
-    (repo / "requirements.txt").write_text("torch\nnumpy\n", encoding="utf-8")
-    _git(["commit", "-aq", "-m", "new"], repo)
-    new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                         capture_output=True, text=True, check=True).stdout.strip()
-    assert confirm._requirements_changed(repo, old, new) is True
+    _git(["tag", "v1.0.0"], repo)
+    assert confirm._tag_commit(str(repo), "v1.0.0") == (old, "")
 
 
-def test_requirements_changed_false_when_it_does_not(confirm, real_repo):
+def test_an_annotated_tag_resolves_to_the_commit_not_the_tag_object(confirm, real_repo):
     repo, old = real_repo
-    (repo / "other.txt").write_text("x\n", encoding="utf-8")
-    _git(["add", "other.txt"], repo)
-    _git(["commit", "-q", "-m", "unrelated"], repo)
-    new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                         capture_output=True, text=True, check=True).stdout.strip()
-    assert confirm._requirements_changed(repo, old, new) is False
+    _git(["tag", "-a", "v1.1.0", "-m", "annotated"], repo)
+    tag_object = subprocess.run(["git", "rev-parse", "refs/tags/v1.1.0"], cwd=repo,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert tag_object != old
+    assert confirm._tag_commit(str(repo), "v1.1.0") == (old, "")
 
 
-def test_requirements_changed_none_when_it_cannot_be_determined(confirm, tmp_path):
-    not_a_repo = tmp_path / "not-a-repo"
-    not_a_repo.mkdir()
-    assert confirm._requirements_changed(not_a_repo, "a" * 40, "b" * 40) is None
+def test_a_missing_tag_is_reported_not_guessed(confirm, real_repo):
+    repo, _old = real_repo
+    commit, why = confirm._tag_commit(str(repo), "v9.9.9")
+    assert commit is None
+    assert "has no tag v9.9.9" in why
+
+
+def test_an_unreadable_repository_is_reported(confirm, tmp_path):
+    commit, why = confirm._tag_commit(str(tmp_path / "absent"), "v1.0.0")
+    assert commit is None
+    assert "git ls-remote exited" in why
 
 
 # --------------------------------------------------------------------------- #
@@ -475,6 +519,65 @@ def test_provision_phase_records_the_failure_verdict(confirm, tmp_path, monkeypa
     assert receipt["checks"]["provision"]["verdict"] == verdict
     assert f"{verdict}: Installing ComfyUI requirements failed" in capsys.readouterr().out
 
+
+
+def test_provision_phase_passes_checkout_on_a_source_archive_tree_without_git(
+        confirm, tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from localm import hwdetect
+    from localm.media import managed_comfy as mc
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import source_archive
+
+    commit = "c" * 40
+    root = tmp_path / "comfyui"
+    root.mkdir()
+    (root / "main.py").write_text("", encoding="utf-8")
+    source_archive.write_record(root, fresh.COMFYUI_REPO, commit, ["main.py"])
+    (root / ".localm-comfy.json").write_text(json.dumps({
+        "custom_nodes_installed": len(fresh.required_custom_nodes().nodes),
+        "custom_node_failures": [], "localm_patches": {"p": "applied"}}), encoding="utf-8")
+    assert not (root / ".git").exists()
+    monkeypatch.setattr(confirm, "_prepare_scratch_env", lambda wd: (wd, wd))
+    monkeypatch.setattr(confirm, "_verify_isolation", lambda wd: (True, "scoped"))
+    monkeypatch.setattr(hwdetect, "detect", lambda: None)
+    monkeypatch.setattr(fresh, "comfy_torch_spec",
+                        lambda det: SimpleNamespace(variant="rocm", note="", packages=("torch",)))
+    monkeypatch.setattr(fresh, "provision_fresh",
+                        lambda **kw: SimpleNamespace(ok=True, status="ok", message="ready"))
+    monkeypatch.setattr(mc, "managed_comfy_paths", lambda: SimpleNamespace(root=root))
+    monkeypatch.setattr(confirm, "_tag_commit", lambda repo, tag: (commit, ""))
+    monkeypatch.setattr(confirm, "_requirements_changed", lambda repo, old, new: True)
+    receipt_path = tmp_path / "r.json"
+    assert confirm.run_provision_phase("v9.9.9", commit, tmp_path / "wd", receipt_path,
+                                       require_gpu=False) == 0
+    receipt = confirm._load_receipt(receipt_path, "v9.9.9", commit)
+    assert receipt["checks"]["checkout"]["verdict"] == "PASS", receipt["checks"]["checkout"]
+    assert receipt["baseline"]["requirements_changed"] is True
+
+
+def test_fetch_repo_file_reads_the_raw_file_of_that_commit(confirm, monkeypatch):
+    from localm import http_ssl
+    seen = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"torch\n"
+
+    def fake(req, timeout=None):
+        seen.append(req.full_url)
+        return Resp()
+    monkeypatch.setattr(http_ssl, "verified_urlopen", fake)
+    got = confirm._fetch_repo_file("https://github.com/o/r.git", "a" * 40, "requirements.txt")
+    assert got == b"torch\n"
+    assert seen == [f"https://raw.githubusercontent.com/o/r/{'a' * 40}/requirements.txt"]
 
 # --------------------------------------------------------------------------- #
 #  Teardown: keeps cache/, removes everything else                          #

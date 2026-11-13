@@ -16,6 +16,15 @@ def _comfy_port_reads_free(monkeypatch):
     monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_comfy_handles(monkeypatch):
+    """A fresh ComfyUI handle registry per test: "localm launched nothing" means
+    an empty registry, whatever another test in this process left in it."""
+    from localm.media import comfy_client
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
+
+
 # --------------------------------------------------------------------------- #
 #  comfy_client core
 # --------------------------------------------------------------------------- #
