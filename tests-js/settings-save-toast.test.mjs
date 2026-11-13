@@ -86,5 +86,5 @@ test("a blank text field left blank does not count as changed", async () => {
 
 test("an unchanged restart field does not ask for a restart", async () => {
   const text = await saveWith("mdns_name", "localm", "core-Server");
-  assert.equal(text.trim(), "Saved");
+  assert.equal(text.trim(), "Nothing changed", "a value typed back to the saved one is not sent");
 });
