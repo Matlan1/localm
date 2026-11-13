@@ -228,7 +228,8 @@ def _run_bat(tmp_path, exit_code, args):
     stub = f"cmd /c exit /b {exit_code}"
     patched = (src.replace('"%PY%" -m localm %*', stub)
                   .replace('"%PY%" -m localm run "%MODEL%"', stub))
-    assert patched.count(stub) == 2, "the localm invocation moved; this test is blind"
+    invocations = [ln for ln in patched.splitlines() if ln.startswith('"%PY%" -m localm')]
+    assert stub in patched and not invocations, "the localm invocation moved; this test is blind"
     clone = make_windows_clone(tmp_path, text=patched)
     out = subprocess.run(["cmd", "/c", str(clone / "localm.bat"), *args], capture_output=True,
                          text=True, stdin=subprocess.DEVNULL, cwd=str(tmp_path),
