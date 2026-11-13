@@ -358,7 +358,8 @@ def _live_server_stall_stacks() -> str:
               help="What did you expect to happen? (optional)")
 @click.option("-w", "--happened", default="", help="What actually happened?")
 @click.option("--no-log", "no_log", is_flag=True,
-              help="Do not attach this run's debug log tail even if one exists. "
+              help="Do not attach the debug log tail of the running localm server "
+                   "(or of this command when no server runs) even if one exists. "
                    "Attached by default when present (debug mode only - a normal "
                    "run has none to attach - and always scrubbed, never chat "
                    "content).")
@@ -416,7 +417,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     stall_stacks = "" if hang else _live_server_stall_stacks()
     path = bugreport.save_user_report(
         description, what_i_expected=what_expected, what_happened=what_happened,
-        include_log=not no_log, extra_hang_trace=hang, stall_stacks=stall_stacks)
+        include_log=not no_log, extra_hang_trace=hang, stall_stacks=stall_stacks,
+        log_pid=None if no_log else bugreport.live_server_log_pid())
     if path is not None:
         console.print(
             f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}",

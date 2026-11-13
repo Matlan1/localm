@@ -2152,23 +2152,39 @@ def network_mode() -> str:
     That covers both a load that raises and a config.json (with its .bak) that
     is present but cannot be read, which load_config_checked reports as
     read_ok False. An unset or unrecognised config value resolves to "ask"."""
+    return network_mode_checked()[0]
+
+
+def network_mode_checked() -> tuple:
+    """``(mode, unreadable)``: *mode* as :func:`network_mode` resolves it, and
+    *unreadable* True when it is ``off`` only because the config file could
+    not be read (no ``LOCALM_NET_MODE`` override)."""
     import logging
     logger = logging.getLogger("localm")
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
-        return env
+        return env, False
     try:
         cfg, read_ok = load_config_checked()
     except Exception as exc:
         logger.warning("netpolicy: could not load config (%s); resolving "
                        "net_mode to 'off' (fail-safe) so an unreadable config "
                        "cannot silently re-enable network access", exc)
-        return "off"
+        return "off", True
     if not read_ok:
         logger.warning("netpolicy: config.json is present but unreadable; "
                        "resolving net_mode to 'off' (fail-safe) so an "
                        "unreadable config cannot silently re-enable network "
                        "access")
-        return "off"
+        return "off", True
     mode = str(cfg.get("net_mode", "ask")).strip().lower()
-    return mode if mode in NET_MODES else "ask"
+    return (mode if mode in NET_MODES else "ask"), False
+
+
+def net_off_unreadable_config_refusal(what: str = "") -> str:
+    """The text of a refusal made because the config file could not be read,
+    which turns network access off: the file, *what* was refused (optional),
+    and what to do."""
+    lead = f"{CONFIG_FILE} could not be read, so network access is treated as off"
+    return (f"{lead} and {what}. " if what else f"{lead}. ") + (
+        "Correct that file (or set LOCALM_NET_MODE for this run) and try again.")

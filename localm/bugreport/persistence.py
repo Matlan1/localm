@@ -125,7 +125,8 @@ def save_user_report(description: str = "", *, summary: str = "",
                      client: Optional[dict] = None,
                      extra_hang_trace: str = "",
                      stall_stacks: str = "",
-                     scrub: Optional[Callable[[str], str]] = None) -> Optional[Path]:
+                     scrub: Optional[Callable[[str], str]] = None,
+                     log_pid: Optional[int] = None) -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path.
 
     The shared backend for the GUI "Report a bug" control and the
@@ -155,7 +156,9 @@ def save_user_report(description: str = "", *, summary: str = "",
     *scrub*, when given, is applied to the summary and the three user fields
     before the report is built (so a title cut from them holds no partial
     path) and to the whole report text before it is saved, so the saved file
-    holds exactly the scrubbed text."""
+    holds exactly the scrubbed text. *log_pid*, when given, names the process
+    whose own debug log *include_log* attaches (the CLI passes the live
+    server's, see live_server_log_pid); else this process's own log."""
     with _SAVE_REPORT_LOCK:
         description = (description or "").strip()
         what_i_expected = (what_i_expected or "").strip()
@@ -177,7 +180,8 @@ def save_user_report(description: str = "", *, summary: str = "",
             # The reason matters only when the user ASKED for the log: with
             # include_log false there is nothing to explain, and a "not
             # collected" line would misreport an opt-out as a failure.
-            tail, log_unavailable = _recent_log_tail_result(pid=os.getpid())
+            tail, log_unavailable = _recent_log_tail_result(
+                pid=log_pid if log_pid is not None else os.getpid())
             if tail:
                 context["recent_log_tail"] = tail
             elif log_unavailable:

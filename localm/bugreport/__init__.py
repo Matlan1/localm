@@ -68,7 +68,7 @@ from localm.bugreport.diagnostics import (
 from localm.bugreport.logs import (
     _LOG_TAIL_READ_BYTES, _find_run_log, _LOG_UNAVAILABLE_NO_FILE, _log_failure_reason,
     _recent_log_tail_result, _recent_log_tail, _HANG_TRACE_MAX_AGE_S,
-    _recent_hang_traces, live_server_hang_trace,
+    _recent_hang_traces, live_server_hang_trace, live_server_log_pid,
 )
 from localm.bugreport.assembly import (
     _format_error, _kv_lines, _app_state_lines, build_report, _report_footer,
@@ -123,7 +123,7 @@ __all__ = [
     "_handle_thread_exception", "_handlers_installed", "_HANG_TRACE_MAX_AGE_S",
     "_HEADER_SECRET_RE", "install_asyncio_handler", "install_global_handlers",
     "_is_fatal_fault_description", "_JSON_SECRET_RE", "_kv_lines",
-    "live_server_hang_trace", "_loaded_model_info", "_localm_version", "LocalmError",
+    "live_server_hang_trace", "live_server_log_pid", "_loaded_model_info", "_localm_version", "LocalmError",
     "_log_failure_reason", "_LOG_TAIL_READ_BYTES", "_LOG_UNAVAILABLE_NO_FILE",
     "mailto_url", "MAINTAINER_EMAIL", "_MAX_PREFILL_BODY", "_NATIVE_OP_LINE_RE",
     "_NOT_DETECTED", "offer_to_send", "_POSIX_FAULT_LINE_RE", "_QUERY_SECRET_RE",
