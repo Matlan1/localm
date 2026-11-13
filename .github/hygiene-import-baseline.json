@@ -22,7 +22,7 @@
     "executor -> debuglog": 1,
     "gpu_usage -> discover": 2,
     "gpu_usage -> inference": 2,
-    "inference -> discover": 48,
+    "inference -> discover": 47,
     "inference -> plugins": 7,
     "inference -> sysstats": 6,
     "install_manifest -> globalcmd": 3,
