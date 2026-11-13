@@ -712,9 +712,10 @@ class TestEmbeddingRoutes:
         finally:
             emb.reset_embedder()
 
-    def test_lazy_resolve_fetches_the_pinned_model_under_ask(self, tmp_path, monkeypatch):
-        """net_mode=ask (the default): the lazy resolve that memory and RAG use
-        downloads the missing known embedding model on first use."""
+    def test_lazy_resolve_fetches_the_pinned_model_only_under_allow(self, tmp_path, monkeypatch):
+        """The lazy resolve that memory and RAG use downloads nothing under
+        net_mode=ask (the default) and, under allow, downloads the missing known
+        embedding model on first use."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
@@ -734,6 +735,11 @@ class TestEmbeddingRoutes:
         _pin_known_models_to_fake_bytes(monkeypatch)
         try:
             set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            emb.reset_embedder()
+            assert emb.resolve_embedding_model_path() is None
+            assert fetched == []
+
+            set_config(monkeypatch, lambda: {"net_mode": "allow"})
             emb.reset_embedder()
             got = emb.resolve_embedding_model_path()
             assert fetched == [(repo, filename)]
@@ -763,7 +769,7 @@ class TestEmbeddingRoutes:
             set_config(monkeypatch, lambda: {"net_mode": "ask"})
             emb.reset_embedder()
             assert emb.resolve_embedding_model_path(allow_download=False) is None
-            assert "not present yet" in (emb.last_error() or "")
+            assert "not auto-downloading (net_mode=ask)" in (emb.last_error() or "")
             assert fetched == []
         finally:
             emb.reset_embedder()
@@ -771,7 +777,7 @@ class TestEmbeddingRoutes:
     def test_first_use_under_off_does_not_use_up_the_download_attempt(
             self, tmp_path, monkeypatch):
         """get_embedder() under net_mode=off only checks the disk; after a switch
-        to ask the next call still makes its one first-use download attempt."""
+        to allow the next call still makes its one first-use download attempt."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         from localm.inference import embedder as emb
@@ -785,7 +791,7 @@ class TestEmbeddingRoutes:
             assert calls == [False]
 
             calls.clear()
-            set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            set_config(monkeypatch, lambda: {"net_mode": "allow"})
             assert emb.get_embedder() is None
             assert calls == [False, None]
         finally:
@@ -794,7 +800,7 @@ class TestEmbeddingRoutes:
     def test_a_probe_keeps_the_off_reason_and_a_failed_download_reason(
             self, tmp_path, monkeypatch):
         """A filesystem-only probe under net_mode=off records off's own reason,
-        and under ask it leaves the reason of a failed first-use download in
+        and under allow it leaves the reason of a failed first-use download in
         place."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
@@ -810,7 +816,7 @@ class TestEmbeddingRoutes:
             assert emb.resolve_embedding_model_path(allow_download=False) is None
             assert "net_mode=off" in (emb.last_error() or "")
 
-            set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            set_config(monkeypatch, lambda: {"net_mode": "allow"})
             emb.reset_embedder()
             failed = "embedding model download failed: connection refused"
             monkeypatch.setattr(emb, "_TRIED_DOWNLOAD", True)

@@ -2089,7 +2089,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
-  "settings.field.embeddingModel.help": "Fetched on first use when network access is allow; otherwise use the Download button on the Knowledge or memory page or run 'localm setup-embeddings' (with network access off, also enable Allow model downloads). Until then memory and RAG search lexically. A known key, registered name or GGUF path.",
+  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. Fetched on first use only when network access is allow; else use Download on the Knowledge or memory page. Until then search is by keyword.",
   "settings.field.embeddingPooling.label": "Embedding pooling",
   "settings.field.embeddingPooling.help": "Changing this invalidates document collections and memory vectors: re-index after. A loaded embedder keeps the old value until unloaded. mean suits bge/nomic; a decoder-based one needs last or auto.",
   "settings.field.embeddingGpuLayers.label": "Embedder GPU layers",
