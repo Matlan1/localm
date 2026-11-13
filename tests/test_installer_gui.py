@@ -594,6 +594,38 @@ class TestInstallParity:
             f"an inline transformers[ specifier is back: {hf_install[0]}")
 
 
+    def test_the_hf_install_is_held_to_the_torch_the_pytorch_step_left(
+            self, gui, monkeypatch):
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="cuda"),
+                             spec="torch torchvision --torch-backend=cu126")
+        hf = next(i for i, c in enumerate(cmds) if any(".[hf" in part for part in c))
+        pins = next(i for i, c in enumerate(cmds) if "torch-pins" in c)
+        torch = next(i for i, c in enumerate(cmds) if "--torch-backend=cu126" in c)
+        assert torch < pins < hf
+        assert cmds[pins][1:] == ["-m", "localm.hwdetect", "torch-pins", "--out",
+                                  gui.TORCH_PINS_FILE]
+        assert cmds[pins][0] == str(gui.venv_python(gui.ROOT))
+        assert cmds[hf][-2:] == ["-c", gui.TORCH_PINS_FILE]
+
+    def test_a_failed_torch_pins_step_fails_the_pytorch_step(self, gui, monkeypatch):
+        ran = []
+
+        def fake_run(cmd, emit, plan, **kw):
+            ran.append([str(c) for c in cmd])
+            return 1 if "torch-pins" in ran[-1] else 0
+        monkeypatch.setattr(gui, "_run", fake_run)
+        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "torch_spec_for",
+                            lambda b: ("torch torchvision --torch-backend=cu126", ""))
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
+        monkeypatch.setattr(gui, "_query", lambda args: "queried")
+        step = next(s for s in gui.build_steps(gui.Plan(backend="cuda")) if s.key == "torch")
+        with pytest.raises(gui.StepFailed):
+            step.run(lambda s: None)
+        assert any("torch-pins" in c for c in ran)
+
+
 class TestGlobalCommandExitCodes:
     """globalcmd exit 20 means the command WAS created and its directory was
     already on PATH. Both console installers record the shim on 20 and add

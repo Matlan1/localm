@@ -583,6 +583,30 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
     return ""
 
 
+# The PyTorch packages the step after the PyTorch install must not replace, and
+# the constraints file (relative to the install root) every setup variant and the
+# updater write their installed versions to before that step.
+TORCH_PIN_PACKAGES = ("torch", "torchvision", "torchaudio")
+TORCH_PINS_FILE = ".venv/localm-torch-pins.txt"
+
+
+def torch_pins(installed: dict | None = None) -> list:
+    """``name==version`` for each of :data:`TORCH_PIN_PACKAGES` installed, in that
+    order: from *installed* (canonical name -> version) when given, else from
+    this interpreter's distributions. Never raises; a package whose version
+    cannot be read is left out."""
+    if installed is None:
+        from importlib import metadata
+        installed = {}
+        for name in TORCH_PIN_PACKAGES:
+            try:
+                installed[name] = metadata.version(name)
+            except Exception:
+                continue
+    return [f"{name}=={installed[name]}" for name in TORCH_PIN_PACKAGES
+            if isinstance(installed.get(name), str) and installed[name]]
+
+
 def main(argv=None) -> int:
     """``python -m localm.hwdetect`` -> prints '<primary-vendor-or-none> <install-backend>'
     on one line, for the shell installers (setup.bat / setup.sh).
@@ -596,8 +620,29 @@ def main(argv=None) -> int:
 
     ``python -m localm.hwdetect backends`` -> prints the backends with a
     prebuilt build for this machine (``prebuilt_backends``), space-separated,
-    or "none"."""
+    or "none".
+
+    ``python -m localm.hwdetect torch-pins [--out FILE]`` -> :func:`torch_pins`
+    for this interpreter, one per line (nothing when none is installed): the
+    constraints of the install step after the PyTorch install. With ``--out``
+    they are written to FILE (empty when none) instead of printed; exit 1 with
+    the reason on stderr when FILE cannot be written."""
     args = [] if argv is None else list(argv)
+    if args and args[0] == "torch-pins":
+        text = "".join(f"{line}\n" for line in torch_pins())
+        if "--out" not in args[1:]:
+            sys.stdout.write(text)
+            return 0
+        i = args.index("--out", 1)
+        if i + 1 >= len(args):
+            print("torch-pins: --out needs a file", file=sys.stderr)
+            return 2
+        try:
+            Path(args[i + 1]).write_text(text, encoding="utf-8")
+        except OSError as e:
+            print(f"torch-pins: could not write {args[i + 1]}: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args and args[0] == "backends":
         print(" ".join(prebuilt_backends()) or "none")
         return 0
