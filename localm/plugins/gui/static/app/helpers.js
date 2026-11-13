@@ -1128,9 +1128,9 @@ export function escapeDelimiterRuns(text) {
   const lineBlocks = [];
   for (let i = 0; i < parts.length; i += 1) {
     if (i % 2 === 1) {
-      const prev = parts[i - 1];
+      const prevLines = parts[i - 1];
       const fence = parts[i].startsWith("```") || parts[i].startsWith("~~~");
-      if (fence && /^[ \t]*$/.test(prev.slice(prev.lastIndexOf("\n") + 1))) counts.push(0);
+      if (fence && /^[ \t]*$/.test(prevLines[prevLines.length - 1])) counts.push(0);
       continue;
     }
     const lines = parts[i].split("\n");
