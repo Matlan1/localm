@@ -435,6 +435,12 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 # Shown when any grammar, lazy or forced, is requested of a diffusion language
 # model. Contains "would be ignored", which the GUI's web-tool retry matches
 # on. See test_grammar_refusals_carry_the_retry_phrase.
+GRAMMAR_FAILED_THIS_REPLY_MESSAGE = (
+    "The grammar constraint failed while this reply was generated, so the reply "
+    "does not follow the requested grammar. Grammar-constrained sampling is off for "
+    "this model until localm restarts. Restart localm, or update the runtime with "
+    "`localm setup-llama`.")
+
 GRAMMAR_FAULTED_MESSAGE = (
     "This model's llama.cpp runtime faulted while applying a grammar earlier, so "
     "grammar-constrained sampling is off for it until localm restarts, and the "

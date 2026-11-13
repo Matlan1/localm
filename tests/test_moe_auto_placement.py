@@ -331,6 +331,7 @@ class TestPreflightOptions:
         msg = str(exc.value)
         assert "Lower the context:  -c 8192" in msg
         assert "-c 32768" not in msg
+        assert "Settings > Model: 'Context window (initial)' (-c)" in msg
 
     def test_no_context_option_when_the_weights_alone_exceed_the_card(self, tmp_path):
         b = _backend(_dense_model(tmp_path), n_gpu_layers_auto=False)

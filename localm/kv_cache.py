@@ -115,6 +115,8 @@ def context_refused_note(kv_cache_type: Optional[str]) -> str:
     asked for in a quantised type, "" for f16 or None."""
     if kv_cache_type is None or kv_cache_type == KV_CACHE_F16:
         return ""
-    return (f" The KV cache type is {kv_cache_type} (the kv_cache_type setting), which "
-            f"needs flash attention; if this model or runtime cannot use flash "
-            f"attention, set kv_cache_type to {KV_CACHE_F16} and load the model again.")
+    return (f" The KV cache type is {kv_cache_type} ('KV cache type' in Settings > "
+            f"Model), which needs flash attention; only if this model or runtime "
+            f"cannot use flash attention, set it to {KV_CACHE_F16} and load the model "
+            f"again ({KV_CACHE_F16} needs about twice the KV memory, so it does not help "
+            f"when memory is short).")

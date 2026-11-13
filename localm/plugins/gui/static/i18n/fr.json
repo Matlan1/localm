@@ -1345,7 +1345,7 @@
   "models.relocate.title": "Faire pointer cette entrée vers le nouvel emplacement du fichier",
   "models.relocate.toast": "« {name} » relocalisé",
   "models.relocate.working": "Vérification…",
-  "models.bundledCodeNote": "Ce modèle fournit son propre code, qui n'a pas été exécuté car « Autoriser le code personnalisé fourni avec le modèle » est désactivé ; localm a utilisé à la place la prise en charge propre de transformers. Cela peut expliquer cet échec. Si vous faites confiance à la source du modèle, essayez d'activer ce réglage (localm config hf_trust_remote_code true).",
+  "models.bundledCodeNote": "Ce modèle fournit son propre code, qui n'a pas été exécuté car « Autoriser le code personnalisé fourni avec le modèle » est désactivé ; localm a utilisé à la place la prise en charge propre de transformers. Cela peut expliquer cet échec. Si vous faites confiance à la source du modèle, essayez d'activer ce réglage (Paramètres > Modèle, ou `localm config hf_trust_remote_code true`).",
   "models.bundledCodeAlwaysNote": "Ce modèle fournit son propre code, que localm n'exécute pas pour ce type de modèle ; il utilise à la place la prise en charge propre de transformers. Cela peut expliquer cet échec.",
   "models.ownCodeOff": "code propre désactivé",
   "models.ownCodeOffHint": "Ce modèle fournit son propre code, qui n'est pas exécuté : il utilise la prise en charge propre de transformers. En cas d'échec, le message indique quoi essayer.",

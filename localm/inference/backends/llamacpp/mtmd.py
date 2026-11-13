@@ -699,7 +699,8 @@ class MtmdContext:
                 "projector will use the default GPU device", gpu_index)
             self._gpu_index = 0
         self.on_gpu = bool(use_gpu)
-        _cpu_requested = bool(os.environ.get("LOCALM_MTMD_CPU"))
+        from ._abi import env_on
+        _cpu_requested = env_on("LOCALM_MTMD_CPU")
         self._ctx = self._open(use_gpu=self.on_gpu)
         if not self._ctx and self.on_gpu:
             # A GPU-side refusal at INIT (the backend cannot take this projector
@@ -786,7 +787,8 @@ class MtmdContext:
         else at the time. Two concurrent ``_open`` calls in ONE process would race
         on the variable (the second's restore could drop the first's value), so a
         caller that loads two mmprojs at once needs a lock."""
-        if use_gpu and os.environ.get("LOCALM_MTMD_CPU"):
+        from ._abi import env_on
+        if use_gpu and env_on("LOCALM_MTMD_CPU"):
             return None
         params = self._m.mtmd_context_params_default()
         buf = ctypes.cast(ctypes.byref(params), ctypes.POINTER(ctypes.c_uint8))
