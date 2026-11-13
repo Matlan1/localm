@@ -27,6 +27,13 @@ from localm.inference import capability_routing as cr
 from localm.inference import routing_latch as rl
 from localm.inference.backends.base import ModelLoadCancelled
 from tests.conftest import probe_double
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 CRASH_TEXT = ("The native model-loading process crashed (exit code -11 "
               "(killed by signal SIGSEGV)) while loading the model file.")
@@ -302,18 +309,18 @@ SKIP_BIG = {"big": cr.SkippedCandidate("big", 1_000_000.0, 1_000_600.0, "boom")}
 
 class TestPlanRouteSkip:
     def test_a_skipped_model_is_not_a_candidate(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
         assert d.candidates == ("small",)
         assert d.resolved == "small"
 
     def test_a_skipped_model_that_would_have_qualified_is_reported(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
         assert [s.model for s in d.skipped] == ["big"]
 
     def test_when_every_capable_model_is_skipped_the_current_model_answers(self):
         skip = dict(SKIP_BIG)
         skip["small"] = cr.SkippedCandidate("small", 1.0, 2.0, "boom")
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=skip)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=skip)
         assert d.candidates == ()
         assert d.resolved == "plain" and d.routed is False
         assert d.unmet == ("tool_use",)
@@ -321,17 +328,17 @@ class TestPlanRouteSkip:
 
     def test_a_skipped_model_that_could_not_serve_the_request_is_not_reported(self):
         skip = {"plain": cr.SkippedCandidate("plain", 1.0, 2.0, "boom")}
-        d = cr.plan_route("tooly", TOOLS, pinned=False,
+        d = _rf.plan_route("tooly", TOOLS, pinned=False,
                           reg=_reg(plain={"tool_use": False}, tooly={"tool_use": True}),
                           skip=skip)
         assert d.skipped == ()
 
     def test_a_pinned_request_ignores_the_skip_set(self):
-        d = cr.plan_route("plain", TOOLS, pinned=True, reg=REG, skip=SKIP_BIG)
+        d = _rf.plan_route("plain", TOOLS, pinned=True, reg=REG, skip=SKIP_BIG)
         assert d.resolved == "plain" and d.skipped == ()
 
     def test_without_a_skip_set_nothing_changes(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG)
         assert d.candidates == ("big", "small") and d.skipped == ()
 
     def test_the_partial_path_skips_too(self):
@@ -343,7 +350,7 @@ class TestPlanRouteSkip:
                    roomy2={"tool_use": False, "context_length": 131072})
         needs = cr.CapabilityNeeds(capabilities=("tool_use",), min_context=100000)
         skip = {"roomy": cr.SkippedCandidate("roomy", 1.0, 2.0, "boom")}
-        d = cr.plan_route("plain", needs, pinned=False, reg=reg, skip=skip)
+        d = _rf.plan_route("plain", needs, pinned=False, reg=reg, skip=skip)
         assert d.candidates == ("roomy2",)
         assert d.unmet == ("tool_use",)
         assert [s.model for s in d.skipped] == ["roomy"]
@@ -354,7 +361,7 @@ class TestPlanRouteSkip:
                    roomy={"tool_use": False, "context_length": 200000},
                    roomy2={"tool_use": False, "context_length": 131072})
         needs = cr.CapabilityNeeds(capabilities=("tool_use",), min_context=100000)
-        d = cr.plan_route("plain", needs, pinned=False, reg=reg)
+        d = _rf.plan_route("plain", needs, pinned=False, reg=reg)
         assert d.candidates == ("roomy", "roomy2") and d.skipped == ()
 
 
@@ -362,7 +369,7 @@ class TestDescribeSkipped:
     def test_it_names_the_model_when_it_failed_why_and_when_it_is_retried(self):
         skip = {n: cr.SkippedCandidate(n, 1_000_000.0, 1_000_600.0, "it crashed")
                 for n in ("big", "small")}
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=skip)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=skip)
         text = d.describe()
         assert "big was skipped because its last load failed at" in text
         assert "(it crashed)" in text
@@ -372,13 +379,13 @@ class TestDescribeSkipped:
         assert "no installed model provides" not in text
 
     def test_a_route_that_skipped_a_model_still_says_so(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG, skip=SKIP_BIG)
         text = d.describe()
         assert text.startswith("routed plain -> small")
         assert "big was skipped" in text
 
     def test_a_decision_with_nothing_skipped_reads_as_before(self):
-        d = cr.plan_route("plain", TOOLS, pinned=False, reg=REG)
+        d = _rf.plan_route("plain", TOOLS, pinned=False, reg=REG)
         assert d.describe() == "routed plain -> big (tool_use=absent)"
 
 

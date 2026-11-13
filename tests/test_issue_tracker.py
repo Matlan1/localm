@@ -68,7 +68,9 @@ def test_net_mode_off_makes_no_request(monkeypatch, how):
     with pytest.raises(LocalmError) as e2:
         issue_tracker.get_issue(3)
     assert calls == []
-    assert "net_mode = off" in e2.value.summary
+    assert e2.value.stage == "network_off"
+    from localm import config
+    assert e2.value.reason == config.NET_OFF_REMEDY
 
 
 @pytest.mark.parametrize("mode", ["ask", "allow"])
@@ -259,7 +261,8 @@ def test_net_mode_off_gives_error_rows_and_sends_nothing(monkeypatch, fresh_reco
     issue_tracker.record_filed(8, "t")
     rows = issue_tracker.filed_status()
     assert calls == []
-    assert "net_mode = off" in rows[0]["error"]
+    from localm import config
+    assert rows[0]["error"] == config.net_off_refusal("nothing was sent to the localm proxy")
 
 
 def _client(monkeypatch):
@@ -306,7 +309,8 @@ def test_issues_route_under_net_mode_off_reports_and_sends_nothing(monkeypatch, 
     assert calls == []
     data = r.json()
     assert data["available"] is True
-    assert "net_mode = off" in data["issues"][0]["error"]
+    from localm import config
+    assert config.NET_OFF_REMEDY in data["issues"][0]["error"]
     assert "state" not in data["issues"][0]
 
 

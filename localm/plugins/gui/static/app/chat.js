@@ -340,7 +340,7 @@ export function templateMargin(ctxMax) {
  *  non-ASCII character. */
 export function budgetTokens(text) {
   const s = String(text || "");
-  const wide = (s.match(/[^\x00-\x7f]/g) || []).length;
+  const wide = (s.match(/[\u0080-\uffff]/g) || []).length;
   return wide + Math.ceil((s.length - wide) / BUDGET_CHARS_PER_TOKEN);
 }
 
@@ -1017,14 +1017,14 @@ const _convTooLargeWarned = new Set();   // conversation ids already toasted for
 
 /** Debounced upsert of one conversation to the server store. */
 export function pushConversation(conv) {
-  if (!chat.persist) return;
+  if (!chat.persist || conv.deleted) return;
   // Brand-new conversations with nothing in them yet aren't worth a file.
   if (!conv.messages.length && conv.title === "New chat") return;
   conv.updated_at = Date.now();
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
-    if (!chat.persist) return;   // the mode switched to privacy while this waited
+    if (!chat.persist || conv.deleted) return;   // privacy mode, or the chat was deleted, while this waited
     try {
       const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",
@@ -1041,7 +1041,7 @@ export function pushConversation(conv) {
         _remoteSaveOk = false;
         if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
           _convTooLargeWarned.add(conv.id);
-          toast(t("chat.conv.tooLarge"), true);
+          toast(t(_localSaveOk ? "chat.conv.tooLarge" : "chat.conv.tooLargeTabOnly"), true);
         }
         if (!_convPushWarned) {
           _convPushWarned = true;
@@ -1289,10 +1289,14 @@ export function syncPinModelToggle(conv) {
 
 /** Pins the conversation on screen to the model selected in the sidebar, or
  *  unpins it. A pinned conversation is always answered by that model, even
- *  when a request needs something it lacks. */
+ *  when a request needs something it lacks. Pinning with no chat open starts
+ *  a chat for the pin. */
 export function setConversationPin(on) {
+  if (!currentConv()) {
+    if (!on) { syncPinModelToggle(null); return; }
+    newConversation();
+  }
   const conv = currentConv();
-  if (!conv) return;
   const model = modelSelect.value || modelCache.active;
   delete conv.pinnedModelId;
   if (on && model) conv.pinnedModel = model;
@@ -1480,7 +1484,20 @@ for (const evt of ["input", "change"]) {
   });
 }
 
+/** Open a new, empty chat. An untouched empty "New chat" already in the list
+ *  (no messages, default title, no folder, pin or model pin) is reused and
+ *  moved to the top instead of adding another. */
 export function newConversation() {
+  const idle = chat.conversations.find((c) => c.title === "New chat" &&
+    !(c.messages || []).length && !(c.branches || []).length && !c.folder && !c.pinned && !c.pinnedModel && !c.params);
+  if (idle) {
+    chat.conversations.splice(chat.conversations.indexOf(idle), 1);
+    chat.conversations.unshift(idle);
+    chat.activeId = idle.id;
+    renderConvList();
+    renderChat();
+    return;
+  }
   const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
   chat.conversations.unshift(conv);
   chat.activeId = conv.id;
@@ -1704,13 +1721,20 @@ export function buildConvItem(conv, snippet) {
     e.stopPropagation();
     const input = document.createElement("input");
     input.value = conv.title;
+    let cancelled = false;
     const commit = () => {
-      conv.title = input.value.trim() || conv.title;
-      saveConversations(conv);
+      if (!cancelled) {
+        conv.title = input.value.trim() || conv.title;
+        saveConversations(conv);
+      }
       renderConvList();
     };
     input.onblur = commit;
-    input.onkeydown = (ke) => { if (ke.key === "Enter") input.blur(); };
+    // Enter keeps the typed name; Escape leaves the old one.
+    input.onkeydown = (ke) => {
+      if (ke.key === "Enter") input.blur();
+      else if (ke.key === "Escape") { ke.preventDefault(); ke.stopPropagation(); cancelled = true; input.blur(); }
+    };
     item.replaceChild(input, title);
     input.focus();
     input.select();
@@ -1747,6 +1771,11 @@ export function buildConvItem(conv, snippet) {
   const del = el("button", "del", "×");
   del.title = t("chat.conv.delete");
   const removeConversation = () => {
+    // Marked deleted: pushConversation never writes it again, also not at the
+    // end of a reply still streaming into it.
+    conv.deleted = true;
+    clearTimeout(_convPushTimers.get(conv.id));
+    _convPushTimers.delete(conv.id);
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
     chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
@@ -1950,6 +1979,9 @@ export function buildRoutedChip(routed) {
     chip.appendChild(document.createTextNode(t("chat.routed.suggestChip", { model: routed.suggest })));
     chip.title = t("chat.routed.suggestTitle", {
       from: routed.from || "?", needs, model: routed.suggest });
+    if (routed.askReason) {
+      chip.title += " " + t("chat.routed.askReason", { reason: routed.askReason });
+    }
     chip.onclick = () => {
       if ([...modelSelect.options].some((o) => o.value === routed.suggest)) {
         modelSelect.value = routed.suggest;
@@ -2195,7 +2227,8 @@ export function addMessageRow(container, role, text, opts = {}) {
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
   copy.onclick = async () => {
-    const plain = stripAsrPrefix(stripThink(text) || text);
+    // Reasoning blocks are stripped from a reply only; a user message is copied as typed.
+    const plain = role === "user" ? text : stripAsrPrefix(stripThink(text) || text);
     const firstImg = body.querySelector(".msg-img");
     // Image-only message (e.g. a bare attachment): copy the IMAGE, not empty
     // text - the "copy copied the prompt, not the image" report (VIS-2). For a
@@ -2355,8 +2388,16 @@ export function addToolEventRow(container, ev, opts = {}) {
       const title = (s.title || "").trim() || url;
       li.appendChild(toolSourceLink(url, title));
       const meta = [];
-      if (TOOL_GROUNDING_KEYS[s.grounding]) meta.push(t(TOOL_GROUNDING_KEYS[s.grounding]));
-      if (TOOL_READ_KEYS[s.retrieval_status]) meta.push(t(TOOL_READ_KEYS[s.retrieval_status]));
+      // A source whose read failed but whose search snippet is in the evidence
+      // says so instead of "no evidence".
+      const snippetUsed = s.grounding === "failed" && (ev.chunks || []).some(
+        (c) => c && c.source_id === s.id && c.kind === "snippet");
+      if (snippetUsed) {
+        meta.push(t("chat.tool.read.failedSnippetUsed"));
+      } else {
+        if (TOOL_GROUNDING_KEYS[s.grounding]) meta.push(t(TOOL_GROUNDING_KEYS[s.grounding]));
+        if (TOOL_READ_KEYS[s.retrieval_status]) meta.push(t(TOOL_READ_KEYS[s.retrieval_status]));
+      }
       if (s.error) meta.push(s.error);
       if (meta.length) li.appendChild(el("span", "tool-source-meta", meta.join(" · ")));
       list.appendChild(li);
@@ -2539,7 +2580,7 @@ export function updateUsageDisplay(usage) {
     return;
   }
   const bits = [`${usage.total_tokens} tok`];
-  if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
+  if (usage.ttft_ms != null) bits.push(`TTFT ${Math.round(usage.ttft_ms)} ms`);
   if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
   const mtp = mtpUsageText(usage.mtp);
   if (mtp.text) bits.push(mtp.text);
@@ -2779,7 +2820,7 @@ export function editMessage(conv, index) {
 }
 
 export function regenerate(conv) {
-  if (chatBusy()) return;
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   const last = conv.messages.length - 1;
   if (conv.messages[last]?.role !== "assistant") return;
   forkAt(conv, last);                // park the old reply as a sibling
@@ -2846,9 +2887,19 @@ export function revertTo(conv, index) {
 }
 
 export function chatParams() {
+  // A value above the field's max is lowered to the max, and the field shows
+  // the value that is sent.
   const num = (id) => {
-    const v = $(id).value.trim();
-    return v === "" ? null : Number(v);
+    const box = $(id);
+    const v = box.value.trim();
+    if (v === "") return null;
+    const n = Number(v);
+    const hi = box.max === "" ? NaN : Number(box.max);
+    if (Number.isFinite(n) && Number.isFinite(hi) && n > hi) {
+      box.value = String(hi);
+      return hi;
+    }
+    return n;
   };
   return {
     temperature: num("p-temperature"),
