@@ -181,6 +181,9 @@ def runtime_history() -> list:
             if isinstance(e, dict) and is_safe_tag(str(e.get("tag") or ""))]
 
 
+_NO_ROLLBACK_BACKENDS = frozenset({"amd-rocm", "custom"})
+
+
 def previous_tag(backend: str) -> Optional[str]:
     """The most recent recorded tag for *backend* that is NOT the one currently
     installed - i.e. what --rollback goes back to. None when there is no such
@@ -190,7 +193,11 @@ def previous_tag(backend: str) -> Optional[str]:
     newest history entry, so a rollback still works after a history write failed
     or after the runtime dir was re-provisioned by something that did not
     journal. The marker is the ground truth for "what is installed"; history is
-    only the list of candidates."""
+    only the list of candidates. Always None for ``amd-rocm`` (its build is fixed
+    by the localm release) and ``custom`` (a build localm did not download): neither
+    can be rolled back."""
+    if backend in _NO_ROLLBACK_BACKENDS:
+        return None
     current = _sl.installed_build()
     for entry in reversed(runtime_history()):
         if entry.get("backend") != backend:
@@ -277,7 +284,8 @@ def check_runtime_update() -> dict:
     if backend == "amd-rocm" and _sl.rocm_build_is_current(_sl._repo_runtime_lib(), current):
         newer = False
     return {"installed": True, "backend": backend, "current": current,
-            "target": target, "newer": newer, "pinned": pin,
+            "target": target, "newer": newer,
+            "pinned": None if backend == "amd-rocm" else pin,
             "previous": previous_tag(backend)}
 
 
@@ -475,7 +483,7 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
             set_pinned_tag(None)
             console.print(f"[green]Back to localm's confirmed build[/green] "
                           f"({_PINNED_TAG}) - the one this release was tested "
-                          "with. Re-run setup-llama --force to install it now.")
+                          "with. Installing it now.")
             return
         if tag.strip().lower() == _TRACK_LATEST:
             set_pinned_tag(_TRACK_LATEST)
