@@ -71,6 +71,13 @@ MTP_DRAFT_SCORE_BYTES = 4
 MTP_DRAFT_COMPUTE_MARGIN_BYTES = 384 * 1024 * 1024
 
 
+def ram_reading() -> tuple[Optional[int], Optional[int]]:
+    """``(total, available)`` system RAM bytes (``sysstats.system_ram``), each
+    None when it cannot be read."""
+    from localm.sysstats import system_ram
+    return system_ram()
+
+
 class MmapDecision(NamedTuple):
     """How a load memory-maps the model file (:func:`decide_use_mmap`).
 
@@ -2426,7 +2433,8 @@ class VramSizingMixin:
                + int(self.n_ctx) * self._kv_bytes_per_token() + overhead)
         return full, min(full, low)
 
-    def _auto_gpu_layers_budget(self) -> Optional[_AutoLayerBudget]:
+    def _auto_gpu_layers_budget(self, reading: Optional[tuple[int, Optional[int]]] = None
+                                ) -> Optional[_AutoLayerBudget]:
         """The full computation behind ``_auto_gpu_layers()``: the same
         layer-count decision, plus the free/total/model/kv/overhead breakdown
         a partial-offload notice needs to name the actual cause. None under
@@ -2464,8 +2472,14 @@ class VramSizingMixin:
         that trades routed experts for context keeps room for its reserved
         window first; when that window does not fit even with every block's
         routed experts in system RAM, ``kv`` is charged for ``n_ctx`` tokens
-        instead."""
-        free, total, split_devices = self._split_free_total_bytes()
+        instead.
+
+        *reading*, ``(free, total)`` bytes of one GPU, replaces the VRAM reading
+        (a single-device load sized against that much free VRAM)."""
+        if reading is not None:
+            free, total, split_devices = reading[0], reading[1], 1
+        else:
+            free, total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
             if free is None:
@@ -2640,32 +2654,35 @@ class VramSizingMixin:
             return 0
         return pinned * min(n_used, n_expert) // n_expert
 
-    def _host_resident_bytes(self) -> Optional[int]:
+    def _host_resident_bytes(self, n_cpu_moe: Optional[int] = None) -> Optional[int]:
         """Weight bytes a load with every layer on the GPU keeps in system RAM:
         the model file's bytes minus :meth:`_vram_model_bytes` for this load's
         n_cpu_moe, so the input layer and any pinned routed experts. None when
         the file size cannot be read, or when n_cpu_moe is
         above 0 and the per-block byte probe failed. An input-layer probe
-        failure counts the input layer as 0 bytes here."""
+        failure counts the input layer as 0 bytes here. *n_cpu_moe* replaces
+        the load's own (``_load_n_cpu_moe``)."""
         try:
             model_bytes = self._model_bytes()
         except OSError:
             return None
         if model_bytes <= 0:
             return None
-        n_cpu_moe = self._load_n_cpu_moe()
+        if n_cpu_moe is None:
+            n_cpu_moe = self._load_n_cpu_moe()
         if n_cpu_moe > 0 and not self._block_bytes():
             return None
         return max(0, model_bytes - self._base_vram_model_bytes(n_cpu_moe))
 
-    def _cpu_held_weight_bytes(self, gpu_layers: int) -> Optional[int]:
+    def _cpu_held_weight_bytes(self, gpu_layers: int,
+                               n_cpu_moe: Optional[int] = None) -> Optional[int]:
         """Weight bytes a load with *gpu_layers* below 99 keeps in system RAM:
         the whole file for 0, else the input layer, every repeating block
         llama.cpp leaves on the CPU (blocks below ``n_layer + 1 - gpu_layers``)
         and the routed experts this load's n_cpu_moe pins in the blocks on
         the GPU. None when the file size or the per-block byte probe cannot
         be read. An input-layer probe failure counts the input layer as 0
-        bytes here."""
+        bytes here. *n_cpu_moe* replaces the load's own (``_load_n_cpu_moe``)."""
         try:
             model_bytes = self._model_bytes()
         except OSError:
@@ -2678,7 +2695,8 @@ class VramSizingMixin:
         if not blocks:
             return None
         gpu_start = max(max(blocks) + 2 - gpu_layers, 0)
-        n_cpu_moe = self._load_n_cpu_moe()
+        if n_cpu_moe is None:
+            n_cpu_moe = self._load_n_cpu_moe()
         outside_blocks = max(0, model_bytes - sum(total for total, _ in blocks.values()))
         input_bytes = max(0, model_bytes - self._base_vram_model_bytes(0))
         held = min(outside_blocks, input_bytes)
@@ -2738,6 +2756,108 @@ class VramSizingMixin:
             return bool(discover.native_gpu_devices())
         return bool(gpu_readings)
 
+    @staticmethod
+    def _ram_reading() -> tuple[Optional[int], Optional[int]]:
+        """``(total, available)`` system RAM bytes (:func:`ram_reading`)."""
+        return ram_reading()
+
+    def _mmap_byte_counts(self, gpu_layers: int, on_gpu: bool, n_cpu_moe: int
+                          ) -> tuple[Optional[int], Optional[int], bool]:
+        """``(host, read, per_token)`` for a load with *gpu_layers* (reaching a
+        GPU when *on_gpu*) and *n_cpu_moe*: the weight bytes it keeps in system
+        RAM, the part of them the CPU reads while generating, and whether those
+        are read on every token (pinned routed experts or a draft model on the
+        CPU). ``(None, None, False)`` when a byte count fails. Changes nothing."""
+        full = gpu_layers >= self._DEFAULT_GPU_LAYERS
+        per_token = False
+        try:
+            if full and on_gpu:
+                host = self._host_resident_bytes(n_cpu_moe)
+                per_token = n_cpu_moe > 0
+            else:
+                host = self._cpu_held_weight_bytes(gpu_layers if on_gpu else 0, n_cpu_moe)
+            if host is None:
+                return None, None, False
+            lookup = self._cpu_row_lookup_bytes(gpu_layers if on_gpu else 0)
+            read = host if lookup is None else max(0, host - lookup)
+            draft = self._cpu_draft_weight_bytes(on_gpu)
+            return host + draft, read + draft, per_token or draft > 0
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("mmap: host-resident byte count failed (%s)", type(exc).__name__)
+            return None, None, False
+
+    def _mmap_decision_for(self, setting, gpu_layers: int, on_gpu: bool,
+                           host: Optional[int], read: Optional[int], per_token: bool,
+                           total: Optional[int], available: Optional[int]) -> MmapDecision:
+        """The :class:`MmapDecision` for the byte counts of
+        :meth:`_mmap_byte_counts` and a RAM reading. Changes nothing."""
+        full = gpu_layers >= self._DEFAULT_GPU_LAYERS
+        decision = decide_use_mmap(setting, full and on_gpu, host, total, available, read)
+        if not on_gpu and gpu_layers > 0 and decision.reason == "partial_offload":
+            decision = decision._replace(reason="no_gpu")
+        if (per_token and decision.reason == "exceeds_ram" and read is not None
+                and available is not None
+                and read + HOST_RAM_HEADROOM_BYTES > available):
+            decision = decision._replace(reason="cpu_exceeds_ram")
+        return decision
+
+    def predict_placement(self, free_vram: Optional[int] = None,
+                          total_vram: Optional[int] = None,
+                          ram_available: Optional[int] = None,
+                          ram_total: Optional[int] = None) -> Optional[dict]:
+        """What a load of this model would do, without loading it or changing
+        any attribute a load reads. *free_vram*/*total_vram* replace the GPU
+        reading (one GPU), *ram_available*/*ram_total* the RAM reading; None
+        takes the live reading.
+
+        Returns ``{"layers", "full", "n_cpu_moe", "mmap", "host_bytes",
+        "cpu_read_bytes", "ram_available", "reads_from_disk"}`` sized as
+        :meth:`_effective_gpu_layers` and :meth:`_resolve_use_mmap` size a load
+        (``mmap`` is the :class:`MmapDecision` reason). ``reads_from_disk`` is
+        True when weights the CPU reads on every token (layers on the CPU, or
+        routed experts or a draft model in system RAM) do not fit available RAM
+        with :data:`HOST_RAM_HEADROOM_BYTES` to spare, whatever ``use_mmap`` is,
+        so generating reads them from the model file. None when the load would
+        spread over two or more GPUs, a GPU split is configured, VRAM cannot be
+        read, or the model's bytes cannot be counted. Reads the GGUF header and
+        may take a GPU and a RAM reading; must not run on an event loop thread."""
+        if self._gpu_split_configured():
+            return None
+        if free_vram is None:
+            split_free, split_total, devices = self._split_free_total_bytes()
+            if devices >= 2:
+                return None
+            free_vram = split_free if split_free is not None else self._free_vram_bytes()
+            total_vram = split_total if split_total is not None else self._total_vram_bytes()
+        if free_vram is None or self._model_bytes() <= 0:
+            return None
+        configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
+        if (not getattr(self, "n_gpu_layers_auto", False)
+                or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS):
+            layers, n_cpu_moe = int(self.n_gpu_layers), configured_moe
+        else:
+            budget = self._auto_gpu_layers_budget(reading=(int(free_vram), total_vram))
+            if budget is None:
+                return None
+            layers = budget.layers
+            n_cpu_moe = budget.moe_cpu_layers if budget.moe_cpu_layers > 0 else configured_moe
+        on_gpu = layers > 0
+        host, read, per_token = self._mmap_byte_counts(layers, on_gpu, n_cpu_moe)
+        if host is None:
+            return None
+        if ram_available is None:
+            ram_total, ram_available = self._ram_reading()
+        decision = self._mmap_decision_for(getattr(self, "use_mmap", "auto"), layers, on_gpu,
+                                           host, read, per_token, ram_total, ram_available)
+        full = layers >= self._DEFAULT_GPU_LAYERS
+        from_disk = ((not full or per_token) and read is not None and read > 0
+                     and ram_available is not None
+                     and read + HOST_RAM_HEADROOM_BYTES > ram_available)
+        return {"layers": layers, "full": full, "n_cpu_moe": n_cpu_moe,
+                "mmap": decision.reason, "host_bytes": host, "cpu_read_bytes": read,
+                "ram_available": ram_available, "reads_from_disk": bool(from_disk)}
+
     def _resolve_use_mmap(self, gpu_layers: int, gpu_readings) -> MmapDecision:
         """This load's :class:`MmapDecision` for *gpu_layers* and the configured
         ``use_mmap`` (read via getattr, ``auto`` when absent), stored as
@@ -2773,37 +2893,13 @@ class VramSizingMixin:
                 except Exception as exc:
                     _dbg.debug("mmap: GPU presence check failed (%s)", type(exc).__name__)
                     on_gpu = False
-            per_token = False
-            read = None
-            try:
-                if full and on_gpu:
-                    host = self._host_resident_bytes()
-                    per_token = self._load_n_cpu_moe() > 0
-                else:
-                    host = self._cpu_held_weight_bytes(gpu_layers if on_gpu else 0)
-                if host is not None:
-                    lookup = self._cpu_row_lookup_bytes(gpu_layers if on_gpu else 0)
-                    read = host if lookup is None else max(0, host - lookup)
-                    draft = self._cpu_draft_weight_bytes(on_gpu)
-                    host += draft
-                    read += draft
-                    per_token = per_token or draft > 0
-            except Exception as exc:
-                _dbg.debug("mmap: host-resident byte count failed (%s)",
-                           type(exc).__name__)
-                host = read = None
+            host, read, per_token = self._mmap_byte_counts(
+                gpu_layers, on_gpu, self._load_n_cpu_moe())
             total = available = None
             if host is not None:
-                from localm.sysstats import system_ram
-                total, available = system_ram()
-            decision = decide_use_mmap(setting, full and on_gpu, host, total, available,
-                                       read)
-            if not on_gpu and gpu_layers > 0 and decision.reason == "partial_offload":
-                decision = decision._replace(reason="no_gpu")
-            if (per_token and decision.reason == "exceeds_ram" and read is not None
-                    and available is not None
-                    and read + HOST_RAM_HEADROOM_BYTES > available):
-                decision = decision._replace(reason="cpu_exceeds_ram")
+                total, available = self._ram_reading()
+            decision = self._mmap_decision_for(setting, gpu_layers, on_gpu, host, read,
+                                               per_token, total, available)
         self.last_mmap_decision = decision
         _dbg.debug("%s (host %s bytes, CPU read %s bytes, RAM available %s of %s bytes)",
                    describe_mmap_decision(setting, decision), decision.host_bytes,

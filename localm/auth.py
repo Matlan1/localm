@@ -234,6 +234,49 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     return {}
 
 
+_REVOCATION_LOCK = threading.Lock()
+_revocation_epoch = 0
+_revoke_listeners: list = []
+
+
+def revocation_epoch() -> int:
+    """A counter that grows every time this process removes or replaces a
+    credential (a named key revoked, every key cleared, the owner key set)."""
+    return _revocation_epoch
+
+
+def add_revoke_listener(fn: Callable[[Optional[str]], None]) -> None:
+    """Call *fn* after this process revokes keystore keys: with the revoked
+    key's sha256 hash, or with None when every keystore key was removed."""
+    with _REVOCATION_LOCK:
+        if fn not in _revoke_listeners:
+            _revoke_listeners.append(fn)
+
+
+def remove_revoke_listener(fn: Callable[[Optional[str]], None]) -> None:
+    """Stop calling *fn* (see :func:`add_revoke_listener`)."""
+    with _REVOCATION_LOCK:
+        if fn in _revoke_listeners:
+            _revoke_listeners.remove(fn)
+
+
+def _credentials_changed(revoked_hash: Optional[str] = None, *,
+                         notify: bool = True) -> None:
+    """Advance :func:`revocation_epoch` and, with *notify*, call every revoke
+    listener with *revoked_hash*. A listener that raises is logged at WARNING
+    and the others still run."""
+    global _revocation_epoch
+    with _REVOCATION_LOCK:
+        _revocation_epoch += 1
+        listeners = list(_revoke_listeners) if notify else []
+    for fn in listeners:
+        try:
+            fn(revoked_hash)
+        except Exception as e:
+            logger.warning("a key revocation listener (%s) failed: %s",
+                           getattr(fn, "__qualname__", fn), e)
+
+
 def _record_event(kind: str, **fields) -> None:
     """Append a management event; never raises into the key operation."""
     from localm import config, mgmt_events
@@ -281,6 +324,7 @@ def set_api_key(key: Optional[str]) -> None:
     _record_event("key_minted", principal="owner")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
+    _credentials_changed(notify=False)
     # Derive at SET time, not on the per-request verify path, so the salt is on
     # disk before anything can stamp an identity with it. _owner_digest first
     # re-verifies every KEPT historical record (_OWNER_KDF_KEEP) before minting a
@@ -351,6 +395,8 @@ def clear_api_key() -> list[dict[str, str]]:
     _forget_cached_digests()
     if had_key and not failures:
         _record_event("key_revoked", principal="all")
+    if had_key:
+        _credentials_changed(None)
     return failures
 
 
@@ -564,12 +610,16 @@ def _legacy_owner_identity(key: str) -> str:
     return _fast_digest(key)
 
 
-def _memo_key(key: str) -> str:
-    """Lookup handle for the in-memory memo: the presented secret's fast digest.
+_MEMO_SECRET = secrets.token_bytes(32)
 
-    This value is never persisted and never leaves the process; the digest that
-    IS written to disk for the owner key is the scrypt derivation."""
-    return _fast_digest(key)
+
+def _memo_key(key: str) -> str:
+    """Lookup handle for the in-memory memo: HMAC-SHA256 of the presented secret
+    under a per-process random secret. Never persisted, never leaves the process,
+    and not an unsalted hash of the secret; the digest that IS written to disk
+    for the owner key is the scrypt derivation."""
+    return hmac.new(_MEMO_SECRET, key.encode("utf-8", "surrogatepass"),
+                    hashlib.sha256).hexdigest()
 
 
 def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
@@ -1202,6 +1252,8 @@ def revoke_key(key_id: str) -> bool:
             return False
         _save_keystore(remaining)
     _record_event("key_revoked", principal=key_id)
+    revoked_hash = (target or {}).get("hash") or None
+    _credentials_changed(revoked_hash, notify=revoked_hash is not None)
     if target and target.get("hash"):
         try:
             from localm import sessions
@@ -1260,6 +1312,23 @@ def key_hash_live(key_hash: Optional[str]) -> bool:
         return False
     now = time.time()
     for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            return not (exp is not None and now > float(exp))
+    return False
+
+
+def key_hash_live_checked(key_hash: Optional[str]) -> Optional[bool]:
+    """:func:`key_hash_live`, or None when the keystore could not be read
+    (``_load_keystore_checked`` read_ok False), so a caller can tell "the key is
+    gone" from "could not look"."""
+    if not key_hash:
+        return False
+    records, read_ok = _load_keystore_checked()
+    if not read_ok:
+        return None
+    now = time.time()
+    for r in records:
         if r.get("hash") == key_hash:
             exp = r.get("expires")
             return not (exp is not None and now > float(exp))

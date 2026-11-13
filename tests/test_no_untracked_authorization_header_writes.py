@@ -61,6 +61,14 @@ latter would flag these two as violations:
                                  correct value to pass in for the open-mode
                                  fallback.
 
+  localm/inference/server_switch.py, switch_server_model()
+                                 the model switch of the same attach flow
+                                 (`localm run`, gui, serve, coder). Like
+                                 the probes above it sends the *token* its
+                                 caller passes; each caller resolves the
+                                 credential its command uses (the coder's
+                                 _attach_credential gives --api-key first).
+
   localm/plugins/coder/backends/http.py, HTTPBackend._headers()
                                  the standalone coder CLI's own HTTP backend,
                                  targeting an arbitrary (possibly remote,
@@ -203,6 +211,7 @@ _REVIEWED_SITES = {
     ("localm/inference/http_engine.py", "HttpEngine._headers", "f'Bearer {self._token}'"),
     ("localm/inference/http_engine.py", "remote_model_status", "f'Bearer {token}'"),
     ("localm/inference/http_engine.py", "remote_model_identity", "f'Bearer {token}'"),
+    ("localm/inference/server_switch.py", "switch_server_model", "f'Bearer {token}'"),
     ("localm/plugins/coder/backends/http.py", "HTTPBackend._headers", "f'Bearer {self._api_key}'"),
     ("localm/plugins/gui/cli.py", "_mount_remote_gui", "f'Bearer {token}'"),
     ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),

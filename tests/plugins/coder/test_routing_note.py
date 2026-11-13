@@ -14,6 +14,14 @@ from pathlib import Path
 
 from localm.plugins.coder.backends.http import HTTPBackend
 from localm.plugins.coder.sessions import CoderSession
+import pytest
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 NOTE = ("kept plain (tool_use=absent); big was skipped because its last load "
         "failed at 14:08 (the native model-loading process crashed); it is tried "

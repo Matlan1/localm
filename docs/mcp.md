@@ -123,7 +123,7 @@ localm plugin install mcp
 localm mcp --print-config
 ```
 
-This prints a JSON block showing the command to add to Claude Desktop's MCP server list, plus the path to Claude Desktop's config file on your system:
+This prints a JSON block showing the command to add to Claude Desktop's MCP server list (on standard output, so it can be piped), plus, on standard error, the path to Claude Desktop's config file on your system:
 
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -135,12 +135,14 @@ The output looks like:
 {
   "mcpServers": {
     "localm": {
-      "command": "localm",
-      "args": ["mcp"]
+      "command": "/path/to/localm/python",
+      "args": ["-m", "localm", "mcp"]
     }
   }
 }
 ```
+
+`command` is the full path of the Python interpreter of the localm install that printed the block, so the client starts that install even when no global `localm` command is on its PATH (a Portable install, for example).
 
 ### Step 3: Paste into Claude Desktop config
 
