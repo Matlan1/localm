@@ -11,8 +11,9 @@ A ``memory_file`` setting in the project config (project_config.py) replaces
 that order with one file, named relative to the project root (the folder that
 holds ``.localcoder``). It takes effect only once the project is trusted, and a
 path that is absolute, contains ``..``, or resolves (through a symlink or
-junction) outside the project root is refused with a warning and the default
-order is used.
+junction) outside the project root, or names a file under ``.git`` or under
+``.localcoder`` other than ``memory.md``, is refused with a warning and the
+default order is used.
 
 Both files use free-form markdown. The content is injected into the system
 prompt under a "## Project Memory" heading so the LLM always sees it, capped at
@@ -140,9 +141,15 @@ def configured_memory_path(cwd: Path) -> tuple:
         return None, "memory_file must be a non-empty path string"
     root = config.resolve().parent.parent
     try:
-        return pathsafe.confined_under(root, value), ""
+        path = pathsafe.confined_under(root, value)
     except ValueError:
         return None, f"memory_file {value!r} is not inside the project"
+    parts = [part.rstrip(" .").casefold() for part in path.relative_to(root).parts]
+    if ".git" in parts or (".localcoder" in parts
+                           and parts != [".localcoder", "memory.md"]):
+        return None, (f"memory_file {value!r} names a repository or coder "
+                      "configuration file")
+    return path, ""
 
 
 def active_memory_path(cwd: Path) -> tuple:

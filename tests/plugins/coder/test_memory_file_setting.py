@@ -180,3 +180,48 @@ def test_junction_to_outside_is_refused(tmp_path, monkeypatch):
         pytest.skip("junction creation failed")
     assert find_memory_file(root) is None
     assert "SECRET OUTSIDE" not in load_memory(root)
+
+
+@pytest.mark.parametrize("value", [
+    ".git/config",
+    ".git/hooks/pre-commit",
+    ".localcoder/config.toml",
+    ".localcoder/hooks.toml",
+    ".localcoder/sub/memory.md",
+    "a/.GIT/config",
+])
+def test_repository_and_coder_config_files_are_refused(tmp_path, monkeypatch, value):
+    _trust(monkeypatch)
+    root = _project(tmp_path, value)
+    target = root / value
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("[core]", encoding="utf-8")
+    assert find_memory_file(root) is None
+    assert load_memory(root) == ""
+    assert "configuration file" in memory_warning(root)
+    assert default_memory_file(root) == root / "LOCALCODER.md"
+
+
+def test_editing_the_configured_file_changes_the_trust_digest(tmp_path):
+    root = _project(tmp_path, "notes.md")
+    (root / "notes.md").write_text("one", encoding="utf-8")
+
+    def digest():
+        _, raw, _, content = hook_trust.trust_subject(root)
+        return hook_trust.project_digest(raw, content)
+
+    before = digest()
+    (root / "notes.md").write_text("two", encoding="utf-8")
+    assert digest() != before
+
+
+def test_trusted_digest_does_not_survive_a_rewrite_of_the_file(tmp_path, monkeypatch):
+    root = _project(tmp_path, "notes.md")
+    (root / "notes.md").write_text("one", encoding="utf-8")
+    _, raw, trust_path, content = hook_trust.trust_subject(root)
+    hook_trust.remember_trust(trust_path, hook_trust.project_digest(raw, content))
+    assert hook_trust.project_trusted(root) is True
+    assert find_memory_file(root) is not None
+    (root / "notes.md").write_text("two", encoding="utf-8")
+    assert hook_trust.project_trusted(root) is False
+    assert find_memory_file(root) is None
