@@ -279,6 +279,26 @@ class TestRegisterPluginTools:
             assert "<|im_start|>" not in pkey and "&lt;|im_start|>" in pkey
             assert "</tool_result>" not in td.params[pkey]["description"]
 
+    def test_an_enabled_plugin_with_a_broken_manifest_is_named(self, tmp_path, monkeypatch):
+        d = tmp_path / "issues"
+        d.mkdir()
+        (d / "plugin.toml").write_text("[plugin\nname = ", encoding="utf-8")
+        _isolate(tmp_path, monkeypatch, enabled=("issues",))
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            names, warnings = register_plugin_tools()
+        assert names == []
+        assert any("'issues' was skipped" in w for w in warnings), warnings
+
+    def test_a_disabled_plugin_with_a_broken_manifest_is_not_named(self, tmp_path,
+                                                                   monkeypatch):
+        d = tmp_path / "issues"
+        d.mkdir()
+        (d / "plugin.toml").write_text("[plugin\nname = ", encoding="utf-8")
+        _isolate(tmp_path, monkeypatch, enabled=())
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            _, warnings = register_plugin_tools()
+        assert not any("issues" in w for w in warnings), warnings
+
     def test_plugin_without_exports_registers_nothing(self, tmp_path, monkeypatch):
         d = tmp_path / "plain"
         d.mkdir()
