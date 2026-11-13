@@ -476,3 +476,155 @@ def test_why_the_users_extra_model_paths_were_not_copied_is_returned(home, tmp_p
     clean: list = []
     mc.write_extra_model_paths(problems=clean)
     assert clean == []
+
+
+# --------------------------------------------------------------------------- #
+#  Registered models reach the managed ComfyUI's extra_model_paths.yaml       #
+# --------------------------------------------------------------------------- #
+
+def _st(path: Path, names) -> Path:
+    import json
+    import struct
+    header = {n: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]} for n in names}
+    raw = json.dumps(header).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+    return path
+
+
+def _registered_yaml():
+    import yaml
+    return yaml.safe_load(mc.render_extra_model_paths()) or {}
+
+
+def _register(entries: dict) -> None:
+    cfg.save_registry({name: {"path": str(path), "model_type": mtype}
+                       for name, (path, mtype) in entries.items()})
+
+
+def test_registered_unet_and_vae_appear_under_their_comfyui_types(home, tmp_path):
+    unet = tmp_path / "central" / "unets" / "flux1-dev-Q8_0.gguf"
+    unet.parent.mkdir(parents=True)
+    unet.write_bytes(b"GGUF" + b"\x00" * 64)
+    vae = _st(tmp_path / "central" / "vaes" / "ae.safetensors", ["decoder.conv_in.weight"])
+    _register({"flux1-dev-Q8_0": (unet, "diffusion-unet"), "ae": (vae, "vae")})
+    section = _registered_yaml()[mc.REGISTERED_SECTION]
+    assert "base_path" not in section
+    assert section["diffusion_models"].split("\n") == [str(unet.parent)]
+    assert section["vae"].split("\n") == [str(vae.parent)]
+
+
+def test_a_removed_model_disappears_and_an_unregistered_folder_never_appears(home, tmp_path):
+    a = _st(tmp_path / "one" / "a.safetensors", ["decoder.conv_in.weight"])
+    b = _st(tmp_path / "two" / "b.safetensors", ["decoder.conv_in.weight"])
+    stray = _st(tmp_path / "stray" / "c.safetensors", ["decoder.conv_in.weight"])
+    _register({"a": (a, "vae"), "b": (b, "vae")})
+    assert _registered_yaml()[mc.REGISTERED_SECTION]["vae"].split("\n") == sorted(
+        [str(a.parent), str(b.parent)])
+    _register({"a": (a, "vae")})
+    text = mc.render_extra_model_paths()
+    assert str(b.parent) not in text and str(stray.parent) not in text
+    assert _registered_yaml()[mc.REGISTERED_SECTION]["vae"] == str(a.parent)
+
+
+def test_only_comfyui_loadable_files_are_listed(home, tmp_path):
+    chat_lora = tmp_path / "adapters" / "chat-lora.gguf"
+    chat_lora.parent.mkdir(parents=True)
+    chat_lora.write_bytes(b"GGUF")
+    llm = tmp_path / "llms" / "chat.gguf"
+    llm.parent.mkdir(parents=True)
+    llm.write_bytes(b"GGUF")
+    folder_model = tmp_path / "hf" / "pipeline"
+    folder_model.mkdir(parents=True)
+    _register({"chat-lora": (chat_lora, "lora"), "chat": (llm, "llm"),
+               "pipe": (folder_model, "diffusion-unet"),
+               "gone": (tmp_path / "missing" / "x.safetensors", "vae"),
+               "remote": (Path("\\\\192.0.2.1\\share\\v.safetensors"), "vae")})
+    assert mc.REGISTERED_SECTION not in _registered_yaml()
+
+
+def test_a_full_checkpoint_is_listed_under_checkpoints(home, tmp_path):
+    ckpt = _st(tmp_path / "ckpts" / "sd15.safetensors",
+               ["model.diffusion_model.input_blocks.0.0.weight",
+                "first_stage_model.decoder.conv_in.weight",
+                "cond_stage_model.transformer.text_model.embeddings.token_embedding.weight"])
+    _register({"sd15": (ckpt, "diffusion-unet")})
+    section = _registered_yaml()[mc.REGISTERED_SECTION]
+    assert section == {"checkpoints": str(ckpt.parent)}
+
+
+def test_the_type_folders_match_the_comfyui_folder_mapping():
+    from localm.model_manager.comfy_resolve import _FOLDER_MODEL_TYPES
+    for model_type, folder in mc.REGISTERED_TYPE_FOLDERS.items():
+        assert _FOLDER_MODEL_TYPES[folder] == model_type
+    assert _FOLDER_MODEL_TYPES["checkpoints"] == "diffusion-unet"
+
+
+def test_a_hand_added_section_survives_a_rewrite(home, tmp_path):
+    import yaml
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    out = mc.write_extra_model_paths()
+    out.write_text(out.read_text(encoding="utf-8")
+                   + "\nmy_nas:\n  base_path: 'N:/models'\n  loras: loras\n",
+                   encoding="utf-8")
+    vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
+    _register({"vae": (vae, "vae")})
+    for _ in range(2):
+        mc.write_extra_model_paths()
+    data = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert data["my_nas"] == {"base_path": "N:/models", "loras": "loras"}
+    assert data[mc.REGISTERED_SECTION] == {"vae": str(vae.parent)}
+    assert out.read_text(encoding="utf-8").count("my_nas:") == 1
+
+
+def test_refresh_says_when_the_registered_folders_changed(home, tmp_path):
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    mc.write_extra_model_paths()
+    assert mc.refresh_extra_model_paths() == (False, [])
+    vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
+    _register({"vae": (vae, "vae")})
+    assert mc.refresh_extra_model_paths() == (True, [])
+    assert str(vae.parent) in paths.extra_model_paths.read_text(encoding="utf-8")
+    assert mc.refresh_extra_model_paths() == (False, [])
+
+
+def test_a_launch_of_the_managed_comfyui_writes_the_registered_folders_first(
+        home, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    paths = _install_managed(home)
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+    vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
+    _register({"vae": (vae, "vae")})
+    seen = {}
+
+    def fake_popen(argv, **kw):
+        seen["yaml"] = paths.extra_model_paths.read_text(encoding="utf-8")
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.returncode = 1
+        return proc
+    monkeypatch.setattr(comfy_client, "_comfy_alive", lambda *a, **k: False)
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda url: None)
+    from tests._popen_scope import ignore_background_threads
+    monkeypatch.setattr("subprocess.Popen", ignore_background_threads(fake_popen))
+    comfy_client.ensure_comfy(mc.managed_comfy_api_url(), wait_seconds=30)
+    assert str(vae.parent) in seen["yaml"]
+
+
+def test_a_running_managed_comfyui_says_a_restart_lists_new_models(home, tmp_path,
+                                                                   monkeypatch):
+    _install_managed(home)
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+    url = mc.managed_comfy_api_url()
+    mc.write_extra_model_paths()
+    monkeypatch.setitem(comfy_client._launched_model_folders, url,
+                        mc.registered_folders_in_file())
+    monkeypatch.setattr(comfy_client, "is_comfy_confirmed", lambda u=None: True)
+    assert comfy_client.ensure_comfy(url) == (True, "ComfyUI is running.")
+    vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
+    _register({"vae": (vae, "vae")})
+    for _ in range(2):
+        ok, msg = comfy_client.ensure_comfy(url)
+        assert ok and msg.endswith(comfy_client.STALE_MODEL_FOLDERS)

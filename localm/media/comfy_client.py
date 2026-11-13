@@ -2057,6 +2057,42 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                         workdir=workdir)
 
 
+def _is_managed_target(api_url: str, cfg: Optional[dict] = None) -> bool:
+    """Whether *api_url* is localm's own managed ComfyUI and it is the one in
+    use. Never raises."""
+    try:
+        from localm.media.managed_comfy import managed_comfy_active, managed_comfy_api_url
+        return (managed_comfy_active(cfg)
+                and api_url.rstrip("/") == managed_comfy_api_url().rstrip("/"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# api_url -> the registered-model section of the model paths file localm's own
+# ComfyUI was launched with by this process.
+_launched_model_folders: dict[str, list] = {}
+
+STALE_MODEL_FOLDERS = ("Models registered with localm since localm's ComfyUI started are "
+                       "listed by it after a restart (run: localm comfy restart).")
+
+
+def _running_note(api_url: str) -> str:
+    """``"ComfyUI is running."``, plus ``STALE_MODEL_FOLDERS`` when *api_url* is
+    localm's own ComfyUI and the folders of the registered models differ from
+    the ones it was started with (known when this process started it; otherwise
+    from the file it last read). The file is rewritten for its next start."""
+    if _is_managed_target(api_url):
+        from localm.media.managed_comfy import (refresh_extra_model_paths,
+                                                registered_folders_in_file)
+        folders_changed, _problems = refresh_extra_model_paths()
+        launched = _launched_model_folders.get(api_url)
+        if launched is not None:
+            folders_changed = launched != registered_folders_in_file()
+        if folders_changed:
+            return "ComfyUI is running. " + STALE_MODEL_FOLDERS
+    return "ComfyUI is running."
+
+
 def comfy_launch_wait_seconds(cfg: Optional[dict] = None) -> int:
     """The wait budget ``ensure_comfy`` gives an unpinned launch: the
     configured ``comfy_launch_timeout`` (a ZLUDA/ROCm cold start compiles GPU
@@ -2112,10 +2148,10 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     api_url = (api_url or default_api_url()).rstrip("/")
     if comfy_device_error(api_url) is None:
         if is_comfy_confirmed(api_url):
-            return True, "ComfyUI is running."
+            return True, _running_note(api_url)
         if _comfy_alive(api_url):
             mark_comfy_alive(api_url)
-            return True, "ComfyUI is running."
+            return True, _running_note(api_url)
     mark_comfy_dead(api_url)
 
     with _launch_lock_for(api_url):
@@ -2290,6 +2326,14 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     holder = comfy_port_holder(api_url)
     if holder is not None:
         return False, comfy_port_held_message(api_url, holder)
+
+    if _is_managed_target(api_url, cfg):
+        from localm.media.managed_comfy import (refresh_extra_model_paths,
+                                                registered_folders_in_file)
+        _changed, problems = refresh_extra_model_paths(cfg)
+        for problem in problems:
+            _say(f"Warning: {problem}; ComfyUI may not list every registered model.")
+        _launched_model_folders[api_url] = registered_folders_in_file()
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:

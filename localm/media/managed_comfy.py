@@ -70,6 +70,17 @@ _MODEL_FOLDER_TYPES = (
 )
 
 
+# The ComfyUI model folder type a registered model of each localm model_type is
+# listed under; an all-in-one checkpoint goes under "checkpoints" instead.
+REGISTERED_TYPE_FOLDERS = {
+    "diffusion-unet": "diffusion_models", "text-encoder": "text_encoders", "vae": "vae",
+    "lora": "loras", "upscaler": "upscale_models", "controlnet": "controlnet",
+    "textual-inversion": "embeddings",
+}
+REGISTERED_SECTION = "localm_registered"
+_GENERATED_SECTIONS = ("localm_managed", "user_comfyui", REGISTERED_SECTION)
+
+
 @dataclass(frozen=True)
 class ManagedComfyPaths:
     """Resolved on-disk locations for the managed ComfyUI. Pure paths - reading
@@ -498,7 +509,84 @@ def build_extra_model_paths_config(cfg: Optional[dict] = None) -> dict:
     if workdir:
         # Standard ComfyUI stores models under <workdir>/models/<type>.
         config["user_comfyui"] = _entry(Path(workdir) / "models")
+    registered = registered_model_folders()
+    if registered:
+        config[REGISTERED_SECTION] = registered
     return config
+
+
+def registered_model_folders(reg: Optional[dict] = None) -> dict:
+    """``{ComfyUI folder type: [folder, ...]}``: the folders of the models
+    registered with localm that a ComfyUI loader can use, each under the type
+    of ``REGISTERED_TYPE_FOLDERS`` (an all-in-one checkpoint under
+    ``checkpoints``), sorted, without repeats. Read in place, never copied. A
+    registered folder (a diffusers or Hugging Face model), a GGUF chat-model
+    LoRA, a file that is gone and a network or device path are left out; a
+    path with a line break or surrounding blanks cannot be written to the file
+    and is left out with a warning. Never raises."""
+    from localm.media.sdcpp import families
+    from localm.pathsafe import is_unc_or_device_path
+    if reg is None:
+        from localm.config import load_registry
+        try:
+            reg = load_registry()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("managed ComfyUI: the model registry could not be read (%s); "
+                           "registered models are not listed for ComfyUI", e)
+            return {}
+    out: dict = {}
+    for entry in reg.values():
+        if not isinstance(entry, dict):
+            continue
+        folder_type = REGISTERED_TYPE_FOLDERS.get(entry.get("model_type"))
+        raw = entry.get("path")
+        if folder_type is None or not isinstance(raw, str) or not raw:
+            continue
+        if is_unc_or_device_path(raw):
+            continue
+        path = Path(raw)
+        if entry.get("model_type") == "lora" and path.suffix.lower() == ".gguf":
+            continue
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            continue
+        folder = str(path.parent)
+        if folder != folder.strip() or "\n" in folder or "\r" in folder:
+            logger.warning("managed ComfyUI: the folder of %s cannot be written to "
+                           "extra_model_paths.yaml; ComfyUI will not list it", path.name)
+            continue
+        if folder_type == "diffusion_models" and families.inspect_file(path).kind == "checkpoint":
+            folder_type = "checkpoints"
+        out.setdefault(folder_type, set()).add(folder)
+    return {k: sorted(v) for k, v in sorted(out.items())}
+
+
+def _hand_added_sections(text: str) -> list[str]:
+    """The top-level sections of a managed extra_model_paths.yaml *text* that
+    localm did not write (every name but the generated ones and
+    ``user_extra_*``), as their lines in order. Comment lines at the left
+    margin are not kept."""
+    out: list[str] = []
+    keep = False
+    for line in text.splitlines():
+        if not line.strip():
+            if keep:
+                out.append("")
+            continue
+        if line[0] not in " \t":
+            if line.startswith("#"):
+                continue
+            m = _USER_SECTION_RE.match(line)
+            name = m.group(1) if m else None
+            keep = (name is not None and name not in _GENERATED_SECTIONS
+                    and not name.startswith(_USER_SECTION_PREFIX))
+        if keep:
+            out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return out
 
 
 _USER_SECTION_RE = re.compile(r"^([A-Za-z0-9_.\-]+):\s*(?:#.*)?$")
@@ -620,29 +708,38 @@ def _yaml_squote(s: str) -> str:
 
 
 def render_extra_model_paths(cfg: Optional[dict] = None,
-                             problems: Optional[list] = None) -> str:
+                             problems: Optional[list] = None,
+                             previous: Optional[str] = None) -> str:
     """Render the extra_model_paths.yaml TEXT from build_extra_model_paths_config.
-    Hand-rolled (no PyYAML): two levels of mapping, all string scalars quoted.
-    Why the user's own extra_model_paths.yaml was not copied is appended to
-    *problems* when given (``user_extra_model_paths_sections``)."""
+    Hand-rolled (no PyYAML): two levels of mapping, string scalars quoted, a
+    list of folders as a literal block (one absolute path per line, as ComfyUI
+    splits it). Why the user's own extra_model_paths.yaml was not copied is
+    appended to *problems* when given (``user_extra_model_paths_sections``).
+    The sections of *previous* (the file as it was) that localm did not write
+    are carried over unchanged."""
     config = build_extra_model_paths_config(cfg)
     lines = [
         "# extra_model_paths.yaml - written by localm (managed ComfyUI, stage S1).",
         "# Tells this ComfyUI where to find models WITHOUT copying them:",
         "#   localm_managed = localm's own managed models dir",
         "#   user_comfyui   = your existing ComfyUI's models (when localm knows it)",
+        f"#   {REGISTERED_SECTION} = the folders of the models registered with localm",
         "#   user_extra_<name> = the model locations in your ComfyUI's own extra_model_paths.yaml",
-        "# Add your own sources by copying an entry below and editing base_path.",
+        "# Rewritten before localm starts this ComfyUI. A section of your own is kept.",
         "",
     ]
     for name, entry in config.items():
         lines.append(f"{name}:")
-        # base_path first for readability, then the folder types in order.
-        lines.append(f"  base_path: {_yaml_squote(str(entry['base_path']))}")
+        if "base_path" in entry:
+            lines.append(f"  base_path: {_yaml_squote(str(entry['base_path']))}")
         for key, val in entry.items():
             if key == "base_path":
                 continue
-            lines.append(f"  {key}: {_yaml_squote(str(val))}")
+            if isinstance(val, list):
+                lines.append(f"  {key}: |-")
+                lines.extend(f"    {item}" for item in val)
+            else:
+                lines.append(f"  {key}: {_yaml_squote(str(val))}")
         lines.append("")
     workdir = (cfg if cfg is not None else load_config()).get("comfy_workdir")
     if workdir:
@@ -650,6 +747,11 @@ def render_extra_model_paths(cfg: Optional[dict] = None,
         if copied:
             lines.append("# Copied from your ComfyUI's own extra_model_paths.yaml:")
             lines.extend(copied)
+    own = _hand_added_sections(previous) if previous else []
+    if own:
+        lines.append("")
+        lines.append("# Your own sections:")
+        lines.extend(own)
     return "\n".join(lines)
 
 
@@ -657,10 +759,69 @@ def write_extra_model_paths(cfg: Optional[dict] = None,
                             problems: Optional[list] = None) -> Path:
     """Write extra_model_paths.yaml into the managed ComfyUI dir and return its
     path. The install dir must already exist (S2/S3 create it); this writer only
-    drops the file in. Overwrites any prior generated file. *problems*: see
+    drops the file in. Rewrites what localm generates and keeps the sections of
+    the previous file localm did not write; the file is replaced in one step.
+    Raises ``OSError`` or ``UnicodeDecodeError`` (and leaves the file as it is)
+    when the previous file cannot be read. *problems*: see
     ``render_extra_model_paths``."""
+    from localm.storekit import atomic_write
     paths = managed_comfy_paths()
     paths.root.mkdir(parents=True, exist_ok=True)
-    paths.extra_model_paths.write_text(render_extra_model_paths(cfg, problems),
-                                       encoding="utf-8")
-    return paths.extra_model_paths
+    target = paths.extra_model_paths
+    try:
+        previous = target.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        previous = None
+    atomic_write(target, render_extra_model_paths(cfg, problems, previous))
+    return target
+
+
+def _section_lines(text: str, name: str) -> list[str]:
+    """The lines of the top-level section *name* of an extra_model_paths.yaml
+    *text*, header included; empty when it has none."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line and line[0] not in " \t#":
+            inside = line.split(":", 1)[0] == name
+        if inside and line.strip():
+            out.append(line)
+    return out
+
+
+def registered_folders_in_file() -> list[str]:
+    """The registered-model section of the managed ComfyUI's
+    extra_model_paths.yaml as it is on disk, as lines; empty when the file or
+    the section is missing or cannot be read. Never raises."""
+    try:
+        text = managed_comfy_paths().extra_model_paths.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return _section_lines(text, REGISTERED_SECTION)
+
+
+def refresh_extra_model_paths(cfg: Optional[dict] = None) -> tuple[bool, list]:
+    """Rewrite the managed ComfyUI's extra_model_paths.yaml when what localm
+    generates (the registered model folders included) differs from the file:
+    ``(folders_changed, problems)``, *folders_changed* True when the folders of
+    the registered models differ from the ones the file listed. A file that
+    cannot be read or written is left as it is, with a warning logged and the
+    reason in *problems*. Never raises."""
+    problems: list = []
+    paths = managed_comfy_paths()
+    target = paths.extra_model_paths
+    try:
+        try:
+            previous = target.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            previous = None
+        wanted = render_extra_model_paths(cfg, problems, previous)
+        if previous == wanted:
+            return False, problems
+        write_extra_model_paths(cfg, [])
+        return (_section_lines(previous or "", REGISTERED_SECTION)
+                != _section_lines(wanted, REGISTERED_SECTION)), problems
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning("managed ComfyUI: %s could not be updated (%s)", target, e)
+        problems.append(f"{target.name} could not be updated ({e})")
+        return False, problems
