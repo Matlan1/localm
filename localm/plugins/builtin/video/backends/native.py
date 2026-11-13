@@ -143,7 +143,8 @@ def missing_model_message(blk: Optional[dict] = None) -> str:
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
     ``{"key", "ctx", "label", "recommended", "family", "components",
-    "notes", "defaults"}``. ``ctx`` also turns on diffusion flash attention.
+    "notes", "defaults"}``, plus ``"registered"`` (``{role: registered name}``
+    of the recommended set's files) when the recommended set is used. ``ctx`` also turns on diffusion flash attention.
     A set model's missing text encoder, VAE and CLIP vision encoder are
     picked from the registry (``pairing.build_context``). Raises
     ``_ModelError`` (``pairing.MissingComponents`` when a companion file is
@@ -172,10 +173,12 @@ def resolve_models(s: dict) -> dict:
     rec = RECOMMENDED_VIDEO_MODELS[0]
     if missing_parts(rec, blk):
         raise _ModelError(missing_model_message(blk))
+    registered = {}
     for part in rec.parts:
         hit = registered_file(part.filename)
         if hit is not None:
             ctx[_PART_FIELDS[part.role]] = str(hit[1])
+            registered[part.role] = hit[0]
     label = rec.name
     for key, field in _COMPONENT_FIELDS:
         value = (blk.get(key) or "").strip()
@@ -184,7 +187,8 @@ def resolve_models(s: dict) -> dict:
     ctx["diffusion_flash_attn"] = True
     key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
-            "family": "wan2.1", "components": {}, "notes": [], "defaults": None}
+            "family": "wan2.1", "components": {}, "notes": [], "defaults": None,
+            "registered": registered}
 
 
 def _runtime_choice(s: dict) -> str:
@@ -336,8 +340,9 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load. *unsupported*
     names keyword arguments the backend does not take. With *s* (the plugin
-    settings) and an *input_image*, a configured model known not to take a
-    start image is refused here; others are checked once loaded."""
+    settings), an unknown sampler in Settings is refused
+    (``sampling.settings_refusal``), and with an *input_image* too a configured
+    model known not to take a start image; others are checked once loaded."""
     if unsupported:
         return ("The native video backend does not support: "
                 + ", ".join(sorted(unsupported)) + ".")
@@ -364,6 +369,10 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
             return (f"The native backend makes at most {MAX_FRAMES} frames per clip "
                     f"({seconds:g} s at {int(fps)} fps is {wanted}); shorten the clip or "
                     "lower the frame rate.")
+    if s is not None:
+        bad = sampling.settings_refusal(_native_block(s), "video")
+        if bad:
+            return bad
     if input_image and s is not None:
         try:
             rec = resolve_models(s)["recommended"]
@@ -422,11 +431,17 @@ def _write_mp4(out_path: Path, result: dict, fps: int) -> None:
             pass
 
 
-def _load_init_image(path: Path, width: int, height: int) -> dict:
+def _load_init_image(path: Path, width: int, height: int,
+                     say: Optional[Callable[[str], None]] = None) -> dict:
+    """The start image at *path* as RGB pixels at *width* x *height*; the
+    resize is said through *say* (``sampling.resize_note``)."""
     from PIL import Image
     with Image.open(path) as im:
         im = im.convert("RGB")
         if (im.width, im.height) != (width, height):
+            note = sampling.resize_note((im.width, im.height), (width, height), "start image")
+            if note and say is not None:
+                say(note)
             im = im.resize((width, height), Image.Resampling.LANCZOS)
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
@@ -627,6 +642,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     blk = _native_block(s)
     rec = models["recommended"]
     defaults = models.get("defaults")
+    refused = sampling.settings_refusal(blk, "video", steps)
+    if refused:
+        return False, refused
     try:
         lora_files, lora_notes = pairing.resolve_loras(list(loras or []), models.get("family"))
     except _ModelError as e:
@@ -664,6 +682,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()
+        cancelled = False
         try:
             ctx = models["ctx"]
             key = (models["key"], rt.backend)
@@ -680,7 +699,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                                "a video generation model.")
             if input_image and "-T2V-" in (info.get("desc") or ""):
                 return False, _start_image_refusal(models["label"])
-            init = _load_init_image(Path(input_image), width, height) if input_image else None
+            init = (_load_init_image(Path(input_image), width, height, say)
+                    if input_image else None)
             too_long = _attention_refusal(runner, rt, info, models["label"], width, height,
                                           frames, int(fps), say)
             if too_long:
@@ -718,6 +738,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                                                       cancel_check=cancel_check),
                 reload_model, say, on_retry=relay.budget_retry, cancel_check=cancel_check)
         except SdCancelled:
+            cancelled = True
             return False, "Cancelled."
         except SdWorkerError as e:
             return False, f"Native video generation failed: {e}"
@@ -725,8 +746,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return False, f"Native video generation failed: {e}"
         finally:
             relay.flush()
-            if runner.is_alive():
-                shared.arm_idle_timer()
+            shared.after_job(cancelled)
     out_fps = int(result.get("fps") or fps)
     say(f"Encoding {len(result['frames'])} frames to MP4...")
     try:
@@ -747,9 +767,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "frames": len(result["frames"]), "fps": out_fps,
                     "seconds": round(len(result["frames"]) / out_fps, 2),
                     "input_image": str(input_image) if input_image else None,
-                    "backend": "native", "model": models["label"],
-                    "components": {k: v["name"] for k, v in
-                                   (models.get("components") or {}).items()} or None,
+                    "backend": "native",
+                    "model": (models.get("registered") or {}).get("model") or models["label"],
+                    "components": ({k: v["name"] for k, v in
+                                    (models.get("components") or {}).items()}
+                                   or {k: v for k, v in
+                                       (models.get("registered") or {}).items()
+                                       if k != "model"} or None),
                     "loras": [{"name": x["name"], "strength": x["multiplier"],
                                **({} if x.get("checked", True) else {"family_checked": False})}
                               for x in lora_files] or None,

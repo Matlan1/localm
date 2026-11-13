@@ -1009,3 +1009,69 @@ def test_the_vision_encoder_offer_is_the_qwen3_vl_projector():
     dl = pairing.QWEN3_VL_8B_MMPROJ
     assert entry["filename"] == dl.filename and entry["source"]["sha256"] == dl.sha256
     assert entry["source"]["model_type"] == "mmproj"
+
+
+def test_a_cancel_stops_the_worker_and_a_finished_job_keeps_it(fake_video, tmp_path,
+                                                              monkeypatch):
+    runner, s = fake_video
+    armed = []
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: armed.append(seconds))
+    ok, _ = native.generate(s, "p", tmp_path / "kept.mp4", seconds=0.2, fps=8, width=64,
+                            height=64, write_sidecar=False)
+    assert ok and runner.alive and len(armed) == 1
+    runner.raise_on_generate = SdCancelled("Generation cancelled.")
+    assert native.generate(s, "p", tmp_path / "stop.mp4", write_sidecar=False) == (
+        False, "Cancelled.")
+    assert runner.alive is False and len(armed) == 1
+
+
+@pytest.mark.parametrize("steps", [0, 201])
+def test_steps_outside_the_range_are_refused_before_any_load(fake_video, tmp_path, steps):
+    runner, s = fake_video
+    ok, msg = native.generate(s, "p", tmp_path / "s.mp4", write_sidecar=False, steps=steps)
+    assert not ok and msg.startswith("Steps must be between 1 and 200")
+    assert runner.loads == []
+
+
+def test_an_unknown_sampler_in_settings_is_refused_before_the_handover(fake_video, tmp_path):
+    runner, s = fake_video
+    s = {**s, "native": {**s["native"], "sample_method": "bogus"}}
+    refused = native.refusal(s=s)
+    assert refused.startswith("Settings > Media > Video > Native sampler: Unknown sampler "
+                              "'bogus'. Allowed: ")
+    assert native.generate(s, "p", tmp_path / "b.mp4", write_sidecar=False) == (False, refused)
+    assert runner.loads == []
+
+
+def test_a_start_image_of_another_shape_is_said_to_be_stretched(fake_video, tmp_path):
+    from PIL import Image
+    runner, s = fake_video
+    src = tmp_path / "start.png"
+    Image.new("RGB", (100, 100)).save(src)
+    lines = []
+    ok, msg = native.generate(s, "p", tmp_path / "i.mp4", seconds=0.2, fps=8, width=128,
+                              height=64, input_image=src, write_sidecar=False,
+                              on_progress=lines.append)
+    assert ok, msg
+    assert ("The start image (100x100) is stretched to 128x64; its aspect ratio is not kept."
+            in lines)
+
+
+def test_reuse_of_a_recommended_set_clip_names_registered_models(fake_video, tmp_path,
+                                                                 monkeypatch):
+    rec = native.RECOMMENDED_VIDEO_MODELS[0]
+    for part in rec.parts:
+        p = tmp_path / part.filename
+        p.write_bytes(b"w")
+        _register(f"reg-{part.role}", p, part.model_type)
+    runner, _s = fake_video
+    out = tmp_path / "rec.mp4"
+    ok, msg = native.generate({"backend": "native", "native": {}}, "p", out, seconds=0.2,
+                              fps=8, width=64, height=64, write_sidecar=True)
+    assert ok, msg
+    side = json.loads(out.with_suffix(".mp4.json").read_text(encoding="utf-8"))
+    assert side["model"] == "reg-model"
+    assert side["components"] == {"vae": "reg-vae", "t5xxl": "reg-t5xxl"}
+    reused = native.resolve_models({"backend": "native", "native": {
+        "model": side["model"], **side["components"]}})
+    assert reused["ctx"]["diffusion_model_path"] == str(tmp_path / rec.parts[0].filename)

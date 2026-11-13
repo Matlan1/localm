@@ -2286,8 +2286,13 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
-_MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, 150), "native_cfg_scale": (float, 0.0, 30.0),
-                        "native_flow_shift": (float, 0.0, 20.0)}
+NATIVE_STEPS_MAX = 200
+NATIVE_CFG_MAX = 30.0
+NATIVE_FLOW_SHIFT_MAX = 100.0
+
+_MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, NATIVE_STEPS_MAX),
+                        "native_cfg_scale": (float, 0.0, NATIVE_CFG_MAX),
+                        "native_flow_shift": (float, 0.0, NATIVE_FLOW_SHIFT_MAX)}
 
 
 def _media_number(key: str, value):

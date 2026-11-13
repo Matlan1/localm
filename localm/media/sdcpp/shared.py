@@ -2,8 +2,8 @@
 """The one sd.cpp worker of this process, shared by every caller.
 
 ``lock`` serialises use of ``runner``; callers take it through ``held``. The worker exits after
-``IDLE_UNLOAD_SECONDS`` without use (``arm_idle_timer``), on ``free()``, or when
-this process exits.
+``IDLE_UNLOAD_SECONDS`` without use (``arm_idle_timer``), when a job is cancelled
+(``after_job``), on ``free()``, or when this process exits.
 """
 
 from __future__ import annotations
@@ -94,6 +94,17 @@ def arm_idle_timer(seconds: Optional[float] = None) -> None:
         t.name = "localm-sdcpp-idle"
         _idle_timer = t
         t.start()
+
+
+def after_job(cancelled: bool) -> None:
+    """End a job's use of ``runner``: stop the worker when the job was
+    *cancelled* (Stop frees the GPU), else (re)start the idle countdown while it
+    runs. Caller must hold ``lock``."""
+    if cancelled:
+        cancel_idle_timer()
+        runner.shutdown()
+    elif runner.is_alive():
+        arm_idle_timer()
 
 
 def _idle_unload() -> None:
