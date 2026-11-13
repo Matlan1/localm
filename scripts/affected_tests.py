@@ -260,6 +260,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_check_hygiene_non_ascii_paths.py": "runs the hygiene file list on a repository in tmp_path",
     "tests/test_check_hygiene_no_child_console_print.py": "reads the fixed module list check_hygiene names",
     "tests/test_conftest_isolation_guards.py": "runs one named test file",
+    "tests/test_config_reading.py": "loads scripts.report_issue, whose log glob reads the data folder, not the checkout",
     "tests/test_confirm_sdcpp_runtime.py": "reads the sd.cpp pin file only",
     "tests/test_confirm_comfyui_runtime.py": "writes a source record into a ComfyUI tree in tmp_path",
     "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",
