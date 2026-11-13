@@ -46,12 +46,24 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     # (HF) or license/NSFW/scan-status (CivitAI) badges. net_mode=off blocks it.
 
     def _discover_status(e: Exception) -> int:
-        msg = str(e)
-        if "net_mode" in msg:
-            return 403          # blocked by the network kill switch
-        if "request failed" in msg:
-            return 502          # HF/CivitAI unreachable
-        return 422              # bad repo / no files / bad format token / bad type
+        """403 for a request the network policy refused (net_mode off included),
+        502 for a request to HuggingFace or CivitAI that failed (the error is
+        raised from the transport or parse error, a host that did not resolve
+        included), 422 for everything else (bad repo, no files, bad format
+        token, bad type, and an error raised from another discovery error, such
+        as a repo HuggingFace answered 401, 403 or 404 for). Decided by the
+        error's attributes and cause, never by its text."""
+        from localm.discover import DiscoverError
+        from localm.model_manager.sources import ModelSourceError
+        from localm.netpolicy import NetworkPolicyError, UnresolvableHost
+        cause = e.__cause__
+        if getattr(e, "off", False):
+            return 403
+        if cause is None or isinstance(cause, (DiscoverError, ModelSourceError)):
+            return 422
+        if isinstance(cause, NetworkPolicyError) and not isinstance(cause, UnresolvableHost):
+            return 403
+        return 502
 
     async def _run_discover(fn):
         """Run *fn* off the event loop; map DiscoverError/ModelSourceError to its
