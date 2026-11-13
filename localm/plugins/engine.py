@@ -182,6 +182,30 @@ class UninstallResult(NamedTuple):
     left_in_place: Optional[Path]
 
 
+class PluginNotInstalled(ValueError):
+    """A known plugin (in the catalog or the bundled store) that is not
+    installed was asked to be disabled, uninstalled or enabled."""
+
+
+class PluginConfigWriteError(RuntimeError):
+    """The plugin's enabled flag could not be saved to the settings file."""
+
+
+def _dir_stamp(d: Path) -> Optional[tuple]:
+    """Identity of the installed folder *d* and its provenance marker, which a
+    reinstall changes; None when *d* is gone or cannot be read."""
+    try:
+        st = d.stat()
+    except OSError:
+        return None
+    try:
+        mst = (d / _PLUGIN_MARKER).stat()
+        marker = (mst.st_mtime_ns, mst.st_size)
+    except OSError:
+        marker = None
+    return (st.st_ino, marker)
+
+
 def _old_data_folder(spec: PluginSpec) -> Optional[Path]:
     """``<data dir>/<data_subdir>`` of third-party plugin *spec* when that
     folder exists and is not its current data folder, else None."""
@@ -540,19 +564,55 @@ def import_tool_module(spec: PluginSpec):
 _ROUTE_PREFIXES = ("/api/", "/v1/")
 
 
-def _mounted_paths(route) -> list:
-    """The URL paths *route* serves. An included router (FastAPI keeps it lazy
-    and path-less) is expanded into the effective paths of its routes."""
+def _mounted_targets(route) -> list:
+    """The leaf routes *route* stands for: itself, or for an included router
+    (FastAPI keeps it lazy and path-less) the effective route of each of its
+    routes."""
     accessor = getattr(route, "effective_route_contexts", None)
     if callable(accessor):
         out = []
         contexts: Any = accessor()
         for ctx in contexts:
             starlette_route = getattr(ctx, "starlette_route", None)
-            target = starlette_route if starlette_route is not None else ctx
-            out.append(str(getattr(target, "path", "")))
+            out.append(starlette_route if starlette_route is not None else ctx)
         return out
-    return [str(getattr(route, "path", ""))]
+    return [route]
+
+
+def _mounted_paths(route) -> list:
+    """The URL paths *route* serves. An included router is expanded into the
+    effective paths of its routes."""
+    return [str(getattr(t, "path", "")) for t in _mounted_targets(route)]
+
+
+_PATH_PARAM_RE = re.compile(r"\{[^}]*\}")
+
+
+def _route_clashes(new: list, existing: list) -> list:
+    """``"METHOD path"`` for every route in *new* that a route in *existing*
+    (the GUI's catch-all mount at "/" excluded) already answers, so the new
+    one would never be reached. A path parameter is probed with the value
+    ``1``."""
+    from starlette.routing import Match, Mount
+    others = [r for r in existing
+              if not (isinstance(r, Mount) and r.path in ("", "/"))]
+    clashes = []
+    for route in new:
+        for target in _mounted_targets(route):
+            path = str(getattr(target, "path", ""))
+            methods = getattr(target, "methods", None)
+            probe = _PATH_PARAM_RE.sub("1", path)
+            kinds = ([("http", m) for m in sorted(methods)] if methods
+                     else [("websocket", "WS")])
+            for kind, method in kinds:
+                scope = {"type": kind, "path": probe, "root_path": "",
+                         "method": method, "headers": [], "query_string": b""}
+                for other in others:
+                    match, _ = other.matches(scope)
+                    if match == Match.FULL:
+                        clashes.append(f"{method} {path}")
+                        break
+    return clashes
 
 
 class PluginHost:
@@ -579,31 +639,49 @@ class PluginHost:
         """Mount *router* on the live app, gating every route with the plugin's
         capability scope, and remember the routes added for later removal. With
         no app (a backend-only load, see ``PluginManager.load_backend_plugins``)
-        nothing is mounted."""
+        nothing is mounted. Raises ValueError, mounting nothing, for a path
+        outside /api/ and /v1/, and for a third-party plugin's route that localm
+        or another plugin already answers; a first-party plugin's such route is
+        mounted and logged at WARNING."""
         if self._app is None:
             self.audit("router_skipped_no_app", {})
             return
         from fastapi import Depends
         from localm.inference.http_server import require_scope
-        before = {id(r) for r in self._app.router.routes}
+        existing = list(self._app.router.routes)
+        before = {id(r) for r in existing}
         self._app.include_router(
             router, dependencies=[Depends(require_scope(self._spec.scope))])
         new = [r for r in self._app.router.routes if id(r) not in before]
         outside = [path for r in new for path in _mounted_paths(r)
                    if not path.startswith(_ROUTE_PREFIXES)]
         if outside:
-            for r in new:
-                self._app.router.routes.remove(r)
-            self._app.openapi_schema = None
+            self._drop_new_routes(new)
             raise ValueError(
                 f"plugin {self._spec.name!r}: route path(s) {outside!r} are outside "
                 f"/api/ and /v1/")
+        clashes = _route_clashes(new, existing)
+        if clashes and not self._spec.builtin:
+            self._drop_new_routes(new)
+            raise ValueError(
+                f"plugin {self._spec.name!r}: route(s) {clashes!r} are already "
+                f"served by localm or another plugin")
+        if clashes:
+            _log.warning("plugin %s: route(s) %s are already served by localm or "
+                         "another plugin, so its own never answer",
+                         self._spec.name, clashes)
         # include_router appends, and the GUI's catch-all StaticFiles mount at
         # '/' matches every path, so Starlette would return that first.
         # Relocate the plugin's routes to just before the catch-all.
         self._relocate_before_catchall(new)
         self._routes += new
         self._app.openapi_schema = None      # force /openapi.json to regenerate
+
+    def _drop_new_routes(self, new: list) -> None:
+        """Remove the just-included routes *new* from the app."""
+        for r in new:
+            self._app.router.routes.remove(r)
+        self._app.openapi_schema = None
 
     def _relocate_before_catchall(self, new: list) -> None:
         from starlette.routing import Mount
@@ -1034,6 +1112,7 @@ class PluginManager:
         self._specs: dict[str, PluginSpec] = {}
         self._loaded: dict[str, tuple] = {}     # name -> (spec, module, host, uniq)
         self._errors: dict[str, str] = {}            # load/runtime errors (persist)
+        self._error_stamps: dict[str, Optional[tuple]] = {}  # _dir_stamp at a load failure
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
         self._provision_errors: dict[str, str] = {}  # first-run copy / upgrade refresh
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
@@ -1042,13 +1121,18 @@ class PluginManager:
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
         # Serializes discover(), which may run on a worker thread
-        # (load_enabled_pending_off_loop, api_state off the loop) while the
+        # (run_lifecycle, api_state off the loop) while the
         # event loop calls it too. The config file lock is taken under it;
         # never take this lock while holding the config file lock.
         self._discover_lock = threading.RLock()
-        # Bumped when a plugin is disabled or unloaded, so a pending load
-        # computed off the loop before that change is dropped.
-        self._disable_gen = 0
+        # Serializes run_lifecycle calls. An asyncio.Lock, acquired only by
+        # awaiting on the event loop, never by a worker thread: a worker holds
+        # no lock while it waits for the loop in _on_loop.
+        self._lifecycle_lock: Any = None
+        self._lifecycle_loop: Any = None
+        # .loop is set on a run_lifecycle worker thread: the loop _on_loop
+        # hands app and plugin-code steps to.
+        self._op_local = threading.local()
         # (plugin name, callback) queued by Host.on_startup before the event
         # loop exists; drained once by the app lifespan.
         self._startup_callbacks: list = []
@@ -1304,16 +1388,32 @@ class PluginManager:
 
     def _set_enabled(self, name: str, on: bool) -> None:
         """Add/remove *name* in config["plugins_enabled"] atomically (read-modify-
-        write under the I/O lock), so concurrent toggles can't lose updates."""
+        write under the I/O lock), so concurrent toggles can't lose updates.
+        Raises PluginConfigWriteError when the settings file cannot be written."""
         from localm.config import update_config
 
         def _mutate(cfg: dict) -> None:
             cur = set(cfg.get("plugins_enabled", []))
             cur.add(name) if on else cur.discard(name)
             cfg["plugins_enabled"] = sorted(cur)
-        if not on:
-            self._disable_gen += 1
-        update_config(_mutate)
+        try:
+            update_config(_mutate)
+        except OSError as e:
+            reason = getattr(e, "strerror", None) or str(e) or type(e).__name__
+            raise PluginConfigWriteError(
+                f"plugin {name!r} could not be {'enabled' if on else 'disabled'}: "
+                f"the settings file (config.json) could not be written ({reason})"
+            ) from e
+
+    def _enable_or_unload(self, name: str) -> None:
+        """Set *name*'s enabled flag after a load; when the flag cannot be saved,
+        unload the plugin again and raise PluginConfigWriteError, so a loaded
+        plugin is always an enabled one."""
+        try:
+            self._set_enabled(name, True)
+        except PluginConfigWriteError:
+            self._unload(name)
+            raise
 
     # ---- load / unload (in-process, isolated) ------------------------------
     def load_enabled(
@@ -1381,28 +1481,139 @@ class PluginManager:
         recorded load error, mounting its routes on the live app. Covers a plugin
         installed or enabled by another process (``localm plugin install``) while
         this server runs. Returns the names loaded. Never raises: a failing plugin
-        is recorded in errors, as at startup. Runs on the event loop thread, like
-        enable(). Returns [] without loading when the manager has no app."""
+        is recorded in errors, as at startup. Returns [] without loading when the
+        manager has no app."""
         if self.app is None:
             return []
         return self._load_pending(self._pending_specs())
 
-    async def load_enabled_pending_off_loop(self) -> list:
-        """``load_enabled_pending`` for a request handler: discovery and the
-        config read run on a worker thread, and only the import and register()
-        of a plugin that is actually pending run on the event loop, as enable()
-        does. Returns the names loaded; [] without loading when the manager has
-        no app, or when a plugin was disabled or unloaded while discovery ran
-        (the next call loads what is still pending). Never raises for a failing
-        plugin, which is recorded in errors."""
+    def reconcile(self) -> tuple:
+        """Bring the loaded plugins in line with the installed folder and the
+        config, which another process (``localm plugin ...``, the MCP tools)
+        may have changed while this server runs. Unloads every loaded plugin
+        whose installed manifest is gone, or that the config, read
+        successfully, no longer enables (a protected plugin stays); forgets a
+        load error whose plugin was reinstalled or removed since it failed;
+        then loads every installed, enabled plugin that is not loaded and has
+        no recorded load error. Returns ``(loaded, unloaded)`` name lists, both
+        empty when the manager has no app. Never raises for one plugin's
+        failure, which is recorded in errors. Called through
+        :meth:`run_lifecycle` by a request handler."""
         if self.app is None:
-            return []
+            return [], []
+        from localm.config import load_config_checked
+        from localm.plugins import catalog as _cat
+        self.discover()
+        cfg, read_ok = load_config_checked()
+        enabled = set(cfg.get("plugins_enabled", [])) | set(_cat.protected())
+        unloaded = []
+        for name in sorted(self._loaded):
+            spec = self._loaded[name][0]
+            gone = self._manifest_gone(spec)
+            off = read_ok and name not in enabled and not spec.protected
+            if not (gone or off):
+                continue
+            self._unload(name)
+            unloaded.append(name)
+            _log.info("plugin %s unloaded: it was %s outside this server", name,
+                      "uninstalled" if gone else "disabled")
+        self._forget_stale_errors()
+        return self._load_pending(self._pending_specs()), unloaded
+
+    async def reconcile_off_loop(self) -> tuple:
+        """:meth:`reconcile` for a request handler, through
+        :meth:`run_lifecycle`. ``([], [])`` without a call when the manager has
+        no app."""
+        if self.app is None:
+            return [], []
+        return await self.run_lifecycle(self.reconcile)
+
+    def _plugin_dir(self, spec: PluginSpec) -> Path:
+        """The installed folder of *spec*: the marker folder of a store install,
+        the copied folder of a third-party one."""
+        return self._installed_dir(spec.name) if spec.builtin else Path(spec.path)
+
+    def _manifest_gone(self, spec: PluginSpec) -> bool:
+        """True when *spec*'s installed manifest is known to be absent; False
+        when it is present or cannot be checked."""
+        try:
+            (self._plugin_dir(spec) / "plugin.toml").stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return True
+        except (OSError, ValueError):
+            return False
+        return False
+
+    def _forget_stale_errors(self) -> None:
+        """Drop the load error of every plugin whose installed folder changed
+        (reinstalled) or is gone since the load failed, so it is tried again."""
+        for name, stamp in list(self._error_stamps.items()):
+            spec = self._specs.get(name)
+            now = _dir_stamp(self._plugin_dir(spec)) if spec is not None else None
+            if now != stamp:
+                self._forget_errors(name)
+
+    def _forget_errors(self, name: str) -> None:
+        """Drop every recorded load or unload error of *name*."""
+        self._errors.pop(name, None)
+        self._error_stamps.pop(name, None)
+        self._unload_errors.pop(name, None)
+
+    async def run_lifecycle(self, fn, *args, **kwargs):
+        """Run ``fn(*args, **kwargs)`` (an install, enable, disable, uninstall,
+        refresh or :meth:`reconcile`) on a worker thread, so file copies,
+        imports and config writes do not stall the event loop, and return its
+        result or raise its exception. Calls are serialized per manager. The
+        steps that touch the app or run plugin code (register, unregister,
+        unmount, lifecycle hooks) are handed back to this event loop by
+        :meth:`_on_loop`. A cancelled caller still waits for the worker to
+        finish before the next call starts. Must be awaited on the server's
+        event loop."""
+        import asyncio
+
         from starlette.concurrency import run_in_threadpool
-        gen = self._disable_gen
-        specs = await run_in_threadpool(self._pending_specs)
-        if gen != self._disable_gen:
-            return []
-        return self._load_pending(specs)
+        loop = asyncio.get_running_loop()
+        if self._lifecycle_lock is None or self._lifecycle_loop is not loop:
+            self._lifecycle_lock = asyncio.Lock()
+            self._lifecycle_loop = loop
+
+        def _call():
+            self._op_local.loop = loop
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._op_local.loop = None
+
+        async with self._lifecycle_lock:
+            return await run_in_threadpool(_call)
+
+    def _on_loop(self, fn):
+        """Return ``fn()``. On a :meth:`run_lifecycle` worker thread *fn* runs
+        on the server's event loop while this thread waits for it, and its
+        exception is re-raised here; anywhere else it runs on the calling
+        thread. Raises RuntimeError when the loop stops before *fn* ran."""
+        import concurrent.futures
+        loop = getattr(self._op_local, "loop", None)
+        if loop is None:
+            return fn()
+        done: concurrent.futures.Future = concurrent.futures.Future()
+
+        def _run() -> None:
+            if not done.set_running_or_notify_cancel():
+                return
+            try:
+                done.set_result(fn())
+            except BaseException as e:
+                done.set_exception(e)
+        loop.call_soon_threadsafe(_run)
+        while not done.done():
+            concurrent.futures.wait([done], timeout=1.0)
+            if done.done() or loop.is_running():
+                continue
+            if done.cancel():
+                raise RuntimeError("the server's event loop stopped before a "
+                                   "plugin step could run on it")
+        return done.result()
 
     def _pending_specs(self) -> list:
         """Discover, then return the specs of installed, enabled plugins that
@@ -1426,6 +1637,10 @@ class PluginManager:
             self._safe_load(spec)
             if name in self._loaded:
                 loaded.append(name)
+                _log.info("plugin %s loaded", name)
+            else:
+                _log.warning("plugin %s failed to load: %s", name,
+                             self._errors.get(name))
         return loaded
 
     def _ensure_preinstalled(self) -> None:
@@ -1474,24 +1689,35 @@ class PluginManager:
         self._provision_errors[name] = msg
 
     def _safe_load(self, spec: PluginSpec) -> None:
+        """``_load(spec)``; a failure is recorded in errors with the installed
+        folder's identity, so a reinstall makes it eligible again."""
         try:
             self._load(spec)
         except Exception as e:
             self._errors[spec.name] = f"load failed: {e}"
+            self._error_stamps[spec.name] = _dir_stamp(self._plugin_dir(spec))
 
     def _load(self, spec: PluginSpec) -> None:
         """Import *spec*'s module, call its register(host) and record it as
         loaded. A tools-only manifest (``entry`` and no ``register``) is left
-        unloaded with no error. Raises when the module or its register callable
-        is missing, or register() raises."""
+        unloaded with no error. The import runs on the calling thread and
+        register() through ``_on_loop``. Raises when the module or its register
+        callable is missing, or register() raises."""
         if spec.tools_only:
-            self._errors.pop(spec.name, None)
+            self._forget_errors(spec.name)
             return
         module, attr, uniq = _import_module(spec)
         register = getattr(module, attr, None)
         if not callable(register):
             _drop_plugin_modules(uniq)
             raise ValueError(f"plugin {spec.name!r}: no callable {attr!r}")
+        self._on_loop(lambda: self._register(spec, module, register, uniq))
+        _warn_old_data_location(spec)
+        self._maybe_fire_first_use(spec.name)
+
+    def _register(self, spec: PluginSpec, module, register, uniq: str) -> None:
+        """Call *register* with a new host and record *spec* as loaded; on a
+        failure undo what the host mounted and raise."""
         host = PluginHost(self.app, self, spec)
         try:
             register(host)
@@ -1507,10 +1733,7 @@ class PluginManager:
             _drop_plugin_modules(uniq)
             raise
         self._loaded[spec.name] = (spec, module, host, uniq)
-        self._errors.pop(spec.name, None)       # a successful load clears prior error
-        self._unload_errors.pop(spec.name, None)
-        _warn_old_data_location(spec)
-        self._maybe_fire_first_use(spec.name)
+        self._forget_errors(spec.name)          # a successful load clears prior errors
 
     def _maybe_fire_first_use(self, name: str) -> None:
         """Invoke the ``on_first_use`` lifecycle hook exactly once per plugin - the
@@ -1524,7 +1747,10 @@ class PluginManager:
         from localm.config import load_config, update_config
         try:
             done = set(load_config().get("plugins_first_use_done", []))
-        except Exception:
+        except Exception as e:
+            _log.warning("plugin %s: could not read whether its first-use hook "
+                         "has run (%s: %s); not running it now", name,
+                         type(e).__name__, e)
             return
         if name in done:
             return
@@ -1536,11 +1762,18 @@ class PluginManager:
             cfg["plugins_first_use_done"] = sorted(cur)
         try:
             update_config(_mutate)
-        except Exception:
-            pass  # best-effort: worst case on_first_use fires again next start
+        except Exception as e:
+            _log.warning("plugin %s: could not record that its first-use hook "
+                         "ran (%s: %s); it runs again the next time it loads",
+                         name, type(e).__name__, e)
 
     def _unload(self, name: str) -> None:
-        self._disable_gen += 1
+        """Unload *name* if it is loaded: its unregister(), then the host's
+        unmount, through ``_on_loop``."""
+        self._on_loop(lambda: self._unload_now(name))
+
+    def _unload_now(self, name: str) -> None:
+        """``_unload`` body, on the event loop when one runs the server."""
         entry = self._loaded.pop(name, None)
         if not entry:
             return
@@ -1566,7 +1799,7 @@ class PluginManager:
         hook = getattr(entry[1], hook_name, None)
         if callable(hook):
             try:
-                hook(**kwargs)
+                self._on_loop(lambda: hook(**kwargs))
             except Exception as e:
                 # Log a failing plugin hook at WARNING without failing the
                 # install/first-use path that called it.
@@ -1970,34 +2203,51 @@ class PluginManager:
             raise ValueError(f"plugin {name!r} {fail_verb}: {detail}")
 
     def _resolve_missing_plugin_error(self, name: str, *, hint_ok: bool = True) -> Exception:
-        """Resolve 'not installed' into a ValueError with an install hint (the
-        plugin is at least known) or a KeyError (truly unknown). *hint_ok*
-        suppresses the install hint for disable
-        (``set_enabled_state(on=False)``), where 'install it first' makes no
-        sense."""
+        """Resolve 'not installed' into a PluginNotInstalled (a ValueError; the
+        plugin is known to the catalog or the bundled store) or a KeyError
+        (truly unknown). *hint_ok* adds the 'install it first' hint, which an
+        enable takes and a disable or uninstall does not."""
         from localm.plugins import catalog as _cat
-        if hint_ok and (_cat.get(name) or self._store_dir(name)):
-            return ValueError(f"plugin {name!r} is not installed; install it first")
+        if _cat.get(name) or self._store_dir(name):
+            hint = "; install it first" if hint_ok else ""
+            return PluginNotInstalled(f"plugin {name!r} is not installed{hint}")
         return KeyError(f"no such plugin: {name}")
 
     # ---- public lifecycle (install/uninstall = store<->installed) -----------
-    def install(self, name: str) -> None:
+    def install(self, name: str) -> bool:
         """Install a plugin from the bundled store into the installed folder
         (``_provision_from_store``), then load + enable it on the live app. Rolls
-        back the install if it does not load. KeyError if no such plugin exists."""
+        back the install if it does not load or its enabled flag cannot be
+        saved. A plugin whose required plugins are not installed is installed
+        but neither loaded nor enabled. Returns whether it was enabled. KeyError
+        if no such plugin exists."""
         copied = self._provision_from_store(name)    # may raise KeyError
         # Roll back only the copy this call created; see _provision_from_store.
         self._provision_and_verify(name, rollback_on_fail=copied)
+        if self._left_disabled_for_requires(name):
+            self._record_event("plugin_installed", name)
+            return False
         try:
             if name not in self._loaded:
                 self._load(self._specs[name])
+            self._invoke_hook(name, "on_install")    # optional lifecycle hook
+            self._enable_or_unload(name)
         except Exception:
             if copied:
                 self._remove_installed_dir(name)     # roll back OUR copy only
             raise
-        self._invoke_hook(name, "on_install")        # optional lifecycle hook
-        self._set_enabled(name, True)
         self._record_event("plugin_installed", name)
+        return True
+
+    def _left_disabled_for_requires(self, name: str) -> bool:
+        """True, logging why at WARNING, when *name* just installed declares a
+        required plugin that is not installed, so the install leaves it
+        disabled (``enable`` refuses it the same way)."""
+        problem = self._requires_problem(name)
+        if problem is None:
+            return False
+        _log.warning("plugin %s is installed but not enabled: %s", name, problem)
+        return True
 
     def _record_event(self, kind: str, name: str) -> None:
         """Append a plugin install or uninstall to the management log; never raises."""
@@ -2013,18 +2263,24 @@ class PluginManager:
 
     def install_external(self, source: Path, *, force: bool = False):
         """Install a THIRD-PARTY plugin from an arbitrary source directory: copy it
-        into the installed folder, then load + enable. Rolls back on failure."""
+        into the installed folder, then load + enable. Rolls back on failure,
+        including an enabled flag that cannot be saved. A plugin whose required
+        plugins are not installed is installed but neither loaded nor enabled.
+        Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name, fail_verb="is not loadable")
+        if self._left_disabled_for_requires(name):
+            self._record_event("plugin_installed", name)
+            return spec0
         try:
             if name not in self._loaded:
                 self._load(self._specs[name])
+            self._invoke_hook(name, "on_install")    # optional lifecycle hook
+            self._enable_or_unload(name)
         except Exception:
             self._remove_installed_dir(name)
             raise
-        self._invoke_hook(name, "on_install")        # optional lifecycle hook
-        self._set_enabled(name, True)
         self._record_event("plugin_installed", name)
         return spec0
 
@@ -2033,17 +2289,24 @@ class PluginManager:
         """CLI/headless install of a THIRD-PARTY plugin from an arbitrary
         directory WITHOUT mounting routes (the app-free sibling of
         ``install_external``, mirroring ``set_installed_state``): validate the
-        manifest, copy it into the installed folder, and enable it. Rolls back a
-        copy that does not parse. A running server loads it the next time
-        its plugin list is read. Returns the parsed PluginSpec."""
+        manifest, copy it into the installed folder, and enable it unless a
+        plugin it requires is not installed. Rolls back a copy that does not
+        parse. A running server loads it the next time its plugin list is read.
+        Returns the parsed PluginSpec."""
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name)
-        if enable:
+        if enable and not self._left_disabled_for_requires(name):
             self._set_enabled(name, True)
+        self._record_event("plugin_installed", name)
         return spec0
 
     def enable(self, name: str) -> None:
+        """Load *name* on the live app and set its enabled flag. Raises
+        PluginNotInstalled for a known plugin that is not installed, KeyError
+        for an unknown one, ValueError when a required plugin is not installed,
+        and PluginConfigWriteError (after unloading it again) when the flag
+        cannot be saved."""
         self.discover()
         if name not in self._specs:
             raise self._resolve_missing_plugin_error(name)
@@ -2056,18 +2319,25 @@ class PluginManager:
         self.discover()
         if name not in self._loaded:
             self._load(self._specs[name])             # load first; surface errors
-        self._set_enabled(name, True)
+        self._enable_or_unload(name)
 
-    def _require_deps_installed(self, name: str) -> None:
-        """Refuse to enable a plugin whose declared ``requires`` are not
-        installed."""
+    def _requires_problem(self, name: str) -> Optional[str]:
+        """Why *name* may not be enabled because a plugin it declares in
+        ``requires`` is not installed, or None."""
         missing = self.missing_requires(name)
-        if missing:
-            plural = "s" if len(missing) > 1 else ""
-            raise ValueError(
-                f"plugin {name!r} requires plugin{plural} "
+        if not missing:
+            return None
+        plural = "s" if len(missing) > 1 else ""
+        return (f"plugin {name!r} requires plugin{plural} "
                 f"{', '.join(sorted(missing))} which {'are' if plural else 'is'} "
                 f"not installed; install {'them' if plural else 'it'} first")
+
+    def _require_deps_installed(self, name: str) -> None:
+        """Refuse (ValueError) to enable a plugin whose declared ``requires``
+        are not installed."""
+        problem = self._requires_problem(name)
+        if problem is not None:
+            raise ValueError(problem)
 
     def _dependents(self, name: str) -> set:
         """Installed plugins that (transitively) declare *name* in their requires."""
@@ -2087,6 +2357,14 @@ class PluginManager:
         return result
 
     def disable(self, name: str) -> None:
+        """Clear *name*'s enabled flag, then unload it. Raises KeyError for an
+        unknown name, PluginNotInstalled for a known plugin that is neither
+        installed nor loaded, ValueError for a protected one, and
+        PluginConfigWriteError (leaving it loaded) when the flag cannot be
+        saved."""
+        self.discover()
+        if name not in self._loaded and name not in self._installed_set():
+            raise self._resolve_missing_plugin_error(name, hint_ok=False)
         if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
         self._set_enabled(name, False)
@@ -2213,22 +2491,28 @@ class PluginManager:
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
         """CLI/headless install/uninstall WITHOUT loading routes: install from
         the store (or remove the installed dir); the GUI server reconciles via
-        load_enabled on its next start. Installing also enables by default;
-        uninstalling disables. Honours protection on uninstall."""
+        load_enabled on its next start. Installing also enables by default,
+        unless a plugin it requires is not installed; uninstalling disables.
+        Honours protection on uninstall. Uninstalling raises PluginNotInstalled
+        for a known plugin that is not installed and KeyError for an unknown
+        name."""
         if on:
             copied = self._provision_from_store(name)  # raises if unknown
             # Roll back ONLY what this call created - see _provision_from_store.
             self._provision_and_verify(name, rollback_on_fail=copied)
-            if enable:
+            if enable and not self._left_disabled_for_requires(name):
                 self._set_enabled(name, True)
+            if copied:
+                self._record_event("plugin_installed", name)
         else:
             self.discover()
             if name not in self._installed_set() and not self._installed_dir_on_disk(name):
-                raise KeyError(f"no such plugin: {name}")
+                raise self._resolve_missing_plugin_error(name, hint_ok=False)
             if self._is_protected(name):
                 raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
             self._set_enabled(name, False)
-            self._remove_installed_dir(name)
+            if self._remove_installed_dir(name):
+                self._record_event("plugin_uninstalled", name)
 
     def set_enabled_state(self, name: str, on: bool) -> None:
         """CLI/headless enable/disable WITHOUT loading routes. Requires the plugin
@@ -2259,8 +2543,9 @@ class PluginManager:
         directory is deleted too; the on_uninstall hook runs first. Returns True
         only if it was installed AND its installed directory was actually removed
         from disk AND - when delete_data was requested - its data directory was
-        actually removed too. False if it was not installed to begin with, or if
-        either removal could not complete (a locked file, an AV hold, or a
+        actually removed too. False if no folder of that name was installed (a
+        manifest whose name differs from its folder's), or if either removal
+        could not complete (a locked file, an AV hold, or a
         permission denial - all reachable on Windows - or a data_subdir that
         refused to resolve inside the data dir). In the degraded case the plugin
         is still disabled and unloaded, but some of its files remain on disk; see
@@ -2271,14 +2556,19 @@ class PluginManager:
         Also removable when the installed directory exists with no manifest
         (an interrupted or corrupted previous install): that directory is
         deleted the same as a fully installed plugin's, and doing so still
-        counts as complete. KeyError only when nothing - manifest or
-        directory - exists under this name."""
+        counts as complete. When nothing - manifest or directory - exists
+        under this name: PluginNotInstalled for a plugin the catalog or the
+        bundled store knows, KeyError for any other name.
+
+        The plugin's earlier load and unload errors are forgotten, so a later
+        install of it is loaded; a failure of its unregister() during this
+        uninstall is recorded."""
         self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
         on_disk = self._installed_dir_on_disk(name)
         if spec is None and not was_installed and not on_disk:
-            raise KeyError(f"no such plugin: {name}")
+            raise self._resolve_missing_plugin_error(name, hint_ok=False)
         if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
         # Cascade-unload dependents: disable and unload (transitively) every
@@ -2303,11 +2593,12 @@ class PluginManager:
             hook = getattr(module, "on_uninstall", None)
             if callable(hook):
                 try:
-                    hook(delete_data=delete_data)
+                    self._on_loop(lambda: hook(delete_data=delete_data))
                 except Exception as e:
                     hook_failed = True
                     _log.warning("plugin %s: on_uninstall(delete_data=%s) failed: %s",
                                  name, delete_data, e, exc_info=True)
+        self._forget_errors(name)
         self._unload(name)
         self._set_enabled(name, False)
         data_deleted = not (delete_data and hook_failed)
@@ -2371,7 +2662,11 @@ class PluginManager:
     def api_state(self) -> dict:
         """Installed plugins (loaded from the installed folder) plus what is
         AVAILABLE to install (the bundled store + the static catalog, minus what
-        is installed). Each entry carries installed/enabled/active/available."""
+        is installed). Each entry carries installed/enabled/active/available, and
+        ``not_runnable_reason``: why a first-party plugin cannot run on this
+        machine (it is still listed), else "". Runs the catalog's hardware
+        check, so a request handler calls it off the event loop after
+        ``catalog.check_hardware_off_loop``."""
         from localm.plugins import catalog as _cat
         from localm.plugins import deps as _deps
         self.discover()
@@ -2413,6 +2708,8 @@ class PluginManager:
                 "missing_requires": [r for r in (spec.requires if spec else [])
                                      if r not in installed],
                 "extra": cat.extra if cat else "",
+                # Why this first-party plugin cannot run on this machine, or "".
+                "not_runnable_reason": _cat.not_runnable_reason(cat) if cat else "",
                 "commands": list(cat.commands) if cat else [],
                 "installed": name in installed,
                 "enabled": name in enabled,
@@ -2429,7 +2726,7 @@ class PluginManager:
             plugins.append(_entry(spec, name, available=False))
         seen = set(self._specs)
         for name in sorted(set(store) | set(_cat.names())):  # available, not installed
-            if name in seen or not _cat.offered(name):
+            if name in seen or not _cat.listed(name):
                 continue
             plugins.append(_entry(store.get(name), name, available=True))
         from localm.config import load_config
@@ -2468,8 +2765,8 @@ def load_inference_backend_plugins() -> list:
 
 
 def attach_engine(app, inference_engine=None) -> PluginManager:
-    """Instantiate a PluginManager bound to *app*, load enabled plugins, and add
-    the management endpoints. Returns the manager."""
+    """Instantiate a PluginManager bound to *app*, add the management
+    endpoints, then load enabled plugins. Returns the manager."""
     from fastapi import Depends, HTTPException
     from fastapi import Request as _Request
     from localm import scopes
@@ -2480,7 +2777,6 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     with _backend_manager_lock:
         _server_manager_attached = True
     manager = PluginManager(app, inference_engine=inference_engine)
-    manager.load_enabled()
     app.state.plugin_manager = manager
 
     def _valid_name_or_404(name: str) -> str:
@@ -2498,7 +2794,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         from starlette.concurrency import run_in_threadpool
 
         from localm.plugins import catalog as _cat
-        await manager.load_enabled_pending_off_loop()
+        await manager.reconcile_off_loop()
         await _cat.check_hardware_off_loop()
         return await run_in_threadpool(manager.api_state)
 
@@ -2507,12 +2803,24 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def install_plugin_engine(name: str):
         name = _valid_name_or_404(name)
         try:
-            manager.install(name)
+            reply = await manager.run_lifecycle(
+                lambda: _installed_reply(name, manager.install(name)))
         except KeyError as exc:
             raise HTTPException(404, f"No such plugin: {name}") from exc
+        except PluginConfigWriteError as e:
+            raise HTTPException(500, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Install failed: {e}") from e
-        return {"status": "installed", "name": name}
+        return reply
+
+    def _installed_reply(name: str, enabled: bool) -> dict:
+        """The install routes' answer: ``enabled`` is False, with the reason in
+        ``detail``, when a plugin it requires is not installed. Reads the
+        installed folder and the store, so it runs off the event loop."""
+        out = {"status": "installed", "name": name, "enabled": bool(enabled)}
+        if not enabled:
+            out["detail"] = manager._requires_problem(name) or ""
+        return out
 
     @app.post("/api/plugins/install-external",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
@@ -2541,13 +2849,20 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         src = _P(source)
         if not (src.is_dir() and (src / "plugin.toml").is_file()):
             raise HTTPException(400, f"No plugin.toml in {source!r}")
+        def _install():
+            spec = manager.set_installed_from_dir(
+                src, force=bool((body or {}).get("force")))
+            return {**_installed_reply(spec.name, manager.is_enabled(spec.name)),
+                    "version": spec.version}
         try:
-            spec = manager.set_installed_from_dir(src, force=bool((body or {}).get("force")))
+            reply = await manager.run_lifecycle(_install)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        except PluginConfigWriteError as e:
+            raise HTTPException(500, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Install failed: {e}") from e
-        return {"status": "installed", "name": spec.name, "version": spec.version}
+        return reply
 
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
@@ -2555,13 +2870,17 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         name = _valid_name_or_404(name)
         # is_installed_or_on_disk(), not is_installed(): a manifest-less
         # directory is something uninstall() below can still act on.
-        existed = manager.is_installed_or_on_disk(name)
+        def _uninstall():
+            existed = manager.is_installed_or_on_disk(name)
+            return existed, manager.uninstall_report(name, delete_data=delete_data)
         try:
-            complete, left = manager.uninstall_report(name, delete_data=delete_data)
+            existed, (complete, left) = await manager.run_lifecycle(_uninstall)
         except KeyError as exc:
             raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
+        except PluginConfigWriteError as e:
+            raise HTTPException(500, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}") from e
         if complete:
@@ -2585,7 +2904,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def refresh_all_plugins_engine():
-        refreshed = manager.refresh()
+        refreshed = await manager.run_lifecycle(manager.refresh)
         failed = dict(getattr(manager, "last_refresh_failures", {}) or {})
         return {"status": "partial" if failed else "ok", "refreshed": refreshed,
                 "failed": failed}
@@ -2595,7 +2914,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def refresh_plugin_engine(name: str):
         name = _valid_name_or_404(name)
         try:
-            refreshed = manager.refresh(name)
+            refreshed = await manager.run_lifecycle(manager.refresh, name)
         except KeyError as exc:
             raise HTTPException(404, f"No such installed builtin plugin: {name}") from exc
         except Exception as e:
@@ -2607,11 +2926,13 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def enable_plugin(name: str):
         name = _valid_name_or_404(name)
         try:
-            manager.enable(name)
+            await manager.run_lifecycle(manager.enable, name)
         except KeyError as exc:
             raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
             raise HTTPException(409, str(e)) from e      # e.g. not installed
+        except PluginConfigWriteError as e:
+            raise HTTPException(500, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Enable failed: {e}") from e
         return {"status": "enabled", "name": name}
@@ -2621,9 +2942,15 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def disable_plugin(name: str):
         name = _valid_name_or_404(name)
         try:
-            manager.disable(name)
+            await manager.run_lifecycle(manager.disable, name)
+        except KeyError as exc:
+            raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
-            raise HTTPException(409, str(e)) from e
+            raise HTTPException(409, str(e)) from e      # e.g. not installed
+        except PluginConfigWriteError as e:
+            raise HTTPException(500, str(e)) from e
+        except Exception as e:
+            raise HTTPException(400, f"Disable failed: {e}") from e
         return {"status": "disabled", "name": name}
 
     # Host-side dependency install (pip extras). In its own module so its
@@ -2640,4 +2967,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     app.state.jobs = JobManager()
     _job_routes.register(app, app.state.jobs)
 
+    # Runs after every route above is registered, so mount_router's clash
+    # check sees them. See test_a_startup_load_cannot_shadow_a_management_route.
+    manager.load_enabled()
     return manager

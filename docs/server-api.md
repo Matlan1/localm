@@ -1209,18 +1209,27 @@ Each plugin entry carries the state flags `installed`, `enabled`, `active`,
 `available`, and `loaded`, plus `name`, `version`, `description`, `scope`,
 `builtin`, `protected`, `tab`, `label`, `icon`, `group`, `client_entry`,
 `assets_base`, `requires`, `requires_extras`, `missing_deps`,
-`missing_requires`, `tool_exports`, `commands`, `extra`, and `error`.
+`missing_requires`, `tool_exports`, `commands`, `extra`, `not_runnable_reason`
+(why a first-party plugin cannot run on this machine, else empty; such a
+plugin is still listed), and `error`. Reading the list also brings the
+server in line with changes another process made (`localm plugin ...`, the
+MCP tools): a plugin installed or enabled there is loaded, one disabled or
+uninstalled there is unloaded, and a plugin that failed to load is tried
+again once it has been reinstalled.
 
 ### `POST /api/plugins/{name}/install` / `POST /api/plugins/{name}/uninstall`
 
 Move a plugin between the available catalog and the installed set. Install
 copies the plugin from the store into `<data dir>/plugins/` and enables it;
 uninstall removes the installed directory and accepts `?delete_data=` to
-also drop the plugin's stored data. They return `{"status": "installed" |
-"uninstalled", "name"}`. Uninstalling a protected plugin (chat) returns 409; an
-unknown plugin returns 404; a failed install or uninstall returns 400; an
+also drop the plugin's stored data. Install returns `{"status": "installed",
+"name", "enabled"}`: `enabled` is false, with the reason in `detail`, when a
+plugin it requires is not installed (it is installed but not enabled).
+Uninstall returns `{"status": "uninstalled", "name"}`. Uninstalling a
+protected plugin (chat) or a known plugin that is not installed returns 409;
+an unknown plugin returns 404; a failed install or uninstall returns 400; an
 uninstall that disabled and unloaded the plugin but could not remove everything
-it owns from disk returns 500.
+it owns from disk, or a settings file that cannot be written, returns 500.
 
 ### `POST /api/plugins/refresh` / `POST /api/plugins/{name}/refresh`
 
@@ -1235,11 +1244,10 @@ other refresh failure of the `{name}` route returns 500.
 ### `POST /api/plugins/{name}/enable` / `POST /api/plugins/{name}/disable`
 
 Toggle an installed plugin active or inactive in config. Disabling a
-protected plugin (chat) returns 409; enabling a plugin that is not installed
-returns 409; an unknown plugin returns 404 from `enable`; any other failure
-to enable returns 400. They return `{"status": "enabled" | "disabled", "name"}`.
-`disable` does not check whether a well-formed name is a real plugin - an
-unknown name returns 200 the same as a real one.
+protected plugin (chat) returns 409; enabling or disabling a known plugin that
+is not installed returns 409; an unknown plugin returns 404; a settings file
+that cannot be written returns 500 and leaves the plugin as it was; any other
+failure returns 400. They return `{"status": "enabled" | "disabled", "name"}`.
 
 ### `POST /api/plugins/install-external`
 
@@ -1247,8 +1255,9 @@ unknown name returns 200 the same as a real one.
 plugin from a local directory (`{"source": "/path/to/plugin"}`, which must
 contain a `plugin.toml`; `force` replaces an installed copy) - the HTTP sibling
 of `localm plugin install <dir>`. The plugin is loaded the next time `GET /api/plugins` is called, with no restart.
-Returns `{"status": "installed", "name", "version"}`; a missing `source`, a
-directory without a `plugin.toml`, or a rejected plugin is a 400.
+Returns `{"status": "installed", "name", "version", "enabled"}` (`enabled` as
+for the install route above); a missing `source`, a directory without a
+`plugin.toml`, or a rejected plugin is a 400.
 
 ### `POST /api/plugins/{name}/install-deps` / `GET /api/plugins/{name}/install-deps/events`
 

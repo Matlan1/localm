@@ -26,9 +26,10 @@ def plugin() -> None:
 # status. Two axes: install/uninstall moves a plugin between the available catalog
 # (builtin/ + external dirs) and the user's installed set; enable/disable toggles
 # an installed plugin active/inactive. A PluginManager with no app is enough to
-# flip config (no routes are mounted from the CLI - a running GUI server picks
-# HTTP routes up the next time it reads the plugin list, while stdio plugins like mcp take effect
-# immediately). Nothing is installed by default: only what the user selects.
+# flip config (no routes are mounted from the CLI - a running GUI server loads or
+# unloads the plugin the next time it reads the plugin list, while stdio plugins
+# like mcp take effect immediately). Nothing is installed by default: only what
+# the user selects.
 
 def _engine_manager():
     from ..plugins.engine import PluginManager
@@ -48,6 +49,23 @@ def _warn_missing_requires(mgr, name):
             f"{', '.join(escape(m) for m in missing)}, which "
             f"{'is' if len(missing) == 1 else 'are'} not installed. "
             f"Install with:  {cmds}")
+        if not mgr.is_enabled(name):
+            console.print(
+                f"[yellow]{escape(repr(name))} is installed but not enabled.[/yellow] "
+                f"Enable it once they are installed:  "
+                f"localm plugin enable {escape(name)}")
+
+
+def _warn_not_runnable(name):
+    """Say so when first-party plugin *name* cannot run on this machine."""
+    from rich.markup import escape
+
+    from localm.plugins import catalog
+    entry = catalog.get(name)
+    reason = catalog.not_runnable_reason(entry) if entry is not None else ""
+    if reason:
+        console.print(f"[yellow]Note:[/yellow] {escape(name)} {escape(reason)}, "
+                      f"so it will not run models here.")
 
 
 # ---- pip-extra auto-install (host-side; the CLI always runs on the host) ---- #
@@ -156,6 +174,7 @@ def plugin_install_engine(target, force, with_deps, assume_yes):
     run_or_die(mgr.set_installed_state, target, True,
               missing_msg=f"No such plugin: {target}")
     console.print(f"[green]Installed[/green] plugin [bold]{escape(target)}[/bold]")
+    _warn_not_runnable(target)
     _warn_missing_requires(mgr, target)
     if _resolve_with_deps(with_deps):
         _install_deps(mgr, target)
@@ -411,12 +430,22 @@ def plugin_uninstall_engine(name, delete_data):
     from rich.markup import escape
 
     from localm import cli as _cli
+    from localm.plugins.engine import PluginNotInstalled
     mgr = _cli._engine_manager()
     # is_installed_or_on_disk(), not is_installed(): a manifest-less
     # directory is something uninstall() below can still act on.
     existed = mgr.is_installed_or_on_disk(name)
-    complete, left = run_or_die(mgr.uninstall_report, name, delete_data=delete_data,
-                                missing_msg=f"No such plugin: {name}")
+
+    def _uninstall():
+        try:
+            return mgr.uninstall_report(name, delete_data=delete_data)
+        except PluginNotInstalled:
+            return None
+    result = run_or_die(_uninstall, missing_msg=f"No such plugin: {name}")
+    if result is None:
+        console.print(f"[dim]Plugin {escape(repr(name))} was not installed.[/dim]")
+        return
+    complete, left = result
     if left is not None:
         from localm.plugins.engine import data_left_in_place_message
         console.print(f"[yellow]{escape(data_left_in_place_message(name, left))}[/yellow]")
@@ -451,6 +480,7 @@ def plugin_enable(name, with_deps):
     run_or_die(mgr.set_enabled_state, name, True,
               missing_msg=f"No such plugin: {name}")
     console.print(f"[green]Enabled[/green] plugin [bold]{escape(name)}[/bold]")
+    _warn_not_runnable(name)
     _warn_missing_requires(mgr, name)
     if _resolve_with_deps(with_deps):
         _install_deps(mgr, name)
@@ -538,7 +568,8 @@ def plugin_status():
         # - unlike name, it is not restricted to isidentifier()), so both are
         # escaped defensively - never trust manifest text is display-safe.
         desc = f" - {escape(p['description'])}" if p.get("description") else ""
-        console.print(f"  {mark} [bold]{escape(p['name'])}[/bold]{desc}")
+        console.print(f"  {mark} [bold]{escape(p['name'])}[/bold]{desc}"
+                      f"{_not_runnable_suffix(p)}")
     if not any_installed:
         console.print("  [dim](none - only chat is active by default)[/dim]")
     console.print("[bold]Available[/bold] (not installed)")
@@ -548,9 +579,19 @@ def plugin_status():
             continue
         any_available = True
         desc = f" - {escape(p['description'])}" if p.get("description") else ""
-        console.print(f"  [dim]+[/dim]  [bold]{escape(p['name'])}[/bold]{desc}")
+        console.print(f"  [dim]+[/dim]  [bold]{escape(p['name'])}[/bold]{desc}"
+                      f"{_not_runnable_suffix(p)}")
     if not any_available:
         console.print("  [dim](none)[/dim]")
+
+
+def _not_runnable_suffix(p) -> str:
+    """A status line's note that plugin entry *p* cannot run on this
+    machine, already markup-escaped, or ""."""
+    from rich.markup import escape
+
+    reason = p.get("not_runnable_reason") or ""
+    return f" [yellow]({escape(reason)})[/yellow]" if reason else ""
 
 
 # ------------------------------------------------------------------ #
@@ -568,12 +609,14 @@ def plugin_status():
 # ------------------------------------------------------------------ #
 
 def _plugin_install_state(name):
-    """(installed, active) for *name*, without loading a single plugin."""
+    """(known, installed, active) for *name*, without loading a single
+    plugin. *known* is True for a plugin installed here or listed as
+    available to install."""
     from localm import cli as _cli
     for p in _cli._engine_manager().api_state().get("plugins", []):
         if p.get("name") == name:
-            return bool(p.get("installed")), bool(p.get("active"))
-    return False, False
+            return True, bool(p.get("installed")), bool(p.get("active"))
+    return False, False, False
 
 
 def _attached_server():
@@ -670,7 +713,12 @@ def _runtime_fields(name):
         """Why this plugin has no fields, read from THIS machine's install set.
         Only sound when the server we would ask is this home's own - see the
         remote note below."""
-        installed, active = _plugin_install_state(name)
+        known, installed, active = _plugin_install_state(name)
+        if not installed and known:
+            console.print(f"[red]{escape(name)} is not installed.[/red]")
+            console.print(f"[dim]Install it with:[/dim]  "
+                          f"localm plugin install {escape(name)}")
+            sys.exit(1)
         if not installed:
             console.print(f"[red]No such plugin:[/red] {escape(name)}")
             console.print("[dim]See[/dim] localm plugin status [dim]for the "
@@ -773,7 +821,7 @@ def plugin_config(name, key, value):
         _runtime_plugin_config(name, key, value)
         return
 
-    installed, active = _plugin_install_state(name)
+    _known, installed, active = _plugin_install_state(name)
     note = None
     if not active:
         # Not a refusal: the settings routes accept a write for an inactive

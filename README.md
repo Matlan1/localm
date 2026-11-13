@@ -373,7 +373,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, `mcp`, and `exllama` (opt-in, offered only on Linux with an NVIDIA GPU), plus the protected `chat`. For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, `mcp`, and `exllama` (opt-in; it runs only on Linux with an NVIDIA GPU, and elsewhere it is listed with that note), plus the protected `chat`. For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 
