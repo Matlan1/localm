@@ -12,7 +12,7 @@ Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
     if ($words.Count -eq 0 -or ($wordToComplete -eq '' -and $words[-1] -ne '')) {
         $words += ''
     }
-    localm __complete @words 2>$null | Where-Object { $_ } | ForEach-Object {
+    localm __complete -- @words 2>$null | Where-Object { $_ } | ForEach-Object {
         $text = $_
         if ($text -match '[\s''"`$;,(){}@&|<>#]') { $text = "'" + ($text -replace "'", "''") + "'" }
         [System.Management.Automation.CompletionResult]::new($text, $_, 'ParameterValue', $_)
@@ -24,8 +24,7 @@ Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
 
 
 @main.command("__complete", hidden=True,
-              context_settings={"ignore_unknown_options": True,
-                                "help_option_names": []})
+              context_settings={"ignore_unknown_options": True})
 @click.argument("words", nargs=-1, type=click.UNPROCESSED)
 def _complete_hidden(words):
     """Internal: print completion candidates for the partial command line,
