@@ -538,7 +538,7 @@ def registered_model_folders(reg: Optional[dict] = None) -> dict:
     for entry in reg.values():
         if not isinstance(entry, dict):
             continue
-        folder_type = REGISTERED_TYPE_FOLDERS.get(entry.get("model_type"))
+        folder_type = REGISTERED_TYPE_FOLDERS.get(str(entry.get("model_type")))
         raw = entry.get("path")
         if folder_type is None or not isinstance(raw, str) or not raw:
             continue

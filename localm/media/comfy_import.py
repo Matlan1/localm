@@ -18,7 +18,7 @@ search for it.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 MAX_NODES = 2000
 
@@ -284,7 +284,8 @@ def _sampler_view(g: _Graph, sampler: str, notes: list) -> dict:
     prompts from its ``CFGGuider`` or ``BasicGuider`` (no CFG)."""
     node = g.nodes[sampler]
     inp = node["inputs"]
-    view = {k: (None, None) for k in ("steps", "cfg", "sampler_name", "scheduler", "denoise")}
+    view: dict[str, Any] = {k: (None, None)
+                            for k in ("steps", "cfg", "sampler_name", "scheduler", "denoise")}
     view.update(positive=inp.get("positive"), negative=inp.get("negative"), parts=[])
     if node["class_type"] not in CUSTOM_SAMPLERS:
         for key in ("steps", "cfg", "sampler_name", "scheduler"):
