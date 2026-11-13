@@ -733,9 +733,10 @@ def test_wait_for_ci_resets_the_stable_count_when_a_check_starts_running(monkeyp
 
 def test_the_ci_wait_outlasts_the_longest_pull_request_gate_job():
     ci = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    job = ci[ci.index("  python-pr-gate:"):]
-    minutes = int(job[job.index("timeout-minutes:"):].split(":", 1)[1].split()[0])
-    assert pipeline.CI_WAIT_TIMEOUT_SECONDS > minutes * 60
+    for name in ("python-pr-gate", "python-pr-gate-windows"):
+        job = ci[ci.index(f"  {name}:"):]
+        minutes = int(job[job.index("timeout-minutes:"):].split(":", 1)[1].split()[0])
+        assert pipeline.CI_WAIT_TIMEOUT_SECONDS > minutes * 60, name
 
 
 def _expire_after_two_polls(monkeypatch):

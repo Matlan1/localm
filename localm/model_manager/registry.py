@@ -1790,9 +1790,17 @@ def attach_mmproj(name: str, mmproj_path: str) -> tuple[bool, str]:
                   f"to '{name}'.")
 
 
+def _suggested_first(names: list, suggested: Optional[str]) -> list:
+    """*names* with *suggested* moved to the front when it is one of them."""
+    if suggested and suggested in names:
+        return [suggested] + [n for n in names if n != suggested]
+    return names
+
+
 def vision_input_guidance(mmproj_failed: bool = False,
                           active_model_path: Optional[str] = None,
-                          audio_only: bool = False) -> str:
+                          audio_only: bool = False,
+                          suggested: Optional[str] = None) -> str:
     """Capability-aware, install-specific message for when an image is attached
     to a model that cannot see it. Instead of a flat dead-end, point the user at
     a path that EXISTS on THIS install: a vision model already in their library,
@@ -1816,7 +1824,8 @@ def vision_input_guidance(mmproj_failed: bool = False,
     pull a model they already have.
 
     *audio_only* is True when the active model's projector loaded and takes
-    audio but has no vision encoder."""
+    audio but has no vision encoder. *suggested* (the model capability routing
+    suggests) is named first when it is one of the vision-capable models."""
     import importlib.util
     if audio_only:
         head = ("This model cannot accept image input: its projector (mmproj) "
@@ -1828,16 +1837,19 @@ def vision_input_guidance(mmproj_failed: bool = False,
                 "log for the mtmd error).")
     elif active_model_path and (missing := _active_model_missing_mmproj(active_model_path)):
         name, repo_id = missing
+        from localm.config import NET_OFF_DOWNLOAD_REMEDY
         msg = (
             "This model cannot accept image input: "
             f"'{name}' has no vision projector (mmproj) recorded. If it is a "
             "vision model whose repository publishes one, localm fetches it "
             "automatically the next time it starts (subject to your network "
             "setting) - restart localm, or reload the Models page. If network "
-            "access is off (net_mode=off), turn it on, or pull the projector "
-            f"explicitly: `localm pull {repo_id} --mmproj <repo>:<file>`."
+            f"access off (net_mode=off): {NET_OFF_DOWNLOAD_REMEDY}; or pull "
+            f"the projector explicitly: `localm pull {repo_id} --mmproj "
+            "<repo>:<file>`."
         )
-        others = [n for n in vision_capable_models() if n != name]
+        others = _suggested_first([n for n in vision_capable_models() if n != name],
+                                  suggested)
         if others:
             msg += (f" A vision-capable model is already in your library: "
                     f"{', '.join(others[:3])}.")
@@ -1845,7 +1857,7 @@ def vision_input_guidance(mmproj_failed: bool = False,
     else:
         head = ("This model cannot accept image input (it is text-only), so the "
                 "attached image would be ignored.")
-    vlms = vision_capable_models()
+    vlms = _suggested_first(vision_capable_models(), suggested)
     if vlms:
         return (f"{head} A vision-capable model is already in your library: "
                 f"{', '.join(vlms[:3])}. Switch to it (e.g. "
@@ -1866,11 +1878,14 @@ def vision_input_guidance(mmproj_failed: bool = False,
 
 
 
-def audio_input_guidance(projector_failed: bool = False) -> str:
+def audio_input_guidance(projector_failed: bool = False,
+                         suggested: Optional[str] = None) -> str:
     """Install-specific message for when audio is attached to a model that
     cannot take it: names an audio-capable model already in the library when
     there is one, otherwise how to get one. *projector_failed* is True when the
-    active GGUF model was given a projector (mmproj) that did not load."""
+    active GGUF model was given a projector (mmproj) that did not load.
+    *suggested* (the model capability routing suggests) is named first when it
+    is one of the audio-capable models."""
     if projector_failed:
         head = ("This model cannot accept audio input: a projector (mmproj) was "
                 "provided but failed to load (see the server log for the mtmd "
@@ -1878,7 +1893,7 @@ def audio_input_guidance(projector_failed: bool = False) -> str:
     else:
         head = ("This model cannot accept audio input, so the attached audio "
                 "would be ignored.")
-    capable = audio_capable_models()
+    capable = _suggested_first(audio_capable_models(), suggested)
     if capable:
         return (f"{head} An audio-capable model is already in your library: "
                 f"{', '.join(capable[:3])}. Switch to it (e.g. "
@@ -3179,12 +3194,12 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         # projector found", which is a different, silent outcome; see
         # _hf_repo_files/_maybe_fetch_repo_mmproj's own distinction between
         # "could not look" and "looked and found nothing".
+        from localm.config import net_off_refusal
         blocked_note = (
             f"{len(net_blocked_mmproj)} model(s) may be missing a vision "
-            f"projector ({', '.join(net_blocked_mmproj)}) but network access "
-            "is off (net_mode=off), so localm did not check. Enable network "
-            "access to let localm look, or pull the projector explicitly with "
-            "--mmproj."
+            f"projector ({', '.join(net_blocked_mmproj)}). "
+            f"{net_off_refusal('localm did not check')} Or pull the projector "
+            "explicitly with --mmproj."
         )
         note = f"{note} {blocked_note}".strip() if note else blocked_note
 
