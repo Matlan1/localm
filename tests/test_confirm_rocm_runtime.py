@@ -703,6 +703,12 @@ class Stages:
         return confirm.ChildResult(0, out, "")
 
 
+def _families(pins) -> list:
+    """The GPU families of the ROCm assets *pins* names."""
+    return sorted({name.split("-rocm-", 1)[1].rsplit("-x64.zip", 1)[0]
+                   for name in pins.rocm_table})
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     """main() against the real pins file with a fake GitHub API and canned stages."""
@@ -713,9 +719,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(confirm, "ensure_model", lambda cache_dir: (model, "from the cache", ""))
     pins = bump.read_pins(fake_api.REAL_PINS)
     api = fake_api.FakeApi(tag=pins.tag)
-    families = sorted({name.split("-rocm-", 1)[1].rsplit("-x64.zip", 1)[0]
-                       for name in pins.rocm_table})
-    body = fake_api.lemonade_body(pins.tag, commit="71ad0", families=families)
+    body = fake_api.lemonade_body(pins.tag, commit="71ad0", families=_families(pins))
     body["published_at"] = "2026-10-08T20:46:47Z"
     for a in body["assets"]:
         if a["name"] in pins.rocm_table:
@@ -788,7 +792,7 @@ def test_the_probe_stages_get_the_runtime_and_model_and_the_cpu_stage_hides_the_
 
 
 def test_the_receipt_of_a_passing_candidate_run_is_accepted_by_the_bump(world, tmp_path):
-    fake = fake_api.FakeApi()
+    fake = fake_api.FakeApi(families=_families(world.pins))
     stages = Stages(world.work, bump.fetch_candidate(fake_api.TAG, fake))
     code, r = world.go("--tag", fake_api.TAG, stages=stages, fetch=fake)
     assert code == 0, r["why"]
