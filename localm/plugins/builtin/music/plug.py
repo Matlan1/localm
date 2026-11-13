@@ -21,7 +21,6 @@ set up, else the native ACE-Step runtime) and reads this plugin's own config
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import shutil
@@ -115,7 +114,7 @@ async def music(req: MusicRequest, request: Request):
     if not req.tags.strip():
         raise HTTPException(400, "Empty style tags")
     if (not math.isfinite(req.duration_seconds)
-            or req.duration_seconds <= 0 or req.duration_seconds > 3600):
+            or req.duration_seconds < 1 or req.duration_seconds > 3600):
         raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
     if req.steps is not None and not (1 <= req.steps <= 200):
         raise HTTPException(400, "Steps must be between 1 and 200")
@@ -392,13 +391,7 @@ async def music_history(request: Request):
                  if p.suffix.lower() in (".flac", ".mp3", ".wav", ".ogg")]
         for p in sorted(files, key=lambda f: f.stat().st_mtime,
                         reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("music", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "size_bytes": p.stat().st_size,

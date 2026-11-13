@@ -19,7 +19,6 @@ by default.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import shutil
@@ -115,7 +114,7 @@ async def _require_native_size(width: int, height: int) -> None:
 async def video(req: VideoRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(400, "Empty prompt")
-    if not math.isfinite(req.seconds) or req.seconds <= 0 or req.seconds > 20:
+    if not math.isfinite(req.seconds) or req.seconds < 1 or req.seconds > 20:
         raise HTTPException(400, "Duration must be between 1 and 20 seconds")
     if req.fps <= 0 or req.fps > 60:
         raise HTTPException(400, "FPS must be between 1 and 60")
@@ -412,13 +411,7 @@ async def video_history(request: Request):
                  if p.suffix.lower() in (".mp4", ".webm", ".gif")]
         for p in sorted(files, key=lambda f: f.stat().st_mtime,
                         reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("video", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "size_bytes": p.stat().st_size,

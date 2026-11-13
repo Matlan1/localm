@@ -74,7 +74,7 @@ class ImagineRequest(BaseModel):
     guidance: float | None = Field(None, allow_inf_nan=False)
     cfg: float | None = Field(None, allow_inf_nan=False)          # negative-prompt CFG scale; no effect without one
     input_image: str | None = None    # path on this machine (img2img)
-    denoise: float | None = Field(None, allow_inf_nan=False)
+    denoise: float | None = Field(None, ge=0.0, le=1.0, allow_inf_nan=False)
     steps: int | None = None                  # native backend only; None keeps the model default
     clip_skip: int | None = None              # native backend only; None keeps the model default
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
@@ -918,13 +918,7 @@ async def imagine_history(request: Request):
     if images_dir.is_dir():
         for p in sorted(images_dir.glob("*.png"),
                         key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
-            meta = {}
-            sidecar = p.with_suffix(p.suffix + ".json")
-            if sidecar.is_file():
-                try:
-                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+            meta = gallery.read_sidecar("image", p)
             items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "mtime": p.stat().st_mtime})

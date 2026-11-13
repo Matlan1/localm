@@ -237,7 +237,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
 @click.option("--image", "input_image", type=click.Path(exists=True), default=None,
               help="Use this picture as a base (image-to-image) instead of noise.")
-@click.option("--denoise", type=float, default=None,
+@click.option("--denoise", type=click.FloatRange(0.0, 1.0), default=None,
               help="img2img strength 0-1 (lower keeps more of the base image).")
 @click.option("--lora", "lora_name", default=None,
               help="Optional LoRA file name (in ComfyUI's loras dir) to apply.")
