@@ -595,7 +595,7 @@ window.clearImageProxyCache = clearImageProxyCache;
  *  error, which is indistinguishable from the reader declining and would make
  *  the `ask` state silently unusable on a phone.
  *
- *  Dismissing through the shared modal chrome (the x, or the backdrop) is a
+ *  Dismissing through the shared modal chrome (the x, or Escape) is a
  *  DECLINE. Those handlers are not ours, so it is detected by polling for
  *  display:none - the same pattern promptText and the missing-model modal use. */
 function askOriginConsent(origin) {
@@ -948,6 +948,18 @@ export function protectMath(text) {
   return { text: protectedText, restore, finish };
 }
 
+/** *text* with every run of eight or more `*` or `_` outside code escaped
+ *  (`\\*`), so the run is plain text, unless the line holds nothing but such
+ *  marks and spaces (a thematic break). Bounds marked's emphasis scan, which
+ *  is quadratic in an unmatched delimiter run (markedjs/marked#4196). See
+ *  tests-js/markdown-degenerate-bound.test.mjs. */
+export function escapeDelimiterRuns(text) {
+  return String(text || "").split(_CODE_SPAN).map((part, i) => (i % 2 === 1 ? part
+    : part.split("\n").map((line) => (/^[ \t]*(?:[*_][ \t]*)+$/.test(line) ? line
+      : line.replace(/(?<!\\)([*_])\1{7,}/g, (run) => run.replace(/[*_]/g, "\\$&"))))
+      .join("\n"))).join("");
+}
+
 /** Render one model reply into *target*.
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
@@ -986,7 +998,7 @@ export function renderMarkdown(target, text, opts = {}) {
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     const thinkMath = protectMath(think);
     const thinkBody = det.querySelector("div");
-    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
+    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(thinkMath.text)));
     thinkMath.restore(thinkBody);
     thinkFinish = () => thinkMath.finish(thinkBody);
     if (!det.dataset.userset) det.open = open;
@@ -1003,7 +1015,7 @@ export function renderMarkdown(target, text, opts = {}) {
     target.appendChild(main);
   }
   const restMath = protectMath(rest || "");
-  main.innerHTML = DOMPurify.sanitize(marked.parse(restMath.text));
+  main.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(restMath.text)));
   restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
@@ -1733,8 +1745,20 @@ export function openModal(title, bodyBuilder) {
   bodyBuilder(body);
   $("modal").style.display = "flex";
 }
-$("modal-close").onclick = () => ($("modal").style.display = "none");
-$("modal").onclick = (e) => { if (e.target === $("modal")) $("modal").style.display = "none"; };
+/** Close the shared modal. A dialog waiting for an answer reads a close it did
+ *  not make itself as a cancel. */
+export function closeModal() {
+  $("modal").style.display = "none";
+}
+$("modal-close").onclick = closeModal;
+// A click outside the dialog does nothing: it neither cancels, dismisses nor
+// accepts. Escape and the x cancel.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  if ($("modal").style.display === "none") return;
+  e.preventDefault();
+  closeModal();
+});
 
 /** Confirm a destructive action with the in-page modal. window.confirm() is
  *  suppressed in some mobile / PWA browsers (the NET-1 prompt() class of bug),
@@ -1757,7 +1781,7 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
  *  to `await` the outcome (e.g. only retrying a request with `force: true`
  *  once confirmed) instead of continuing inside a callback. Resolves true if
  *  confirmed, false if cancelled OR dismissed via the shared modal chrome
- *  (x / backdrop) - same polling pattern as promptText above, since those
+ *  (x / Escape) - same polling pattern as promptText above, since those
  *  handlers are not ours. */
 export function confirmDangerAsync(title, message, confirmLabel) {
   return new Promise((resolve) => {
@@ -1788,7 +1812,7 @@ export function confirmDangerAsync(title, message, confirmLabel) {
 }
 
 /** Ask with the in-page modal and resolve to the key of the button chosen,
- *  or null when the dialog was cancelled or dismissed (x / backdrop).
+ *  or null when the dialog was cancelled or dismissed (x / Escape).
  *  *choices* are ``{key, label, danger}`` in display order; a Cancel button
  *  comes first. */
 export function chooseAsync(title, message, choices) {
@@ -1864,7 +1888,7 @@ export function promptText(title, defaultValue) {
     });
     input.focus();
     input.select();
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // Dismissing via the shared modal chrome (x / Escape) sets display:none;
     // poll for it and treat as cancel - those handlers are not ours (same
     // pattern _offerModelDownload's missing-model modal uses below, for the
     // same reason).
@@ -1957,7 +1981,7 @@ function _offerModelDownload(missingModel, log, plugin) {
       row.appendChild(dl);
       body.appendChild(row);
     });
-    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // Dismissing via the shared modal chrome (x / Escape) sets display:none;
     // poll for it and treat as "not now" - those handlers are not ours (same
     // pattern as picker.js's pickPath, for the same reason).
     watch = setInterval(() => {
