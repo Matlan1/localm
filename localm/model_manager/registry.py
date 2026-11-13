@@ -2000,15 +2000,28 @@ def model_is_external(name: str) -> bool:
     return epath is not None and is_external_path(epath)
 
 
-def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
-    """Validate *new_path* as a relocate destination: a real GGUF file or a
-    HuggingFace model directory. Returns (resolved Path, None) when valid, or
-    (None, reason) when not - the single source of truth `relocate_model` (CLI)
-    and the GUI's POST /api/models/relocate route both call, so the two surfaces
-    can never disagree about what counts as a valid target."""
+def relocate_target(new_path: str, name: Optional[str] = None
+                    ) -> "tuple[Path | None, str | None]":
+    """Validate *new_path* as a relocate destination for the registered model
+    *name*: a real GGUF file or a HuggingFace model directory, or, for a model
+    registered as an image, video or music component file (a ``.safetensors`` /
+    ``.sft`` diffusion model, text encoder, VAE, LoRA, ControlNet or embedding,
+    or a ``.pth`` / ``.pt`` upscaler), a file of that kind, checked the way
+    registration checks it (``_media_component_type``). Returns (resolved Path,
+    None) when valid, or (None, reason) when not - the single source of truth
+    `relocate_model` (CLI) and the GUI's POST /api/models/relocate route both
+    call, so the two surfaces can never disagree about what counts as a valid
+    target."""
     p = Path(new_path).expanduser()
     if not p.exists():
         return None, f"Path does not exist: {p}"
+    entry = _mm.load_registry().get(name) if name else None
+    entry_type = entry.get("model_type") if isinstance(entry, dict) else None
+    if (p.is_file() and entry_type in _MEDIA_COMPONENT_TYPES
+            and p.suffix.lower() in _MEDIA_FILE_SUFFIXES + _CHECKPOINT_SUFFIXES):
+        if _media_component_type(p, entry_type) == entry_type:
+            return p, None
+        return None, f"Not a {entry_type} model file: {p}"
     if p.is_dir():
         from localm.inference.engine import _is_hf_dir
         if not _is_hf_dir(str(p)):
@@ -2039,7 +2052,7 @@ def relocate_model(name: str, new_path: str) -> bool:
         # subprocess boundary.
         console.print(f"[red]No such registered model:[/red] {escape(name)}")
         return False
-    p, reason = relocate_target(new_path)
+    p, reason = relocate_target(new_path, name)
     if p is None:
         # reason (from relocate_target) is built from the caller's raw new_path
         # (e.g. "Path does not exist: {p}") - also reachable via the GUI route

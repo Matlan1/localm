@@ -194,7 +194,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_manager.registry import relocate_model, relocate_target
 
         def _do():
-            p, reason = relocate_target(req.new_path)
+            p, reason = relocate_target(req.new_path, req.model)
             if p is None:
                 return {"reason": reason}
             if not relocate_model(req.model, req.new_path):
