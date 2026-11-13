@@ -91,15 +91,18 @@ def main(model, no_images, no_coder, no_memory, memory_write, coder_shell,
         if share_loaded:
             args += ["--share-loaded-models"]
         # The command is this process's own interpreter running `-m localm`.
-        # Only the JSON goes to stdout; the notes after it go to stderr.
-        block = {
-            "mcpServers": {
-                "localm": {
-                    "command": sys.executable,
-                    "args": ["-m", "localm", *args],
-                }
-            }
-        }
+        # A LOCALM_HOME set in this shell is carried as an absolute path, so the
+        # client starts the server on the same data folder. Only the JSON goes
+        # to stdout; the notes after it go to stderr.
+        import os
+
+        server: dict = {"command": sys.executable, "args": ["-m", "localm", *args]}
+        if os.environ.get("LOCALM_HOME", "").strip():
+            from pathlib import Path
+
+            from localm.config import home_dir
+            server["env"] = {"LOCALM_HOME": str(Path(home_dir()).absolute())}
+        block = {"mcpServers": {"localm": server}}
         if sys.platform == "win32":
             cfg_path = "%APPDATA%\\Claude\\claude_desktop_config.json"
         elif sys.platform == "darwin":

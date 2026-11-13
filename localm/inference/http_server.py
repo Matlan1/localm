@@ -3999,11 +3999,17 @@ def _sanitize_client_context(raw) -> dict:
 
 def _idle_unload_ttl() -> int:
     """Configured idle-unload TTL in seconds (0 = disabled), read live so a
-    Settings change applies without a restart. A bad value falls back to 0."""
+    Settings change applies without a restart. A bad value falls back to 0, and
+    so does a settings read too slow to finish on the event loop
+    (``ConfigReadSlow``, logged at debug): the caller checks again later."""
+    from localm.config import ConfigReadSlow, load_config
     try:
-        from localm.config import load_config
         return max(0, int(load_config().get("idle_unload_seconds", 0) or 0))
     except (TypeError, ValueError):
+        return 0
+    except ConfigReadSlow as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("idle-unload: skipping this check: %s", e)
         return 0
 
 
@@ -6621,6 +6627,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
     security.add_host_header_guard(app)
+    errors.add_config_read_slow_answer(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # only when enabled
     diagnostics.add_request_logging(app)     # outermost; debug mode only

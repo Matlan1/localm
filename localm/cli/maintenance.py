@@ -134,16 +134,16 @@ def setup_embeddings(model, yes=False):
     from ..config import load_config, update_config
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
-                                      reranker_as_embedding_model,
+                                      embedding_model_refusal,
                                       resolve_embedding_model_path)
     # Whether the ready banner below prints its "existing collections stay
     # lexical" reminder. See
     # TestSetupEmbeddingsPreSwitchConfirm.test_switch_to_model_matching_existing_collection_skips_reembed_note.
     reembed_hint = True
     if model:
-        reranker_why = reranker_as_embedding_model(model)
-        if reranker_why:
-            console.print(f"[red]Not switching the embedding model:[/red] {escape(reranker_why)}")
+        refusal = embedding_model_refusal(model)
+        if refusal:
+            console.print(f"[red]Not switching the embedding model:[/red] {escape(refusal)}")
             sys.exit(1)
         current = str(load_config().get("embedding_model") or "")
         if model != current:

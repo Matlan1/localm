@@ -119,8 +119,22 @@ def _run_selector(depth: int, base: str, files: list[str] | None,
                           encoding="utf-8", errors="replace")
 
 
+#: Longest pytest argument list passed on the command line; a longer one goes
+#: through an ``@file`` (Windows refuses a command line over 32767 characters).
+ARGS_INLINE_MAX = 20000
+
+
 def _run_pytest(args: list[str]) -> int:
-    return subprocess.run([sys.executable, "-m", "pytest", *args], cwd=str(REPO)).returncode
+    """Run pytest with *args*, reading them from a temporary ``@file`` when
+    together they are longer than ``ARGS_INLINE_MAX`` characters."""
+    if sum(len(a) + 1 for a in args) <= ARGS_INLINE_MAX:
+        return subprocess.run([sys.executable, "-m", "pytest", *args], cwd=str(REPO)).returncode
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        argfile = Path(tmp) / "pytest-args.txt"
+        argfile.write_text("\n".join(args) + "\n", encoding="utf-8")
+        return subprocess.run([sys.executable, "-m", "pytest", f"@{argfile}"],
+                              cwd=str(REPO)).returncode
 
 
 def _base_resolves(base: str) -> bool:

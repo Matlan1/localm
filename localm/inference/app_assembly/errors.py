@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The exception handlers ``create_app()`` installs: a generic, logged 500 for
 anything unhandled, a debug-log seam in front of FastAPI's own HTTPException
-handler, and a 422 formatter that stays serializable and bounded for any body."""
+handler, a 422 formatter that stays serializable and bounded for any body, and
+a 503 for a settings read that is too slow (with the middleware that answers it
+when a middleware raised it)."""
 
 from __future__ import annotations
 
@@ -42,12 +44,68 @@ def error_body(path: str, status: int, detail) -> dict:
     return body
 
 
+def read_slow_response(method: str, path: str, exc) -> JSONResponse:  # noqa: ANN001
+    """The 503 for a ``config.ConfigReadSlow`` *exc* raised while answering
+    *method* *path*, with its Retry-After. Logs one debug-mode line."""
+    from localm.debuglog import logger as _dbg
+    _dbg.info("%s %s refused: %s", method, _ONE_LINE_RE.sub(" ", path), exc)
+    return JSONResponse(
+        status_code=503,
+        content=error_body(path, 503, "localm's settings are not readable right now: "
+                           f"reading {_ONE_LINE_RE.sub(' ', str(exc.name))} is "
+                           "taking too long (a busy disk?). Nothing was read; "
+                           "try again in a moment."),
+        headers={"Retry-After": str(exc.retry_after_s)})
+
+
+class ConfigReadSlowAnswer:
+    """ASGI middleware that answers a request with :func:`read_slow_response`
+    when ``config.ConfigReadSlow`` escapes everything inside it (a route or a
+    middleware) before the response has started. Raised after the response
+    started, the exception propagates unchanged."""
+
+    def __init__(self, app) -> None:  # noqa: ANN001
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from localm.config import ConfigReadSlow
+        started = False
+
+        async def _send(message) -> None:  # noqa: ANN001
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except ConfigReadSlow as exc:
+            if started:
+                raise
+            response = read_slow_response(scope.get("method", ""), scope.get("path", ""), exc)
+            await response(scope, receive, send)
+
+
+def add_config_read_slow_answer(app: FastAPI) -> None:
+    """Add :class:`ConfigReadSlowAnswer`. ``create_app()`` adds it after every
+    middleware that can read the settings, so it wraps them all."""
+    app.add_middleware(ConfigReadSlowAnswer)
+
+
 def register_exception_handlers(app: FastAPI) -> None:
-    """Install the five handlers. The response of each is pinned by
-    tests/test_create_app_characterization.py, and the load-busy 503 by
-    tests/test_load_lease.py."""
-    from localm.config import ConfigLockTimeout
+    """Install the six handlers. The response of each is pinned by
+    tests/test_create_app_characterization.py, the load-busy 503 by
+    tests/test_load_lease.py, and the slow-read 503 by
+    tests/test_config_reads_off_the_loop.py."""
+    from localm.config import ConfigLockTimeout, ConfigReadSlow
     from localm.inference.load_lease import LoadBusyError
+
+    @app.exception_handler(ConfigReadSlow)
+    async def _config_read_slow(request, exc):  # noqa: ANN001 - framework signature
+        return read_slow_response(request.method, request.url.path, exc)
 
     @app.exception_handler(LoadBusyError)
     async def _load_busy(request, exc):  # noqa: ANN001 - framework signature
@@ -78,6 +136,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     # audio is validated before the native path, and surfaced via the crash marker.)
     @app.exception_handler(Exception)
     async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
+        # A ConfigReadSlow raised by a middleware reaches this handler, not the
+        # one registered for its class.
+        if isinstance(exc, ConfigReadSlow):
+            return read_slow_response(request.method, request.url.path, exc)
         from localm.debuglog import logger as _dbg
         _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
         detail = "Internal server error"

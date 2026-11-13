@@ -5,6 +5,7 @@ disabled plugin, and run_doctor's child process."""
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -31,6 +32,27 @@ def test_print_config_stdout_is_one_json_document_naming_this_interpreter(cfg_en
     assert entry["args"] == ["-m", "localm", "mcp", "--no-images"]
     assert "claude_desktop_config.json" in result.stderr
     assert "localm plugin install mcp" in result.stderr
+
+
+def test_print_config_carries_the_shells_localm_home_as_an_absolute_path(
+        cfg_env, tmp_path, monkeypatch):
+    from localm.plugins.mcpserver.cli import main
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCALM_HOME", "relative-home")
+    result = CliRunner().invoke(main, ["--print-config"])
+    assert result.exit_code == 0
+    entry = json.loads(result.stdout)["mcpServers"]["localm"]
+    home = entry["env"]["LOCALM_HOME"]
+    assert Path(home).is_absolute()
+    assert Path(home).resolve() == (tmp_path / "relative-home").resolve()
+
+
+def test_print_config_without_localm_home_sets_no_env(cfg_env, monkeypatch):
+    from localm.plugins.mcpserver.cli import main
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    result = CliRunner().invoke(main, ["--print-config"])
+    assert result.exit_code == 0
+    assert "env" not in json.loads(result.stdout)["mcpServers"]["localm"]
 
 
 def test_installed_but_disabled_is_told_to_enable_not_install(cfg_env):

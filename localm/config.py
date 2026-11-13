@@ -1399,7 +1399,9 @@ _rmw_lock = threading.RLock()
 # later call on the loop gets the kept read at once, with a fresh read queued
 # behind, until a read finishes within LOOP_READ_WAIT_S again. A kept read is
 # served only while it is at most LOOP_KEPT_MAX_AGE_S old (counted from when
-# that read completed); past that the loop waits for the fresh read. The reader
+# that read completed); past that the loop waits for the fresh read until it is
+# LOOP_FRESH_READ_WAIT_S old (counted from when it started) and otherwise raises
+# ConfigReadSlow, so no answer is ever older than LOOP_KEPT_MAX_AGE_S. The reader
 # threads share _io_lock, so a read stuck on the disk holds the other files'
 # reads too. A write made by
 # this process through save_config, update_config, save_registry or
@@ -1411,6 +1413,23 @@ _rmw_lock = threading.RLock()
 # is a leaf: nothing is acquired and no file is read while it is held.
 LOOP_READ_WAIT_S = 0.5
 LOOP_KEPT_MAX_AGE_S = 2.0
+LOOP_FRESH_READ_WAIT_S = 2.0
+
+
+class ConfigReadSlow(RuntimeError):
+    """A read of config.json or registry.json made on the server's event loop
+    did not finish within LOOP_FRESH_READ_WAIT_S, and no read at most
+    LOOP_KEPT_MAX_AGE_S old was kept to answer from. Nothing was read; the read
+    goes on in the background and trying again later is safe. ``name`` is the
+    file, ``retry_after_s`` a whole number of seconds to wait."""
+
+    def __init__(self, name: str, waited_s: float) -> None:
+        self.name = name
+        self.retry_after_s = 5
+        super().__init__(
+            f"reading {name} has taken over {waited_s:.1f} s (a busy disk?), and "
+            f"no read at most {LOOP_KEPT_MAX_AGE_S:.0f} s old is kept to answer "
+            "from. Nothing was read; try again in a moment.")
 
 _loop_reads_lock = threading.Lock()
 _loop_reads_epoch = 0
@@ -1425,7 +1444,7 @@ class _LoopRead:
     """One read handed to a reader thread."""
 
     __slots__ = ("name", "key", "epoch", "fn", "started", "done", "value", "error",
-                 "ran")
+                 "ran", "refused")
 
     def __init__(self, name: str, key: tuple, epoch: int, fn: Callable) -> None:
         self.name = name
@@ -1437,6 +1456,7 @@ class _LoopRead:
         self.value = None
         self.error: Optional[BaseException] = None
         self.ran = False
+        self.refused = False
 
 
 def _on_event_loop_thread() -> bool:
@@ -1574,9 +1594,11 @@ def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
     """``fn()`` (a read of *name*). On a running event loop with a kept read of
     *name* at most LOOP_KEPT_MAX_AGE_S old, the loop waits at most
     LOOP_READ_WAIT_S and is otherwise answered from that kept read; with an
-    older kept read it waits for the fresh read. Off the loop, or with no kept
-    read yet, it is ``fn()`` on the calling thread. Every caller gets its own
-    copy. Raises what ``fn`` raises."""
+    older kept read it waits for the fresh read until that read is
+    LOOP_FRESH_READ_WAIT_S old. Off the loop, or with no kept read yet, it is
+    ``fn()`` on the calling thread. Every caller gets its own copy. Raises what
+    ``fn`` raises, and ``ConfigReadSlow`` when the fresh read is still running
+    at that bound (logged at WARNING once per read)."""
     if not _on_event_loop_thread() or _holds_store_lock():
         return fn()
     key = _store_paths()
@@ -1617,7 +1639,18 @@ def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
                     "read, at most %.0f s old, until a read is fast again.",
                     name, LOOP_READ_WAIT_S, LOOP_KEPT_MAX_AGE_S)
             return copy.deepcopy(kept[1])
-    job.done.wait()
+    if not job.done.wait(max(0.0, LOOP_FRESH_READ_WAIT_S - (time.monotonic() - job.started))):
+        waited = time.monotonic() - job.started
+        with _loop_reads_lock:
+            first = not job.refused
+            job.refused = True
+        if first:
+            _logger().warning(
+                "reading %s has taken over %.1f s (a busy disk?) and the last "
+                "complete read is older than %.0f s; requests on the server's "
+                "event loop that need it are refused until the read finishes.",
+                name, waited, LOOP_KEPT_MAX_AGE_S)
+        raise ConfigReadSlow(name, waited)
     if not job.ran:
         return fn()
     if job.error is not None:
@@ -1960,7 +1993,9 @@ def load_config_checked() -> tuple:
     diagnostics) uses this instead of load_config().
 
     On a running event loop the read follows ``_loop_safe_read``: at most
-    LOOP_READ_WAIT_S of waiting, then the last complete read."""
+    LOOP_READ_WAIT_S of waiting, then the last complete read while it is at
+    most LOOP_KEPT_MAX_AGE_S old; past that, ``ConfigReadSlow`` when the fresh
+    read takes longer than LOOP_FRESH_READ_WAIT_S."""
     return _loop_safe_read("config.json", _load_config_checked_now)
 
 

@@ -436,6 +436,7 @@ _MIDDLEWARE_STACK = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("ConfigReadSlowAnswer", None),
     ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
@@ -558,10 +559,11 @@ def _shell_auth(app) -> dict:
 
 def test_exception_handler_registry():
     handlers = create_app(None).exception_handlers
+    from localm.config import ConfigReadSlow
     from localm.inference.load_lease import LoadBusyError
     assert set(handlers) == {Exception, ConfigLockTimeout, StarletteHTTPException,
                              RequestValidationError, WebSocketRequestValidationError,
-                             LoadBusyError}
+                             LoadBusyError, ConfigReadSlow}
     assert handlers[WebSocketRequestValidationError] is (
         websocket_request_validation_exception_handler)
     for exc_type in (Exception, StarletteHTTPException, RequestValidationError):

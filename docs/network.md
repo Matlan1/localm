@@ -119,7 +119,8 @@ localm config net_allow_private true
 ```
 
 Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`,
-`fd00:ec2::/32`, in any embedded IPv6 form) stay refused with it on; a name that
+`100.100.100.200`, `fd00:ec2::/32`, in any embedded IPv6 form) stay refused
+with it on; a name that
 also resolves to another address (a LAN machine with an `fe80::` address) is
 reached on that other address.
 
@@ -301,7 +302,7 @@ coding agent's shell access, so you can grant one without the other.
   guards instead: a configured `comfy_api_url` (or a media plugin's own
   `comfy.api_url`, the model scan included) that targets a link-local or
   cloud-metadata address is refused (169.254.0.0/16, fe80::/10,
-  fd00:ec2::/32, and a link-local IPv4 address in IPv4-mapped,
+  100.100.100.200, fd00:ec2::/32, and a link-local or metadata IPv4 address in IPv4-mapped,
   IPv4-compatible, NAT64 or 6to4 form), and the connection itself refuses any
   HTTP redirect outright. Loopback and LAN are both normal, unchecked ComfyUI
   deployments.

@@ -155,7 +155,11 @@ def _civitai_get(path: str, params: Optional[dict] = None, *,
 
     *api_key*: optional CivitAI API key, sent as an Authorization header
     (CivitAI's own convention). Raises rate limits and lets gated resources
-    resolve; omitted, the request runs anonymously exactly as before."""
+    resolve; omitted, the request runs anonymously exactly as before.
+
+    Raises CivitAIError. When CivitAI answered 401, 403 or 404, the error names
+    that answer and its cause is the CivitAIError of the failed request, not
+    the transport error."""
     import json as _json
     import urllib.parse
 
@@ -173,7 +177,19 @@ def _civitai_get(path: str, params: Optional[dict] = None, *,
     except netpolicy.NetworkPolicyError as e:
         raise CivitAIError(f"CivitAI request failed: {e}", off=e.off) from e
     except Exception as e:
-        raise CivitAIError(f"CivitAI request failed: {e}") from e
+        failed = CivitAIError(f"CivitAI request failed: {e}")
+        failed.__cause__ = e
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 404:
+            raise CivitAIError(
+                f"CivitAI has nothing at {path} (HTTP 404). Check the model or "
+                "model version id.") from failed
+        if status in (401, 403):
+            raise CivitAIError(
+                f"CivitAI refused {path} (HTTP {status}): it needs a CivitAI API "
+                "key with access to it. Set one with `localm config "
+                "civitai_api_key <key>`.") from failed
+        raise failed from e
 
 
 def _passes_content_policy(item: dict) -> bool:
