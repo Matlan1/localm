@@ -206,6 +206,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
         _WORKFLOWS + (".github/requirements/*",), "checks every workflow and requirement set"),
     "tests/test_installer_batch.py": (("*.bat",), "checks every batch file at the repository root"),
     "tests/test_rag_store_contract.py": (("tests/fixtures/rag_store_v1/*",), "lists the stored collections"),
+    "tests/test_routing_reading_pinned.py": (("tests/*.py",),
+                                            "greps every test file for a direct routing reading override"),
     "tests/test_rag_rerank_gate_real.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
     "tests/test_rag_rerank_replay.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),
     "tests/test_rag_rerank_stage.py": (_RERANK_CORPUS, "ingests the evaluation corpus"),

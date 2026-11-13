@@ -888,21 +888,6 @@ async def _cannot_measure(loop, budget, reading=None):
                                       shortfall=None, shares_adaptive=False)
 
 
-def test_no_test_sets_the_routing_reading_but_through_pin_vram_reading():
-    """A test that replaces routing's GPU reading without dropping the reading
-    the server cached for planning gets an earlier test's reading instead. Every
-    test goes through tests._routing_fit.pin_vram_reading, which resets that
-    state first."""
-    from pathlib import Path
-    tests_dir = Path(__file__).resolve().parent
-    allowed = {tests_dir / "_routing_fit.py", Path(__file__).resolve()}
-    offenders = sorted(
-        str(p.relative_to(tests_dir)) for p in tests_dir.rglob("*.py")
-        if p.resolve() not in allowed
-        and '"routing_vram_reading"' in p.read_text(encoding="utf-8", errors="replace"))
-    assert offenders == []
-
-
 def test_reset_routing_state_drops_every_kind_of_routing_state(monkeypatch):
     from tests._routing_fit import reset_routing_state
     monkeypatch.setattr(hs, "_routing_reading_cache", (0.0, object()))
