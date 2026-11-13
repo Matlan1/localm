@@ -1888,8 +1888,9 @@ function readSettingsDraft() {
 }
 
 /** Save every Settings section that holds an unsaved edit, with each
- *  section's own Save button, one after another. Resolves true when no unsaved
- *  edit is left afterwards. */
+ *  section's own Save button, one after another, then wait 600 ms for the
+ *  redraw the saves start. Resolves true when no unsaved edit is left
+ *  afterwards. */
 export async function saveDirtySettings() {
   const buttons = [];
   for (const n of _dirtySettings) {
@@ -1907,6 +1908,8 @@ export async function saveDirtySettings() {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
+  // Each save redraws Settings; let that redraw's requests finish before a reload.
+  if (buttons.length) await new Promise((r) => setTimeout(r, 600));
   return !settingsDirty();
 }
 
