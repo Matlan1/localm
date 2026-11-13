@@ -46,9 +46,32 @@ class TestGuiBindWarning:
 
 def test_a_console_shared_with_a_shell_is_not_hidden(monkeypatch):
     from localm import winconsole
-    monkeypatch.setattr(winconsole, "_console_process_names",
-                        lambda: ["python.exe", "cmd.exe"])
+    monkeypatch.setattr(winconsole, "_console_processes",
+                        lambda: [(10, 1, "cmd.exe"), (11, 10, "python.exe")])
     assert winconsole.console_has_a_shell() is True
-    monkeypatch.setattr(winconsole, "_console_process_names",
-                        lambda: ["localm.exe", "python.exe"])
+    monkeypatch.setattr(winconsole, "_console_processes",
+                        lambda: [(10, 1, "localm.exe"), (11, 10, "python.exe")])
     assert winconsole.console_has_a_shell() is False
+
+
+def test_the_launchers_own_cmd_wrapper_does_not_count_as_a_shell(monkeypatch):
+    from localm import winconsole
+    monkeypatch.setattr(winconsole, "_console_processes",
+                        lambda: [(20, 777, "cmd.exe"), (21, 20, "python.exe")])
+    assert winconsole.console_has_a_shell(777) is False
+    assert winconsole.console_has_a_shell(778) is True
+
+
+def test_an_unreadable_process_list_keeps_the_console_visible(monkeypatch):
+    from localm import winconsole
+
+    def fail():
+        raise OSError("snapshot refused")
+    monkeypatch.setattr(winconsole, "_console_processes", fail)
+    assert winconsole.console_has_a_shell() is True
+
+
+def test_the_launcher_passes_its_pid_as_the_own_console_value():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "launcher.pyw").read_text(encoding="utf-8")
+    assert 'env["LOCALM_OWN_CONSOLE"] = str(os.getpid())' in text

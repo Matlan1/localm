@@ -1128,6 +1128,22 @@ class TestApiModePullAndLanding:
         assert "Download starting" not in r.flat
         assert gui.engine.kwargs["display_name"] == "pulled"
 
+    def test_api_mode_pull_serves_the_pulled_model_beside_registered_ones(self, gui):
+        calls = []
+        gui.register_model("aaa-first-by-name")
+        self._fake_pull(gui, calls)
+        r = gui.invoke("--api-mode", "--no-browser", "--pull", self.SPEC)
+        assert r.exit_code == 0, r.output
+        assert gui.engine.kwargs["display_name"] == "pulled"
+
+    def test_api_mode_pull_refused_by_the_bind_guard_downloads_nothing(self, gui):
+        calls = []
+        self._fake_pull(gui, calls)
+        gui.mp.delenv("LOCALM_API_KEY", raising=False)
+        r = gui.invoke("--api-mode", "--no-browser", "-H", "0.0.0.0", "--pull", self.SPEC)
+        assert r.exit_code == 2, r.output
+        assert calls == []
+
     def test_an_api_only_server_sends_a_browser_to_the_docs(self, gui):
         from fastapi.testclient import TestClient
         r = gui.invoke("--api-mode", "--no-model", "--no-browser")
