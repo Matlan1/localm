@@ -73,16 +73,45 @@ def _deps_extras() -> list:
     return list(au.DEPS_EXTRAS)
 
 
+def _editable_here(site: Path, root: Path) -> bool:
+    """True when localm's install record in *site* is an editable install of
+    *root* (its ``direct_url.json`` names *root* with ``editable`` true).
+    False when there is no such record or it cannot be read."""
+    import json
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+    for info in site.glob("localm-*.dist-info"):
+        try:
+            data = json.loads((info / "direct_url.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not (isinstance(data, dict) and isinstance(data.get("dir_info"), dict)
+                and data["dir_info"].get("editable") is True):
+            continue
+        url = urlparse(str(data.get("url", "")))
+        if url.scheme != "file":
+            continue
+        try:
+            here = Path(url2pathname(unquote(url.netloc + url.path))).resolve()
+            if here == Path(root).resolve():
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _deps(root: Path) -> dict:
-    """The venv half: ``{"venv", "record", "problems"}``. ``venv`` is whether
-    the install has a venv, ``record`` the version of localm's install record
-    in it (None when there is none), ``problems`` each dependency the venv does
-    not satisfy, of the declared ones and of the extras the dependency step
+    """The venv half: ``{"venv", "record", "editable_here", "problems"}``.
+    ``venv`` is whether the install has a venv, ``record`` the version of
+    localm's install record in it (None when there is none), ``editable_here``
+    whether that record is an editable install of *root*
+    (:func:`_editable_here`), ``problems`` each dependency the venv does not
+    satisfy, of the declared ones and of the extras the dependency step
     installs."""
     from localm import updater, updater_components as uc
     site = uc.site_packages(root / ".venv")
     if site is None:
-        return {"venv": False, "record": None, "problems": []}
+        return {"venv": False, "record": None, "editable_here": False, "problems": []}
     installed = uc.dists(site)
     record = (installed.get("localm") or {}).get("version")
     data = updater._read_toml(root / "pyproject.toml")
@@ -92,7 +121,8 @@ def _deps(root: Path) -> dict:
     for extra in _deps_extras():
         reqs += [str(r) for r in extras.get(extra, []) or []
                  if not str(r).startswith("localm")]
-    return {"venv": True, "record": record, "problems": uc.unsatisfied(reqs, installed)}
+    return {"venv": True, "record": record, "editable_here": _editable_here(site, root),
+            "problems": uc.unsatisfied(reqs, installed)}
 
 
 def installed_parts(root=None) -> dict:
@@ -108,7 +138,9 @@ def installed_parts(root=None) -> dict:
     ``app`` (False also when the venv has
     no record at all). A record of another version is a problem
     (``install_record_problem``) unless an update that kept the dependencies
-    left it (:func:`note_kept_record`),
+    left it (:func:`note_kept_record`), or *root* is a git clone (``.git``
+    present) whose record is an editable install of *root* and whose
+    dependencies are all satisfied,
     ``deps_problems`` each dependency the venv does not satisfy (a problem),
     ``runtime``
     ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
@@ -138,6 +170,9 @@ def installed_parts(root=None) -> dict:
         elif record is not None:
             record_matches = _norm_version(record) == _norm_version(app)
             record_problem = not record_matches and _kept_records().get(app) != record
+            if (record_problem and (root / ".git").exists() and d.get("editable_here")
+                    and not deps_problems):
+                record_problem = False
             if record_problem:
                 problems.append(f"the venv's install record is localm {record}, but localm "
                                 f"{app} is installed")
