@@ -1801,7 +1801,8 @@ export const I18N_EN = {
   "memory.embedder.incomplete": "Embedding model download did not complete",
   "memory.embedder.alreadyInstalled": "Already installed",
   "memory.embedder.downloadFailed": "Download failed: {message}",
-  "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once. It is downloaded the first time recall needs it, or now with the button below.",
+  "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once. Download it now with the button below. With network access set to allow, it is also downloaded the first time recall needs it.",
+  "memory.embedder.setupHint": "Semantic recall is off until '{model}' is downloaded once. Run localm setup-embeddings, or install or enable the Knowledge plugin to download it from here. With network access set to allow, it is downloaded the first time recall needs it.",
   "memory.modal.title": "Memory - what the model knows about you",
   "memory.modal.writable": "Durable facts localm remembers about you, added to the prompt while the memory toggle is on. With \"Grow memory automatically\" and \"Memory recall\" on, memory also grows as you chat; it never grows on its own in privacy mode. Edit freely - one fact per line; Save replaces the list.",
   "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is recalled only if \"Allow memory recall in privacy mode\" is on.",
@@ -2097,7 +2098,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Embeddings
   "settings.field.embeddingModel.label": "Embedding model",
-  "settings.field.embeddingModel.help": "Fetched on first use; with network access off, enable Allow model downloads and run 'localm setup-embeddings'. Until then memory and RAG search lexically. A known key, registered name or GGUF path.",
+  "settings.field.embeddingModel.help": "A known key, registered name or GGUF path. Fetched on first use only when network access is allow; else use Download on the Knowledge or memory page. Until then search is by keyword.",
   "settings.field.embeddingPooling.label": "Embedding pooling",
   "settings.field.embeddingPooling.help": "Changing this invalidates document collections and memory vectors: re-index after. A loaded embedder keeps the old value until unloaded. mean suits bge/nomic; a decoder-based one needs last or auto.",
   "settings.field.embeddingGpuLayers.label": "Embedder GPU layers",
