@@ -1078,7 +1078,7 @@ if [ "$IS_MACOS" = 1 ]; then
   say "  ./localm-launcher.sh or ./localm.sh gui."
 elif [ "$LOCALM_BIN_OK" = 1 ]; then
   say "  Building the LocaLM app launcher ..."
-  .venv/bin/localm make-launcher --force \
+  .venv/bin/localm make-launcher --force --quiet \
     || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
   # make-launcher writes ./LocaLM.desktop on Linux; uninstall removes it.
   if [ -f LocaLM.desktop ]; then LAUNCHER_FILE="$(pwd)/LocaLM.desktop"; fi

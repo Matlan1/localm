@@ -70,6 +70,7 @@ def _parse_exec(value: str) -> list:
     ["/srv/$HOME/`cmd`/x"],
     ["/weird\\dir/x", "50%"],
     ["/tab\there/x", "(paren)", "semi;colon", "amp&", "pipe|", "hash#", "star*", "q?", "<>~"],
+    ["/new\nline/x"],
     [""],
 ])
 def test_exec_round_trips_through_the_spec_parser(argv):
@@ -161,6 +162,28 @@ def test_the_copy_note_does_not_suggest_a_second_menu_entry(tmp_path, monkeypatc
     assert applaunch._menu_entry_installed() is None
 
 
+def test_the_menu_entry_is_found_through_another_spelling_of_the_folder(tmp_path,
+                                                                        monkeypatch):
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    home = tmp_path / "home"
+    apps = home / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    monkeypatch.setattr(applaunch, "_repo_root", lambda: repo.resolve())
+    monkeypatch.setattr(applaunch.Path, "home", classmethod(lambda cls: home))
+    spelled = tmp_path / "clone" / ".." / "clone"
+    text = setup_spec.menu_entry("launcher", spelled).replace(
+        "Path=" + setup_spec.desktop_string(spelled.as_posix()),
+        "Path=" + setup_spec.desktop_string(str(spelled)))
+    (apps / "localm.desktop").write_text(text, encoding="utf-8")
+    assert applaunch._menu_entry_installed() == apps / "localm.desktop"
+
+
+def test_desktop_string_round_trips():
+    for value in ["/plain", "/a b/c", "/back\\slash", "/new\nline", "/tab\there"]:
+        assert setup_spec.desktop_unstring(setup_spec.desktop_string(value)) == value
+
+
 def test_unsupported_platform_reports_a_problem(monkeypatch):
     monkeypatch.setattr(applaunch.sys, "platform", "sunos5")
     res = applaunch.make_launcher()
@@ -227,6 +250,7 @@ def test_another_interpreter_without_arguments_is_left_alone(monkeypatch):
 def test_the_bare_start_runs_localm_gui_owning_its_console(monkeypatch):
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
     ran, exits = [], []
     applaunch.start_gui_from_bare_exe(run=lambda argv, env: ran.append((argv, env)) or 7,
                                       exit_now=exits.append)
@@ -239,11 +263,40 @@ def test_the_bare_start_runs_localm_gui_owning_its_console(monkeypatch):
 def test_the_bare_start_in_debug_keeps_the_console(monkeypatch):
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
     _, env = applaunch.bare_start_command()
     assert "LOCALM_OWN_CONSOLE" not in env
 
 
+def test_the_bare_start_never_hides_a_terminal_the_person_also_uses(monkeypatch):
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: False)
+    _, env = applaunch.bare_start_command()
+    assert "LOCALM_OWN_CONSOLE" not in env
+
+
+@pytest.mark.parametrize("rc, code", [(0, 0), (3, 3), (0xC0000005, -1073741819),
+                                      (0xC000013A, -1073741510), (-1073741819, -1073741819)])
+def test_a_windows_exit_code_reaches_exit_as_a_c_int(monkeypatch, rc, code):
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: False)
+    exits = []
+    applaunch.start_gui_from_bare_exe(run=lambda argv, env: rc, exit_now=exits.append)
+    assert exits == [code]
+
+
+def test_ctrl_c_while_waiting_exits_instead_of_reaching_site(monkeypatch):
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: False)
+
+    def interrupted(argv, env):
+        raise KeyboardInterrupt
+    exits = []
+    applaunch.start_gui_from_bare_exe(run=interrupted, exit_now=exits.append)
+    assert exits == [130]
+
+
 def test_a_bare_start_that_cannot_run_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: False)
     def boom(argv, env):
         raise OSError("no such file")
     exits = []

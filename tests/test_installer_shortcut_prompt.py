@@ -1053,8 +1053,8 @@ def test_make_launcher_quiet_prints_no_competing_start_instruction(monkeypatch):
     quiet = CliRunner().invoke(maintenance.make_launcher_cmd, ["--quiet"])
 
     assert loud.exit_code == 0 and quiet.exit_code == 0
-    # The note (real work done) survives both; the hints only appear when loud.
-    assert "built LocaLM.exe" in loud.output and "built LocaLM.exe" in quiet.output
+    # --quiet reports only problems; the note of work done is shown when loud.
+    assert "built LocaLM.exe" in loud.output and "built LocaLM.exe" not in quiet.output
     # "Launch it:" is a Windows-only hint (maintenance.py gates it on
     # sys.platform == "win32"); POSIX's equivalent affordance is the desktop
     # entry line, which this fake result does not set.

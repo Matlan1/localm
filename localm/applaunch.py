@@ -335,9 +335,10 @@ def _ensure_bare_start(notes: list, problems: list) -> None:
 def bare_start_command() -> tuple:
     """``(argv, env)`` that a LocaLM.exe started with no arguments runs: this
     interpreter with ``-m localm gui``, owning the console it was given (so the
-    GUI can hide it) unless LOCALM_DEBUG is set."""
+    GUI can hide it) only when this process alone holds that console and
+    LOCALM_DEBUG is not set; a terminal the person also uses is never hidden."""
     env = dict(os.environ)
-    if not env.get("LOCALM_DEBUG"):
+    if not env.get("LOCALM_DEBUG") and _owns_console():
         env.setdefault("LOCALM_OWN_CONSOLE", "1")
     return [sys.executable, "-m", "localm", "gui"], env
 
@@ -350,11 +351,20 @@ def start_gui_from_bare_exe(run=None, exit_now=None) -> None:
     exit_now = exit_now or os._exit
     argv, env = bare_start_command()
     try:
-        rc = run(argv, env=env)
-    except OSError as e:
+        rc = int(run(argv, env=env))
+    except KeyboardInterrupt:
+        rc = 130
+    except BaseException as e:
         print(f"LocaLM could not start the GUI: {e}", file=sys.stderr)
         rc = 1
-    exit_now(int(rc))
+    exit_now(_c_int_exit_code(rc))
+
+
+def _c_int_exit_code(rc: int) -> int:
+    """*rc* as the signed 32-bit value os._exit accepts (a Windows exit code
+    such as 0xC0000005 is reported unsigned)."""
+    rc &= 0xFFFFFFFF
+    return rc - 0x100000000 if rc >= 0x80000000 else rc
 
 
 # ---- PE icon stamping (ctypes UpdateResource, no dependency) --------------- #
@@ -566,13 +576,21 @@ def _menu_entry_installed() -> Optional[Path]:
     or None."""
     from localm import setup_spec
     entry = Path.home() / ".local" / "share" / "applications" / setup_spec.MENU_ENTRY_FILE
-    want = "Path=" + setup_spec.desktop_string(_repo_root().as_posix())
     try:
-        if entry.is_file() and want in entry.read_text(encoding="utf-8",
-                                                       errors="replace").splitlines():
-            return entry
+        lines = entry.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
+    repo = _repo_root()
+    for line in lines:
+        if not line.startswith("Path="):
+            continue
+        named = setup_spec.desktop_unstring(line[len("Path="):])
+        try:
+            if named and os.path.samefile(named, repo):
+                return entry
+        except OSError:
+            if Path(named).as_posix() == repo.as_posix():
+                return entry
     return None
 
 

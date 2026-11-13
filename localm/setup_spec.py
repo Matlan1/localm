@@ -220,14 +220,31 @@ def desktop_exec(argv) -> str:
     """The Exec= value that runs *argv*: each argument holding a reserved
     character (a space among them) in double quotes with ``"`` `` ` `` ``$``
     and ``\\`` backslash-escaped, ``%`` doubled, and then every backslash
-    doubled for the string-value escape the spec applies first."""
+    doubled for the string-value escape the spec applies first (a newline or
+    tab inside an argument is written as ``\\n`` or ``\\t``)."""
     parts = []
     for arg in argv:
         arg = str(arg).replace("%", "%%")
         if not arg or any(c in _EXEC_RESERVED for c in arg):
             arg = '"' + "".join("\\" + c if c in _EXEC_ESCAPED else c for c in arg) + '"'
         parts.append(arg)
-    return " ".join(parts).replace("\\", "\\\\")
+    return (" ".join(parts).replace("\\", "\\\\").replace("\n", "\\n")
+            .replace("\t", "\\t"))
+
+
+def desktop_unstring(value: str) -> str:
+    """A Desktop Entry string value with its escapes (``\\s``, ``\\n``,
+    ``\\t``, ``\\r``, ``\\\\``) undone."""
+    out, i = [], 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value):
+            out.append({"s": " ", "n": "\n", "t": "\t", "r": "\r",
+                        "\\": "\\"}.get(value[i + 1], value[i:i + 2]))
+            i += 2
+            continue
+        out.append(value[i])
+        i += 1
+    return "".join(out)
 
 
 def desktop_string(value) -> str:
