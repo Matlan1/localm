@@ -719,6 +719,7 @@
   "common.reasoning.thinking": "Réflexion…",
   "common.reasoning.thoughts": "Réflexions",
   "common.reply.empty": "(aucun texte de réponse)",
+  "common.reply.unformatted": "Une réponse n'a pas pu être mise en forme et s'affiche en texte brut : {error}",
   "common.toolCall.readPage": "lecture de page : {arg}",
   "common.toolCall.webRequest": "requête web : {arg}",
   "common.toolCall.webRequestBare": "requête web",
