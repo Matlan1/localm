@@ -154,17 +154,20 @@ def test_the_cli_attaches_the_live_servers_own_log(monkeypatch, tmp_path):
         {"pid": 4242, "started": "2026-11-13T08:00:01"},
         {"pid": 111, "started": "2026-11-13T07:00:00"},
     ])
-    monkeypatch.setattr(instances, "pid_alive", lambda pid: pid != 111)
+    monkeypatch.setattr(instances, "entry_process_state",
+                        lambda e: ("gone", "") if e["pid"] == 111 else ("same", ""))
 
     assert br.live_server_log_pid(tmp_path) == 4242
     assert br._find_run_log(tmp_path, 4242) == server
 
 
-def test_no_live_server_with_a_log_gives_no_pid(monkeypatch, tmp_path):
+@pytest.mark.parametrize("state", ["gone", "stale", "unknown"])
+def test_an_ended_run_whose_pid_is_reused_gives_no_pid(monkeypatch, tmp_path, state):
     from localm import instances
     _log(tmp_path, "localm_20261113_080000_111.log")
     monkeypatch.setattr(instances, "list_entries", lambda home: [{"pid": 111}])
-    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(instances, "entry_process_state", lambda e: (state, ""))
     assert br.live_server_log_pid(tmp_path) is None
 
 

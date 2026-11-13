@@ -225,14 +225,18 @@ def live_server_hang_trace(home=None) -> str:
         return ""
 
 
-def _live_server_pids(home) -> list:
+def _live_server_pids(home, *, verified: bool = False) -> list:
     """The pids of the live servers of the data folder *home* (from the
     instance registry, ``<home>/run/*.json``, kept only when the process is
-    alive), the most recently started first. Raises when the registry cannot
-    be read."""
+    alive, and with *verified* only when its start identity matches the entry,
+    so a reused pid is left out), the most recently started first. Raises when
+    the registry cannot be read."""
     from localm import instances
     entries = sorted(instances.list_entries(home),
                      key=lambda e: e.get("started") or "", reverse=True)
+    if verified:
+        return [e["pid"] for e in entries if isinstance(e.get("pid"), int)
+                and instances.entry_process_state(e)[0] == "same"]
     return [e["pid"] for e in entries
             if isinstance(e.get("pid"), int) and instances.pid_alive(e["pid"])]
 
@@ -240,14 +244,14 @@ def _live_server_pids(home) -> list:
 def live_server_log_pid(home=None):
     """The pid of the live server of this install whose own debug log a
     ``localm bug-report`` filed from a separate process attaches: the most
-    recently started live server that has a log file, else None (no live
-    server, none with a log, or the registry could not be read). Never
-    raises."""
+    recently started live server, proven to be the process its registry entry
+    describes, that has a log file, else None (no such server, none with a
+    log, or the registry could not be read). Never raises."""
     try:
         if home is None:
             from localm.config import HOME_DIR
             home = HOME_DIR
-        for pid in _live_server_pids(home):
+        for pid in _live_server_pids(home, verified=True):
             if _find_run_log(home, pid) is not None:
                 return pid
         return None
