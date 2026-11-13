@@ -54,7 +54,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Install failed - see the error above.',
         'uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
         'uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
-        'uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
+        'uv pip install -p .venv -e ".[hf,audio]" -c ".venv\\localm-torch-pins.txt" || echo  [^^!] transformers install failed.',
         'echo  [^^!] !PFDETAIL!',
         'if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish',
         'if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here;',

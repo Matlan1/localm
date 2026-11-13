@@ -274,7 +274,7 @@ def test_kobold_installs_each_installed_build_with_its_setup_backend(tmp_path, i
     staged = _write_tree(tmp_path / "s", _files("0.3.2", kobold="v1.123.1"))
     p = _plans(staged, install)["koboldcpp"]
     assert p["update"] and p["items"] == ["nocuda"]
-    assert uc._commands(p, staged) == [[sys.executable, "-m", "localm", "setup-music",
+    assert list(uc._commands(p, staged)) == [[sys.executable, "-m", "localm", "setup-music",
                                         "--backend", "cpu", "--no-models", "--no-test"]]
 
 

@@ -136,6 +136,8 @@ _RERANK_CORPUS = ("tests/fixtures/rag_rerank_eval/*",)
 _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
     "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
+    "tests/test_update_steps_run_in_the_new_version.py": (
+        _LOCALM_PY, "scans every localm module for updater.apply calls"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
         ("localm/*", "docs/*", "scripts/*", "installer/*", "docker/*", "README.md", "pyproject.toml",
          "uv.lock", "setup.bat", "setup.sh", "setup-gui.bat", "setup-gui.sh"),
@@ -206,6 +208,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_gui_no_import_reassignment.py": (_GUI_JS, "parses every GUI app and page module"),
     "tests/test_gui_render_loop.py": (_GUI_JS, "reads every GUI script"),
     "tests/test_gui_slash_menu.py": (_GUI_JS, "reads every GUI script"),
+    "tests/test_gui_no_native_dialogs.py": ((_GUI_STATIC + "*", "localm/plugins/builtin/*/static/*"),
+                                            "reads every GUI script and page for native browser dialogs"),
     "tests/test_static_cache.py": (_GUI_JS, "checks the cache headers of every GUI script"),
     "tests/test_i18n_language_setting.py": ((_GUI_STATIC + "i18n/*",), "lists the GUI translation catalogs"),
     "tests/test_protocol.py": ((_GUI_STATIC + "i18n/*",), "reads every GUI translation catalog"),

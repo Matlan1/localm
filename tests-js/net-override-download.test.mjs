@@ -8,6 +8,9 @@ import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const modalOpen = (w) => w.document.getElementById("modal").style.display !== "none";
+const modalButton = (w, cls) => w.document.querySelector(`#modal-body .actions button${cls}`);
+const NO_NATIVE = `window.confirm = () => { throw new Error("the browser's own confirm() must not be used"); };`;
 
 /* ---- voice: mic click offers the one-time download when permitted ------- */
 
@@ -32,13 +35,12 @@ const BLOCKED = {
   model_cached: false, model: "base", can_download: true,
 };
 
-test("greyed mic + can_download: click confirms then POSTs the download", async () => {
+test("greyed mic + can_download: click confirms in the in-page dialog then POSTs the download", async () => {
   const calls = [];
   const { window: win } = loadApp({ fetchImpl: voiceFetch(BLOCKED, calls) });
   await tick(); await tick(); await tick();   // boot's auto refreshVoiceStatus
   runScript(win, `
-    globalThis.__confirms = [];
-    window.confirm = (msg) => { globalThis.__confirms.push(msg); return true; };
+    ${NO_NATIVE}
     streamJob = () => Promise.resolve({ status: "done" });
   `);
   const mic = win.document.getElementById("chat-mic");
@@ -46,10 +48,14 @@ test("greyed mic + can_download: click confirms then POSTs the download", async 
   assert.match(mic.title, /download it now/i, "tooltip advertises the action");
 
   await win.toggleMic();
-  await tick(); await tick();
-  assert.equal(win.__confirms.length, 1, "exactly one consent dialog");
-  assert.match(win.__confirms[0], /changes no settings/i,
+  await tick();
+  assert.ok(modalOpen(win), "the in-page consent dialog opens");
+  assert.match(win.document.getElementById("modal-body").textContent, /changes no settings/i,
     "the consent text states nothing is persisted");
+  assert.equal(calls.filter((c) => c.url === "/api/voice/model/download").length, 0,
+    "nothing is sent before the answer");
+  modalButton(win, ".btn-danger").click();
+  await tick(); await tick();
   const posts = calls.filter((c) => c.url === "/api/voice/model/download");
   assert.equal(posts.length, 1, "one POST to the download route");
   assert.equal((posts[0].opts || {}).method, "POST");
@@ -59,9 +65,12 @@ test("declining the consent dialog sends nothing", async () => {
   const calls = [];
   const { window: win } = loadApp({ fetchImpl: voiceFetch(BLOCKED, calls) });
   await tick(); await tick(); await tick();
-  runScript(win, `window.confirm = () => false;`);
+  runScript(win, NO_NATIVE);
   await win.toggleMic();
   await tick();
+  assert.ok(modalOpen(win), "the in-page consent dialog opens");
+  modalButton(win, ":not(.btn-danger)").click();
+  await tick(); await tick();
   assert.equal(calls.filter((c) => c.url === "/api/voice/model/download").length, 0,
     "no download without the explicit yes");
 });
@@ -85,11 +94,12 @@ test("without can_download the click only reports the reason", async () => {
   const body = { ...BLOCKED, can_download: false };
   const { window: win } = loadApp({ fetchImpl: voiceFetch(body, calls) });
   await tick(); await tick(); await tick();
-  runScript(win, `
-    window.confirm = () => { throw new Error("consent dialog must not open"); };
-  `);
+  runScript(win, NO_NATIVE);
   await win.toggleMic();
   await tick();
+  assert.ok(!modalOpen(win) ||
+    !/changes no settings/i.test(win.document.getElementById("modal-body").textContent),
+  "no consent dialog opens");
   assert.equal(calls.filter((c) => c.url === "/api/voice/model/download").length, 0,
     "a caller the server did not clear gets no download attempt");
   const mic = win.document.getElementById("chat-mic");

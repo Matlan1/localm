@@ -148,6 +148,9 @@ sys.exit({_PROBE_NO_GPU_DEVICE})
 """
 
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
 def _is_abi_rejection(detail: Optional[str]) -> bool:
     """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
     the runtime, as opposed to any other load failure.
@@ -158,7 +161,7 @@ def _is_abi_rejection(detail: Optional[str]) -> bool:
     return str(detail or "").startswith(_ABI_REJECT_PREFIX)
 
 
-def _native_loads_ok() -> tuple:
+def _native_loads_ok(env: Optional[dict] = None) -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
     as ``localm run`` will, AND confirm it registered a compute backend. A build
     can load cleanly yet register ZERO backends ("no backends are loaded"), which
@@ -167,10 +170,12 @@ def _native_loads_ok() -> tuple:
     self-registering builds and a broken runtime slips through, failing only at
     the first model load with the real cause already lost. A subprocess keeps the
     setup process clean (the loader mutates the DLL/lib search path) and matches
-    the real run environment. Returns (ok, last_error_line)."""
+    the real run environment. *env* is the child's environment (default this
+    process's). Returns (ok, last_error_line)."""
     try:
         r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, env=env,
+                           creationflags=_NO_WINDOW)
     except Exception as e:
         return False, str(e)
     if r.returncode == 0:
@@ -187,14 +192,16 @@ def _native_loads_ok() -> tuple:
     return False, _informative_error_line(detail)
 
 
-def _native_gpu_loads_ok() -> tuple:
+def _native_gpu_loads_ok(env: Optional[dict] = None) -> tuple:
     """Like :func:`_native_loads_ok`, but passes only when the runtime registers
     a GPU-type compute device. A GPU build whose GPU library fails to load still
     registers the CPU device, which satisfies :func:`_native_loads_ok`. Returns
-    (ok, last_error_line); the failure line names the devices that did register."""
+    (ok, last_error_line); the failure line names the devices that did register.
+    *env* is the child's environment (default this process's)."""
     try:
         r = subprocess.run([sys.executable, "-c", _GPU_LOAD_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, env=env,
+                           creationflags=_NO_WINDOW)
     except Exception as e:
         return False, str(e)
     if r.returncode == 0:
