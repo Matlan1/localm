@@ -173,15 +173,16 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 
 | Method | Purpose |
 |--------|---------|
-| `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. |
+| `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. Every route path must start with `/api/` or `/v1/`: any other path makes `register()` raise `ValueError` and the plugin fails to load. With no server app (a backend-only load) nothing is mounted. |
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
-| `register_tab(surface)` | Register a GUI tab in the SPA. |
+| `register_tab(surface)` | Accepted but currently ignored: it does not add a tab. A plugin's tab comes from the `[surface]` table in `plugin.toml`. |
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
 | `caller_is_owner(request)` | Inside a route: `True` when the caller is the owner (open mode, or the owner key or session). |
 | `caller_principal(request)` | Inside a route: an opaque, stable id for the caller's key (never the key itself), or `None` in open mode. Store it with anything the caller creates. |
-| `caller_owns(request, owner)` | Inside a route: whether the caller may act on something created by `owner` (a value `caller_principal` returned). `True` for a `None` owner and for the owner. |
+| `caller_owns(request, owner)` | Inside a route: whether the caller may act on something created by `owner` (a value `caller_principal` returned). `True` for a `None` owner, for the same principal, and for an owner (admin) caller. |
+| `set_global_config(request, key, value)` | Write a global config key (a plugin may not call `update_config`). Raises `PermissionError` for an owner-only key when the caller of `request` is not the owner, and `ValueError` for an unknown key or a value the settings schema rejects. |
 | `engine()` | Handle to the inference engine. |
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
@@ -255,7 +256,7 @@ it. `admin_only` fields (a secret, a script URL, anything that widens a trust
 boundary) additionally require an owner (admin) key to see or set, mirroring
 the media backends' `launch_cmd`/`api_url` gate. A `Widget.SECRET` field's value
 and default are never returned by either route. A blank/`null` save clears an
-override back to the field's own `default`.
+override back to the field's own `default`, except for a `Widget.TOGGLE` field, which must be saved as `true` or `false` (a blank or `null` save is refused with a 400).
 
 `localm plugin config <name>` reaches the same fields from the terminal, over
 those same two routes. It needs a running localm to do it: your field list is
@@ -286,33 +287,32 @@ in privacy mode with no gating. The client context (`ctx`) exposes
 
 ## Exporting a coder tool
 
-A plugin can add a tool the coder agent may call. This uses a DIFFERENT
-manifest form from the rest of this document, so read this section before
-adding one.
-
-Everything above describes the ENGINE contract: `[plugin] register = "..."`,
-loaded by the plugin engine. Coder tool discovery does not read those. It walks
-the LEGACY plugin form, which requires an `entry` instead:
+A plugin can add a tool the coder agent may call. Declare the names in a
+`[tools]` table of its `plugin.toml`:
 
 ```toml
 [plugin]
 name  = "myplugin"
-entry = "myplugin.tools:setup"     # <module>:<attr>, and it is required here
+entry = "myplugin.tools:setup"     # <module>:<attr>
 
 [tools]
 exports = ["do_the_thing"]
 ```
 
-A plugin that declares `register` and no `entry` is treated as engine-owned and
-skipped by that scan entirely, so **a `[tools] exports` block on an
-engine-contract plugin is parsed, shown in the GUI's External plugins card, and
-never registered as a coder tool.** That split is a real limitation of the
-current loader, not a convention: a plugin that wants both surfaces has to
-declare `entry` as well as `register`.
+Coder tool discovery goes through the same plugin engine as everything above, so
+`exports` works for both manifest forms:
 
-A manifest with only `entry` is a coder-tool plugin: the plugin engine lists it
-on the Plugins page and loads nothing for it. A manifest with neither `entry` nor
-`register` is reported there as a load failure.
+- A manifest with `entry` and no `register` is a coder-tool plugin: the plugin
+  engine lists it on the Plugins page and loads nothing for it. The `entry`
+  module is searched for the exports.
+- A manifest with `register` (the engine contract above) can declare `exports`
+  too. The `entry` module is used when there is one, otherwise the `register`
+  module.
+
+Tools are registered only for plugins that are installed and enabled; an
+installed but disabled plugin adds no tool. A manifest with neither `entry` nor
+`register` defaults to a `plugin.py` module with a `register` attribute, and is
+reported as a load failure if that module is missing.
 
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
@@ -408,7 +408,7 @@ Scope and limits:
   nothing. The built-in chat plugin's two inlets (a style note asking the model
   to answer directly and to speak of itself as "I", and the `<think>` note for
   reasoning models) apply only to `chat`; an API caller's messages reach the
-  model unchanged. The `chat_style_note` setting (Settings > Chat) turns the
+  model unchanged. The `chat_style_note` setting (Settings > Model > Add the chat style note) turns the
   style note off for the own chat as well.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).

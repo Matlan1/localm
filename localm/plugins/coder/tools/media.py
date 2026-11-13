@@ -51,7 +51,7 @@ def tool_generate_image(
         guidance=guidance, negative_prompt=negative_prompt, seed=seed,
         lora_name=lora_name, lora_strength_model=lora_strength_model,
         lora_strength_clip=lora_strength_clip, input_image=input_p, denoise=denoise,
-        write_sidecar=not _privacy, delete_outputs=_privacy, privacy=_privacy,
+        write_sidecar=not _privacy, privacy=_privacy,
         cancel_check=_cancel)
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p

@@ -1506,6 +1506,12 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 verified, verify_reason = assessed["verified"], assessed["reason"]
                 if not verified and not allow_unverified:
                     raise UnverifiedBuild(str(target_version), verify_reason, digest)
+            if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
+                raise LocalmError(
+                    "refusing to install: the downloaded build changed after its "
+                    "signature was checked",
+                    reason="the file on disk no longer matches the verified bytes; "
+                           "try the update again")
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"

@@ -81,7 +81,7 @@ test("an audio turn after an image turn is answered with the earlier images left
     "the clip turn gets its reply");
 });
 
-test("an image refusal on an audio turn that also carries an image still drops the images", async () => {
+test("an image refusal on an audio turn that also carries an image keeps the image and asks once", async () => {
   const calls = [];
   const impl = async (url, opts = {}) => {
     let body = null;
@@ -106,7 +106,7 @@ test("an image refusal on an audio turn that also carries an image still drops t
   ] };
   await window.runCompletion(conv);
   assert.equal(chatCalls(calls).length, 1, "no repeat");
-  assert.equal(window.msgImages(conv.messages[0]).length, 0, "the refused image is dropped");
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the refused image stays in the chat");
 });
 
 function loadRealPipeline() {
