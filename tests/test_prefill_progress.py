@@ -33,27 +33,30 @@ def _fake_llama(monkeypatch):
 
 
 def test_each_prompt_batch_reports_progress(monkeypatch):
-    monkeypatch.setattr(llama_mod, "PREFILL_PROGRESS_INTERVAL_S", 0.0)
+    monkeypatch.setattr(protocol, "PREFILL_PROGRESS_INTERVAL_S", 0.0)
     llm = _fake_llama(monkeypatch)
     seen = []
     with llm._prefill_progress_to(seen.append):
         assert llm._decode_prompt(list(range(10)), 0, 4) == 0
     assert [str(s) for s in seen] == [
         "Processing prompt... (4 of 10 tokens)",
-        "Processing prompt... (8 of 10 tokens)",
-        "Processing prompt... (10 of 10 tokens)"]
+        "Processing prompt... (8 of 10 tokens)"]
     assert all(s.code == "processing_progress" for s in seen)
-    assert seen[-1].args == {"done": "10", "total": "10"}
+    assert seen[-1].args == {"done": "8", "total": "10"}
     assert llm._prefill_progress is None, "the reporter does not outlive its reply"
 
 
-def test_progress_is_throttled_but_the_last_batch_always_reports(monkeypatch):
-    monkeypatch.setattr(llama_mod, "PREFILL_PROGRESS_INTERVAL_S", 3600.0)
+def test_progress_is_throttled_and_a_one_batch_prompt_reports_nothing(monkeypatch):
+    monkeypatch.setattr(protocol, "PREFILL_PROGRESS_INTERVAL_S", 3600.0)
     llm = _fake_llama(monkeypatch)
     seen = []
     with llm._prefill_progress_to(seen.append):
         llm._decode_prompt(list(range(10)), 0, 2)
-    assert [str(s) for s in seen] == ["Processing prompt... (10 of 10 tokens)"]
+    assert seen == []
+    monkeypatch.setattr(protocol, "PREFILL_PROGRESS_INTERVAL_S", 0.0)
+    with llm._prefill_progress_to(seen.append):
+        llm._decode_prompt(list(range(10)), 0, 10)
+    assert seen == []
 
 
 def test_without_a_status_callback_nothing_is_reported(monkeypatch):
@@ -115,3 +118,21 @@ def test_a_prefill_that_stops_reporting_is_still_caught(monkeypatch):
     with pytest.raises(RuntimeError, match="made no progress for 1s"):
         list(r.chat_stream(first_chunk_timeout=1.0, messages=[]))
     child.join(2)
+
+
+def test_the_slot_scheduler_reports_a_long_prompt_s_progress_to_its_reply(monkeypatch):
+    from tests.test_slot_scheduler import _collect, _SimContext
+    from localm.inference.backends.llamacpp._slots import SlotScheduler
+    monkeypatch.setattr(protocol, "PREFILL_PROGRESS_INTERVAL_S", 0.0)
+    ctx = _SimContext()
+    monkeypatch.setattr(ctx, "n_batch", lambda: 4)
+    sched = SlotScheduler(ctx, 2, timer=ctx.timer)
+    try:
+        rec = _collect(sched, [1 + i % 7 for i in range(10)], 3)
+    finally:
+        sched.close(timeout=5)
+    progress = [s for s in rec["statuses"] if getattr(s, "code", None) == "processing_progress"]
+    assert [str(s) for s in progress] == [
+        "Processing prompt... (4 of 10 tokens)",
+        "Processing prompt... (8 of 10 tokens)"], rec["statuses"]
+    assert rec["out"], "the reply still decodes"

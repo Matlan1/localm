@@ -409,6 +409,10 @@ def status_code_of(text: str) -> Optional[str]:
 PROCESSING_PROMPT_STATUS = "Processing prompt..."
 
 
+# Seconds between two prompt-progress statuses of one reply.
+PREFILL_PROGRESS_INTERVAL_S = 5.0
+
+
 def prefill_progress_status(done: int, total: int) -> StatusText:
     """The status for a prompt *done* of *total* tokens into its evaluation."""
     args = {"done": str(done), "total": str(total)}
