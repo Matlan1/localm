@@ -311,7 +311,7 @@ def _export_subcommand_mode(ctx) -> None:
             os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
     except click.ClickException:
         return
-    except Exception as e:   # noqa: BLE001. See test_a_failing_mode_read_never_stops_the_command
+    except Exception as e:   # noqa: BLE001 - see test_a_failing_mode_read_never_stops_the_command
         try:
             from localm.debuglog import logger
             logger.debug("could not read the subcommand's --mode before the start-up "
