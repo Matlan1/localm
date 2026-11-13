@@ -210,8 +210,8 @@ test("a code block's copy shows copied when the write succeeds", async () => {
 });
 
 test("no new clipboard write bypasses the shared copy helper", () => {
-  // Every navigator.clipboard.writeText call outside helpers.js's
-  // copyTextWithFeedback, by file. The listed ones predate the helper.
+  // The most direct navigator.clipboard.writeText calls each file may hold;
+  // every other write goes through copyTextWithFeedback.
   const allowed = { "app/chat.js": 2, "app/media-gallery.js": 1, "pages/models.js": 1, "pages/settings.js": 2 };
   const found = {};
   for (const dir of ["app", "pages"]) {
@@ -223,9 +223,10 @@ test("no new clipboard write bypasses the shared copy helper", () => {
     }
   }
   const helpers = fs.readFileSync(new URL("app/helpers.js", STATIC), "utf8");
-  assert.equal(found["app/helpers.js"], 1, "helpers.js writes only inside copyTextWithFeedback");
+  assert.equal(found["app/helpers.js"], undefined, "helpers.js writes only inside copyTextWithFeedback");
+  assert.equal((helpers.match(/\.writeText\(/g) || []).length, 1);
   assert.match(helpers, /async function copyTextWithFeedback[\s\S]*?clip\.writeText\(text\)/);
-  delete found["app/helpers.js"];
+  assert.match(helpers, /export function enhanceCodeBlock[\s\S]*?copyTextWithFeedback\(btn,/);
   for (const [file, n] of Object.entries(found)) {
     assert.ok(n <= (allowed[file] || 0), `${file} writes to the clipboard directly; use copyTextWithFeedback`);
   }
