@@ -181,7 +181,9 @@ def test_timeout_triggers_rollback_and_restores_backup(tmp_path, monkeypatch):
             "--log-file", str(logfile)])
         assert code == wd.EXIT_ROLLED_BACK
         assert (inst / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
-        assert "watchdog exiting with code 1" in logfile.read_text(encoding="utf-8")
+        log = logfile.read_text(encoding="utf-8")
+        assert "watchdog exiting with code 1" in log
+        assert "health check failed: localm 9.9.9 did not start within 1 seconds" in log
     finally:
         held.close()
 

@@ -278,9 +278,9 @@ def main(argv=None) -> int:
     if healthy:
         code = EXIT_HEALTHY
     else:
-        _log(args.log_file, "health check failed - invoking automatic rollback")
         why = (f"localm {args.expect_version} did not start within "
                f"{args.timeout:.0f} seconds")
+        _log(args.log_file, f"health check failed: {why} - invoking automatic rollback")
         code = _invoke_rollback(install_root, args.log_file,
                                 args.code_root.resolve() if args.code_root else None,
                                 why=why)
