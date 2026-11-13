@@ -133,7 +133,7 @@ served by another instance and the configured `embedding_model` count as registe
   empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
   architecture when recorded, else empty), `families` (a list holding `family`,
   or null), `parameter_size` (the parameter count in the weights' file or
-  folder name, such as `8B` or `8x7B`, else empty) and `quantization_level` (the
+  folder name, such as `8B`, `8x7B` or `135M`, else empty) and `quantization_level` (the
   quantization in that name, such as `Q4_K_M`, else empty).
 - `GET /api/ps` returns `{"models": [...]}`: the loaded models, each with the
   `name`, `model`, `size`, `digest` and `details` of a tag (no `modified_at`),

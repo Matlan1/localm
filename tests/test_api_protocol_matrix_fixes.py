@@ -47,6 +47,8 @@ def test_load_of_the_localm_sentinel_with_nothing_loaded_still_loads(setup_multi
     ("Qwen3-0.6B-IQ4_XS.gguf", "0.6B", "IQ4_XS"),
     ("Mixtral-8x7B-Instruct-v0.1.Q5_K_S.gguf", "8x7B", "Q5_K_S"),
     ("gemma-3n-E2B-it-BF16.gguf", "", "BF16"),
+    ("SmolLM2-135M-Instruct-Q8_0.gguf", "135M", "Q8_0"),
+    ("Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf", "7B", "Q4_K_M"),
     ("plain.gguf", "", ""),
 ])
 def test_tags_and_show_report_size_and_quant_from_the_file_name(client, home,
