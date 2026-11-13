@@ -805,9 +805,9 @@ DEFAULT_CONFIG: dict = {
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     # Bind address for a fresh server start when -H/--host is not given on the
     # command line: "" = loopback only (127.0.0.1), "0.0.0.0" = every interface,
-    # or one specific interface IP. GUI-settable (Settings > Server) so a
-    # browser-only user can enable the phone/Companion feature without a
-    # terminal; applies on restart. An explicit -H always wins for that process
+    # or one specific interface IP. GUI-settable (Settings > Server & network >
+    # Bind address) so a browser-only user can enable the phone/Companion
+    # feature without a terminal; applies on restart. An explicit -H always wins for that process
     # (and survives an in-place restart, which re-execs the same argv). Binding
     # past loopback still requires a strong API key: without one the server
     # IGNORES this key and stays on loopback (see plugins/gui/cli.py) - the
@@ -1747,8 +1747,9 @@ def keep_diagnostics_enabled() -> bool:
     """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
     the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
     ``--keep-diagnostics`` flag, a per-run override) OR the persistent
-    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
-    launcher and the in-app toggle both take effect. Never raises."""
+    ``keep_diagnostics`` config key (the WebUI Settings > Privacy & data > Keep
+    diagnostics for bug reports toggle). So the launcher and the in-app toggle
+    both take effect. Never raises."""
     if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
             "1", "true", "on", "yes"):
         return True

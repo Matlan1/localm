@@ -422,13 +422,13 @@ def _run_spec_bench(model, label, arm, rounds, kinds=None):
         if overriding:
             how = (f"Speculative drafting is set to [cyan]{overriding}[/cyan], which "
                    "takes precedence over the MTP toggle. Set it to mtp (or Inherit) "
-                   "in Settings > Engine > Speculative drafting, or set "
+                   "in Settings > Model > Speculative drafting, or set "
                    "[cyan]spec_source[/cyan].")
         elif label == "MTP":
-            how = ("Turn it on in Settings > Engine > Multi-Token Prediction, or "
+            how = ("Turn it on in Settings > Model > Multi-Token Prediction (MTP), or "
                    "set [cyan]mtp_enabled[/cyan] to true.")
         else:
-            how = ("Choose it in Settings > Engine > Speculative drafting, or set "
+            how = ("Choose it in Settings > Model > Speculative drafting, or set "
                    "[cyan]spec_source[/cyan].")
         console.print(
             f"[green]{label} is {ratio:.2f}x faster for this model[/green] "

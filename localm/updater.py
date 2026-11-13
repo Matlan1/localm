@@ -491,7 +491,8 @@ def _refuse_downgrade(new_version: str) -> None:
         raise LocalmError(
             "cannot read the installed localm version",
             reason="without it an update cannot be confirmed as newer; choose the "
-                   "version to install (Settings > Updates, or 'localm update "
+                   "version to install (Settings > System > Updates > Choose a version, "
+                   "or 'localm update "
                    "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
@@ -2201,7 +2202,7 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
            for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += (" (" + "; ".join(why) + "). To try again, close anything else using this "
-                 "install, then choose Update now in Settings > Updates")
+                 "install, then choose Settings > System > Updates > Update now")
     write_runtime = not keep_failures or (runtime_last is not None
                                           and not failed_now(runtime_last))
     write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))
