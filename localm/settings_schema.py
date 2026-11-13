@@ -432,9 +432,9 @@ CORE_FIELDS: list = [
                  group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_first_token_timeout_s", Widget.NUMBER,
                  "HuggingFace first-token timeout (s)",
-                 "How long a HuggingFace-format model's reply may take to produce "
-                 "its first token before it is treated as hung. It covers reading "
-                 "your whole prompt, so it is generous by default.",
+                 "How long a HuggingFace-format model's reply may go without "
+                 "progress, before its first token, until it is treated as hung. "
+                 "Each model layer the prompt passes counts as progress.",
                  group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_embed_timeout_s", Widget.NUMBER,
                  "HuggingFace embed timeout (s)",
