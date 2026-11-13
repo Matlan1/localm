@@ -849,7 +849,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-In bash/zsh/fish, model names complete for the MODEL argument of the model commands and for the `--model` option of `rerank`, `speak` and `coder` (not for `job add --model`, `mcp -m` or `setup-embeddings --model`). In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `bench-spec`, `gui`) complete only the command name, not the model.
+In bash/zsh/fish, model names complete for the MODEL argument of the model commands and for the `--model` option of `rerank`, `speak` and `coder` (not for `job add --model`, `mcp -m` or `setup-embeddings --model`). PowerShell completes the same commands, options and model names, and quotes a model name that contains a space.
 
 ---
 

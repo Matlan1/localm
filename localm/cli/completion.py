@@ -13,7 +13,9 @@ Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
         $words += ''
     }
     localm __complete @words 2>$null | Where-Object { $_ } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        $text = $_
+        if ($text -match '[\s''"`$;,(){}@&|<>#]') { $text = "'" + ($text -replace "'", "''") + "'" }
+        [System.Management.Automation.CompletionResult]::new($text, $_, 'ParameterValue', $_)
     }
 }
 '''
@@ -21,31 +23,23 @@ Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
 
 
 
-@main.command("__complete", hidden=True)
-@click.argument("words", nargs=-1)
+@main.command("__complete", hidden=True,
+              context_settings={"ignore_unknown_options": True,
+                                "help_option_names": []})
+@click.argument("words", nargs=-1, type=click.UNPROCESSED)
 def _complete_hidden(words):
-    """Internal: print completion candidates for the partial command line."""
+    """Internal: print completion candidates for the partial command line,
+    one per line, from Click's own completion (the one bash, zsh and fish use):
+    commands, options, and each argument's own candidates such as model names."""
+    from click.shell_completion import ShellComplete
+
     words = list(words)
     partial = words[-1] if words else ""
     prior = words[:-1]
-
-    # Commands whose first positional argument is a registered model name
-    model_cmds = {"run", "serve", "rm", "alias"}
-
-    if prior and prior[0] in model_cmds and len(prior) == 1:
-        from localm.config import load_registry
-        candidates = sorted(load_registry())
-    elif not prior:
-        candidates = sorted(
-            cmd for cmd, obj in main.commands.items()
-            if not getattr(obj, "hidden", False)
-        )
-    else:
-        candidates = []
-
-    for c in candidates:
-        if c.startswith(partial):
-            click.echo(c)
+    complete = ShellComplete(main, {}, "localm", "_LOCALM_COMPLETE")
+    for item in complete.get_completions(prior, partial):
+        if item.type == "plain" and item.value:
+            click.echo(item.value)
 
 
 
