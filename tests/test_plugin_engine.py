@@ -689,11 +689,23 @@ def test_protected_plugin_cannot_be_disabled(env, monkeypatch):
     monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
+    store = env / "store"
+    _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(FastAPI(), external_root=plugins, store_root=store)
+    mgr.install("core")
+    with pytest.raises(ValueError, match="protected"):
+        mgr.disable("core")
+
+
+def test_a_protected_flag_on_a_third_party_plugin_is_ignored(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
     mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
     mgr.install("core")
-    with pytest.raises(ValueError):
-        mgr.disable("core")
+    mgr.disable("core")
+    assert "core" not in mgr._loaded
 
 
 def test_enable_unknown_raises(env):

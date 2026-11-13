@@ -507,6 +507,7 @@ class Made:
     def __init__(self, path, opts):
         self.path, self.opts = path, opts
         self.loaded = False
+        self.gpu_layers_offloaded = 0
 
     def load(self):
         self.loaded = True
@@ -566,7 +567,6 @@ class TestDisableUnloadsItsModels:
         mgr = PluginManager(FastAPI(), installed_root=root, builtin_root=None)
         mgr.install("fakeexl")
         exl = Engine(str(_exl2_dir(tmp_path)))
-        exl.cpu_only_load = True
         exl._backend.load()
         assert exl.backend_plugin == "fakeexl"
         other = _BuiltinEngine()
