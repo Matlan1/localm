@@ -2,8 +2,9 @@
 """Every "Settings > Page > Place" a text names exists on the GUI Settings page.
 
 Scans the string literals and comments of every tracked ``localm/**/*.py`` file,
-the English catalog (app/i18n-en.js) and the text of index.html for
-``Settings > ...`` (also ``->``, the arrow sign, ``&gt;``) and ``(Settings, ...``.
+the paragraphs of README.md and every tracked docs/*.md, the English catalog
+(app/i18n-en.js) and the text of index.html for
+``Settings > ...`` (also ``->``, the arrow sign, ``›``, ``&gt;``) and ``(Settings, ...``.
 The first segment must be a nav page label from ``SETTINGS_GROUPS`` in
 pages/settings.js. Every later segment must be something that page shows: the
 label of a field rendered there (placed by ``CORE_GROUP_TO_TOP``, labelled as the
@@ -32,12 +33,13 @@ SETTINGS_JS = (STATIC / "pages" / "settings.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 I18N_EN_JS = (STATIC / "app" / "i18n-en.js").read_text(encoding="utf-8")
 
-SEP = re.compile(r"\s*(?:->|>|→)\s*")
-START = re.compile(r"\bSettings\s*(?:->|>|→)\s*|\(Settings,\s*")
+SEP = re.compile(r"\s*(?:->|>|→|›)\s*")
+START = re.compile(r"\bSettings\s*(?:->|>|→|›)\s*|\(Settings,\s*")
 
 # Settings places of another app that the certificate how-to texts walk through:
 # (app the text names, the exact place). A match is skipped only when the text
-# names that app and the place starts there, word for word.
+# names that app and the place starts there, word for word, written with any of
+# the separators the check reads.
 OTHER_APP_PLACES = (
     ("Firefox", "Settings → Privacy & Security → Certificates → "
                 "View Certificates → Authorities → Import"),
@@ -247,12 +249,46 @@ def _html_texts() -> list:
     return out
 
 
+def _tracked_docs() -> list:
+    """README.md and every tracked docs/*.md."""
+    try:
+        r = subprocess.run(["git", "ls-files", "README.md", "docs"], cwd=ROOT,
+                           capture_output=True, text=True, check=True)
+        files = [ROOT / p for p in r.stdout.splitlines() if p.endswith(".md")]
+    except (OSError, subprocess.CalledProcessError):
+        files = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+    return [p for p in files if p.is_file()]
+
+
+def _md_texts(path: Path) -> list:
+    """(line, text) for each paragraph of a Markdown file, with links reduced
+    to their text and emphasis and code marks removed."""
+    out, block, start = [], [], 0
+    lines = path.read_text(encoding="utf-8").splitlines() + [""]
+    for n, line in enumerate(lines, 1):
+        if line.strip():
+            if not block:
+                start = n
+            block.append(line)
+            continue
+        if block:
+            text = " ".join(block)
+            text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+            text = re.sub(r"\*\*|__|`|(?<!\w)\*(?!\s)|(?<!\s)\*(?!\w)", "", text)
+            out.append((start, html.unescape(text)))
+            block = []
+    return out
+
+
 def all_texts() -> list:
     """(where, text) for every text the check reads."""
     out = []
     for path in _tracked_py():
         rel = path.relative_to(ROOT).as_posix()
         out += [(f"{rel}:{line}", text) for line, text in _py_texts(path)]
+    for path in _tracked_docs():
+        rel = path.relative_to(ROOT).as_posix()
+        out += [(f"{rel}:{line}", text) for line, text in _md_texts(path)]
     rel = (STATIC / "app" / "i18n-en.js").relative_to(ROOT).as_posix()
     out += [(f"{rel} {key}", text) for key, text in _catalog_texts()]
     rel = (STATIC / "index.html").relative_to(ROOT).as_posix()
@@ -279,7 +315,8 @@ def check_text(text: str, places: dict) -> list:
     text = re.sub(r"\s+", " ", text)
     bad = []
     for m in START.finditer(text):
-        if any(app in text and text.startswith(place, m.start())
+        rest = SEP.sub(" > ", text[m.start():])
+        if any(app in text and rest.startswith(SEP.sub(" > ", place))
                for app, place in OTHER_APP_PLACES):
             continue
         pos = m.end()
@@ -319,6 +356,19 @@ def test_the_check_reads_every_kind_of_text():
     assert any(w.startswith("localm/settings_schema.py:") for w in wheres)
     assert any(w.startswith("localm/plugins/gui/static/app/i18n-en.js ") for w in wheres)
     assert any(w.startswith("localm/plugins/gui/static/index.html:") for w in wheres)
+    assert any(w.startswith("README.md:") for w in wheres)
+    assert any(w.startswith("docs/phone.md:") for w in wheres)
+
+
+def test_a_markdown_mention_is_read_through_its_emphasis_and_links(tmp_path):
+    page = tmp_path / "page.md"
+    page.write_text("Open **Settings > Server > Bind address**\nand go on.\n\n"
+                    "See [Settings > Media > Image > Native model](x.md).\n", encoding="utf-8")
+    places = settings_places()
+    texts = _md_texts(page)
+    assert [line for line, _ in texts] == [1, 4]
+    assert check_text(texts[0][1], places)
+    assert not check_text(texts[1][1], places)
 
 
 def test_the_check_rejects_missing_places_and_accepts_real_ones():
@@ -333,3 +383,5 @@ def test_the_check_rejects_missing_places_and_accepts_real_ones():
     assert not check_text("Settings > Server & network failed: x", places)
     assert not check_text("Settings > System > Updates > Inference runtime", places)
     assert not check_text("in Settings > Privacy & data.", places)
+    assert check_text("later in Settings › Knowledge.", places)
+    assert not check_text("in Settings › Plugins › Knowledge (RAG) › Allowed folders.", places)

@@ -564,12 +564,16 @@ def _legacy_owner_identity(key: str) -> str:
     return _fast_digest(key)
 
 
-def _memo_key(key: str) -> str:
-    """Lookup handle for the in-memory memo: the presented secret's fast digest.
+_MEMO_SECRET = secrets.token_bytes(32)
 
-    This value is never persisted and never leaves the process; the digest that
-    IS written to disk for the owner key is the scrypt derivation."""
-    return _fast_digest(key)
+
+def _memo_key(key: str) -> str:
+    """Lookup handle for the in-memory memo: HMAC-SHA256 of the presented secret
+    under a per-process random secret. Never persisted, never leaves the process,
+    and not an unsalted hash of the secret; the digest that IS written to disk
+    for the owner key is the scrypt derivation."""
+    return hmac.new(_MEMO_SECRET, key.encode("utf-8", "surrogatepass"),
+                    hashlib.sha256).hexdigest()
 
 
 def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,

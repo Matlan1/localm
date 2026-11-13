@@ -109,23 +109,27 @@ nothing or fails, when the selector fails, prints nothing, names a path that
 is not an existing test file, or cannot resolve the base ref it diffs from. A
 change that fails the gate that way needs the two-platform matrix with
 coverage, which runs on a PR carrying the `full-ci` label in place of the
-gate.
+gate. `python-pr-gate-windows` runs the same selection, with the same install
+and test command, on windows-latest, so a test that skips on Linux (`skipif`
+not win32) runs on every pull request that selects it; the lockfile check, the
+hygiene gate and ruff run on the Linux job only.
 
 `merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
-others up. It runs on every pull request once `python-pr-gate`, `lint`,
-`gui-tests`, `test`, `mutation-scope` and `mutation-test` have finished,
+others up. It runs on every pull request once `python-pr-gate`,
+`python-pr-gate-windows`, `lint`, `gui-tests`, `test`, `mutation-scope` and
+`mutation-test` have finished,
 whatever their results, and it is never skipped on a pull request, so a
 needed job that was skipped or failed cannot read as a pass. It passes when
 `lint` and `mutation-scope` succeeded, `mutation-test` succeeded when
 `mutation-scope` selected any mutation shard (and otherwise did not fail when
 it ran; skipped is neutral then) and, on a PR without the `full-ci` label,
-`python-pr-gate` succeeded and the change is not a release (`VERSION`
-unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
+`python-pr-gate` and `python-pr-gate-windows` succeeded and the change is not
+a release (`VERSION` unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
 succeeded. `gui-tests` runs on both hosts on a pull request that
 carries the label; without it, on the Linux host only, and only when the
 change touches the GUI or its tests. The two-platform matrix runs at release, not on
 an ordinary pull request: a release PR without the label fails
-`merge-policy` with the label named, and every other PR merges on the three
+`merge-policy` with the label named, and every other PR merges on the four
 cheap jobs. Adding the label to an open PR leaves the earlier unlabelled
 run's `merge-policy` in place next to the new one; the newest check run of
 that name is the verdict. The summary also lists the matrix categories the
