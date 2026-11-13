@@ -169,7 +169,7 @@ localm pull https://example.com/m.gguf --sha256 <hash>
 # Alias for the downloaded model
 localm pull owner/repo --name myalias
 
-# Force a fresh download even if an identical model is already registered
+# Download again and replace the copy already in the models folder (a damaged file, say)
 localm pull owner/repo:model-Q4_K_M.gguf --redownload
 
 # Download an mmproj vision projector alongside the main model
@@ -179,7 +179,7 @@ localm pull owner/repo:model-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf
 localm pull owner/repo:model-Q4_K_M.gguf --type llm
 ```
 
-A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add something already registered, localm offers alias / copy / move / register / skip; a pull of something you already have offers alias / download anyway / skip before it downloads (a URL download that turns out to match a registered file offers to alias it and delete the new copy), instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
+A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add something already registered, localm offers alias / copy / move / register / skip; a pull of something you already have offers alias / download anyway / skip before it downloads (a URL download that turns out to match a registered file offers to alias it and delete the new copy), instead of silently duplicating gigabytes. `--redownload` fetches the file or files of the pull again (a single file, every part of a split GGUF, a full repo, a direct URL or a CivitAI file) even when they are already in the models folder: the new download goes to a temporary location and replaces the copy already there only after it matches the published SHA256 (or your `--sha256`), so a download that fails or does not match leaves the old copy untouched. It is refused, with nothing changed, while a model registered from another source (another repo, another revision, another URL) uses that file or folder. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
 ### Interrupted downloads
 
@@ -200,6 +200,7 @@ At a terminal, `localm pull <spec>` first offers each other interrupted download
 ```bash
 localm search qwen2.5 7b instruct            # find GGUF repos
 localm search bartowski/Qwen2.5-7B-GGUF --files  # quants + sizes + VRAM fit
+localm search owner/repo@v1.0 --files        # the files of a branch, tag or commit
 localm search qwen2.5 -n 25                  # up to 25 results (default 10)
 ```
 

@@ -356,7 +356,7 @@ class TestScopeEnforcement:
             assert scoped.jobs.cli_calls == []
             r = c.post("/api/models/pull", json={"spec": "owner/repo:file.gguf"},
                        headers=_hdr(writer))
-        assert r.status_code == 200 and set(r.json()) == {"job_id"}
+        assert r.status_code == 200 and r.json() == {"job_id": "job-1", "kind": "pull"}
 
 
 # --------------------------------------------------------------------------- #
@@ -760,7 +760,7 @@ class TestPull:
             r = c.post("/api/models/pull", json={
                 "spec": " o/r:file.gguf ", "name": "nick", "mmproj": "mm.gguf",
                 "sha256": "ab" * 32, "store": "copy", "model_type": "llm"})
-        assert r.status_code == 200 and set(r.json()) == {"job_id"}
+        assert r.status_code == 200 and set(r.json()) == {"job_id", "kind"}
         kind, args, kw = harness.jobs.cli_calls[0]
         assert kind == "pull"
         assert args == ["pull", "--name", "nick", "--mmproj", "mm.gguf",

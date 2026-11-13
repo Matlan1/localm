@@ -82,6 +82,24 @@ def _remote_only_args(request: Request) -> list[str]:
     return [] if effective_fs_access(request) == "host" else ["--remote-only"]
 
 
+async def _registers_local_path(spec: str, request: Request) -> bool:
+    """True when the pull of *spec* by this caller registers a file or folder on
+    this machine in place instead of downloading it, as ``pull_model`` decides
+    with ``local_spec_path``. Never for a caller without host filesystem
+    access. A UNC or device spec is judged by its text and never stat'ed here.
+    Raises HTTPException 504 when the path check times out."""
+    if _remote_only_args(request):
+        return False
+    if pathsafe.is_unc_or_device_path(spec):
+        return True
+    from localm.model_manager.pull import local_spec_path
+    try:
+        found = await run_in_threadpool_bounded(local_spec_path, spec, timeout=10.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Checking {spec} on this machine timed out: {e}") from e
+    return found is not None
+
+
 def register(app: FastAPI, context: ModelRouteContext) -> None:
     jobs = context.jobs
 
@@ -112,6 +130,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # The textual check runs first, so a UNC spec never reaches a stat.
         if _spec_names_a_host_path(spec):
             require_fs_host(request)
+        # A local file or folder is registered as a "Model add" job, a remote
+        # spec is downloaded as a "Model pull" job.
+        adding = await _registers_local_path(spec, request)
+        kind, label = ("add", f"Model add {spec}") if adding else ("pull", f"Model pull {spec}")
         # Fails here rather than starting a second download of the same spec
         # that cannot finish. ADVISORY ONLY, not the guard: reading the job list
         # and then starting a job are two steps, so two requests can both find
@@ -120,12 +142,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # which also covers the contender this cannot see - a `localm pull` a
         # user ran in a terminal. This only spares the user a job that would
         # start and immediately refuse.
-        label = f"Model pull {spec}"
-        if any(j.get("kind") == "pull" and j.get("status") == "running"
+        if any(j.get("kind") == kind and j.get("status") == "running"
                and j.get("label") == label for j in jobs.snapshot()):
             raise HTTPException(
-                409, f"Already downloading {spec} - watch the running job "
-                     f"instead of starting a second one.")
+                409, f"Already {'adding' if adding else 'downloading'} {spec} - "
+                     "watch the running job instead of starting a second one.")
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
         args = ["pull", *_remote_only_args(request)]
@@ -151,11 +172,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars.
-        job = jobs.start_cli("pull", args, extra_env={
+        job = jobs.start_cli(kind, args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        }, host_label=f"Model pull {spec}", owner=principal_id(request))
-        return {"job_id": job.id}
+        }, host_label=label, owner=principal_id(request))
+        return {"job_id": job.id, "kind": kind}
 
     @app.post("/api/models/pull/discard",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

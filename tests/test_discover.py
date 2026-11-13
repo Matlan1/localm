@@ -800,17 +800,17 @@ class TestTypeScopedSearch:
         assert "filter" not in seen   # replaces the generic transformers filter entirely
         assert results[0]["detected_type"] == "embedding"
 
-    def test_embedding_gguf_stays_plain_gguf_filter(self, monkeypatch):
-        """No reliable gguf+embedding combined filter exists - conservative
-        default: plain gguf format filter, query text does the narrowing, still
-        classified for a badge when metadata is present."""
-        seen = {}
-        _mock_fetch(monkeypatch, [
+    def test_embedding_gguf_ands_the_feature_extraction_tag(self, monkeypatch):
+        """An embedding GGUF repo carries the feature-extraction tag even
+        without a pipeline_tag (Qwen/Qwen3-Embedding-0.6B-GGUF), so the gguf
+        side is filter=gguf AND filter=feature-extraction, classified for a
+        badge."""
+        urls = _urls_capture(monkeypatch, [
             {"id": "unsloth/bge-small-en-v1.5-GGUF", "downloads": 9,
-             "pipeline_tag": "sentence-similarity", "tags": ["gguf", "feature-extraction"]},
-        ], seen)
+             "pipeline_tag": "sentence-similarity", "tags": ["gguf", "feature-extraction"]}])
         results = hf_search("bge", limit=5, formats=["gguf"], model_types=["embedding"])
-        assert seen["filter"] == "gguf"
+        assert "filter=gguf" in urls[0] and "filter=feature-extraction" in urls[0]
+        assert "pipeline_tag" not in urls[0]
         assert results[0]["detected_type"] == "embedding"
 
     def test_diffusion_hf_uses_text_to_image_pipeline_tag(self, monkeypatch):

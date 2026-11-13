@@ -457,7 +457,7 @@ class TestSnapshotDestCollision:
         """The collision check must not fire on a legitimate --redownload of
         the repo already registered at this exact dest (matching source)."""
         store, models_dir = fake_registry
-        self._wire(monkeypatch)
+        downloaded = self._wire(monkeypatch)
 
         assert mm._pull_hf_snapshot(self.REPO_A, "mymodel") is True
         capsys.readouterr()
@@ -465,10 +465,7 @@ class TestSnapshotDestCollision:
         ok = mm._pull_hf_snapshot(self.REPO_A, "mymodel", redownload=True)
 
         assert ok is True
-        # redownload=True skips the "already downloaded" fast path's dedup prompt
-        # branch, but the snapshot IS already complete, so it still short-circuits
-        # there rather than re-downloading. What this checks is only that the
-        # collision check does not refuse it.
+        assert downloaded == [self.REPO_A, self.REPO_A]
         assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"
         out = _flat(capsys.readouterr().out)
         assert "different model" not in out

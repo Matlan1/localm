@@ -65,6 +65,11 @@ _HF_TYPE_FILTER = {
 # only; their type comes from the result badge (classify_hf_metadata) and, at
 # pull time, from the checkbox the user searched under.
 _HF_TYPE_FILTER_DEFAULT = {"filter": "safetensors"}
+# The Hub tag ANDed with "gguf" in a type-scoped GGUF search. An embedding GGUF
+# repo carries "feature-extraction" in its tags even without a pipeline_tag;
+# llm, lora, vae, text-encoder and unknown GGUF repos carry no tag of their
+# type, so a search for those lists every GGUF repo.
+_GGUF_TYPE_TAG = {"diffusion-unet": "diffusers", "embedding": "feature-extraction"}
 _ALL_SEARCHABLE_TYPES = frozenset(
     {"llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"})
 # Sentinel model_type for the "all types selected" broad search: the widest
@@ -405,16 +410,16 @@ def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
     ``search_models``): the plain per-format library tag - gguf -> "gguf",
     hf -> "transformers".
 
-    Otherwise the gguf side is the reliable, type-independent "gguf" Hub tag
-    (diffusion additionally ANDs "diffusers" so a gguf search isn't drowned by
-    unrelated gguf repos), and the hf (safetensors) side narrows per type where
-    HF exposes a reliable signal, else the plain "safetensors" format tag."""
+    Otherwise the gguf side is the "gguf" Hub tag, ANDed with the tag of the
+    type where GGUF repos carry one (_GGUF_TYPE_TAG: diffusion "diffusers",
+    embedding "feature-extraction"), and the hf (safetensors) side narrows per
+    type where HF exposes a reliable signal, else the plain "safetensors"
+    format tag."""
     if model_type is None:
         return {"filter": _FORMAT_FILTER[fmt]}
     if fmt == "gguf":
-        if model_type == "diffusion-unet":
-            return {"filter": ["gguf", "diffusers"]}
-        return {"filter": "gguf"}
+        tag = _GGUF_TYPE_TAG.get(model_type)
+        return {"filter": ["gguf", tag]} if tag else {"filter": "gguf"}
     if model_type == _ANY_TYPE:
         return {"filter": "safetensors"}
     return _HF_TYPE_FILTER.get(model_type, _HF_TYPE_FILTER_DEFAULT)
@@ -608,21 +613,36 @@ def hf_gguf_files(repo: str, token: Optional[str] = None) -> list[dict]:
     is the first part (what ``localm pull repo:file`` expects) and whose
     size is the sum of all parts. Sorted smallest-first.
 
+    *repo* is ``owner/repo`` (the ``main`` branch) or ``owner/repo@<revision>``
+    (a branch, tag or commit, parsed as ``localm pull`` parses it), whose files
+    are then listed. Raises :class:`DiscoverError` for a malformed id or
+    revision, and for a repo or revision that cannot be read.
+
     *token*: optional HF API token (see hf_search) - required for a gated
     repo's tree to be visible at all.
     """
+    import urllib.parse
+
+    from localm.model_manager.pull import split_hf_revision
     _ensure_online()
     repo = repo.strip().strip("/")
+    try:
+        repo, revision = split_hf_revision(repo)
+    except ValueError as e:
+        raise DiscoverError(f"Not a valid revision: {e}") from e
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         raise DiscoverError(f"Not a HuggingFace repo id: {repo}")
+    ref = urllib.parse.quote(revision, safe="") if revision else "main"
     try:
-        tree = _get(f"{HF_API}/api/models/{repo}/tree/main",
+        tree = _get(f"{HF_API}/api/models/{repo}/tree/{ref}",
                     {"recursive": "true"}, token=token)
     except DiscoverError as e:
         status = getattr(getattr(e.__cause__, "response", None), "status_code", None)
         if status in (401, 403, 404):
+            what = (f"Repository {repo} or its revision {revision}" if revision
+                    else f"Repository {repo}")
             raise DiscoverError(
-                f"Repository {repo} was not found, or it is private or gated "
+                f"{what} was not found, or it is private or gated "
                 "(HuggingFace answers the same way for all three). Check the "
                 "name; for a private or gated repo set a token with "
                 "`localm config hf_token hf_xxx` and accept the repo's terms "

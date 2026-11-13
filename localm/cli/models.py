@@ -694,7 +694,10 @@ def spec_drafts(model):
               help="Expected SHA256 hex digest (direct-URL, HF single-GGUF and CivitAI pulls; "
                    "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
-              help="Download even when an identical model is already registered.")
+              help="Download the model again and replace the copy already in "
+                   "the models folder once the new download is verified, for "
+                   "example a damaged file. Refused while a model pulled from "
+                   "another source uses that file.")
 @click.option("--mmproj", default=None, metavar="FILE",
               help="Download an associated mmproj file alongside the main model.")
 @click.option("--type", default="auto",
@@ -1083,9 +1086,9 @@ def _stopped_pull_message() -> str:
 @click.argument("query", nargs=-1)
 @click.option("-n", "--limit", default=10, show_default=True, help="Max repos/models.")
 @click.option("--files", "list_files", is_flag=True,
-              help="Treat QUERY as one repo id (--source hf) or one model "
-                   "VERSION id (--source civitai) and list its downloadable "
-                   "files.")
+              help="Treat QUERY as one repo id (--source hf; owner/repo@REVISION "
+                   "for a branch, tag or commit) or one model VERSION id "
+                   "(--source civitai) and list its downloadable files.")
 @click.option("--source", default="hf", show_default=True,
               type=click.Choice(["hf", "civitai"], case_sensitive=False),
               help="Which model source to search.")
@@ -1102,6 +1105,7 @@ def search_cmd(query, limit, list_files, source, nsfw, legacy_formats):
     Examples:
       localm search qwen2.5 7b instruct
       localm search bartowski/Qwen2.5-7B-Instruct-GGUF --files
+      localm search owner/repo@v1.0 --files
       localm search --source civitai detail tweaker
       localm search --source civitai --files 135867
     """
