@@ -84,7 +84,7 @@ def commands_digest(raw: dict) -> str:
 _PROJECT_PREFIX = b"localm-coder-project-v1\0"
 
 # Config keys that take effect only once the project is trusted.
-GATED_KEYS: tuple[str, ...] = ("auto_approve", "verify", "model", "mode")
+GATED_KEYS: tuple[str, ...] = ("auto_approve", "verify", "model", "mode", "memory_file")
 
 # Files under a project's .localcoder folder that take effect only once the
 # project is trusted, relative to that folder.
@@ -241,6 +241,9 @@ def gated_items(raw: dict, content: list[tuple[str, str]]) -> list[str]:
                      "run as a shell command after every turn that changed files")
     if raw.get("model") is not None:
         lines.append(f"model = {json.dumps(str(raw['model']), ensure_ascii=True)}")
+    if raw.get("memory_file"):
+        lines.append(f"memory_file = {json.dumps(str(raw['memory_file']), ensure_ascii=True)}: "
+                     "project memory the agent reads")
     if raw.get("mode") is not None and _mode_widens(raw.get("mode")):
         lines.append(f"mode = {json.dumps(str(raw['mode']), ensure_ascii=True)}: "
                      "records more of the session than your own coder mode")
