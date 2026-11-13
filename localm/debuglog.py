@@ -363,11 +363,13 @@ class _Writers:
         when all of them were drained."""
         return not self.stuck(timeout)
 
-    def stuck(self, timeout: float = 5.0) -> list[_LogWriter]:
+    def stuck(self, timeout: float = 5.0, *, files_only: bool = False) -> list[_LogWriter]:
         """The writers that did not drain within *timeout* seconds; every
-        writer is drained at once against the same deadline."""
+        writer (with *files_only*, every debug log file writer) is drained at
+        once against the same deadline."""
         deadline = time.monotonic() + timeout
-        marks = [(writer, writer.mark()) for writer in self.all()]
+        marks = [(writer, writer.mark()) for writer in self.all()
+                 if not files_only or isinstance(writer.handler, logging.FileHandler)]
         return [writer for writer, done in marks
                 if done is not None
                 and not done.wait(max(0.0, deadline - time.monotonic()))]
@@ -437,6 +439,40 @@ class _OffThreadStreamHandler(_OffThreadEmit, logging.StreamHandler):
     """The console mirror; writes on its log writer thread."""
 
 
+def drain_debug_log(timeout: float = 1.0) -> bool:
+    """Wait up to *timeout* seconds until every record queued for a debug log
+    FILE in this process is written, so a reader of the file sees them. True
+    when they all were; a file writer that was not is named in a WARNING
+    written to the other handlers (``_report_stuck``). Call before reading,
+    copying or appending to the debug log file. Never raises."""
+    try:
+        stuck = _log_writer.stuck(timeout, files_only=True)
+    except Exception:
+        return False
+    _report_stuck(stuck, "before the debug log file was read")
+    return not stuck
+
+
+def _report_stuck(stuck: list, when: str) -> None:
+    """A WARNING, written to every handler other than the stuck one, naming
+    each writer in *stuck* with its pending and dropped record counts and
+    *when* it was found stuck. Never raises."""
+    for writer in stuck:
+        try:
+            record = logger.makeRecord(
+                logger.name, logging.WARNING, __file__, 0,
+                "debug log: %d records for %s were not written %s, and %d were "
+                "dropped (its stream did not accept writes)",
+                (writer.pending(), _describe_handler(writer.handler), when,
+                 writer.dropped()),
+                None)
+            for h in list(logger.handlers):
+                if h is not writer.handler and record.levelno >= h.level:
+                    h.handle(record)
+        except Exception:
+            pass
+
+
 def _describe_handler(handler: logging.Handler) -> str:
     name = getattr(handler, "baseFilename", None)
     return f"the debug log file {name}" if name else "the console"
@@ -461,20 +497,7 @@ def flush_log_handlers(timeout: float = 5.0) -> None:
         stuck = _log_writer.stuck(timeout)
     except Exception:
         stuck = []
-    for writer in stuck:
-        try:
-            record = logger.makeRecord(
-                logger.name, logging.WARNING, __file__, 0,
-                "debug log: %d records for %s were not written before this process "
-                "restarted or stopped, and %d were dropped (its stream did not accept "
-                "writes)",
-                (writer.pending(), _describe_handler(writer.handler), writer.dropped()),
-                None)
-            for h in list(logger.handlers):
-                if h is not writer.handler and record.levelno >= h.level:
-                    h.handle(record)
-        except Exception:
-            pass
+    _report_stuck(stuck, "before this process restarted or stopped")
     stuck_handlers = {id(writer.handler) for writer in stuck}
     for h in list(logger.handlers):
         if id(h) in stuck_handlers:
@@ -909,13 +932,15 @@ def native_stderr_target() -> Optional[int]:
     """
     File descriptor that native (llama.cpp) stderr should be redirected to
     during suppression windows: the debug log in debug mode, else None
-    (caller falls back to devnull).
+    (caller falls back to devnull). Records already queued for the file are
+    written first (``drain_debug_log``).
 
     The caller owns the descriptor and must close it after dup2.
     """
     path = log_file_path()
     if path is None:
         return None
+    drain_debug_log()
     try:
         return os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     except OSError:

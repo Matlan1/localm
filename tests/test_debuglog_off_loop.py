@@ -306,3 +306,82 @@ def test_a_blocked_stream_holds_at_most_the_bound(debug_logger, monkeypatch):
     assert lines[21:] == ["debug log: 80 records were dropped while the console did not "
                           "accept writes"]
     assert writer.dropped() == 0 and writer.pending() == 0
+
+
+@pytest.fixture
+def slow_debug_file(tmp_path, monkeypatch):
+    """A debug log file in tmp_path/logs named for this process, written by an
+    off-thread file handler whose writes take 0.2 s each."""
+    import os
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / f"localm_2026-01-01_000000_{os.getpid()}.log"
+    monkeypatch.setenv("LOCALM_DEBUG", str(path))
+    handler = debuglog._OffThreadFileHandler(path, mode="a", encoding="utf-8", delay=True)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+    real_write = handler._write
+
+    def slow_write(text, record):
+        time.sleep(0.2)
+        real_write(text, record)
+    handler._write = slow_write
+    debuglog.logger.addHandler(handler)
+    old_level = debuglog.logger.level
+    debuglog.logger.setLevel(logging.DEBUG)
+    try:
+        yield tmp_path, path
+    finally:
+        handler.writer().drain(10)
+        debuglog.logger.removeHandler(handler)
+        debuglog.logger.setLevel(old_level)
+        handler.close()
+
+
+def test_a_line_logged_just_before_a_bug_report_is_in_its_log_tail(slow_debug_file):
+    import os
+
+    from localm.bugreport.logs import _recent_log_tail_result
+    home, _ = slow_debug_file
+    debuglog.logger.warning("first line")
+    debuglog.logger.warning("line just before the report")
+    tail, unavailable = _recent_log_tail_result(home, pid=os.getpid())
+    assert unavailable == ""
+    assert "line just before the report" in tail
+
+
+def test_native_output_lands_after_the_lines_logged_before_it(slow_debug_file):
+    import os
+    _, path = slow_debug_file
+    debuglog.logger.warning("python line")
+    fd = debuglog.native_stderr_target()
+    assert fd is not None
+    try:
+        os.write(fd, b"native line\n")
+    finally:
+        os.close(fd)
+    text = path.read_text(encoding="utf-8")
+    assert text.index("python line") < text.index("native line")
+
+
+def test_a_debug_log_file_that_does_not_drain_is_named_and_the_reader_goes_on(
+        tmp_path, debug_logger):
+    release = threading.Event()
+    path = tmp_path / "debug.log"
+    file_handler = debuglog._OffThreadFileHandler(path, mode="a", encoding="utf-8", delay=True)
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    real_write = file_handler._write
+    file_handler._write = lambda text, record: (release.wait(30), real_write(text, record))
+    debug_logger(file_handler)
+    console = io.StringIO()
+    console_handler = debug_logger(_off_thread(console))
+    debuglog.logger.warning("held line")
+    start = time.monotonic()
+    assert debuglog.drain_debug_log(0.3) is False
+    assert time.monotonic() - start < 2
+    release.set()
+    assert file_handler.writer().drain(10)
+    assert console_handler.writer().drain(10)
+    warned = [line for line in console.getvalue().splitlines() if "not written" in line]
+    assert len(warned) == 1
+    assert "before the debug log file was read" in warned[0]
+    assert str(path) in warned[0]
