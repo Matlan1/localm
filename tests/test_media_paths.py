@@ -612,3 +612,59 @@ def test_logs_export_allowed_with_fs_host(tmp_path, monkeypatch):
         r = c.post("/api/logs/export", headers=_h(key), json={"dest": str(dest)})
     assert r.status_code == 200, r.text
     assert list(dest.glob("localm-logs-*")), "export produced no folder"
+
+
+def _input_home(tmp_path, monkeypatch):
+    home = tmp_path / ".localm"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    return home
+
+
+def test_a_bare_gallery_or_upload_name_is_the_file_of_that_name(tmp_path, monkeypatch):
+    home = _input_home(tmp_path, monkeypatch)
+    for sub, name in (("gui_images", "20261113_cat.png"), ("uploads", "sketch.png")):
+        src = home / sub / name
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
+        assert media_paths.check_input_image(name) == src.resolve()
+
+
+def test_a_bare_name_two_roots_hold_is_refused_without_a_path(tmp_path, monkeypatch):
+    home = _input_home(tmp_path, monkeypatch)
+    for sub in ("uploads", "gui_images"):
+        (home / sub).mkdir(parents=True)
+        (home / sub / "same.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    with pytest.raises(media_paths.InputImageRefused) as ei:
+        media_paths.check_input_image("same.png")
+    assert "more than one" in str(ei.value)
+    assert str(home) not in str(ei.value)
+    assert media_paths.check_input_image(str(home / "uploads" / "same.png")) == (
+        home / "uploads" / "same.png").resolve()
+
+
+@pytest.mark.parametrize("raw", ["absent.png", "..", ".", "auth.key", "C:auth.key"])
+def test_a_bare_name_no_root_holds_is_refused_as_before(tmp_path, monkeypatch, raw):
+    home = _input_home(tmp_path, monkeypatch)
+    (home / "auth.key").write_text("secret", encoding="utf-8")
+    (home / "uploads").mkdir()
+    monkeypatch.chdir(home)
+    with pytest.raises(media_paths.InputImageRefused):
+        media_paths.check_input_image(raw)
+
+
+def test_a_bare_name_that_is_a_link_out_of_a_root_is_refused(tmp_path, monkeypatch):
+    import os
+    home = _input_home(tmp_path, monkeypatch)
+    (home / "gui_images").mkdir()
+    secret = home / "auth.key"
+    secret.write_text("secret", encoding="utf-8")
+    link = home / "gui_images" / "innocent.png"
+    try:
+        os.symlink(secret, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("this account cannot create symlinks")
+    with pytest.raises(media_paths.InputImageRefused):
+        media_paths.check_input_image("innocent.png")
