@@ -14,6 +14,8 @@ says "same model -> attach".
 
 from __future__ import annotations
 
+import pytest
+
 from localm.model_manager import names_same_model
 
 
@@ -82,21 +84,24 @@ class TestBothGuardsUseIt:
     """The refusal exists in two places and both must resolve aliases, or the
     bug simply moves to the other entry point."""
 
-    def test_the_run_guard_resolves_aliases(self):
+    def test_the_shared_switch_resolves_aliases(self):
         from pathlib import Path
-        src = Path(__file__).resolve().parents[1] / "localm" / "cli" / "chat.py"
+        src = (Path(__file__).resolve().parents[1] / "localm" / "inference"
+               / "server_switch.py")
         t = src.read_text(encoding="utf-8")
         assert "served_model_is_requested(" in t, (
-            "localm run compares the names, so an alias of the loaded model "
+            "the switch compares the names, so an alias of the loaded model "
             "reads as a different model")
         assert "if active and active != model:" not in t
 
-    def test_the_gui_attach_guard_resolves_aliases(self):
+    @pytest.mark.parametrize("rel", [
+        ("cli", "chat.py"), ("plugins", "gui", "cli.py"),
+        ("plugins", "coder", "cli", "_main.py")])
+    def test_each_attaching_command_uses_the_shared_switch(self, rel):
         from pathlib import Path
-        src = (Path(__file__).resolve().parents[1] / "localm" / "plugins"
-               / "gui" / "cli.py")
-        t = src.read_text(encoding="utf-8")
-        assert "served_model_is_requested(" in t
+        src = Path(__file__).resolve().parents[1] / "localm"
+        t = src.joinpath(*rel).read_text(encoding="utf-8")
+        assert "serve_requested_model(" in t
         assert "if active and active != model:" not in t
 
     def test_the_shared_check_resolves_aliases_first(self):
