@@ -2888,6 +2888,8 @@
   "settings.voice.downloading": "Descargando el modelo de voz...",
   "settings.voice.downloadingToast": "Descargando el modelo de voz...",
   "settings.voice.inactive": "El plugin de voz a texto no está activo.",
+  "settings.pluginOff.notInstalled": "El plugin {name} no está instalado, así que estos ajustes aún no hacen nada. Instálalo en la página Plugins.",
+  "settings.pluginOff.disabled": "El plugin {name} está desactivado, así que estos ajustes no hacen nada hasta que lo actives en la página Plugins.",
   "settings.voice.notDownloaded": "El modelo de voz ({model}) aún no está descargado.",
   "settings.voice.ready": "El modelo de voz ({model}) está descargado y listo.",
   "settings.voice.readyToast": "Modelo de voz listo",

@@ -2888,6 +2888,8 @@
   "settings.voice.downloading": "Téléchargement du modèle vocal...",
   "settings.voice.downloadingToast": "Téléchargement du modèle vocal...",
   "settings.voice.inactive": "Le plugin de reconnaissance vocale n'est pas actif.",
+  "settings.pluginOff.notInstalled": "Le plugin {name} n'est pas installé : ces paramètres n'ont donc encore aucun effet. Installez-le depuis la page Plugins.",
+  "settings.pluginOff.disabled": "Le plugin {name} est désactivé : ces paramètres n'ont aucun effet tant que vous ne l'activez pas depuis la page Plugins.",
   "settings.voice.notDownloaded": "Le modèle vocal ({model}) n'est pas encore téléchargé.",
   "settings.voice.ready": "Le modèle vocal ({model}) est téléchargé et prêt.",
   "settings.voice.readyToast": "Modèle vocal prêt",

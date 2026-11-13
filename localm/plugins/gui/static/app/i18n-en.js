@@ -2284,6 +2284,8 @@ export const I18N_EN = {
   "settings.voice.checking": "Checking speech model status...",
   "settings.voice.download": "Download speech model",
   "settings.voice.inactive": "Speech-to-text plugin is not active.",
+  "settings.pluginOff.notInstalled": "The {name} plugin is not installed, so these settings do nothing yet. Install it on the Plugins page.",
+  "settings.pluginOff.disabled": "The {name} plugin is turned off, so these settings do nothing until you turn it on on the Plugins page.",
   "settings.voice.ready": "Speech model ({model}) is downloaded and ready.",
   "settings.voice.notDownloaded": "Speech model ({model}) is not downloaded yet.",
   "settings.voice.downloadNow": "Download speech model now",

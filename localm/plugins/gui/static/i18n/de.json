@@ -2562,6 +2562,8 @@
   "settings.voice.checking": "Status des Sprachmodells wird geprüft...",
   "settings.voice.download": "Sprachmodell herunterladen",
   "settings.voice.inactive": "Das Plugin für Spracherkennung ist nicht aktiv.",
+  "settings.pluginOff.notInstalled": "Das Plugin {name} ist nicht installiert, diese Einstellungen wirken also noch nicht. Installieren Sie es auf der Seite Plugins.",
+  "settings.pluginOff.disabled": "Das Plugin {name} ist ausgeschaltet, diese Einstellungen wirken also erst, wenn Sie es auf der Seite Plugins einschalten.",
   "settings.voice.ready": "Das Sprachmodell ({model}) ist heruntergeladen und bereit.",
   "settings.voice.notDownloaded": "Das Sprachmodell ({model}) ist noch nicht heruntergeladen.",
   "settings.voice.downloadNow": "Sprachmodell jetzt herunterladen",

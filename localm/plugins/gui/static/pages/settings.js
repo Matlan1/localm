@@ -11,7 +11,7 @@ import { emptyState } from "../app/icons.js";
 import { loginWithKey, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, pluginState, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -1609,6 +1609,18 @@ export async function saveSettingsSection(secId) {
   return false;
 }
 
+/** A note for a settings card (headed *label*) whose plugin *name* is not
+ *  installed or is turned off, from the /api/capabilities plugin list; null when
+ *  the plugin is active or the list does not name it. */
+export function pluginOffNote(name, label) {
+  const p = (pluginState || []).find((x) => x && x.name === name);
+  if (!p || p.active) return null;
+  const text = p.installed
+    ? t("settings.pluginOff.disabled", { name: label })
+    : t("settings.pluginOff.notInstalled", { name: label });
+  return el("div", "sub plugin-off-note", text);
+}
+
 /** The browser plugin's entry in /api/capabilities ({installed, enabled,
  *  active, ...}), or null when the list does not name it or could not be read.
  *  On null the caller falls back to the engine check, which reports its own
@@ -1838,6 +1850,11 @@ export async function refreshSettingsPage() {
     panel.dataset.group = topGroup;
     panel.dataset.secLabel = heading || sec.label;
     if (heading) panel.appendChild(settingsSectionHead(heading, topGroup));
+    const owners = new Set(sec.ctrls.map((c) => c.field.owner || "core"));
+    if (owners.size === 1 && !owners.has("core") && sec.label !== "Voice") {
+      const offNote = pluginOffNote([...owners][0], heading || sec.label);
+      if (offNote) panel.appendChild(offNote);
+    }
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
@@ -3382,6 +3399,8 @@ export function renderMediaSubsection(name) {
   txt.appendChild(head);
   wrap.appendChild(txt);
   sub.appendChild(wrap);
+  const offNote = pluginOffNote(name, label);
+  if (offNote) sub.appendChild(offNote);
   if (["image", "music", "video"].includes(name)) {
     // docs/gui-design.md rule 6: state renders as a .job-state pill, not an
     // inline-JS-styled span. checking -> base pill (neutral, matches the old
