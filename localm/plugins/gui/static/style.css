@@ -2605,6 +2605,7 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .img-blocked-label { font-size: .9em; opacity: .85; }
 .img-blocked-why { font-size: .8em; opacity: .65; overflow-wrap: anywhere; }
+.img-blocked-retry { align-self: flex-start; margin-top: 4px; }
 
 /* promptText()'s text input (helpers.js) - same chrome as .card's fields. */
 .modal-body input[type="text"] {
