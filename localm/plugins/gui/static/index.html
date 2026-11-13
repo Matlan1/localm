@@ -435,7 +435,7 @@
               <option value="" data-i18n="models.pull.noVisionProjector">No vision projector</option>
             </select>
             <input type="text" id="pull-sha256" data-i18n-placeholder="models.pull.sha256Placeholder" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" data-i18n-title="models.pull.sha256Title" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
-            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into ~/.localm/models.">
+            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in the models folder of this instance's data folder, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into that models folder.">
               <option value="" data-i18n="models.pull.store.registerInPlace">Register in place</option>
               <option value="copy" data-i18n="models.pull.store.copy">Copy into library</option>
               <option value="move" data-i18n="models.pull.store.move">Move into library</option>
@@ -1310,9 +1310,10 @@
               <div class="update-subsection">
                 <h4 class="update-sub-head" data-i18n="settings.runtime.subHead">Inference runtime</h4>
                 <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed
-                backend, or install one on a machine that has none yet. You always start it -
-                it never re-provisions on its own. A build that fails to load on this machine
-                is never kept: setup-llama walks back to an older one that does.</div>
+                backend, or install one on a machine that has none yet. On its own, localm installs
+                only the build this localm release uses, at start, when a different build is installed
+                and none is pinned; a newer one is installed only from here. If a new build does not
+                load on this machine, localm says so.</div>
                 <div id="runtime-choice" class="key-warn" hidden>
                   <span id="runtime-choice-text"></span>
                   <div class="actions">
@@ -1333,8 +1334,8 @@
                   <option value="amd-rocm" data-i18n="settings.runtime.optAmdRocm">amd-rocm - AMD RX 6000, self-contained</option>
                 </select>
                 <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the
-                runtime; nothing is replaced while a model is loaded, and your pick is never
-                swapped silently if it turns out not to load here.</div>
+                runtime. On Windows a loaded model keeps the runtime files in use, so unload it first.
+                Your pick is never swapped silently if it turns out not to load here.</div>
                 <label for="runtime-tag" data-i18n="settings.runtime.buildLabel">Build</label>
                 <input type="text" id="runtime-tag" style="max-width:340px"
                        placeholder="leave blank to keep the current build" data-i18n-placeholder="settings.runtime.tagPlaceholder">

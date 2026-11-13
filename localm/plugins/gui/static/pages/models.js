@@ -11,7 +11,7 @@ import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
-import { PLAIN_RELOAD_KEYS, backendOverrideNote, refreshBackendInfo, refreshPerfEstimate, reloadWithToasts } from "../app/settings-perf.js";
+import { PLAIN_RELOAD_KEYS, backendOverrideNote, caps, refreshBackendInfo, refreshPerfEstimate, reloadWithToasts } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -194,7 +194,8 @@ function modelSourceText(m) {
 // comparator all read this one list.
 const MODEL_COLUMNS = [
   { key: "name", label: "models.col.name", sortable: true, kind: "string", get: (m) => m.name || "" },
-  { key: "model_type", label: "models.col.role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
+  { key: "model_type", label: "models.col.role", sortable: true, kind: "string",
+    get: (m) => (modelTypeOf(m) === UNTAGGED_TYPE ? "" : (m.model_type || "llm")) },
   { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => modelSourceText(m) },
   { key: "size_bytes", label: "models.col.size", sortable: true, kind: "number", get: (m) => m.size_bytes },
   { key: "mtime", label: "models.col.modified", sortable: true, kind: "number", get: (m) => m.mtime },
@@ -331,14 +332,18 @@ export async function postAdapterDetach(adapter) {
   return { ok: r.ok, data };
 }
 
-/** The chat models an adapter can be attached to, from the last list read. */
-export function adapterBaseCandidates() {
+/** The chat models an adapter can be attached to, from the last list read:
+ *  chat models of the adapter's own architecture when both are known (the
+ *  attach route refuses any other). */
+export function adapterBaseCandidates(adapter) {
+  const arch = adapter && adapter.architecture;
   return _modelsSnapshot.filter((x) => !x.adapter && !x.missing
-    && (!x.model_type || x.model_type === "llm"));
+    && (!x.model_type || x.model_type === "llm")
+    && (!arch || x.architecture === arch));
 }
 
 export function openAdapterAttachModal(m) {
-  const bases = adapterBaseCandidates();
+  const bases = adapterBaseCandidates(m);
   openModal(t("models.adapter.attachTitle", { name: m.name }), (body) => {
     if (!bases.length) {
       body.appendChild(el("p", "", t("models.adapter.noBases")));
@@ -504,6 +509,9 @@ export async function refreshModelsPage() {
       box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), noMatch] : [noMatch]));
     } else if (hiddenOther) {
       box.replaceChildren(otherHiddenNote(hiddenOther));
+    } else if (currentTypeFilter !== "all" && (_modelsSnapshot || []).length) {
+      box.replaceChildren(emptyState("models", t("models.empty.tabText", { type: typeLabel(currentTypeFilter) }),
+        t("models.empty.tabHint")));
     } else {
       box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
     }
@@ -838,7 +846,7 @@ export async function refreshModelsPage() {
           refreshModelsPage();
           refreshPerfEstimate();
         } catch (e) {
-          toast(e.message || t("models.unload.failed"), true);
+          toast(e.message ? t("models.unload.failedMsg", { message: e.message }) : t("models.unload.failed"), true);
         } finally { unload.disabled = false; }
       };
       actions.appendChild(unload);
@@ -912,7 +920,7 @@ function confirmPackages(name, plan) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
       cancel.onclick = () => finish(false);
-      const ok = el("button", "btn-secondary", t("models.packages.confirmLabel"));
+      const ok = el("button", "btn-primary", t("models.packages.confirmLabel"));
       ok.onclick = () => finish(true);
       row.appendChild(cancel);
       row.appendChild(ok);
@@ -1365,7 +1373,7 @@ function discCivitaiRow(m) {
     t("models.civitai.flagsLine", {
       commercial: civitaiCommercialUse(m.allowCommercialUse),
       derivatives: civitaiFlag(m.allowDerivatives),
-      credit: civitaiFlag(m.allowNoCredit === undefined ? undefined : !m.allowNoCredit),
+      credit: civitaiFlag(typeof m.allowNoCredit === "boolean" ? !m.allowNoCredit : undefined),
       license: civitaiFlag(m.allowDifferentLicense),
     }));
   flags.title = t("models.civitai.flagsTitle");
@@ -1760,14 +1768,22 @@ if ($("pull-shortcut")) {
   };
 }
 
+/** True when *text* reads as a path on disk (absolute, home-relative or
+ *  dot-relative), not a Hugging Face spec or a URL. */
+export function looksLikeLocalPath(text) {
+  const s = String(text || "").trim();
+  return /^([A-Za-z]:[\\/]|[\\/]|~[\\/]?|\.{1,2}[\\/])/.test(s);
+}
+
 // Pick a folder on this machine and drop its path into the spec field; the
 // /api/models/pull endpoint accepts a local folder/file path.
 document.addEventListener("click", async (e) => {
   if (e.target && e.target.id === "pull-browse") {
     const spec = $("pull-spec");
     if (!spec) return;
+    if (caps.fsAccess !== "host") { toast(t("models.pull.browseNoHost"), true); return; }
     const dir = await pickDirectory(t("models.pull.browseDialogTitle"),
-                                    spec.value.trim());
+                                    looksLikeLocalPath(spec.value) ? spec.value.trim() : "");
     if (dir) spec.value = dir;
   }
 });
@@ -2898,7 +2914,12 @@ export async function runtimeProvision(backend, tag, rollback) {
     if ($("runtime-tag")) $("runtime-tag").value = "";
     await runtimeUpdateCheck();   // re-checks; settles the update, rollback and choice rows
     const choice = runtimeChoiceText(runtimeCheckState);
-    if (out && choice) out.textContent = choice;
+    if (out) {
+      // A choice that was not used replaces the line; otherwise the outcome
+      // stays first and the re-check's line follows it.
+      const done = rollback ? t("settings.runtime.rolledBack") : t("settings.runtime.provisioned");
+      out.textContent = choice || `${done} ${out.textContent}`;
+    }
     refreshBackendInfo();
   } else {
     syncRuntimeApply();     // failed: keep the retry affordance, correctly labelled
@@ -3046,12 +3067,11 @@ if ($("logs-export")) {
         out.hidden = false;
         out.textContent = data.copied
           ? tn("settings.logs.exported", data.copied, { dest: data.dest })
-          : (data.message || t("settings.logs.none"));
+          : t("settings.logs.none");
         // A partial export names which files failed.
         if (data.warning) out.textContent += `  (${data.warning})`;
       }
-      toast(data.copied ? tn("settings.logs.exportedToast", data.copied) : t("settings.logs.noneToast"),
-        !data.copied || !!data.warning);
+      if (data.copied) toast(tn("settings.logs.exportedToast", data.copied), !!data.warning);
     } catch (e) {
       toast(t("settings.logs.failed", { message: e.message }), true);
     } finally {
@@ -3088,7 +3108,8 @@ export async function refreshUploadsList() {
       const del = document.createElement("button");
       del.className = "btn-secondary upload-del";
       del.textContent = t("settings.uploads.remove");
-      del.onclick = () => deleteUpload(it.name);
+      del.onclick = () => confirmDanger(t("settings.uploads.removeTitle", { name: it.name }),
+        t("settings.uploads.removeBody"), t("settings.uploads.remove"), () => deleteUpload(it.name));
       li.appendChild(span);
       li.appendChild(del);
       list.appendChild(li);
@@ -3122,8 +3143,8 @@ if ($("upload-input")) {
     const label = $("upload-selected");
     if (label) {
       label.textContent = files.length
-        ? t("settings.uploads.selectedLabel",
-          { count: files.length, names: files.map((f) => f.name).join(", ") })
+        ? tn("settings.uploads.selectedLabel", files.length,
+          { names: files.map((f) => f.name).join(", ") })
         : "";
     }
   };
@@ -3155,6 +3176,7 @@ if ($("upload-send")) {
       const label = $("upload-selected");
       if (label) label.textContent = "";
       toast(tn("settings.uploads.uploadedToast", n));
+      if (n < files.length) toast(tn("settings.uploads.skippedToast", files.length - n), true);
       refreshUploadsList();
     } catch (e) {
       toast(t("settings.uploads.uploadFailed", { message: e.message }), true);
@@ -3738,9 +3760,11 @@ export function openImportComfyModal(initialPath = "") {
     // #modal/#modal-body (openModal() replaces its content, it does not stack),
     // so the picker destroys this modal's DOM, pathInput included. Re-open this
     // modal fresh with the picked path rather than writing into a detached node.
+    // A cancelled pick re-opens it with the path that was typed.
     browseBtn.onclick = async () => {
-      const dir = await pickDirectory(t("models.importComfy.pickerTitle"), pathInput.value.trim());
-      if (dir) openImportComfyModal(dir);
+      const typed = pathInput.value.trim();
+      const dir = await pickDirectory(t("models.importComfy.pickerTitle"), typed);
+      openImportComfyModal(dir || typed);
     };
     pathRow.append(pathInput, browseBtn);
     wrap.appendChild(pathRow);
