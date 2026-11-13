@@ -572,7 +572,8 @@ def _format_missing(missing: list) -> str:
     # reload-on-every-exit-path step.
     lines.append(
         "Install the file(s) into ComfyUI's models folder, or pick a workflow whose "
-        "models you have on the Workflow panel (Settings -> Media), then run again.")
+        "models you have on the Workflow panel of the Images, Music or Video page, then "
+        "run again.")
     return "\n".join(lines)
 
 

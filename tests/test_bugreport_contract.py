@@ -990,11 +990,9 @@ def test_prior_crash_variants(world, tmp_path):
     assert _saved_reports(world) == []
 
     (run / "server-crash.marker").write_text("{half a marker", encoding="utf-8")
-    path = bugreport.check_and_report_prior_crash(home=home)
-    assert path is not None
-    assert path.read_text(encoding="utf-8").startswith(
-        "# localm bug report: localm server crashed during model load/construction "
-        "(native crash suspected, no trace captured)\n")
+    assert bugreport.check_and_report_prior_crash(home=home) is None
+    assert not (run / "server-crash.marker").exists()
+    assert _saved_reports(world) == []
     assert world.transport.requests == []
 
 

@@ -194,13 +194,21 @@ def write_exit_record(crash_dir: Path, instance_id: str, *, pid: int,
 
 def marker_allows_exit_record(marker: Path) -> bool:
     """False when *marker* records ``"diagnostics": false`` (a run armed in
-    privacy mode, which writes no automatic trace). A missing, unreadable or
-    key-less marker returns True."""
+    privacy mode, which writes no automatic trace), or cannot be read, or is
+    not a JSON object. When *marker* is missing, its stopping record
+    (``server-crash.<id>.stopping``, left by a clean stop) is read the same
+    way; when both are missing, or the record has no ``diagnostics`` key, it
+    returns True."""
+    record = marker
+    if not marker.exists():
+        record = marker.with_name(marker.name[:-len(".marker")] + ".stopping")
     try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return True
-    return not (isinstance(data, dict) and data.get("diagnostics") is False)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("diagnostics") is not False
 
 
 def remove_exit_record(crash_dir: Path, instance_id: str,
