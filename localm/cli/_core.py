@@ -302,7 +302,9 @@ def _export_subcommand_mode(ctx) -> None:
         if not args:
             return
         name, cmd, rest = ctx.command.resolve_command(ctx, list(args))
-        param = _session_mode_param(cmd) if cmd is not None else None
+        if cmd is None:
+            return
+        param = _session_mode_param(cmd)
         if param is None:
             return
         sub = cmd.make_context(name, list(rest), parent=ctx, resilient_parsing=True)
