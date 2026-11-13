@@ -516,6 +516,41 @@ def _syntax_refusal(rel, warn: str, after: str, start: int, new: str) -> str:
     )
 
 
+def _plan_edit(p: Path, text: str, old: str, new: str):
+    """What an edit_file call replacing *old* with *new* does to *text*, the
+    contents of *p* with ``\\n`` line ends. None when *old* matches no single
+    region. Otherwise ``(new_text, start, count, tolerant, reindented, broken)``:
+    *broken* is the syntax error that makes the tool refuse the edit (then
+    *new_text* is the refused result), else None. An edit that would break a
+    file that parsed is retried with *new* indented to the line it lands on
+    (*reindented*). *old* must not be empty."""
+    located = _resolve_edit(text, old)
+    if located is None:
+        return None
+    start, end, count, tolerant = located
+    new_text = text[:start] + new + text[end:]
+    broken = _broken_by_edit(p, text, new_text)
+    reindented = False
+    if broken:
+        shifted = _reindented(text, start, new)
+        shifted_text = text[:start] + shifted + text[end:] if shifted is not None else None
+        if shifted_text is not None and _verify_syntax(p, shifted_text) is None:
+            new_text, reindented, broken = shifted_text, True, None
+    return new_text, start, count, tolerant, reindented, broken
+
+
+def planned_edit_text(path: Path, text: str, old: str, new: str) -> Optional[str]:
+    """The text edit_file leaves *text* (the file at *path*, ``\\n`` line ends)
+    as, or None when edit_file refuses the call (empty *old*, no single match,
+    or a syntax break). Reads and writes nothing."""
+    if not old:
+        return None
+    plan = _plan_edit(path, text, old, new)
+    if plan is None or plan[5]:
+        return None
+    return plan[0]
+
+
 def tool_edit_file(cwd: Path, path: str, old: str, new: str,
                    _restricted: bool = True) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
@@ -539,25 +574,14 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str,
             "write_file."
         )
 
-    located = _resolve_edit(text, old)
-    if located is None:
+    plan = _plan_edit(p, text, old, new)
+    if plan is None:
         return ToolResult.error(_edit_miss_message(path, old, text))
-    start, end, count, tolerant = located
+    new_text, start, count, tolerant, reindented, broken = plan
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
-    new_text = text[:start] + new + text[end:]
-    inote = ""
-    broken = _broken_by_edit(p, text, new_text)
     if broken:
-        # An edit that would break a file that parsed is retried with `new`
-        # indented to the line it lands on; if that does not parse either, the
-        # file is left unchanged.
-        shifted = _reindented(text, start, new)
-        shifted_text = text[:start] + shifted + text[end:] if shifted is not None else None
-        if shifted_text is not None and _verify_syntax(p, shifted_text) is None:
-            new_text = shifted_text
-            inote = " (`new` re-indented to match the line it replaces)"
-        else:
-            return ToolResult.error(_syntax_refusal(rel, broken, new_text, start, new))
+        return ToolResult.error(_syntax_refusal(rel, broken, new_text, start, new))
+    inote = " (`new` re-indented to match the line it replaces)" if reindented else ""
     try:
         _write_keeping_eol(p, raw, new_text)
     except Exception as e:
