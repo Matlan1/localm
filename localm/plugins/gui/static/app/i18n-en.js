@@ -412,10 +412,8 @@ export const I18N_EN = {
     "{count} background sub-agent result was discarded before it could be collected, and is lost.",
   "coder.bg.droppedAgent.other":
     "{count} background sub-agent results were discarded before they could be collected, and are lost.",
-  "coder.bg.droppedOther.one":
-    "{count} older finished job has aged out of this list (it is capped per kind).",
-  "coder.bg.droppedOther.other":
-    "{count} older finished jobs have aged out of this list (it is capped per kind).",
+  "coder.bg.droppedOther.one": "{count} older finished job has aged out of this list (it is capped per kind) and can no longer be checked.",
+  "coder.bg.droppedOther.other": "{count} older finished jobs have aged out of this list (it is capped per kind) and can no longer be checked.",
   "coder.bg.emptyHint":
     "The agent starts these with run_shell_background or spawn_agent_background; they show up here while they run.",
   "coder.bg.emptyTitle": "No background work yet",
@@ -434,6 +432,7 @@ export const I18N_EN = {
   "coder.compact.done": "History compacted",
   "coder.compact.feedNote": "Conversation history compacted.",
   "coder.compact.nothing": "Nothing to compact",
+  "coder.compact.busy": "The agent is working - compact once it has finished",
   "coder.composer.attachTitle": "Attach text files - their content is added to your message",
   "coder.composer.estimateBtn": "estimate",
   "coder.composer.estimateTitle":
@@ -585,7 +584,8 @@ export const I18N_EN = {
   "coder.final.notVerified": " (not verified)",
   "coder.final.taskEnded": "Task ended",
   "coder.final.taskFinished": "Task finished",
-  "coder.final.turnsTokens": " - {turns} turns, {tokens} tokens",
+  "coder.final.turnsTokens.one": " - {turns} turn, {tokens} tokens",
+  "coder.final.turnsTokens.other": " - {turns} turns, {tokens} tokens",
   "coder.history.emptyHint":
     "Start a session with persistence set to log or full to keep an audit trail here.",
   "coder.history.emptyTitle": "No session logs yet",
@@ -594,8 +594,7 @@ export const I18N_EN = {
   "coder.history.openFailed": "Could not open log: ",
   "coder.history.ownerOnly":
     "Past coder sessions are private to the server owner. Sign in with the owner API key on this device to view them.",
-  "coder.history.privacyNote":
-    "New sessions are not being recorded (privacy mode). Anything below is from earlier log/full-mode sessions.",
+  "coder.history.privacyDefaultNote": "The default session mode is privacy, so a new session is recorded only when it is started in log or full mode. Anything below is from log/full-mode sessions.",
   "coder.history.sessionModalTitle": "Session - {name}",
   "coder.history.sizeKb": "{name} ({kb} KB)",
   "coder.hooks.declaredIn": "Declared in {path}",
@@ -604,6 +603,7 @@ export const I18N_EN = {
   "coder.hooks.forgetBtn": "stop trusting",
   "coder.hooks.forgetFailed": "Could not withdraw the trust: ",
   "coder.hooks.forgottenToast": "Tool hooks are no longer trusted",
+  "coder.hooks.forgottenToastMcp": "Tool hooks and MCP servers are no longer trusted",
   "coder.hooks.invalid": "Invalid: {error}",
   "coder.hooks.mcpTrustedCalls": "trusted = true: once started, its tool calls are not confirmed",
   "coder.hooks.meta": "tools matching {matcher} · timeout {timeout}s",
@@ -626,6 +626,8 @@ export const I18N_EN = {
   "coder.log.filterPlaceholder": "filter entries… (tool name, text, type)",
   "coder.log.modalTitle": "Audit log - {label}",
   "coder.log.noLogAvailable": "No log available",
+  "coder.log.privacyMode": "No audit log: this session runs in privacy mode, which keeps none",
+  "coder.log.missing": "This session's audit log is not on disk (it may have been deleted)",
   "coder.memory.addBtn": "remember",
   "coder.memory.addFailed": "Could not remember: ",
   "coder.memory.addLabel": "Remember something about this project",
@@ -694,12 +696,14 @@ export const I18N_EN = {
   "coder.session.newBtn": "new",
   "coder.session.newOption": "(new session)",
   "coder.session.noSavedResume": "No saved session to resume - started fresh",
+  "coder.session.endedElsewhere": "Session {label} was ended elsewhere (another tab, an API client or the server) and was removed from this page",
   "coder.session.none": "No active session",
   "coder.session.reattached": "Reattached to a running coder session",
   "coder.session.resumedToast": "Resumed your last session in this folder",
   "coder.session.startFailed": "Failed to start session: ",
   "coder.session.startFirst": "Start a session first",
   "coder.session.stopRequested": "Stop requested - agent halts at the next safe point",
+  "coder.session.requestFailed": "Could not reach the server: ",
   "coder.session.switchTitle": "Switch session",
   "coder.session.turnsCount.one": "{count} turn",
   "coder.session.turnsCount.other": "{count} turns",
@@ -707,6 +711,7 @@ export const I18N_EN = {
     "The project folder is missing, so this session cannot be continued",
   "coder.session.untitled": "(untitled session)",
   "coder.setup.activeModelOption": "active model ({name})",
+  "coder.setup.noActiveModelOption": "active model (none loaded)",
   "coder.setup.backend.anthropic": "Anthropic",
   "coder.setup.backend.local": "this localm (offline)",
   "coder.setup.backend.openai": "OpenAI",
@@ -753,9 +758,8 @@ export const I18N_EN = {
     "Ask the model server for the OpenAI-compatible native tools API. With localm's own server this is not applied and the session says so; it uses grammar-constrained tool calls instead.",
   "coder.setup.noVerifyLabel": "Skip verification",
   "coder.setup.noVerifyTitle": "Run no exit-code check at all, even when this project has an obvious one.",
-  "coder.setup.patchLabel": "Patch mode (collect a diff, write nothing)",
-  "coder.setup.patchTitle":
-    "File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done.",
+  "coder.setup.patchLabel": "Patch mode (file edits become a diff)",
+  "coder.setup.patchTitle": "File writes are captured as a unified diff instead of being applied. Shell commands and tests still run and can change files. Download the diff from the session toolbar when you are done.",
   "coder.setup.pickDirectoryTitle": "Pick a project directory",
   "coder.setup.scopeLabel": "Scope (optional glob - file tools are confined to matching paths)",
   "coder.setup.seedLabel": "Seed (reproducible runs)",
@@ -792,6 +796,7 @@ export const I18N_EN = {
   "coder.tool.failed": "failed",
   "coder.tool.ok": "ok",
   "coder.undo.nothing": "Nothing to undo",
+  "coder.undo.busy": "The agent is working - undo once it has finished",
   "coder.usage.ctx": " · ctx {pct}%",
   "coder.usage.tokTurn": "{tokens} tok · turn {turn}",
 

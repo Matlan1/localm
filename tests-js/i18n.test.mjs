@@ -439,7 +439,7 @@ test("the Coder setup model dropdown's first option follows a language change", 
   assert.match(first.textContent, /active model/);
   await toGerman(window);
   assert.equal(window.document.getElementById("setup-model").options[0].textContent,
-    DE["coder.setup.activeModelOption"].replace("{name}", "?"));
+    DE["coder.setup.noActiveModelOption"]);
 });
 
 test("every first-party plugin manifest has a catalog description with its exact text", async () => {
