@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken } from "./helpers.js";
+import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentShellToken, toast } from "./helpers.js";
 import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
@@ -479,6 +479,11 @@ window.bootAuthProbe = bootAuthProbe;
   const clientPluginsReady = loadClientPlugins();
   refreshPluginCommands();
   setInterval(refreshModels, 30000);
+  // A tab brought back to the front re-reads the model at once: a model loaded
+  // or unloaded from another tab or the API is shown without waiting for the poll.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshModels();
+  });
   startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
   setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
   // The resolved ctx ceiling only exists once a model has loaded - keep the
@@ -572,7 +577,14 @@ window.bootAuthProbe = bootAuthProbe;
     if (viewParam) {
       await Promise.allSettled([capsReady, clientPluginsReady, convReady]);
     }
-    showView(VIEWS.includes(viewParam) ? viewParam : "models");
+    // A `?view=` naming no page here (a typo, or a plugin that is off) says so
+    // and opens Chat; a bare `?pull=` opens Models.
+    if (viewParam && !VIEWS.includes(viewParam)) {
+      toast(t("nav.unknownView", { view: viewParam }), true);
+      showView("chat");
+    } else {
+      showView(viewParam || "models");
+    }
     if (pullSpec) {
       const specInput = $("pull-spec");
       if (specInput) {

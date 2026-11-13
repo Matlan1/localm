@@ -27,7 +27,8 @@ class LocalmError(Exception):
         self.context = context or {}
         # For an UPLOAD failure: WHERE it failed (offline_or_dns / unreachable /
         # tls / timeout / server_rejected / not_filed / no_endpoint / rate_limited
-        # / unknown) and a friendly, actionable *hint* to show the user. Both None for a
+        # / network_off / unknown) and a friendly, actionable *hint* to show the
+        # user. Both None for a
         # non-upload LocalmError.
         self.stage = stage
         self.hint = hint

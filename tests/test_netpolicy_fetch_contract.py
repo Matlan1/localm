@@ -611,8 +611,9 @@ class TestCheckUrlMessages:
         set_config(monkeypatch, lambda: {"net_mode": "off"})
         with pytest.raises(NetworkPolicyError) as ei:
             netpolicy.check_url("https://example.com/")
-        assert str(ei.value) == ("Network access is disabled (net_mode=off). Enable it "
-                                 "with:  localm config net_mode ask")
+        assert str(ei.value) == (
+            "Network access is off (net_mode=off). Turn it on in Settings > Server & "
+            "network > Network access, or run: localm config net_mode ask.")
         assert ei.value.off is True
 
     @pytest.mark.parametrize("env", ["off", "OFF", " Off "])
@@ -636,7 +637,8 @@ class TestCheckUrlMessages:
         with pytest.raises(NetworkPolicyError) as ei:
             netpolicy.check_url("https://c.example/")
         assert str(ei.value) == (
-            "'c.example' is not on the allow list (net_allow). Add it with:  "
+            "'c.example' is not on the allow list (net_allow). Add it in Settings > "
+            "Server & network > Allowed domains, or run: "
             "localm config net_allow \"a.example, b.example, c.example\"")
 
 

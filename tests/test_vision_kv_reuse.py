@@ -160,7 +160,8 @@ class TestFollowUpTurns:
         rig.llm._mtmd.on_gpu = False
         rig.prefill(TURN2, [IMG_B], on_status=statuses.append)
         assert statuses == ["Encoding image (GPU)...", "Processing prompt...",
-                            "Encoding image (CPU)..."]
+                            "Processing prompt...",
+                            "Encoding image (CPU)...", "Processing prompt..."]
 
 
 class TestWhenTheCacheCannotBeReused:

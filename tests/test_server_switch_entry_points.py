@@ -43,6 +43,7 @@ class _Server:
         self.mode = mode
         self.loads: list = []
         self.load_auth: list = []
+        self.get_auth: list = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -58,6 +59,7 @@ class _Server:
                 self.wfile.write(raw)
 
             def do_GET(self):
+                outer.get_auth.append(self.headers.get("Authorization"))
                 if self.path == "/v1/models":
                     rows = ([{"id": outer.active, "loaded": True, "active": True}]
                             if outer.active else [])
@@ -300,6 +302,61 @@ def test_coder_names_why_a_switch_failed(server, coder_backend):
     assert coder_backend["model"] == SECOND
     assert f"could not switch to {SECOND.lower()}" in flat
     assert f"requests name {SECOND.lower()}" in flat
+
+
+OWNER_KEY = "real-owner-key-0123456789"
+USER_KEY = "user-given-key-9876543210"
+
+
+def test_coder_api_key_is_sent_with_the_switch_and_the_chat(server, coder_backend):
+    srv = server()
+    auth.set_api_key(OWNER_KEY)
+    result = _coder(["--model", SECOND, "--api-key", USER_KEY, "hi"])
+    assert result.exit_code == 0, result.output
+    assert srv.loads == [SECOND]
+    assert srv.load_auth == [f"Bearer {USER_KEY}"]
+    assert srv.get_auth and set(srv.get_auth) == {f"Bearer {USER_KEY}"}
+    assert coder_backend["api_key"] == USER_KEY
+
+
+def test_coder_without_api_key_sends_the_owner_key(server, coder_backend, monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    srv = server()
+    auth.set_api_key(OWNER_KEY)
+    result = _coder(["--model", SECOND, "hi"])
+    assert result.exit_code == 0, result.output
+    assert srv.load_auth == [f"Bearer {OWNER_KEY}"]
+    assert set(srv.get_auth) == {f"Bearer {OWNER_KEY}"}
+    assert coder_backend["api_key"] == OWNER_KEY
+
+
+def test_coder_without_api_key_in_open_mode_sends_the_instance_token(
+        server, coder_backend, monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    srv = server()
+    result = _coder(["--model", SECOND, "hi"])
+    assert result.exit_code == 0, result.output
+    assert srv.load_auth == ["Bearer tok"]
+    assert coder_backend["api_key"] == "tok"
+
+
+def test_every_request_of_a_switch_carries_the_given_credential(server):
+    from localm.inference.server_switch import serve_requested_model
+    srv = server()
+    auth.set_api_key(OWNER_KEY)
+    served = serve_requested_model(srv.base_url, USER_KEY, SECOND)
+    assert served.switched and served.name == SECOND
+    assert srv.load_auth == [f"Bearer {USER_KEY}"]
+    assert srv.get_auth and set(srv.get_auth) == {f"Bearer {USER_KEY}"}
+
+
+def test_a_switch_without_a_credential_sends_no_authorization(server):
+    from localm.inference.server_switch import switch_server_model
+    srv = server()
+    auth.set_api_key(OWNER_KEY)
+    name, why = switch_server_model(srv.base_url, None, SECOND)
+    assert (name, why) == (SECOND, None)
+    assert srv.load_auth == [None]
 
 
 # ------------------------------------------------------------------ #
