@@ -66,3 +66,97 @@ def test_parse_spec_does_not_block_reserved_names(tmp_path):
 def test_engine_and_loader_share_reserved_set():
     from localm.plugins.loader import _RESERVED_NAMES
     assert {"run", "serve", "coder", "config", "gui"} <= _RESERVED_NAMES
+
+
+# ---- first-party standing follows install provenance, never the name ---------
+
+def _write_manifest(pdir, name, *, scope=None, extra=""):
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "plugin.toml").write_text(
+        f'[plugin]\nname = "{name}"\nscope = "{scope or name + "-x"}"\n'
+        f'register = "plug"\n{extra}',
+        encoding="utf-8")
+    (pdir / "plug.py").write_text(
+        "def register(host):\n    pass\n\n\ndef unregister():\n    pass\n",
+        encoding="utf-8")
+    return pdir
+
+
+def _store_manager(tmp_path):
+    from localm.plugins.engine import PluginManager
+    installed = tmp_path / "installed"
+    installed.mkdir(parents=True, exist_ok=True)
+    store = tmp_path / "store"
+    _write_manifest(store / "zeta", "zeta", scope="zeta")
+    _write_manifest(store / "tts", "tts", scope="tts",
+                    extra="protected = true\ndefault_enabled = true\n")
+    return PluginManager(FastAPI(), external_root=installed, store_root=store)
+
+
+def _catalog_names():
+    from localm.plugins import catalog
+    return list(catalog.names())
+
+
+@pytest.mark.parametrize("name", _catalog_names())
+@pytest.mark.parametrize("force", [False, True])
+def test_third_party_install_refuses_every_catalog_name(tmp_path, name, force):
+    src = _write_manifest(tmp_path / "src" / name, name,
+                          extra="protected = true\n")
+    mgr = _manager(tmp_path)
+    for install in (mgr.set_installed_from_dir, mgr.install_external):
+        with pytest.raises(ValueError,
+                           match="reserved for a first-party plugin|clashes with a built-in"):
+            install(src, force=force)
+    assert not (tmp_path / "installed" / name).exists()
+
+
+def test_third_party_install_refuses_a_store_plugin_name(tmp_path):
+    src = _write_manifest(tmp_path / "src" / "zeta", "zeta", scope="zeta-x")
+    mgr = _store_manager(tmp_path)
+    with pytest.raises(ValueError, match="reserved for a first-party plugin"):
+        mgr.set_installed_from_dir(src)
+    assert not (tmp_path / "installed" / "zeta").exists()
+
+
+def _external_folder(tmp_path, name, **kw):
+    from localm.plugins.engine import _write_marker
+    pdir = _write_manifest(tmp_path / "installed" / name, name, **kw)
+    _write_marker(pdir, "external", "0")
+    return pdir
+
+
+def test_external_folder_under_a_first_party_name_has_third_party_standing(tmp_path):
+    _external_folder(tmp_path, "tts",
+                     extra="protected = true\ndefault_enabled = true\n")
+    mgr = _store_manager(tmp_path)
+    spec = mgr.discover()["tts"]
+    assert (spec.builtin, spec.protected, spec.default_enabled) == (False, False, False)
+    assert mgr._is_protected("tts") is False
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tts")
+    assert (entry["builtin"], entry["protected"]) == (False, False)
+    mgr.disable("tts")
+    assert mgr.uninstall("tts") is True
+    assert not (tmp_path / "installed" / "tts").exists()
+
+
+def test_external_folder_under_a_first_party_name_gets_the_scope_recheck(tmp_path):
+    _external_folder(tmp_path, "tts", scope="chat")
+    mgr = _store_manager(tmp_path)
+    assert "tts" not in mgr.discover()
+    assert "reserved localm scope" in mgr._discover_errors["tts"]
+
+
+def test_store_install_keeps_first_party_standing(tmp_path):
+    from localm.plugins.engine import _write_store_install
+    dest = tmp_path / "installed" / "tts"
+    mgr = _store_manager(tmp_path)
+    dest.mkdir(parents=True)
+    _write_store_install(dest, tmp_path / "store" / "tts")
+    spec = mgr.discover()["tts"]
+    assert (spec.builtin, spec.protected, spec.default_enabled) == (True, True, True)
+    assert mgr._is_protected("tts") is True
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tts")
+    assert (entry["builtin"], entry["protected"]) == (True, True)
+    with pytest.raises(ValueError, match="protected"):
+        mgr.disable("tts")

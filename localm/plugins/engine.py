@@ -242,8 +242,6 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         if unknown:
             warnings.append(
                 "unknown manifest key(s) ignored: " + ", ".join(unknown))
-    from localm.plugins import catalog as _cat
-    first_party = builtin or any(e.name == name for e in _cat.CATALOG)
     surface = Surface(
         tab_id=str(s.get("tab_id", "")),
         label=str(s.get("label", "")),
@@ -264,8 +262,8 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         capabilities=str_lists["capabilities"],
         data_subdir=str(p.get("data_subdir", "")),
         builtin=builtin,
-        protected=first_party and bool(p.get("protected", False)),
-        default_enabled=first_party and bool(p.get("default_enabled", False)),
+        protected=builtin and bool(p.get("protected", False)),
+        default_enabled=builtin and bool(p.get("default_enabled", False)),
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
@@ -1003,9 +1001,9 @@ class PluginManager:
     def _drop_scope_collisions(specs: dict, errors: dict) -> None:
         """Remove from *specs* every third-party spec whose scope is reserved
         or already claimed by a first-party plugin or an earlier (by name)
-        third-party plugin, and record why in *errors*."""
-        from localm.plugins import catalog as _cat
-        first_party = {e.name for e in _cat.CATALOG}
+        third-party plugin, and record why in *errors*. First-party means
+        installed from the store (``PluginSpec.builtin``), never a name."""
+        first_party = {n for n, sp in specs.items() if sp.builtin}
         claimed = {sp.scope: n for n, sp in specs.items() if n in first_party}
         for name in sorted(specs):
             if name in first_party:
@@ -1257,7 +1255,7 @@ class PluginManager:
                 self._note_provision_error(name, f"preinstall: {e}")
                 continue
             try:
-                spec = parse_spec(self._installed_dir(name))
+                spec = parse_spec(self._installed_dir(name), builtin=True)
                 if spec.default_enabled and name not in self._enabled_set():
                     self._set_enabled(name, True)
                 self._clear_provision_error(name, "preinstall")
@@ -1664,9 +1662,28 @@ class PluginManager:
         return refreshed
 
     def _is_protected(self, name: str) -> bool:
+        """True when *name* cannot be disabled or uninstalled. An installed
+        plugin is protected only through its own spec, which honours
+        ``protected`` for a store install alone; a name with no installed spec
+        falls back to the catalog."""
         from localm.plugins import catalog as _cat
         spec = self._specs.get(name)
-        return bool(spec and spec.protected) or name in _cat.protected()
+        if spec is not None:
+            return bool(spec.protected)
+        return name in _cat.protected()
+
+    def _reserved_name_problem(self, name: str) -> Optional[str]:
+        """Why a THIRD-PARTY plugin may not be installed under *name*, or None:
+        a built-in command verb, a first-party catalog name, or the name of a
+        plugin in the bundled store."""
+        from localm.plugins import catalog as _cat
+        from localm.plugins.loader import _RESERVED_NAMES
+        if name in _RESERVED_NAMES:
+            return f"plugin name {name!r} clashes with a built-in command"
+        if _cat.get(name) is not None or self._store_dir(name) is not None:
+            return (f"plugin name {name!r} is reserved for a first-party plugin; "
+                    f"a third-party plugin must use another name")
+        return None
 
     # ---- shared install-sequence helpers -----------------------------------
     def _reject_scope_collision(self, spec0: PluginSpec) -> None:
@@ -1694,13 +1711,12 @@ class PluginManager:
         _reject_source_links(src)
         spec0 = parse_spec(src)                       # validate + name (raises)
         name = spec0.name
-        # A third-party plugin must not shadow a built-in command name
-        # (run/serve/config/coder/...). Only arbitrary-source third-party
-        # installs are gated; builtins install via install() from the store.
-        from localm.plugins.loader import _RESERVED_NAMES
-        if name in _RESERVED_NAMES:
-            raise ValueError(
-                f"plugin name {name!r} clashes with a built-in command")
+        # A third-party plugin must not take a built-in command name or a
+        # first-party plugin's name. Only arbitrary-source third-party installs
+        # are gated; first-party plugins install via install() from the store.
+        reserved = self._reserved_name_problem(name)
+        if reserved:
+            raise ValueError(reserved)
         self._reject_scope_collision(spec0)
         # name came out of the MANIFEST; parse_spec has already rejected any
         # name that is not a single identifier-shaped component, and
@@ -2147,7 +2163,7 @@ class PluginManager:
                 "description": (spec.description if spec and spec.description
                                 else (cat.description if cat else "")),
                 "scope": spec.scope if spec else name,
-                "builtin": (name in store) or bool(cat),
+                "builtin": spec.builtin if spec is not None else bool(cat),
                 "protected": self._is_protected(name),
                 "tab": spec.surface.tab_id if spec and spec.surface else "",
                 "label": spec.surface.label if spec and spec.surface else "",
