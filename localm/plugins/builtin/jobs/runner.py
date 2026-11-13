@@ -33,7 +33,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from localm.debuglog import logger
 from localm.plugins.builtin.jobs.store import TASK_KIND_SCOPES, Job, JobStore
@@ -65,7 +65,7 @@ class _LiveRun:
     def __init__(self, job: Job) -> None:
         self.job = job
         self.revoked: Optional[str] = None
-        self.agent = None
+        self.agent: Optional[Any] = None
 
     def revoke(self, why: str) -> None:
         if self.revoked is None:
@@ -746,12 +746,16 @@ def _run_rag(job: Job) -> str:
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
     lines: list = []
+
+    def _progress(t, **_) -> None:
+        _raise_if_revoked()
+        lines.append(t)
+
     try:
         result = coll.resync(embed_fn=embed_fn,
                              policy=indexing_policy(key_roots=key_roots),
                              model_name=model_name,
-                             on_progress=lambda t, **_: (_raise_if_revoked(),
-                                                         lines.append(t)))
+                             on_progress=_progress)
     except CollectionLockedError as e:
         # Another localm process (or a hand-run `localm rag add|resync`) holds this
         # collection. The scheduled tick waits a bounded time and then stands down,
