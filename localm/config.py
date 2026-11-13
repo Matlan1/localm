@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar, cast
 
 from localm import mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
@@ -1378,6 +1378,17 @@ def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
 def ensure_dirs() -> None:
     _mkdir_or_explain(HOME_DIR, is_home=True)
     _mkdir_or_explain(MODELS_DIR, is_home=False)
+    _dirs_made.add((HOME_DIR, MODELS_DIR))
+
+
+_dirs_made: set = set()
+
+
+def _ensure_dirs_once() -> None:
+    """``ensure_dirs()`` unless it already succeeded in this process for the
+    current HOME_DIR and MODELS_DIR. For readers; writers call ensure_dirs()."""
+    if (HOME_DIR, MODELS_DIR) not in _dirs_made:
+        ensure_dirs()
 
 
 def _logger():
@@ -1401,6 +1412,241 @@ _io_lock = threading.RLock()
 # _cross_process_lock's token check. LOCK ORDER: _rmw_lock (outer) ->
 # <name>.lock file -> _io_lock (inner).
 _rmw_lock = threading.RLock()
+
+
+# --- Reads made on a running asyncio event loop ---------------------------- #
+# A read of config.json or registry.json called on an event-loop thread runs on
+# that file's background reader thread. The loop waits for it at most
+# LOOP_READ_WAIT_S; a read that takes longer is answered from the last complete
+# read of the same file (the kept read), and the file is then marked slow: every
+# later call on the loop gets the kept read at once, with a fresh read queued
+# behind, until a read finishes within LOOP_READ_WAIT_S again. A kept read is
+# served only while it is at most LOOP_KEPT_MAX_AGE_S old (counted from when
+# that read completed); past that the loop waits for the fresh read. The reader
+# threads share _io_lock, so a read stuck on the disk holds the other files'
+# reads too. A write made by
+# this process through save_config, update_config, save_registry or
+# update_registry reads every kept file again on the writing thread before it
+# returns, so a call on the loop that starts after the write returned never gets
+# a value older than that write. A call with no kept read yet, or made while
+# this thread holds _io_lock or _rmw_lock, reads on the calling thread. Calls
+# off the loop always read on the calling thread. LOCK ORDER: _loop_reads_lock
+# is a leaf: nothing is acquired and no file is read while it is held.
+LOOP_READ_WAIT_S = 0.5
+LOOP_KEPT_MAX_AGE_S = 2.0
+
+_loop_reads_lock = threading.Lock()
+_loop_reads_epoch = 0
+_loop_kept: dict = {}
+_loop_inflight: dict = {}
+_loop_slow: dict = {}
+_loop_readers: dict = {}
+_loop_refilling = threading.local()
+
+
+class _LoopRead:
+    """One read handed to a reader thread."""
+
+    __slots__ = ("name", "key", "epoch", "fn", "started", "done", "value", "error",
+                 "ran")
+
+    def __init__(self, name: str, key: tuple, epoch: int, fn: Callable) -> None:
+        self.name = name
+        self.key = key
+        self.epoch = epoch
+        self.fn = fn
+        self.started = time.monotonic()
+        self.done = threading.Event()
+        self.value = None
+        self.error: Optional[BaseException] = None
+        self.ran = False
+
+
+def _on_event_loop_thread() -> bool:
+    """True when the calling thread is running an asyncio event loop."""
+    aio = sys.modules.get("asyncio")
+    if aio is None:
+        return False
+    try:
+        aio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _holds_store_lock() -> bool:
+    """True when the calling thread holds _io_lock or _rmw_lock."""
+    return any(getattr(lk, "_is_owned", lambda: False)()
+               for lk in (_io_lock, _rmw_lock))
+
+
+def _store_paths() -> tuple:
+    return (HOME_DIR, MODELS_DIR, CONFIG_FILE, REGISTRY_FILE)
+
+
+def _run_loop_read(job: _LoopRead) -> None:
+    """Run *job* on its reader thread and publish the result."""
+    snapshot = None
+    if job.key == _store_paths():
+        job.ran = True
+        try:
+            job.value = job.fn()
+            snapshot = copy.deepcopy(job.value)
+        except Exception as e:  # handed to every waiting caller
+            job.error = e
+    took = time.monotonic() - job.started
+    recovered = None
+    with _loop_reads_lock:
+        if _loop_inflight.get(job.name) is job:
+            del _loop_inflight[job.name]
+        if job.ran and job.error is None and job.epoch == _loop_reads_epoch:
+            _loop_kept[job.name] = (job.key, snapshot, job.fn, time.monotonic())
+            if took <= LOOP_READ_WAIT_S and job.name in _loop_slow:
+                recovered = time.monotonic() - _loop_slow.pop(job.name)
+    job.done.set()
+    if recovered is not None:
+        _logger().info("reads of %s are fast again after %.1f s; requests on the "
+                       "server's event loop read it fresh again.", job.name, recovered)
+
+
+def _loop_reader_main(q) -> None:
+    while True:
+        job = q.get()
+        try:
+            _run_loop_read(job)
+        except BaseException:  # noqa: BLE001
+            job.done.set()
+            _logger().exception("the reader thread for %s failed a read", job.name)
+
+
+def _submit_loop_read(job: _LoopRead) -> None:
+    """Queue *job* on its file's reader thread, starting the thread if needed.
+    Caller holds _loop_reads_lock."""
+    entry = _loop_readers.get(job.name)
+    if entry is None or not entry[1].is_alive():
+        import queue
+        q = queue.SimpleQueue()
+        t = threading.Thread(target=_loop_reader_main, args=(q,),
+                             name=f"localm-reader-{job.name}", daemon=True)
+        t.start()
+        entry = (q, t)
+        _loop_readers[job.name] = entry
+    entry[0].put(job)
+
+
+def _loop_reads_after_fork() -> None:
+    """In a forked child: forget the parent's reader threads and kept reads."""
+    global _loop_reads_lock
+    _loop_reads_lock = threading.Lock()
+    _loop_readers.clear()
+    _loop_kept.clear()
+    _loop_inflight.clear()
+    _loop_slow.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_loop_reads_after_fork)
+
+
+def _loop_reads_invalidate() -> None:
+    """Drop every kept read and every slow mark, and stop later callers from
+    joining a read that started before now."""
+    global _loop_reads_epoch
+    with _loop_reads_lock:
+        _loop_reads_epoch += 1
+        _loop_kept.clear()
+        _loop_inflight.clear()
+        _loop_slow.clear()
+
+
+def _refill_after_write() -> None:
+    """Read every kept file again on the calling thread, after a write by this
+    process. A read already running is not joined by later callers and its
+    result is not kept. A file whose read fails here is dropped from the kept
+    reads. Does nothing when called from inside another refill."""
+    global _loop_reads_epoch
+    if getattr(_loop_refilling, "active", False):
+        return
+    with _loop_reads_lock:
+        _loop_reads_epoch += 1
+        epoch = _loop_reads_epoch
+        _loop_inflight.clear()
+        todo = [(name, kept[0], kept[2]) for name, kept in _loop_kept.items()]
+    _loop_refilling.active = True
+    try:
+        for name, key, fn in todo:
+            try:
+                value = copy.deepcopy(fn()) if key == _store_paths() else None
+            except Exception:  # dropped below; the next read reports it
+                value = None
+            with _loop_reads_lock:
+                if epoch != _loop_reads_epoch:
+                    return
+                if value is None:
+                    _loop_kept.pop(name, None)
+                else:
+                    _loop_kept[name] = (key, value, fn, time.monotonic())
+    finally:
+        _loop_refilling.active = False
+
+
+_T = TypeVar("_T")
+
+
+def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
+    """``fn()`` (a read of *name*). On a running event loop with a kept read of
+    *name* at most LOOP_KEPT_MAX_AGE_S old, the loop waits at most
+    LOOP_READ_WAIT_S and is otherwise answered from that kept read; with an
+    older kept read it waits for the fresh read. Off the loop, or with no kept
+    read yet, it is ``fn()`` on the calling thread. Every caller gets its own
+    copy. Raises what ``fn`` raises."""
+    if not _on_event_loop_thread() or _holds_store_lock():
+        return fn()
+    key = _store_paths()
+    with _loop_reads_lock:
+        kept = _loop_kept.get(name)
+        if kept is not None and kept[0] != key:
+            kept = None
+        job: Optional[_LoopRead] = _loop_inflight.get(name)
+        if kept is not None and (job is None or job.key != key
+                                 or job.epoch != _loop_reads_epoch):
+            job = _LoopRead(name, key, _loop_reads_epoch, fn)
+            _loop_inflight[name] = job
+            _submit_loop_read(job)
+        usable = kept is not None and time.monotonic() - kept[3] <= LOOP_KEPT_MAX_AGE_S
+        if kept is not None and usable and name in _loop_slow:
+            return copy.deepcopy(kept[1])
+        epoch = _loop_reads_epoch
+    if kept is None:
+        value = fn()
+        snapshot = copy.deepcopy(value)
+        with _loop_reads_lock:
+            if epoch == _loop_reads_epoch:
+                _loop_kept[name] = (key, snapshot, fn, time.monotonic())
+        return value
+    job = cast(_LoopRead, job)
+    if usable:
+        remaining = LOOP_READ_WAIT_S - (time.monotonic() - job.started)
+        job.done.wait(max(0.0, remaining))
+        if not job.done.is_set() and time.monotonic() - kept[3] <= LOOP_KEPT_MAX_AGE_S:
+            with _loop_reads_lock:
+                first = name not in _loop_slow
+                if first:
+                    _loop_slow[name] = job.started
+            if first:
+                _logger().warning(
+                    "reading %s has taken over %.1f s (a busy disk?); requests on "
+                    "the server's event loop are answered from the last complete "
+                    "read, at most %.0f s old, until a read is fast again.",
+                    name, LOOP_READ_WAIT_S, LOOP_KEPT_MAX_AGE_S)
+            return copy.deepcopy(kept[1])
+    job.done.wait()
+    if not job.ran:
+        return fn()
+    if job.error is not None:
+        raise job.error
+    return cast(_T, copy.deepcopy(job.value))
+
 
 def _holds_unparseable_json(path: Path) -> bool:
     """True when *path* can be opened but its content is not valid JSON (corrupt,
@@ -1513,11 +1759,24 @@ def instance_id() -> str:
 
     Served to the GUI over ``/v1/config``, which compares it against the id it
     last saw for this browser origin to tell a restart of the same install
-    apart from a different install sharing that origin's localStorage.
+    apart from a different install sharing that origin's localStorage. The
+    value is kept in memory per data folder after the first call.
 
     A file that exists but cannot be read is never overwritten. When the file
     cannot be read or written, one in-memory id serves every call of this
     process."""
+    home = HOME_DIR
+    val = _instance_ids.get(home)
+    if val is None:
+        val = _instance_ids[home] = _instance_id_now()
+    return val
+
+
+_instance_ids: dict = {}
+
+
+def _instance_id_now() -> str:
+    """``instance_id()`` read (or minted) on the calling thread."""
     ensure_dirs()
     path = HOME_DIR / "instance_id.txt"
     with _io_lock:
@@ -1737,9 +1996,17 @@ def load_config_checked() -> tuple:
     with nothing merged in - the same shape a genuinely absent config.json
     produces (see _read_json_checked). A caller that needs to tell "no config
     yet" apart from "a config exists but is corrupt" (e.g. bug-report
-    diagnostics) uses this instead of load_config()."""
+    diagnostics) uses this instead of load_config().
+
+    On a running event loop the read follows ``_loop_safe_read``: at most
+    LOOP_READ_WAIT_S of waiting, then the last complete read."""
+    return _loop_safe_read("config.json", _load_config_checked_now)
+
+
+def _load_config_checked_now() -> tuple:
+    """``load_config_checked()`` read on the calling thread."""
     from localm import model_ids
-    ensure_dirs()
+    _ensure_dirs_once()
     # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
     # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
     # (per-plugin media config, workflow selection) would silently corrupt the
@@ -1868,6 +2135,7 @@ def save_config(cfg: dict) -> None:
         delta = _config_for_disk(cfg)
         previous = _read_json(CONFIG_FILE, {})
         _atomic_write_json(CONFIG_FILE, delta)
+    _refill_after_write()
     _record_config_saved(previous if isinstance(previous, dict) else {}, delta)
 
 
@@ -1945,6 +2213,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         # user-set delta hits the disk (see _user_delta / save_config).
         lock.assert_held()
         _atomic_write_json(CONFIG_FILE, _config_for_disk(cfg))
+    _refill_after_write()
     _record_config_saved(before, cfg)
     return cfg
 
@@ -1956,7 +2225,13 @@ def model_index():
     """The :class:`~localm.model_ids.ModelIndex` of registry.json as it is on
     disk now. Cached on the file's path, mtime and size, so an unchanged registry
     costs one stat. Never raises and never writes; an absent or unreadable registry
-    gives an empty index."""
+    gives an empty index. On a running event loop the read follows
+    ``_loop_safe_read``."""
+    return _loop_safe_read("registry.json index", _model_index_now)
+
+
+def _model_index_now():
+    """``model_index()`` read on the calling thread."""
     from localm import model_ids
     global _model_index_cache
     path = REGISTRY_FILE
@@ -1979,9 +2254,15 @@ def load_registry() -> dict:
     """The registry, each entry's ``base`` holding its base model's current name.
     Entries without their own ID get one on this read and it is written back. A
     failed write-back is logged and retried by the next read; the entries are then
-    returned without an ID."""
+    returned without an ID. On a running event loop the read follows
+    ``_loop_safe_read``."""
+    return _loop_safe_read("registry.json", _load_registry_now)
+
+
+def _load_registry_now() -> dict:
+    """``load_registry()`` read on the calling thread."""
     from localm import model_ids
-    ensure_dirs()
+    _ensure_dirs_once()
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
     if not isinstance(reg, dict):
@@ -1999,7 +2280,13 @@ def load_registry() -> dict:
 def peek_registry() -> dict:
     """The registry as ``load_registry`` returns it, read without creating the
     data dir or the models dir and without writing anything, so an entry may have
-    no ID yet. ``{}`` when the file is absent, unreadable or not a JSON object."""
+    no ID yet. ``{}`` when the file is absent, unreadable or not a JSON object.
+    On a running event loop the read follows ``_loop_safe_read``."""
+    return _loop_safe_read("registry.json (peek)", _peek_registry_now)
+
+
+def _peek_registry_now() -> dict:
+    """``peek_registry()`` read on the calling thread."""
     from localm import model_ids
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
@@ -2016,6 +2303,7 @@ def save_registry(reg: dict) -> None:
     model_ids.follow_bases(reg, model_ids.build_index(reg))
     with _io_lock:
         _atomic_write_json(REGISTRY_FILE, reg)
+    _refill_after_write()
 
 
 def registry_lock_busy(wait: float = 0.5) -> bool:
@@ -2076,7 +2364,8 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
         model_ids.follow_bases(reg, model_ids.build_index(reg))
         lock.assert_held()
         _atomic_write_json(REGISTRY_FILE, reg)
-        return reg
+    _refill_after_write()
+    return reg
 
 
 def _loadable_lib_names() -> tuple:

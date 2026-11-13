@@ -51,14 +51,20 @@ def read_old_content(cwd: Path, path_arg: str) -> str:
 
 def resolve_new_content(tool_name: str, args: dict, old_content: str) -> Optional[str]:
     """The new_content a write_file/edit_file call would produce, given the
-    file's old_content. None for patch_file (no new_content concept - the
-    diff is supplied directly) or any other tool name."""
+    file's old_content. For edit_file this is the tool's own resolution
+    (``planned_edit_text``: an exact match first, else a single
+    whitespace-tolerant one, re-indented when that keeps the file parsing),
+    and *old_content* unchanged when the tool would refuse the call. None for
+    patch_file (no new_content concept - the diff is supplied directly) or any
+    other tool name."""
     if tool_name == "write_file":
         return args.get("content", "")
     if tool_name == "edit_file":
-        old_str = args.get("old", "")
-        new_str = args.get("new", "")
-        return old_content.replace(old_str, new_str, 1)
+        from .tools.files import planned_edit_text
+        planned = planned_edit_text(Path(str(args.get("path", ""))), old_content,
+                                    str(args.get("old", "") or ""),
+                                    str(args.get("new", "") or ""))
+        return old_content if planned is None else planned
     return None
 
 

@@ -972,8 +972,8 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `run_shell` | Execute a shell command | yes | no |
 | `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
 | `check_shell_job` | Check a background shell job's state and output | no | no |
-| `kill_shell_job` | Stop a background job and its process tree | yes | no |
-| `git_commit` | Stage and commit | yes | no |
+| `kill_shell_job` | Stop a background job and its process tree; for a background sub-agent's job, the sub-agent runs no further tool call and ends after its current reply | yes | no |
+| `git_commit` | Stage and commit (without `files`, every change, new untracked files included) | yes | no |
 | `git_create_branch` | Create a branch, optionally checking it out | yes | no |
 | `git_push` | Push the current branch | yes | no |
 | `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
@@ -989,7 +989,7 @@ tools, which only the terminal offers (see [gui.md](gui.md)).
 | `browser_click` | Click a CSS selector | see below | no |
 | `browser_fill` | Type into a form field | see below | no |
 | `browser_read` | Read the visible page text | no | no |
-| `browser_screenshot` | Save a PNG of the current page | no | no |
+| `browser_screenshot` | Save a PNG of the current page into the project (skipped under `--dry-run`, refused under `--patch-mode`) | yes | no |
 | `browser_console` | Read the page's console messages | no | no |
 | `browser_network` | List requests the page made and any the network policy refused | no | no |
 | `browser_close` | Close the browser session | no | no |
@@ -1297,7 +1297,7 @@ localm stop --all                        # stop every running localm instance
 
 `localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
-`localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
+`localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those. A chat reply in progress is not listed either, and a server started with `localm serve` has no activity report. When several servers serve the directory (`--new`), `status` names them all and commands attach to the one started first; `localm stop` without an id then lists them and stops none.
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](rag.md#how-retrieval-works-and-why-its-lexical-first).
 

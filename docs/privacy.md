@@ -240,6 +240,10 @@ non-interactively), every standalone reporter (Python, PowerShell, and the
 `report-issue.sh` curl fallback used when there is no Python) treats that
 exactly like you said no: nothing is sent. The curl fallback also sends
 nothing when `perl`, which it needs to remove personal details, is missing.
+Every reporter follows Network access: with it off nothing is sent, and when
+the standalone reporter cannot read the setting (no `config.json` in the data
+directory yet, or one it cannot parse) it asks before sending, with no as the
+default, and sends nothing without a terminal.
 
 **What is redacted from a report:**
 - Your home directory, replaced by `~`, and your account name wherever it is

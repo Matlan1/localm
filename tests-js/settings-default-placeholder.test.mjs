@@ -201,7 +201,7 @@ test("typing a NUMBER field back to blank after focusing it still omits it (stil
 //  value" into a silent no-op.                                     //
 // ---------------------------------------------------------------- //
 
-test("clearing a TEXT field that had a real override still sends an explicit null (real clear, not omitted)", async () => {
+test("clearing a TEXT field that had a real override sends its shipped default (real clear, not omitted)", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_OVERRIDDEN, patches) });
   await render(win);
@@ -213,9 +213,10 @@ test("clearing a TEXT field that had a real override still sends an explicit nul
   runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(patches.length, 1);
-  assert.equal(patches[0].mdns_name, null,
-    "an explicit clear of a REAL customization must still reach the server as null, " +
-    "never silently dropped - dropping it would strand the old override forever");
+  assert.equal(patches[0].mdns_name, "localm",
+    "an explicit clear of a REAL customization reaches the server as the shipped " +
+    "default (as a cleared number box does), never silently dropped - dropping it " +
+    "would strand the old override forever");
 });
 
 test("legacy schema rows with no shipped_default key behave exactly as before (solid, no crash)", async () => {

@@ -749,7 +749,8 @@ def find_attachable(home: Path, root_dir: str,
                     probe: Optional[Callable[[dict], bool]] = None,
                     *, exclude_ids: Collection[str] = (),
                     launch_tag: Optional[str] = None) -> Optional[dict]:
-    """The live, identity-verified instance serving *root_dir*, or None.
+    """The live, identity-verified instance serving *root_dir*, or None. With
+    several, the one with the oldest ``started`` time.
 
     Entries whose ``instance_id`` is in *exclude_ids* are skipped (neither
     probed nor reaped). When *launch_tag* is given, every entry whose
@@ -763,11 +764,24 @@ def find_attachable(home: Path, root_dir: str,
     remove a live instance's entry and trigger a duplicate server. Other dirs'
     entries are left to their own launch / the PID reaper.
     """
+    return next(_live_for_dir(home, root_dir, probe, exclude_ids, launch_tag), None)
+
+
+def live_entries(home: Path, root_dir: str,
+                 probe: Optional[Callable[[dict], bool]] = None) -> list[dict]:
+    """Every live, identity-verified instance serving *root_dir*, oldest
+    ``started`` first; the first is the one :func:`find_attachable` returns.
+    Reaps confident-dead same-dir entries the same way."""
+    return list(_live_for_dir(home, root_dir, probe, (), None))
+
+
+def _live_for_dir(home: Path, root_dir: str, probe, exclude_ids, launch_tag):
+    """Yield the live same-dir entries of :func:`find_attachable`, oldest
+    ``started`` first, probing each only when the caller asks for the next."""
     probe = probe or default_probe
     target = _canon(root_dir)
-    for entry in list_entries(home):
-        if _canon(entry.get("root_dir", "")) != target:
-            continue
+    same_dir = [e for e in list_entries(home) if _canon(e.get("root_dir", "")) == target]
+    for entry in sorted(same_dir, key=lambda e: str(e.get("started") or "")):
         if exclude_ids and entry.get("instance_id") in exclude_ids:
             continue
         if launch_tag is not None and entry.get("launch_tag") != launch_tag:
@@ -777,12 +791,12 @@ def find_attachable(home: Path, root_dir: str,
         except Exception:
             alive = False
         if alive:
-            return entry
+            yield entry
+            continue
         # Reap only when the process is also gone or its pid now names another
         # process; never delete a live entry on a transient or identity probe miss.
         if entry_process_state(entry)[0] in ("gone", "stale"):
             unregister_instance(entry.get("_path"))
-    return None
 
 
 def attach_url(entry: dict) -> str:

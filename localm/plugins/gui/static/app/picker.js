@@ -566,7 +566,9 @@ export function pickPath(opts = {}) {
           setLoading(false);
           toast(t("picker.openFailed",
             { path: path || t("picker.location"), message: e.message }), true);
-          if (!data) navigate("", { push: false });   // first load failed -> drives
+          // A first load that failed falls back to the drive list once; a drive
+          // list that fails too stays failed.
+          if (!data && path) navigate("", { push: false });
         });
       }
       function setLoading(on) { listEl.classList.toggle("picker-loading", on); }

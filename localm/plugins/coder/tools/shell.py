@@ -512,6 +512,14 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
         return _job_not_found(registry, job_id)
 
     outcome = job.kill()
+    if getattr(job, "kind", "") == "agent":
+        # A background sub-agent has no process output; its status is the
+        # check_agent_job text.
+        from .agents import tool_check_agent_job
+        status = tool_check_agent_job(cwd, job_id)
+        return ToolResult(ok=not outcome.startswith("kill FAILED"),
+                          output=f"<kill_result>{outcome}</kill_result>\n" + status.output,
+                          summary=f"{job_id} {outcome}")
     output, summary, trunc, _st = _render_job(job)
     output = f"<kill_result>{outcome}</kill_result>\n" + output
     # A kill that could not stop the process must never report success.
@@ -689,6 +697,17 @@ def _detect_test_runner(cwd: Path) -> list[str]:
     return [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
 
 
+def _runner_label(cmd: list[str]) -> str:
+    """The test runner *cmd* starts, by name: ``pytest`` for ``<python> -m
+    pytest ...``, else the program's file name and its subcommand."""
+    if len(cmd) >= 3 and cmd[1] == "-m":
+        return cmd[2]
+    name = Path(cmd[0]).stem if cmd else ""
+    if len(cmd) >= 2 and not cmd[1].startswith("-"):
+        return f"{name} {cmd[1]}"
+    return name
+
+
 def tool_run_tests(
     cwd: Path,
     runner: str = "auto",
@@ -773,7 +792,7 @@ def tool_run_tests(
         status = f"failed (exit {result.returncode})"
     return ToolResult(
         ok=ok,
-        output=f"<runner>{' '.join(cmd[:2])}</runner>\n"
+        output=f"<runner>{_runner_label(cmd)}</runner>\n"
                f"<status>{status}</status>\n"
                f"<output>\n{output}\n</output>",
         summary=f"tests {status}",

@@ -82,7 +82,7 @@ test("preflight unavailable: non-blocking warning shown, still resolves true, no
     "toast says the pre-check itself could not run, not that nothing is missing");
   assert.ok(toastEl.className.includes("error"), "surfaced as an error toast");
   assert.equal(win.document.querySelector("#toast-errors .toast-error-text").textContent,
-    toastEl.textContent, "shown on the error toast stack, which stays until dismissed");
+    toastEl.textContent, "shown on the error toast stack");
   assert.ok(log.textContent.toLowerCase().includes("could not check"),
     "the persistent log also gets the line");
 });
@@ -107,7 +107,7 @@ test("missing WITHOUT a curated source: no modal, but an honest toast+log messag
     "toast is honest that it cannot auto-fetch this file");
   assert.ok(toastEl.className.includes("error"), "surfaced as an error toast");
   assert.equal(win.document.querySelector("#toast-errors .toast-error-text").textContent,
-    toastEl.textContent, "shown on the error toast stack, which stays until dismissed");
+    toastEl.textContent, "shown on the error toast stack");
   assert.ok(log.textContent.includes("custom.safetensors"), "the persistent log also gets the line");
 });
 

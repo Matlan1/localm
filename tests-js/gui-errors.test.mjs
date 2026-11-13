@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Error toasts stay until dismissed and stack; every GUI error is recorded in the
+// Error toasts outlast info toasts, can be dismissed, and stack; every GUI error is recorded in the
 // Settings "Recent errors" list (memory only in privacy mode) and POSTed once to
 // /api/gui-error; "Report this error" fills the bug report form and sends nothing.
 import { test } from "node:test";

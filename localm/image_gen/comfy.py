@@ -258,8 +258,9 @@ def _build_image_workflow(
     # caller opted out.
     if fast_dequant:
         if apply_fast_dequant(workflow):
-            say("Using fast fp16 GGUF dequant (was float32) for speed; "
-                "set comfy_fast_dequant=false to keep your workflow's value.")
+            say("Using fast fp16 GGUF dequant (was float32) for speed; turn off "
+                "'Fast GGUF dequant (fp16)' in Settings > Media > Image (or run: "
+                "localm config comfy_fast_dequant false) to keep your workflow's value.")
 
     # 3. Override text encoder models if requested
     if clip_name1 is not None or clip_name2 is not None:
