@@ -1926,6 +1926,12 @@ export async function openEpisodesModal(view = "live") {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     const rows = (view === "archive" ? data.archived : data.episodes) || [];
     openModal(t(view === "archive" ? "coder.episodes.droppedTitle" : "coder.episodes.storedTitle"), (body) => {
+      // A key that is not the owner's sees no lessons at all: say so, offer nothing.
+      if (data.authorized === false) {
+        body.appendChild(emptyState("key", t("coder.episodes.ownerOnlyTitle"),
+          t("coder.episodes.ownerOnlyHint")));
+        return;
+      }
       const tabs = el("div", "actions");
       const liveBtn = el("button", "btn-secondary", t("coder.episodes.storedTab"));
       liveBtn.onclick = () => openEpisodesModal("live");
@@ -2047,6 +2053,11 @@ export async function openHooksModal() {
     const mcpTitle = (data.mcp_servers || []).length > 0;
     openModal(t(mcpTitle ? "coder.hooks.titleMcp" : "coder.hooks.title"), (body) => {
       for (const w of data.warnings || []) body.appendChild(el("p", "sub", w));
+      if (data.authorized === false) {
+        body.appendChild(emptyState("key", t("coder.hooks.ownerOnlyTitle"),
+          t("coder.hooks.ownerOnlyHint")));
+        return;
+      }
       if (!data.configured) {
         body.appendChild(emptyState("book", t("coder.hooks.emptyTitle"), t("coder.hooks.emptyHint")));
         return;
@@ -2456,6 +2467,32 @@ export function openSessionControls() {
     };
     body.appendChild(appRow);
 
+    /* --- plan mode (the REPL's /plan); shown when the server reports it --- */
+    if ("plan_mode" in info) {
+      const planRow = el("div", "card");
+      const planLbl = el("label", "", "");
+      const planBox = document.createElement("input");
+      planBox.type = "checkbox";
+      planBox.id = "ctl-plan-mode";
+      planBox.checked = !!info.plan_mode;
+      planLbl.appendChild(planBox);
+      planLbl.appendChild(document.createTextNode(" " + t("coder.controls.planModeLabel")));
+      planRow.appendChild(planLbl);
+      planRow.appendChild(el("div", "sub", t("coder.controls.planModeHint")));
+      planBox.onchange = async () => {
+        planBox.disabled = true;
+        try {
+          const d = await postSessionSettings({ plan_mode: planBox.checked });
+          planBox.checked = !!d.plan_mode;
+          toast(t(d.plan_mode ? "coder.controls.planModeOn" : "coder.controls.planModeOff"));
+        } catch (e) {
+          planBox.checked = !planBox.checked;
+          toast(t("coder.controls.planModeFailed") + e.message, true);
+        } finally { planBox.disabled = false; }
+      };
+      body.appendChild(planRow);
+    }
+
     /* --- scope (the REPL's /scope) --- */
     const scopeCard = el("div", "card");
     scopeCard.appendChild(el("label", "", t("coder.controls.scopeLabel")));
@@ -2632,7 +2669,7 @@ export async function openCoderMemoryModal() {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
-        toast(t("coder.memory.remembered"));
+        toast(t(d.added === false ? "coder.memory.alreadyThere" : "coder.memory.remembered"));
         openCoderMemoryModal();
       } catch (e) { toast(t("coder.memory.addFailed") + e.message, true); }
       finally { addBtn.disabled = false; }
