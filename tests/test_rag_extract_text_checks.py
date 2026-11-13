@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A file named as text but holding binary data is refused instead of read as
-cp1252 mojibake; real text in any of the encodings the extractor reads still
-passes. A format tie-break that gave no label is not remembered for the extension.
+cp1252 or UTF-16 mojibake; real text in any of the encodings the extractor reads
+still passes, a coloured log included. A format tie-break that gave no label is not remembered for the extension.
 The embedder's warm-up stage names the real reason a configured model is
 unavailable."""
 
@@ -21,6 +21,8 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + bytes(range(256)) * 4
     ("photo.txt", _PNG, "a PNG image"),
     ("notes.md", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj", "a PDF document"),
     ("data.csv", bytes(range(1, 32)) * 40, "binary data"),
+    ("table.txt", b"".join(i.to_bytes(4, "little") for i in range(400)), "binary data"),
+    ("table.log", b"".join(i.to_bytes(4, "big") for i in range(400)), "binary data"),
 ])
 def test_binary_named_as_text_is_refused(name, data, what):
     with pytest.raises(ExtractError) as exc:
@@ -37,6 +39,37 @@ def test_binary_named_as_text_is_refused(name, data, what):
 ])
 def test_text_in_every_supported_encoding_still_reads(data, expected):
     assert extract_bytes(data, "a.txt").strip() == expected
+
+
+_LEGACY_TEXT = {
+    "shift_jis": "これは日本語のテキストです。東京は大きな都市です。",
+    "gbk": "这是一个中文文本文件。我们在这里测试编码。",
+    "big5": "這是一個中文文本文件。我們在這裡測試編碼。",
+    "euc-kr": "이것은 한국어 텍스트 파일입니다. 우리는 여기서 인코딩을 테스트합니다.",
+}
+
+
+@pytest.mark.parametrize("encoding", sorted(_LEGACY_TEXT))
+def test_legacy_multibyte_text_reads_in_its_own_script(encoding):
+    text = _LEGACY_TEXT[encoding]
+    data = ((text + "\n") * 5).encode(encoding)
+
+    out = extract_bytes(data, "notes.txt")
+
+    assert out.splitlines()[0] == text
+
+
+def test_an_ansi_coloured_log_is_read_without_its_colour_codes():
+    data = "".join(
+        f"\x1b[32m2026-11-13 10:00:{i:02d}\x1b[0m \x1b[1;34mINFO\x1b[0m worker {i} ready\n"
+        "\x1b]0;build\x07"
+        for i in range(50)).encode()
+
+    out = extract_bytes(data, "build.log")
+
+    assert out.splitlines()[0] == "2026-11-13 10:00:00 INFO worker 0 ready"
+    assert "\x1b" not in out and "\x07" not in out
+    assert extract.sniff_format(data, "build.weird") == ".txt"
 
 
 def test_a_tie_break_without_a_label_is_tried_again_later(monkeypatch):

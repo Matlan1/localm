@@ -21,6 +21,9 @@ def runner(cli_runner, monkeypatch):
     # about the throwaway home, not the developer's environment.
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    # A COLUMNS value in the environment sets the width of piped output, so the
+    # `key list` table would be laid out (and its cells cut) to that width.
+    monkeypatch.delenv("COLUMNS", raising=False)
     monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 

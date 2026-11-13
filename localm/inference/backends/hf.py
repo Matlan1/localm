@@ -744,5 +744,5 @@ class HFBackend(BaseBackend):
                 "model (the xgrammar runtime raised); this reply is reported as "
                 "failed and later grammar requests are refused.[/yellow]")
             if grammar:
-                from .base import GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError
-                raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_MESSAGE)
+                from .base import GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE, GrammarUnsupportedError
+                raise GrammarUnsupportedError(GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE)

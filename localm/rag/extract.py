@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
 import time
@@ -410,44 +411,126 @@ def _sniff_bytes(data: bytes) -> Optional[str]:
             pass
 
     # 2. Text check (avoid binary files)
-    if b"\x00" in sample:
-        return None
+    return ".txt" if _text_codec(data) is not None else None
 
-    # Check non-printable control characters ratio (excluding tab/cr/lf)
-    control_count = sum(1 for b in sample if b < 32 and b not in (9, 10, 13))
-    if control_count > sample_len * 0.02:
-        return None
 
-    # Try decoding
-    try:
-        data.decode("utf-8")
-        return ".txt"
-    except UnicodeDecodeError:
+# Control characters that do not occur in text. Bell, backspace, vertical tab,
+# form feed and escape do (terminal titles, overstruck man pages, page breaks,
+# colour codes in logs).
+_NON_TEXT_CONTROLS = frozenset(range(32)) - {7, 8, 9, 10, 11, 12, 13, 27}
+
+# Characters frequent in running text of each legacy multi-byte encoding's
+# language, used to pick between encodings that all decode a file.
+_LEGACY_MARKERS = {
+    "gb18030": frozenset("的一是不了在人有我他这个们中来上大为和国地到以说时要就出会也你对生能而子那得于着下自之年过发后作里用道行所然家种事成方多经么去法学如都同现当没动面起看定天分还进好小部其些主样理心她本前开但因只从想实"),
+    "big5": frozenset("的一是不了在人有我他這個們中來上大為和國地到以說時要就出會也你對生能而子那得於著下自之年過發後作裡用道行所然家種事成方多經麼去法學如都同現當沒動面起看定天分還進好小部其些主樣理心她本前開但因只從想實"),
+    "cp949": frozenset("이다는의에가을하고지를기한서도사로리으나자들수대그것인게일어있해시정주전보적라면요까부상니마"),
+}
+
+# Legacy encodings tried after UTF-8, in order of preference when no marker
+# decides between them.
+_LEGACY_CODECS = ("cp1252", "cp932", "gb18030", "big5", "cp949")
+
+# The bytes the encoding detection looks at.
+_DETECT_BYTES = 65536
+
+
+def _controls_ok(chars) -> bool:
+    """True when at most 2% of *chars* (byte values or one-character strings)
+    are control characters that do not occur in text."""
+    chars = list(chars)
+    bad = sum(1 for c in chars
+              if (c if isinstance(c, int) else ord(c)) in _NON_TEXT_CONTROLS)
+    return bad <= len(chars) * 0.02
+
+
+def _kana_share(text: str) -> float:
+    """Hiragana and katakana per non-ASCII character of *text*, less the share
+    of half-width katakana (what other CJK encodings decode to under cp932)."""
+    wide = sum(1 for c in text if "\u3041" <= c <= "\u30ff")
+    narrow = sum(1 for c in text if "\uff61" <= c <= "\uff9f")
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    return (wide - narrow) / non_ascii if non_ascii else 0.0
+
+
+def _legacy_codec(data: bytes) -> Optional[str]:
+    """The legacy encoding *data* decodes with, or None when none of
+    ``_LEGACY_CODECS`` decodes it. Bytes with runs of two or more non-ASCII
+    bytes (double-byte text) go to the multi-byte encoding whose language's
+    frequent characters, or kana for cp932, make up the largest share of the
+    decoded text; otherwise the first encoding in ``_LEGACY_CODECS`` that
+    decodes the bytes is used."""
+    head = data[:_DETECT_BYTES]
+    decoded: dict = {}
+    for codec in _LEGACY_CODECS:
         try:
-            data.decode("cp1252")
-            return ".txt"
+            decoded[codec] = codecs.getincrementaldecoder(codec)("strict").decode(
+                head, final=len(head) == len(data))
+        except UnicodeDecodeError:
+            continue
+    if not decoded:
+        return None
+    runs = re.findall(rb"[\x80-\xff]+", head)
+    if runs and sum(map(len, runs)) / len(runs) >= 1.8:
+        scores = {}
+        for codec, text in decoded.items():
+            if codec == "cp932":
+                scores[codec] = _kana_share(text)
+            elif codec in _LEGACY_MARKERS:
+                non_ascii = [c for c in text if ord(c) > 127]
+                if non_ascii:
+                    hits = sum(1 for c in non_ascii if c in _LEGACY_MARKERS[codec])
+                    scores[codec] = hits / len(non_ascii)
+        best = max(scores, key=lambda c: scores[c], default=None)
+        if best is not None and scores[best] > 0:
+            return best
+    return next(iter(decoded))
+
+
+def _text_codec(data: bytes) -> Optional[str]:
+    """The codec *data* reads as text with, or None when it is not text.
+
+    A byte-order mark names UTF-8 or UTF-16. A first block more than a quarter
+    NUL bytes is BOM-less UTF-16 when it decodes as UTF-16 of the matching
+    endianness with no NUL character and few control characters; otherwise it
+    is binary. Any other block holding a NUL byte, or more than 2% control
+    characters that do not occur in text, is binary. The rest is UTF-8 when it
+    decodes as UTF-8, else the encoding ``_legacy_codec`` picks."""
+    if not data:
+        return "utf-8"
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if data.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    sample = data[:512]
+    if sample.count(0) > len(sample) // 4:
+        codec = "utf-16-be" if sample[0:1] == b"\x00" else "utf-16-le"
+        try:
+            text = codecs.getincrementaldecoder(codec)("strict").decode(
+                sample, final=len(sample) == len(data))
         except UnicodeDecodeError:
             return None
+        if "\x00" in text or not _controls_ok(text):
+            return None
+        return codec
+    if b"\x00" in sample or not _controls_ok(sample):
+        return None
+    try:
+        data.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return _legacy_codec(data)
 
 
 def _binary_in_text_file(data: bytes) -> Optional[str]:
     """What a file with a plain-text suffix holds instead of text ("a PNG image",
-    "binary data"), or None when its bytes read as text. UTF-16 text, with or
-    without a byte-order mark, is text."""
-    if not data or data.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf")):
+    "binary data"), or None when its bytes read as text (see ``_text_codec``)."""
+    if _text_codec(data) is not None:
         return None
     sniffed = _sniff_bytes(data)
-    named = {".pdf": "a PDF document", ".docx": "a Word document", ".zip": "a ZIP archive",
-             ".tar": "an archive", ".png": "a PNG image", ".jpeg": "a JPEG image",
-             ".gif": "a GIF image", ".webp": "a WebP image"}.get(sniffed or "")
-    if named:
-        return named
-    if sniffed is not None:
-        return None
-    sample = data[:512]
-    if sample.count(0) > len(sample) // 4:
-        return None
-    return "binary data"
+    return {".pdf": "a PDF document", ".docx": "a Word document", ".zip": "a ZIP archive",
+            ".tar": "an archive", ".png": "a PNG image", ".jpeg": "a JPEG image",
+            ".gif": "a GIF image", ".webp": "a WebP image"}.get(sniffed or "", "binary data")
 
 
 class ExtractError(Exception):
@@ -463,21 +546,22 @@ def _decode_text(data: bytes) -> str:
     those as UTF-8 yields NUL-interleaved mojibake that an LLM cannot read -
     the attachment then looks present but carries no information.
     """
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16", errors="replace")          # BOM, either endianness
-    if data.startswith(b"\xef\xbb\xbf"):
-        return data.decode("utf-8-sig", errors="replace")
-    # BOM-less UTF-16 is sniffed BEFORE trying UTF-8: a NUL-heavy sample is
-    # decoded as UTF-16 of the matching endianness.
-    sample = data[:512]
-    if sample and sample.count(0) > len(sample) // 4:
-        endian = "utf-16-be" if sample[0:1] == b"\x00" else "utf-16-le"
-        return data.decode(endian, errors="replace")
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        # Legacy single-byte encoding: cp1252 maps every byte.
-        return data.decode("cp1252", errors="replace")
+    codec = _text_codec(data)
+    if codec is None:
+        # Not text by ``_text_codec``: cp1252 maps every byte.
+        codec = "cp1252"
+    return data.decode(codec, errors="replace")
+
+
+# A terminal control sequence: CSI (colours, cursor moves), OSC (titles,
+# links) up to its terminator, or a two-byte escape.
+_TERMINAL_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_]?")
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    """*text* without terminal control sequences (an ANSI-coloured log)."""
+    return _TERMINAL_ESCAPE_RE.sub("", text) if "\x1b" in text else text
 
 
 def extract_text(path: Path,
@@ -553,7 +637,7 @@ def extract_bytes(data: bytes, filename: str,
             raise ExtractError(
                 f"{filename} is named as a text file but holds {binary}; it was "
                 "not read as text.")
-        text = _decode_text(data)
+        text = _strip_terminal_escapes(_decode_text(data))
     elif inferred_ext in (".html", ".htm"):
         from localm.netpolicy import html_to_text
         text = html_to_text(_decode_text(data))

@@ -77,9 +77,11 @@ class _CollectionEmbedding:
         self._vectors_file_rejected = False
         self.vector_degrade_reason = None
         self.corrupt = False
-        self._save(on_progress)
+        stopped = self._save_holding_progress_errors(on_progress)
         with _files_changing(self.dir):
             self._discard_rejected_vectors(
                 f"re-embedded to {self._vec_dim} dimensions"
                 + (f" with {model_name}" if model_name else ""))
+        if stopped is not None:
+            raise stopped
         return {"chunks": total, "dim": self._vec_dim, "model": model_name}
