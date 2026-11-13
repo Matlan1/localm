@@ -40,7 +40,7 @@ Ask questions and have conversations with the model. The model can access docume
 
 **Commands:** Type `/` to open the command menu.
 - `/web <query>` - search the web and answer with cited sources (requires the web plugin; see network.md).
-- `/generate-image <prompt>` - generate an image inline (image plugin required).
+- `/generate-image <prompt>` - generate an image inline (image plugin required) with the model picked on the Images page; `/generate-video` and `/generate-music` likewise use the Video and Music pages' picks.
 - `/remember <fact>` - save a fact to your long-term memory so the model recalls it in later chats (requires the memory plugin).
 - `/memory` - view or edit remembered facts in the memory manager.
 - `/persona <name>` - apply a saved persona (system prompt + sampling values).
