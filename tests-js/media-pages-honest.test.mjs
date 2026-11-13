@@ -141,9 +141,10 @@ test("a music job started elsewhere is followed on the Music page", async () => 
     globalThis.__followed = [];
     streamJob = async (id, onLine) => { globalThis.__followed.push(id); onLine("adopted line");
                                         return { status: "failed" }; };`);
-  runScript(win, "refreshMusicHistory();");
+  runScript(win, "refreshMusicHistory(); refreshMusicHistory();");
   await settle();
-  assert.deepEqual([...win.__followed], ["j-run"]);
+  const music = [...win.__followed].filter((id) => id !== "img");
+  assert.deepEqual(music, ["j-run"], "the running music job is followed once, a finished one never");
   assert.match(win.document.getElementById("music-log").textContent, /adopted line/);
 });
 

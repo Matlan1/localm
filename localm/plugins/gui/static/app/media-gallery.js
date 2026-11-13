@@ -524,13 +524,16 @@ export async function runningJobOf(kind) {
  *  none, so a job started from the chat shows on its page too. */
 export function createJobFollower() {
   let busy = false;
+  let looking = false;
   async function run(work) {
     busy = true;
     try { return await work(); } finally { busy = false; }
   }
   async function adopt(kind, follow) {
-    if (busy) return;
-    const job = await runningJobOf(kind);
+    if (busy || looking) return;
+    looking = true;
+    let job;
+    try { job = await runningJobOf(kind); } finally { looking = false; }
     if (!job || busy) return;
     await run(() => follow(job.id));
   }
