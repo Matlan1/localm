@@ -1950,6 +1950,9 @@ export function buildRoutedChip(routed) {
     chip.appendChild(document.createTextNode(t("chat.routed.suggestChip", { model: routed.suggest })));
     chip.title = t("chat.routed.suggestTitle", {
       from: routed.from || "?", needs, model: routed.suggest });
+    if (routed.askReason) {
+      chip.title += " " + t("chat.routed.askReason", { reason: routed.askReason });
+    }
     chip.onclick = () => {
       if ([...modelSelect.options].some((o) => o.value === routed.suggest)) {
         modelSelect.value = routed.suggest;

@@ -171,7 +171,8 @@ class TestDebugLog:
                     h.close()
             debuglog.logger.setLevel(saved_level)
         assert not any(isinstance(h, logging.FileHandler) for h in handlers)
-        assert any(type(h) is logging.StreamHandler for h in handlers), handlers
+        assert any(isinstance(h, logging.StreamHandler)
+                   and not isinstance(h, logging.FileHandler) for h in handlers), handlers
         assert debuglog._ring_handler is not None and debuglog._ring_handler in handlers
         assert level == logging.DEBUG
         warnings = [r for r in seen if r.levelno == logging.WARNING]

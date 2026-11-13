@@ -129,7 +129,7 @@ def test_a_placement_reload_sizes_the_model_off_the_loop(monkeypatch):
     _seat("model-b", b)
     seen = {}
     _record_threads(monkeypatch, env, seen)
-    monkeypatch.setattr(hs, "_placement_heal_due", lambda name, engine: True)
+    monkeypatch.setattr(hs, "_placement_heal_due", lambda name, engine, protected=frozenset(): True)
 
     async def _go():
         loop_thread = threading.get_ident()

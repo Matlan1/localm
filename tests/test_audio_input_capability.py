@@ -13,6 +13,13 @@ from localm.model_manager.registry import (
     model_audio_capability,
     model_vision_capability,
 )
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 _STR, _BOOL, _U32 = 8, 7, 4
 
@@ -173,20 +180,20 @@ class TestRouting:
 
     @pytest.mark.parametrize("mode", ["image", "auto"])
     def test_audio_moves_a_request_off_a_model_that_cannot_hear(self, library, mode):
-        decision = cr.plan_route("text", cr.request_needs(_audio_message()),
+        decision = _rf.plan_route("text", cr.request_needs(_audio_message()),
                                  pinned=False, resident=["text"], reg=library,
                                  mode=mode)
         assert decision.routed
         assert decision.resolved in ("asr", "omni")
 
     def test_a_model_that_hears_keeps_the_request(self, library):
-        decision = cr.plan_route("asr", cr.request_needs(_audio_message()),
+        decision = _rf.plan_route("asr", cr.request_needs(_audio_message()),
                                  pinned=False, resident=["asr"], reg=library,
                                  mode="auto")
         assert not decision.routed and decision.resolved == "asr"
 
     def test_a_loaded_engine_confirming_audio_is_not_a_gap(self, library):
-        decision = cr.plan_route("legacy", cr.request_needs(_audio_message()),
+        decision = _rf.plan_route("legacy", cr.request_needs(_audio_message()),
                                  pinned=False, resident=["legacy"], reg=library,
                                  current_known={caps.AUDIO: True}, mode="auto")
         assert not decision.routed
@@ -194,7 +201,7 @@ class TestRouting:
     def test_an_audio_only_model_is_not_routed_an_image(self, library):
         msgs = [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]}]
-        decision = cr.plan_route("asr", cr.request_needs(msgs), pinned=False,
+        decision = _rf.plan_route("asr", cr.request_needs(msgs), pinned=False,
                                  resident=["asr"], reg=library, mode="auto")
         assert decision.routed and decision.resolved in ("vlm", "omni", "legacy")
         assert "asr" not in decision.candidates
