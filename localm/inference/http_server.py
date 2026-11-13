@@ -3999,11 +3999,17 @@ def _sanitize_client_context(raw) -> dict:
 
 def _idle_unload_ttl() -> int:
     """Configured idle-unload TTL in seconds (0 = disabled), read live so a
-    Settings change applies without a restart. A bad value falls back to 0."""
+    Settings change applies without a restart. A bad value falls back to 0, and
+    so does a settings read too slow to finish on the event loop
+    (``ConfigReadSlow``, logged at debug): the caller checks again later."""
+    from localm.config import ConfigReadSlow, load_config
     try:
-        from localm.config import load_config
         return max(0, int(load_config().get("idle_unload_seconds", 0) or 0))
     except (TypeError, ValueError):
+        return 0
+    except ConfigReadSlow as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("idle-unload: skipping this check: %s", e)
         return 0
 
 
@@ -4690,8 +4696,8 @@ class _DisconnectSignalMiddleware:
     runs the endpoint in a child task fed by a SYNTHETIC receive that never yields
     http.disconnect - so request.is_disconnected() is permanently False for any
     endpoint behind them (confirmed against a real uvicorn client abort). A
-    StreamingResponse still learns of a disconnect (Starlette acloses its body
-    generator), but a plain non-streaming coroutine does not.
+    StreamingResponse still learns of a disconnect (localm's StreamingResponse
+    acloses its body generator), but a plain non-streaming coroutine does not.
 
     This is a PURE-ASGI middleware (a BaseHTTPMiddleware here would defeat its own
     purpose) added OUTSIDE that stack, so it keeps the raw ASGI receive - which
@@ -5935,7 +5941,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
-    rolled_back = _finish_pending_runtime_update()
+    # A newer version is installed than this process runs: that version carries
+    # the update steps out at its own start (cli._core._update_steps_at_start).
+    from localm import updater as _updater
+    deferred = _updater.newer_version_installed()
+    rolled_back = False if deferred else _finish_pending_runtime_update()
 
     try:
         from localm import bugreport
@@ -5979,6 +5989,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
     _mark_fds_noninheritable()
+    _set_restart_env()
 
     if update_watchdog and rolled_back:
         from localm.debuglog import logger as _dbg
@@ -5993,7 +6004,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             updater.spawn_health_watchdog(
                 host=update_watchdog["host"], port=update_watchdog["port"],
                 scheme=update_watchdog.get("scheme", "http"),
-                expect_version=update_watchdog["expect_version"])
+                expect_version=update_watchdog["expect_version"],
+                relaunch_argv=_restart_argv(port))
         except Exception as e:
             # spawn_health_watchdog() already never raises; this is
             # belt-and-suspenders so even a malformed dict here can never block
@@ -6004,8 +6016,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             except Exception:
                 pass
 
-    _set_restart_env()
-    _execv_restart(port, instance_id, update_steps_done=True)
+    _execv_restart(port, instance_id, update_steps_done=not deferred)
 
 
 def _finish_pending_runtime_update() -> bool:
@@ -6059,7 +6070,7 @@ def _finish_pending_update_steps() -> bool:
     if pending is not None:
         status = updater_runtime.finish_pending(
             say=lambda m: _dbg.info("runtime update during restart: %s", m))
-        if status is not None and status["state"] not in ("updated", "current"):
+        if updater_runtime.failed(status):
             if pending.get("repair"):
                 _dbg.warning("runtime repair during restart: %s", status["note"])
             else:
@@ -6068,7 +6079,8 @@ def _finish_pending_update_steps() -> bool:
                 updater_components.clear_pending()
                 return _roll_back_during_restart()
         if status is not None:
-            _dbg.info("runtime update during restart: %s", status["note"])
+            (_dbg.warning if status["state"] == "kept" else _dbg.info)(
+                "runtime update during restart: %s", status["note"])
     comp_pending = updater_components.read_pending()
     if comp_pending is None and updater_components.catch_up(repair=True) is not None:
         comp_pending = updater_components.read_pending()
@@ -6615,6 +6627,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
     security.add_host_header_guard(app)
+    errors.add_config_read_slow_answer(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # only when enabled
     diagnostics.add_request_logging(app)     # outermost; debug mode only
@@ -7154,7 +7167,7 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
         async for chunk in gen:
             yield chunk
     finally:
-        # Starlette acloses THIS wrapper on a client disconnect (that is how the
+        # The response acloses THIS wrapper when streaming stops (that is how the
         # pin below gets released). Explicitly aclose the inner stream too so its
         # own cancel/finally runs NOW - releasing the per-model _inference_lock the
         # producer thread holds - instead of one async-generator GC tick later.
@@ -7501,8 +7514,8 @@ async def _stream_sse_body(
         def __init__(self, records: list) -> None:
             self.records = records
 
-    # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
-    # async generator. Without a cancel path the producer thread below would keep
+    # A mid-stream client disconnect or a refused credential throws GeneratorExit
+    # or CancelledError into this async generator. Without a cancel path the producer thread below would keep
     # driving engine.chat_stream() all the way to end-of-generation, holding
     # llama.py's per-model _inference_lock the whole time and blocking the next
     # request to THIS model. cancel_event lets the disconnect unwind stop it.
@@ -8551,7 +8564,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
     A non-streaming handler is a plain coroutine, and Starlette does NOT cancel it
     when the client disconnects (unlike a StreamingResponse, whose async generator
-    it acloses - the hook the _stream_sse fix relies on). So without a cancel path,
+    is closed - the hook the _stream_sse fix relies on). So without a cancel path,
     an aborted request with a large/unlimited max_tokens leaves the executor thread
     driving engine.chat_stream() to end-of-generation while holding llama.py's
     per-model _inference_lock, blocking the NEXT request to this model (and this

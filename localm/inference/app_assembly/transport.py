@@ -76,8 +76,10 @@ class CredentialRecheckMiddleware:
     request-start check (``http_server._require_auth``) when
     :func:`localm.auth.revocation_epoch` moved since the request started or
     was last checked, or :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
-    response is closed with an empty final chunk and the handler is cancelled
-    the way a client disconnect cancels it. A response that presented no
+    response is closed with an empty final chunk and the send raises, which ends
+    the response the way a client disconnect ends it: a
+    :class:`localm.streaming_response.StreamingResponse` then closes its body
+    iterator, so the generation behind the stream is stopped. A response that presented no
     credential, or whose first body chunk came while no key was configured and
     ``require_auth`` was off (open mode, where the GUI's shell token is not a
     key), is not checked.

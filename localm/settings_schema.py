@@ -245,8 +245,9 @@ CORE_FIELDS: list = [
     # of the same name, one persisted and one immediate, and the settings search
     # box indexes both under the same words.
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers (next load)",
-                 "Model layers to run on the GPU. 99 puts the whole model on the "
-                 "GPU; lower it if you run out of VRAM.",
+                 "Model layers to run on the GPU. 999 puts every layer there; 99 does "
+                 "too, unless Auto-size GPU layers from VRAM is on: then 99 fits what "
+                 "free VRAM holds. Lower it if VRAM runs out.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999, tier=Tier.CONFIG_WRITE),
     SettingField("n_cpu_moe", Widget.NUMBER, "MoE expert layers on CPU",
                  "MoE models only. Keeps this many layers' expert weights in system RAM, not "
@@ -344,9 +345,9 @@ CORE_FIELDS: list = [
     # number box would not show device names/VRAM. Still accepted by PATCH
     # /v1/config (and `localm config main_gpu_index N`) like any other field.
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
-                 "GPU for HuggingFace models, the embedder, the vision projector and "
-                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU unless "
-                 "Split across GPUs names some. Blank lets each choose.",
+                 "GPU for HuggingFace models, the embedder, the vision projector, "
+                 "localm's own ComfyUI and native music. A GGUF chat model uses every "
+                 "GPU unless Split across GPUs names some. Blank lets each choose.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
                  max=MAX_GPU_SPLIT_INDEX, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
@@ -395,10 +396,9 @@ CORE_FIELDS: list = [
                  "one. Blank pins nothing.",
                  group="Engine", applies=Applies.NEXT_LOAD, tier=Tier.CONFIG_WRITE),
     SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
-                 "off = never switch; image = only for media your model can't read; "
-                 "ask = offer one; loaded = loaded models only; auto = any "
-                 "installed model; eager = also if unchecked. Pinned chats never "
-                 "switch.",
+                 "off = never; image = only for media your model can't read; ask = "
+                 "offer one; loaded = loaded models only; auto = any installed; eager "
+                 "= also if its abilities are unknown. Pinned chats never switch.",
                  group="Models",
                  options=["off", "image", "ask", "loaded", "auto", "eager"], tier=Tier.CONFIG_WRITE),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
@@ -457,9 +457,9 @@ CORE_FIELDS: list = [
                  "HuggingFace-format model.",
                  group="Timeouts", min=1, step=1000, tier=Tier.CONFIG_WRITE),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
-                 "Folder levels `localm add <dir>` and the models-folder scan search for "
-                 "GGUF files and HuggingFace model folders. The models-folder scan "
-                 "always searches at least 2 levels.",
+                 "Folder levels `localm add <dir>` and the models-folder scan search: "
+                 "1 is the folder itself, 2 also its subfolders. The models-folder "
+                 "scan always searches at least 2 levels.",
                  group="Models", min=1, max=10, step=1, tier=Tier.CONFIG_WRITE),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
@@ -568,10 +568,9 @@ CORE_FIELDS: list = [
                  "HTTP.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("tls_cert", Widget.PATH, "Custom TLS certificate (PEM)",
-                 "Use this certificate instead of localm's built-in one; blank "
-                 "= built-in. Needs the matching private key. If the pair "
-                 "cannot be loaded, localm warns and falls back to its "
-                 "built-in certificate.",
+                 "Use this certificate instead of the built-in one; blank = built-in. "
+                 "Needs the matching private key. A pair that cannot load is reported "
+                 "on the console and in the debug log; the built-in one is used.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("tls_key", Widget.PATH, "Custom TLS private key (PEM)",
                  "Private key for the custom TLS certificate.",
@@ -726,15 +725,16 @@ CORE_FIELDS: list = [
     # Both children name the parent setting rather than pointing at a position:
     # in the two-column grid the parent sits to the LEFT, not above.
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
-                 "Overrides Session persistence for chat only. What the server "
-                 "records of chat is only ever made more private by it. Blank "
-                 "inherits whatever Session persistence is set to.",
+                 "Overrides Session persistence for chat, either way: full or log "
+                 "keeps chats on disk even under privacy. The server's own record of "
+                 "chat only gets more private. (inherit) follows Session persistence.",
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
-                 "Overrides Session persistence for the coder, unless the project's "
-                 ".localcoder/config.toml sets a mode. An open session keeps its mode. "
-                 "The server's own record only gets more private. Blank inherits.",
+                 "Overrides Session persistence for the coder unless the project's "
+                 ".localcoder/config.toml sets a mode. An open session keeps its "
+                 "mode. The server's record only gets stricter. (inherit) = no "
+                 "override.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
@@ -782,9 +782,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Fetched on first use; with network access off, enable Allow model "
-                 "downloads and run 'localm setup-embeddings'. Until then memory and RAG "
-                 "search lexically. A known key, registered name or GGUF path.",
+                 "A known key, registered name or GGUF path. Fetched on first use only "
+                 "when network access is allow; else use Download on the Knowledge or "
+                 "memory page. Until then search is by keyword.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -826,7 +826,7 @@ CORE_FIELDS: list = [
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "
-                 "files on disk.",
+                 "files on disk. The Remove button on the Models page always asks.",
                  group="Models", tier=Tier.CONFIG_WRITE),
     SettingField("autoprune_missing_models", Widget.TOGGLE,
                  "Auto-remove entries for missing files",
@@ -991,8 +991,8 @@ CORE_FIELDS: list = [
     SettingField("coder_untrusted_provenance", Widget.TOGGLE,
                  "Tag untrusted external content",
                  "Marks coder tool results from the web, web search and external MCP "
-                 "servers as untrusted data, so a fetched page cannot inject commands. "
-                 "Leave on unless you have a reason. Applies to new sessions.",
+                 "servers as untrusted and tells the model not to obey them. It "
+                 "labels, it does not block. Leave on. Applies to new sessions.",
                  group="Coder", owner="coder", tier=Tier.OWNER),
     SettingField("coder_unattended_network", Widget.SELECT,
                  "Network tools in unattended coder runs",
@@ -1004,8 +1004,8 @@ CORE_FIELDS: list = [
     SettingField("coder_review", Widget.TOGGLE,
                  "Review changes before finishing",
                  "Before the coder declares a task done, a reviewer model reads the "
-                 "diff and feeds blocking issues back for one more fix pass. Adds a "
-                 "model round-trip per task that changed files. Off by default.",
+                 "diff and sends blocking issues back for one more fix pass. One "
+                 "extra model round-trip per task. Applies to new sessions.",
                  # NOT admin_only, unlike the coder_reviewer* fields: this is the
                  # on/off switch for an extra review pass and crosses no trust
                  # boundary. coder_reviewer / coder_reviewer_model ARE owner-only,
@@ -1020,8 +1020,9 @@ CORE_FIELDS: list = [
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
                  "Sends your diff off-machine (network policy applies) unless blank, "
-                 "local or a loopback URL. blank = the agent's own model; local = "
-                 "Reviewer model name, on CPU; openai; anthropic; or a URL.",
+                 "local or loopback. blank = the agent's model; local = Reviewer "
+                 "model name, on CPU; openai; anthropic; a URL. Applies to new "
+                 "sessions.",
                  group="Coder", owner="coder", tier=Tier.OWNER),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its
     # ARGUMENT writable would be a half-fix. registry.py falls through to
@@ -1045,10 +1046,9 @@ CORE_FIELDS: list = [
                  group="Knowledge", owner="rag", tier=Tier.OWNER,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",
-                 "Folders that may be indexed in whitelist mode, in addition to "
-                 "your home folder and the working directory. When you pick a "
-                 "folder outside this list, localm offers to add it here and "
-                 "continue.",
+                 "Folders indexable in whitelist mode, besides your home folder and "
+                 "the folder the server started from. Picking a folder outside this "
+                 "list offers to add it here and continue.",
                  group="Knowledge", owner="rag", tier=Tier.OWNER),
     SettingField("rag_denied_roots", Widget.PATHLIST, "Denied folders",
                  "Folders the server and scheduled jobs never index in blacklist mode "
@@ -1140,8 +1140,9 @@ CORE_FIELDS: list = [
     # setting.
     SettingField("comfy_disable_auto_launch", Widget.TOGGLE,
                  "Suppress ComfyUI's web page on launch",
-                 "When localm starts ComfyUI for you, keep it headless instead of "
-                 "letting it open its own browser tab. Off by default.",
+                 "Keep a ComfyUI that localm starts headless instead of opening its "
+                 "browser tab. Adds --disable-auto-launch to the launch command, so a "
+                 "launcher script must pass its arguments on. Off by default.",
                  group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     # Reactive fix for an upstream ComfyUI core regression that crashes native
     # ACE-Step audio with "'function' object has no attribute
@@ -1151,9 +1152,10 @@ CORE_FIELDS: list = [
     # self-expires once ComfyUI ships its own fix.
     SettingField("comfy_func_shim", Widget.TOGGLE,
                  "Fix ComfyUI ACE-Step __func__ crash (in-memory)",
-                 "Work around a known ComfyUI crash in native ACE-Step audio. Off by "
-                 "default. Patches only a ComfyUI that localm starts, from its next "
-                 "start, in memory - nothing is written into your install.",
+                 "Works around a known crash in ComfyUI's own ACE-Step audio nodes "
+                 "(not localm's native music backend). Off by default. Patches in "
+                 "memory only a ComfyUI localm starts; writes nothing to your "
+                 "install.",
                  group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     # Per-component placement needs a ComfyUI that offers the multigpu
     # Select*Device nodes - localm's own managed ComfyUI has them, and an older
@@ -1165,9 +1167,10 @@ CORE_FIELDS: list = [
                  # The help must keep BOTH halves: that placement is not promised
                  # everywhere, and that single-GPU setups are unaffected. See
                  # test_placement_help_still_states_the_two_gpu_precondition.
-                 "EXPERIMENTAL, off by default. When Split across GPUs names two or more "
-                 "GPUs, put the text encoder and VAE on a second card. Single-GPU setups "
-                 "are unaffected. Needs a recent ComfyUI.",
+                 "EXPERIMENTAL, off by default. When Split across GPUs (Model, Live "
+                 "tuning) names two or more GPUs, puts text encoder and VAE on a "
+                 "second card. Single-GPU setups are unaffected. Needs a recent "
+                 "ComfyUI.",
                  group="Media", owner="image", tier=Tier.CONFIG_WRITE),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
@@ -1225,14 +1228,15 @@ CORE_FIELDS: list = [
                  "(deny wins). Empty = none.",
                  group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_private", Widget.TOGGLE,
-                 "Allow private/loopback targets (disables the SSRF guard)",
-                 "Permit requests to localhost and private IP ranges. Off by "
-                 "default (a common SSRF vector); only enable for a trusted setup.",
-                 # admin_only: flipping this DISABLES the server-wide SSRF guard, so
+                 "Allow private/loopback targets (not link-local or cloud metadata)",
+                 "Permit requests to localhost and private IP ranges; link-local and "
+                 "cloud-metadata addresses stay refused. Off by default (a common SSRF "
+                 "vector); only enable for a trusted setup.",
+                 # admin_only: flipping this relaxes the server-wide SSRF guard, so
                  # it widens a network trust boundary exactly like the rag_* folder
                  # keys widen a filesystem one - a non-owner config:write key must not
-                 # be able to set it (else it could reach loopback/metadata via any
-                 # model-initiated fetch). See routes/config.py admin_only gate.
+                 # be able to set it (else it could reach loopback/private services
+                 # via any model-initiated fetch). See routes/config.py admin_only gate.
                  group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_model_downloads", Widget.TOGGLE,
                  "Allow model downloads while network access is off",
@@ -1294,9 +1298,9 @@ CORE_FIELDS: list = [
     # ---- Browser automation (plugin) ----
     SettingField("browser_enabled", Widget.TOGGLE,
                  "Let the model drive a web browser",
-                 "Off by default. A key must also hold the browser capability. The "
-                 "browser reaches only what the network policy already allows. A coder "
-                 "session already open keeps the value it started with.",
+                 "Off by default. A key also needs the browser capability, and a "
+                 "coder session needs coder:full. The browser reaches only what the "
+                 "network policy allows. An open coder session keeps its start value.",
                  group="Network", owner="browser", tier=Tier.OWNER),
     SettingField("browser_engine", Widget.SELECT, "Browser to drive",
                  "'bundled' runs the browser localm downloads. 'system' runs a "
@@ -2041,10 +2045,15 @@ MEDIA_PLUGIN_FIELDS: list = [
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
-               "Blank uses the model's recommended steps (or 20).", plugins=_NATIVE),
+               "Blank uses the steps of a model localm offers for download, else those "
+               "recommended for the model's family, else stable-diffusion.cpp's default.",
+               plugins=_NATIVE),
     MediaField("native_cfg_scale", ("native", "cfg_scale"), "", Widget.TEXT,
                "Native CFG scale",
-               "Blank uses the model's recommended value (or 7).", plugins=_NATIVE),
+               "Blank uses the CFG scale of a model localm offers for download, else the "
+               "one recommended for the model's family, else stable-diffusion.cpp's "
+               "default (7.0).",
+               plugins=_NATIVE),
     MediaField("native_flow_shift", ("native", "flow_shift"), "", Widget.TEXT,
                "Native flow shift",
                "Blank uses the model's recommended value.", plugins=_VIDEO_ONLY),
@@ -2411,7 +2420,8 @@ TTS_FIELDS: list = [
              "own in chat, which overrides this for that browser. The A-F "
              "grade rates its training data; higher is better."),
     TtsField("speed", Widget.NUMBER, "Speaking speed",
-             "Playback rate for the generated voice. 1.0 is normal.",
+             "Playback rate for the voice generated in this browser. 1.0 is normal. "
+             "The server's speech route speaks only at 1.0.",
              min=TTS_SPEED_MIN, max=TTS_SPEED_MAX, step=0.05),
     TtsField("model", Widget.SELECT, "Voice model",
              "Hugging Face repo id of the Kokoro model the browser downloads "

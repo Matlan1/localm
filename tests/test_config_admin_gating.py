@@ -452,6 +452,7 @@ def test_setup_embeddings_cli_does_not_register_an_external_gguf(tmp_path,
                         lambda: home / "models" / "embeddings")
     monkeypatch.setattr(embedder, "resolve_embedding_model_path",
                         lambda **kw: str(external))
+    monkeypatch.setattr(embedder, "embedding_model_refusal", lambda spec: "")
 
     maintenance.setup_embeddings.callback(model=str(external))
     assert cfg.load_registry() == {}, "an external GGUF must not be auto-registered"

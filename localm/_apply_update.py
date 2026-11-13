@@ -48,6 +48,10 @@ PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 # The provisioned llama.cpp runtime, relative to the install root.
 RUNTIME_LIB = PRESERVE_WITHIN[0]
 
+# In the runtime dir: the previous build an update kept because this release's
+# build did not work there. Not part of the runtime itself (see _tree_signature).
+RUNTIME_KEPT_RECORD = ".localm-runtime-kept.json"
+
 #: The extras the dependency step of an update installs.
 DEPS_EXTRAS = ("coder", "voice", "monitor")
 
@@ -688,10 +692,11 @@ def snapshot_runtime(lib, dest) -> None:
 
 
 def _tree_signature(root: Path) -> dict:
-    """Relative path -> content (small files) or size, for every file under *root*."""
+    """Relative path -> content (small files) or size, for every file under *root*
+    except a :data:`RUNTIME_KEPT_RECORD`."""
     sig = {}
     for f in root.rglob("*"):
-        if f.is_file():
+        if f.is_file() and f.name != RUNTIME_KEPT_RECORD:
             st = f.stat()
             key = f.relative_to(root).as_posix()
             sig[key] = f.read_bytes() if st.st_size <= _SMALL_FILE else st.st_size

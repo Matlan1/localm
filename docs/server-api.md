@@ -67,10 +67,13 @@ A failed request answers `{"detail": "<message>"}`: `401` for a missing or
 invalid key, `403` for a key without the route's scope (`Key lacks required
 scope: <scope>`), a cookie-authenticated change without its CSRF token, or a
 cross-origin browser request to a route that does not accept one, and the
-statuses listed with each route below. A defect in the server is a `500` with
-`{"detail": "Internal server error"}`; its cause goes to the server log. A body
-that fails validation is a `422` with `{"detail": "<one sentence per field>",
-"errors": [...]}`, where `errors` is the structured list. Three groups answer in
+statuses listed with each route below. On a `/v1/...` path the body also
+carries OpenAI's error object, `"error": {"message", "type", "param", "code"}`,
+with the same message. A defect in the server is a `500` with
+`{"detail": "Internal server error"}` (a failed file operation names its cause,
+`Internal server error: <reason>`, never the path); its cause goes to the server
+log. A body that fails validation is a `422` with `{"detail": "<one sentence per
+field>", "errors": [...]}`, where `errors` is the structured list. Three groups answer in
 their own shape, and a body that fails validation is a `400` there:
 the Ollama routes (`{"error": "..."}`), `POST /v1/messages` (Anthropic's error
 object) and `POST /v1/responses` (OpenAI's error object).
@@ -387,9 +390,15 @@ leaves the server (a model that fails to load names its file, which would
 otherwise carry the account name and install layout to the caller). The reason,
 the file name and any line number are kept - the text is redacted, not muted.
 
+Any route can also answer `503` with a `Retry-After` header when the disk is
+so busy that localm's own settings (`config.json` or the model registry) could
+not be read within two seconds and no read at most two seconds old is kept to
+answer from. Nothing was done, and trying again in a moment is safe.
+
 An error that is neither of those - a genuine defect in the server - is a `500`
-with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
-server log rather than to the client.
+with `{"detail": "Internal server error"}` (for a failed file operation,
+`Internal server error: <reason>`), and its cause goes to the server log rather
+than to the client.
 
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 
@@ -589,9 +598,11 @@ status.
 ### `POST /v1/messages/count_tokens`
 
 Same request fields as `/v1/messages` (without `max_tokens`); returns `{"input_tokens": N}`,
-counted with the model's own tokenizer and chat template, tool descriptions included, by the
-model that would answer the same `/v1/messages` request (capability routing applies, and a model
-another instance serves is counted there). The model is loaded if it is not already.
+counted with the model's own tokenizer and chat template, tool descriptions included. A named
+`model` counts its own tokens and is loaded if it is not already. Without a `model` (or with
+`localm`), capability routing picks among the models already loaded only: a loaded model that has
+what the request needs counts it, otherwise the server's model does; counting never loads a
+routed model. A model another instance serves is counted there.
 
 ### `POST /v1/responses` (OpenAI Responses API)
 
@@ -853,8 +864,10 @@ An unregistered `{id}` is a 404.
 ### `GET /health`
 
 Public - no authentication, even when a key is configured. 200 with
-`{"status": "ok", "model": "...", "loaded": true|false}`; 503 when no engine is
-initialised.
+`{"status": "ok", "model": "...", "loaded": true|false}`, where `"loaded": false`
+names a model kept for a reload on the next request; when no model is loaded or
+kept and one is being loaded, 200 names it with `"loaded": false` and
+`"loading": true`; 503 when none of these applies.
 
 ## Model lifecycle
 
@@ -1012,7 +1025,8 @@ the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them
 unchanged. A new `embedding_model` that names a registered model of another type
-(a chat model, for example) or a reranker is refused with a 400; one that names no
+(a chat model, for example), a GGUF file whose header marks it as another type,
+or a reranker is refused with a 400; one that names no
 known key, registered model or file yet is saved, and the answer carries
 `warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
@@ -1298,7 +1312,7 @@ Scope: `keys:admin`.
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
 | `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out; that response carries `owner_key_created` (true when the owner key was made by this request), and `localm key show --reveal` or rolling it from the Owner key card shows it. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
-| `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
+| `DELETE /v1/keys/{key_id}` | Revoke a key. This also ends what runs under it: the browser sessions signed in with it, the coder sessions it opened at once, and each of its open streaming responses at its next chunk, which also stops the generation behind the stream. A key revoked from another process (`localm key rm`) is noticed by a running server within about five seconds: its coder sessions end then, and each of its streams at its next chunk after that. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (owner key, scope `admin`; CSRF-protected for
 cookie-authenticated callers) deletes the server-side owner key and signs out
@@ -1387,8 +1401,8 @@ and `vector_dim`.
 | `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Body: `filename`, `content_b64`, `max_chars` (omit for the whole text; otherwise clamped to 500 to 200000). Returns `{"filename", "text", "chars", "truncated"}`; 400 for invalid base64, 413 over 30 MB, 422 when no text can be extracted. Not used by collection indexing. The GUI's Chat and Coder attachments use `POST /api/chat/extract` instead: the same request and answer, served by the built-in chat plugin (`chat` scope), so it works without this plugin. |
 | `GET /api/rag/rerank` | Whether Knowledge results are reranked. Returns `{"enabled", "installed", "model", "candidates", "note"}`: the `rag_rerank` setting, the registered reranker names, the reranker a query would use (null when none), how many hits it would see, and why a wanted rerank cannot run. Never loads a model. |
 | `GET /api/rag/embedding` | Current embedding-model config and availability: `{"model", "default", "internal", "installed", "dim", "error", "gpu_fallback_reason", "status", "can_download"}`, with `status` one of `ready`, `not_installed` and `unknown`. Never loads a model; 504 if the embedder state cannot be read. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
-| `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, for when it is not on disk yet (it is fetched automatically on first use under `net_mode: ask` and `allow`, so this is mainly for a fetch that failed, or `net_mode: off` with `net_allow_model_downloads` on). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` refuses it with a 409 unless `net_allow_model_downloads` is on. Returns `{"job_id", "model"}`, or `{"status": "already_installed", "model"}` when the model is on disk; 403 without `config:write`, 409 when the configured model is not one of the internal downloadable ones. See [network.md](network.md). |
-| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key (403 otherwise, for the dry run too); an empty `model` is a 400, and a second setup while one is running is a 409. |
+| `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, for when it is not on disk yet (it is fetched automatically on first use only under `net_mode: allow`, so under `ask` this is how it gets downloaded, and under `off` it works with `net_allow_model_downloads` on). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` refuses it with a 409 unless `net_allow_model_downloads` is on. Returns `{"job_id", "model"}`, or `{"status": "already_installed", "model"}` when the model is on disk; 403 without `config:write`, 409 when the configured model is not one of the internal downloadable ones. See [network.md](network.md). |
+| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key (403 otherwise, for the dry run too); an empty `model`, and a model that cannot be the embedding model (the same refusal as `PATCH /v1/config`), are a 400, and a second setup while one is running is a 409. |
 
 ## Memory endpoints (memory plugin)
 
@@ -1400,7 +1414,7 @@ namespace.
 
 | Route | Purpose |
 |---|---|
-| `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. Returns `{"text", "writable", "items": [{"id", "text", "importance", "source", "kind", "uses", "updated"}], "corrections": [{"id", "action", "proposed_text", "target_id", "target_text", "confidence", "created", "target_updated"}], "path", "can_download_embedder", "embedder_model"}`; `corrections` is empty when writes are not allowed. |
+| `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. Returns `{"text", "writable", "items": [{"id", "text", "importance", "source", "kind", "uses", "updated"}], "corrections": [{"id", "action", "proposed_text", "target_id", "target_text", "confidence", "created", "target_updated"}], "path", "can_download_embedder", "embedder_model", "embedder_missing"}`; `corrections` is empty when writes are not allowed. `embedder_missing` names the embedding model when it is not installed yet and network access allows a download, for a caller who gets the download offer and for the owner; otherwise null. |
 | `PUT /api/memory` | Bulk edit. Body `{"text", "base"}`: `text` is the edited list, `base` the `text` that `GET /api/memory` returned when the edit started. A line matching an existing fact keeps that record; new lines are added; a fact in `base` that is no longer in `text` is deleted; a fact added since `base` was read is kept. Returns `{"status": "saved", "count", "kept_newer"}` (`kept_newer`: facts added since `base` that were kept). `base` is required: without it the request is refused with `422` (`"loc": ["body", "base"], "msg": "Field required"`) and nothing changes. `413` past the 256-record or 64k-char cap. |
 | `POST /api/memory/append` | Add one fact. Body `{"text": ...}`; returns `{"status": "appended", "id"}`, or `{"status": "exists", "id"}` when you already added the same text (case and spacing ignored), which then is not stored again; `400` for empty text, `413` at the record cap. |
 | `PATCH /api/memory/{id}` | Edit one record's text or importance. Returns `{"status": "saved", "item"}`; `400` for empty text, `404` for an unknown id. |

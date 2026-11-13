@@ -1090,19 +1090,24 @@ class _GrammarTraceFolder:
 
     While a lazy grammar waits for its trigger, llama.cpp logs
     ``Grammar still awaiting trigger after token <id> (`<piece>`)`` for every
-    sampled token, and ``Grammar triggered on regex: '<text>'`` once the trigger
-    matches. ``<piece>`` and ``<text>`` are generated text and may contain
-    newlines, so one record can span several lines.
+    sampled token, and ``Grammar triggered on regex: '<text>'`` or
+    ``Grammar triggered on token <id> (`<piece>`)`` once the trigger matches.
+    ``<piece>`` and ``<text>`` are generated text and may contain newlines, so
+    one record can span several lines.
 
     :meth:`feed` consumes the lines of such records, continuation lines
     included, and passes every other line to *forward* in arrival order. The
     awaiting records are counted and passed to *record* once, as
     ``Grammar still awaiting trigger after N token(s)``, when a triggered record
     arrives or at :meth:`flush`. A triggered record is passed to *record* as
-    ``Grammar triggered on regex``.
+    ``Grammar triggered on regex`` or ``Grammar triggered on token``.
 
-    An awaiting record ends at a line ending in "`)" and a triggered record at
-    a line ending in "'", but the generated text can itself contain that
+    A token-triggered record ends at the first "`)" on its line; llama.cpp
+    prints it without a line break, so the text after that "`)" is passed to
+    *forward* as a line of its own. A token-triggered record with no "`)" on its
+    line, and an awaiting record, end at a line ending in "`)", and a
+    regex-triggered record at a line ending in "'", but the generated text can
+    itself contain that
     delimiter before a newline. So after such a line the following lines are
     held: a line of at most _MAX_TAIL characters that ends in the same
     delimiter and does not start with "Grammar " is taken, together with the
@@ -1112,14 +1117,16 @@ class _GrammarTraceFolder:
     arrived after _MAX_CONTINUATION_LINES further lines is treated as ended.
 
     *redacted*, when given, receives the first line of every record with its
-    payload removed (``Grammar still awaiting trigger after token <id>`` or
-    ``Grammar triggered on regex``, followed by the line's own trailing "\\r"),
-    at the moment the record is recognised and in order with *forward*."""
+    payload removed (``Grammar still awaiting trigger after token <id>``,
+    ``Grammar triggered on token <id>`` or ``Grammar triggered on regex``,
+    followed by the line's own trailing "\\r"), at the moment the record is
+    recognised and in order with *forward*."""
 
     _TRACE_PREFIX = "Grammar "
     _AWAITING = "Grammar still awaiting trigger after token "
     _AWAITING_ID = re.compile(r"(-?\d+) \(`")
     _AWAITING_CLOSER = "`)"
+    _TRIGGERED_TOKEN = "Grammar triggered on token "
     _TRIGGERED = "Grammar triggered on regex: '"
     _TRIGGERED_CLOSER = "'"
     _MAX_CONTINUATION_LINES = 64
@@ -1169,6 +1176,25 @@ class _GrammarTraceFolder:
                 self._redacted(self._AWAITING + opening.group(1) + line[len(text):])
             self._open(text[opening.end():], self._AWAITING_CLOSER)
             return True
+        if text.startswith(self._TRIGGERED_TOKEN):
+            opening = self._AWAITING_ID.match(text, len(self._TRIGGERED_TOKEN))
+            if opening is None:
+                return False
+            self._record_awaiting()
+            self._record("Grammar triggered on token")
+            stub = self._TRIGGERED_TOKEN + opening.group(1)
+            close = text.find(self._AWAITING_CLOSER, opening.end())
+            if close < 0:
+                if self._redacted is not None:
+                    self._redacted(stub + line[len(text):])
+                self._open(text[opening.end():], self._AWAITING_CLOSER)
+                return True
+            rest = line[close + len(self._AWAITING_CLOSER):]
+            if self._redacted is not None:
+                self._redacted(stub if rest.rstrip("\r") else stub + rest)
+            if rest.rstrip("\r"):
+                self._forward(line.__class__(rest))
+            return True
         if text.startswith(self._TRIGGERED):
             self._record_awaiting()
             self._record("Grammar triggered on regex")
@@ -1212,18 +1238,51 @@ _READER_JOIN_TIMEOUT = 30.0
 class _DedupScope:
     """The descriptors of one open :func:`dedup_native_stderr` scope that refer
     to what fd 2 was when it opened: *saved_fd*, and *console_fd* when its
-    console copy was taken from fd 2."""
+    console copy was taken from fd 2. *redact* is True while generated text
+    must be kept out of the debug log copy of its lines; once True it stays
+    True. Guarded by ``_dedup_scopes_lock``."""
 
-    __slots__ = ("saved_fd", "console_fd")
+    __slots__ = ("saved_fd", "console_fd", "redact")
 
-    def __init__(self, saved_fd: int, console_fd: Optional[int]) -> None:
+    def __init__(self, saved_fd: int, console_fd: Optional[int],
+                 redact: bool = False) -> None:
         self.saved_fd = saved_fd
         self.console_fd = console_fd
+        self.redact = redact
 
 
 # Open dedup scopes, outermost first.
 _dedup_scopes: list[_DedupScope] = []
 _dedup_scopes_lock = threading.Lock()
+
+
+def refresh_native_content_gate() -> None:
+    """Ask :func:`debug_content_enabled` again for the
+    :func:`dedup_native_stderr` scopes open in this process. When it is False,
+    every open scope keeps generated text out of the debug log from now until
+    it closes. Call when new work starts that may run inside a scope opened for
+    other work, such as a reply queued beside running ones. Never raises."""
+    with _dedup_scopes_lock:
+        if not _dedup_scopes:
+            return
+    if debug_content_enabled():
+        return
+    with _dedup_scopes_lock:
+        for scope in _dedup_scopes:
+            scope.redact = True
+
+
+def _register_dedup_scope(scope: _DedupScope) -> None:
+    """Add *scope* to the open scopes. A scope that redacts makes every open
+    scope redact, and a scope opened while any open scope redacts redacts
+    too."""
+    with _dedup_scopes_lock:
+        if scope.redact:
+            for other in _dedup_scopes:
+                other.redact = True
+        elif any(other.redact for other in _dedup_scopes):
+            scope.redact = True
+        _dedup_scopes.append(scope)
 
 
 def _stderr_fileno() -> Optional[int]:
@@ -1303,9 +1362,13 @@ def dedup_native_stderr(swap_lock=None):
     RAW (ungrouped) line is ALSO appended to the debug log file
     (native_stderr_target()), exactly as _quiet_stderr already does for the
     windows it covers - only the two LIVE views are grouped, never the file.
-    When debug_content_enabled() is False, the file copy of a grammar trace
-    record keeps only its first line without the generated text, and every
-    other line stays byte-identical and in order.
+    While the scope redacts, the file copy of a grammar trace record keeps
+    only its first line without the generated text, and every other line
+    stays byte-identical and in order. The scope redacts from the moment
+    debug_content_enabled() is False before or right after it is registered,
+    when another open scope redacts, or at a refresh_native_content_gate()
+    call, until it closes; each line follows the setting in force when the
+    reader takes it.
     If a persisted-log write itself fails (disk full, a closed fd), the line
     still reaches the console and the ring buffer and a single warning is
     emitted (see the _write_debug latch below) - degraded, never a silent drop.
@@ -1329,6 +1392,7 @@ def dedup_native_stderr(swap_lock=None):
     # would then loop straight back into the same pipe the reader thread is
     # draining, which reads it again and re-emits it forever: a silent,
     # CPU-spinning infinite loop with no forward progress.
+    content_allowed = debug_content_enabled()
     guard = swap_lock if swap_lock is not None else contextlib.nullcontext()
     with guard:
         console = None if native_console_is_paused() else _stable_console_stream()
@@ -1339,9 +1403,10 @@ def dedup_native_stderr(swap_lock=None):
         read_fd, write_fd = os.pipe()
         os.dup2(write_fd, 2)
         os.close(write_fd)
-        scope = _DedupScope(saved_fd, console_fd)
-        with _dedup_scopes_lock:
-            _dedup_scopes.append(scope)
+        scope = _DedupScope(saved_fd, console_fd, redact=not content_allowed)
+        _register_dedup_scope(scope)
+    if content_allowed:
+        refresh_native_content_gate()
 
     debug_fd = native_stderr_target()
 
@@ -1374,25 +1439,43 @@ def dedup_native_stderr(swap_lock=None):
                 console.flush()
         record_native_line(text)
 
-    redact_debug = debug_fd is not None and not debug_content_enabled()
-
     class _Unterminated(str):
         """The last native line when the stream ended without a newline."""
+
+    class _Written(str):
+        """A native line already copied raw into the debug log."""
+
+    feeding_written = False
 
     def _debug_line(line: str) -> None:
         data = line.encode("utf-8", errors="surrogateescape")
         _write_debug(data if isinstance(line, _Unterminated) else data + b"\n")
 
     def _forward(line: str) -> None:
-        if redact_debug:
+        if not isinstance(line, _Written):
             _debug_line(line)
         grouper.feed(
             line.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"))
 
+    def _redacted(text: str) -> None:
+        if not feeding_written:
+            _debug_line(text)
+
     grouper = _LineGrouper(_emit)
     grammar_trace = _GrammarTraceFolder(
-        lambda text: record_native_line(text), _forward,
-        _debug_line if redact_debug else None)
+        lambda text: record_native_line(text), _forward, _redacted)
+
+    def _take(raw: bytes, end: bytes) -> None:
+        nonlocal feeding_written
+        text = raw.decode("utf-8", errors="surrogateescape")
+        with _dedup_scopes_lock:
+            redact = scope.redact
+        feeding_written = not redact
+        if redact:
+            grammar_trace.feed(text if end else _Unterminated(text))
+        else:
+            _write_debug(raw + end)
+            grammar_trace.feed(_Written(text))
 
     def _reader() -> None:
         buf = b""
@@ -1407,17 +1490,12 @@ def dedup_native_stderr(swap_lock=None):
                 buf += chunk
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
-                    if not redact_debug:
-                        _write_debug(raw + b"\n")
-                    grammar_trace.feed(raw.decode("utf-8", errors="surrogateescape"))
+                    _take(raw, b"\n")
         finally:
             with contextlib.suppress(OSError):
                 os.close(read_fd)
         if buf:
-            if not redact_debug:
-                _write_debug(buf)
-            tail = buf.decode("utf-8", errors="surrogateescape")
-            grammar_trace.feed(_Unterminated(tail))
+            _take(buf, b"")
         grammar_trace.flush()
         grouper.flush()
 

@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
@@ -36,6 +36,7 @@ from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
 from localm.inference.protocol import ChatRequest, CompletionRequest, EmbeddingRequest
+from localm.streaming_response import StreamingResponse
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
 )
@@ -172,9 +173,21 @@ def _listed_models(registry: dict) -> dict[str, dict]:
     return out
 
 
-# A parameter count in a model file or folder name: "8B", "0.6B", "8x7B". A
-# letter or digit right before it ("A3B", "E2B") is not one.
-_PARAM_SIZE_RE = re.compile(r"(?i)(?<![a-z0-9.])((?:\d+x)?\d+(?:\.\d+)?)b(?![a-z0-9])")
+# A parameter count in a model file or folder name, in billions or millions:
+# "8B", "0.6B", "8x7B", "135M". A letter or digit right before it ("A3B", "E2B")
+# is not one.
+_PARAM_SIZE_RE = re.compile(r"(?i)(?<![a-z0-9.])((?:\d+x)?\d+(?:\.\d+)?)([bm])(?![a-z0-9])")
+
+
+def _parameter_size(name: str) -> str:
+    """The parameter count in *name* as Ollama writes it ("8B", "135M"): the first
+    count in billions, else the first in millions, else ``""``."""
+    found = [(m.group(1).lower(), m.group(2).upper()) for m in _PARAM_SIZE_RE.finditer(name)]
+    for wanted in ("B", "M"):
+        for count, unit in found:
+            if unit == wanted:
+                return f"{count}{unit}"
+    return ""
 
 
 def _entry_file_name(entry: dict) -> str:
@@ -190,9 +203,8 @@ def _entry_details(entry: dict, fmt: str) -> dict[str, Any]:
     from localm.model_manager.gguf import quant_label
     arch = entry.get("architecture")
     name = _entry_file_name(entry)
-    size = _PARAM_SIZE_RE.search(name)
     return P.model_details(fmt=fmt, family=arch if isinstance(arch, str) else "",
-                           parameter_size=f"{size.group(1).lower()}B" if size else "",
+                           parameter_size=_parameter_size(name),
                            quantization_level=quant_label(name))
 
 
@@ -469,7 +481,7 @@ def register(app: FastAPI, ctx) -> None:
         except (ValueError, RecursionError):
             return raw.decode("utf-8", "replace")[:500] or "request failed"
         if isinstance(data, dict):
-            return str(data.get("error") or data.get("detail") or "request failed")
+            return str(data.get("detail") or data.get("error") or "request failed")
         return "request failed"
 
     @route("/api/chat", methods=["POST"], dependencies=chat_scope)

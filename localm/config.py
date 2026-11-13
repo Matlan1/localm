@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional, TypeVar, cast
 
-from localm import mgmt_events
+from localm import _home_cfg, mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
     READ_ABSENT,
     READ_CURRENT,
@@ -148,22 +148,6 @@ def _warn_unconfigured_home(path: Path) -> None:
           "or set LOCALM_HOME to choose where data lives.", file=sys.stderr)
 
 
-def _read_home_cfg(path: Path) -> str:
-    """The first line of ``localm-home.cfg``: read as UTF-8 (with or without a
-    BOM), or on Windows, when that fails, in the console (OEM) code page that
-    cmd.exe's ``echo`` writes. Raises ValueError when neither decodes."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -175,7 +159,10 @@ def _detect_home() -> Path:
          sits in a source tree (pyproject.toml next to it) that contains a
          ``localm-home.cfg`` (one line: the data path) or a ``home``
          directory, that wins.  Created by setup.bat's "keep data in this
-         folder" option.
+         folder" option. A relative path in ``localm-home.cfg`` is relative
+         to the checkout; a relative LOCALM_HOME is made absolute against the
+         working folder at the first read and stored back into the
+         environment.
       3. Contained fallback: ``./home`` INSIDE the install, with a stderr
          warning, when NOTHING is configured. Reaching here is a special case
          (setup never ran, or the config/marker was lost), not a normal default -
@@ -184,16 +171,22 @@ def _detect_home() -> Path:
     """
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        home = Path(env).expanduser()
+        if not home.is_absolute():
+            # A relative LOCALM_HOME is made absolute against the working folder
+            # at the first read and written back to the environment.
+            home = home.absolute()
+            os.environ["LOCALM_HOME"] = str(home)
+        return home
 
     repo_root = Path(__file__).resolve().parents[1]
     if (repo_root / "pyproject.toml").is_file():       # source checkout only
-        cfg_marker = repo_root / "localm-home.cfg"
+        cfg_marker = repo_root / _home_cfg.NAME
         if cfg_marker.is_file():
             try:
-                line = _read_home_cfg(cfg_marker)
+                line = _home_cfg.read_line(cfg_marker)
                 if line:
-                    return Path(line).expanduser()
+                    return _home_cfg.data_dir(line, repo_root)
             except (OSError, ValueError, LookupError) as e:
                 # The marker EXISTS but could not be read: warn and fall back to
                 # the default data dir rather than silently switching. stderr
@@ -1406,7 +1399,9 @@ _rmw_lock = threading.RLock()
 # later call on the loop gets the kept read at once, with a fresh read queued
 # behind, until a read finishes within LOOP_READ_WAIT_S again. A kept read is
 # served only while it is at most LOOP_KEPT_MAX_AGE_S old (counted from when
-# that read completed); past that the loop waits for the fresh read. The reader
+# that read completed); past that the loop waits for the fresh read until it is
+# LOOP_FRESH_READ_WAIT_S old (counted from when it started) and otherwise raises
+# ConfigReadSlow, so no answer is ever older than LOOP_KEPT_MAX_AGE_S. The reader
 # threads share _io_lock, so a read stuck on the disk holds the other files'
 # reads too. A write made by
 # this process through save_config, update_config, save_registry or
@@ -1418,6 +1413,23 @@ _rmw_lock = threading.RLock()
 # is a leaf: nothing is acquired and no file is read while it is held.
 LOOP_READ_WAIT_S = 0.5
 LOOP_KEPT_MAX_AGE_S = 2.0
+LOOP_FRESH_READ_WAIT_S = 2.0
+
+
+class ConfigReadSlow(RuntimeError):
+    """A read of config.json or registry.json made on the server's event loop
+    did not finish within LOOP_FRESH_READ_WAIT_S, and no read at most
+    LOOP_KEPT_MAX_AGE_S old was kept to answer from. Nothing was read; the read
+    goes on in the background and trying again later is safe. ``name`` is the
+    file, ``retry_after_s`` a whole number of seconds to wait."""
+
+    def __init__(self, name: str, waited_s: float) -> None:
+        self.name = name
+        self.retry_after_s = 5
+        super().__init__(
+            f"reading {name} has taken over {waited_s:.1f} s (a busy disk?), and "
+            f"no read at most {LOOP_KEPT_MAX_AGE_S:.0f} s old is kept to answer "
+            "from. Nothing was read; try again in a moment.")
 
 _loop_reads_lock = threading.Lock()
 _loop_reads_epoch = 0
@@ -1432,7 +1444,7 @@ class _LoopRead:
     """One read handed to a reader thread."""
 
     __slots__ = ("name", "key", "epoch", "fn", "started", "done", "value", "error",
-                 "ran")
+                 "ran", "refused")
 
     def __init__(self, name: str, key: tuple, epoch: int, fn: Callable) -> None:
         self.name = name
@@ -1444,6 +1456,7 @@ class _LoopRead:
         self.value = None
         self.error: Optional[BaseException] = None
         self.ran = False
+        self.refused = False
 
 
 def _on_event_loop_thread() -> bool:
@@ -1581,9 +1594,11 @@ def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
     """``fn()`` (a read of *name*). On a running event loop with a kept read of
     *name* at most LOOP_KEPT_MAX_AGE_S old, the loop waits at most
     LOOP_READ_WAIT_S and is otherwise answered from that kept read; with an
-    older kept read it waits for the fresh read. Off the loop, or with no kept
-    read yet, it is ``fn()`` on the calling thread. Every caller gets its own
-    copy. Raises what ``fn`` raises."""
+    older kept read it waits for the fresh read until that read is
+    LOOP_FRESH_READ_WAIT_S old. Off the loop, or with no kept read yet, it is
+    ``fn()`` on the calling thread. Every caller gets its own copy. Raises what
+    ``fn`` raises, and ``ConfigReadSlow`` when the fresh read is still running
+    at that bound (logged at WARNING once per read)."""
     if not _on_event_loop_thread() or _holds_store_lock():
         return fn()
     key = _store_paths()
@@ -1624,7 +1639,18 @@ def _loop_safe_read(name: str, fn: Callable[[], _T]) -> _T:
                     "read, at most %.0f s old, until a read is fast again.",
                     name, LOOP_READ_WAIT_S, LOOP_KEPT_MAX_AGE_S)
             return copy.deepcopy(kept[1])
-    job.done.wait()
+    if not job.done.wait(max(0.0, LOOP_FRESH_READ_WAIT_S - (time.monotonic() - job.started))):
+        waited = time.monotonic() - job.started
+        with _loop_reads_lock:
+            first = not job.refused
+            job.refused = True
+        if first:
+            _logger().warning(
+                "reading %s has taken over %.1f s (a busy disk?) and the last "
+                "complete read is older than %.0f s; requests on the server's "
+                "event loop that need it are refused until the read finishes.",
+                name, waited, LOOP_KEPT_MAX_AGE_S)
+        raise ConfigReadSlow(name, waited)
     if not job.ran:
         return fn()
     if job.error is not None:
@@ -1744,7 +1770,9 @@ def instance_id() -> str:
     Served to the GUI over ``/v1/config``, which compares it against the id it
     last saw for this browser origin to tell a restart of the same install
     apart from a different install sharing that origin's localStorage. The
-    value is kept in memory per data folder after the first call."""
+    value is kept in memory per data folder after the first call, so a file
+    that cannot be read or written still gives one id for the whole process.
+    A file that exists but cannot be read is never overwritten."""
     home = HOME_DIR
     val = _instance_ids.get(home)
     if val is None:
@@ -1766,17 +1794,16 @@ def _instance_id_now() -> str:
                 if val:
                     return val
             except OSError as e:
-                # The marker exists but could not be read: warn, then fall
-                # through and mint a fresh id for this run.
-                print(f"[localm] WARNING: cannot read {path} ({e}); minting a "
-                      "fresh instance id for this run.", file=sys.stderr)
+                # The file exists but cannot be read: it is left as it is and
+                # a fresh id is used in memory.
+                print(f"[localm] WARNING: cannot read {path} ({e}); using an "
+                      "in-memory id for this run; the file is left unchanged.",
+                      file=sys.stderr)
+                return uuid.uuid4().hex
         val = uuid.uuid4().hex
         try:
             path.write_text(val, encoding="utf-8")
         except OSError as e:
-            # Cannot persist: this run's id will not survive a restart, so the
-            # client treats the next launch as a new pairing and starts empty /
-            # re-syncs from the server.
             print(f"[localm] WARNING: cannot persist instance id to {path} "
                   f"({e}); using an in-memory-only id for this run (it will "
                   "change on the next start).", file=sys.stderr)
@@ -1966,7 +1993,9 @@ def load_config_checked() -> tuple:
     diagnostics) uses this instead of load_config().
 
     On a running event loop the read follows ``_loop_safe_read``: at most
-    LOOP_READ_WAIT_S of waiting, then the last complete read."""
+    LOOP_READ_WAIT_S of waiting, then the last complete read while it is at
+    most LOOP_KEPT_MAX_AGE_S old; past that, ``ConfigReadSlow`` when the fresh
+    read takes longer than LOOP_FRESH_READ_WAIT_S."""
     return _loop_safe_read("config.json", _load_config_checked_now)
 
 
@@ -2441,23 +2470,39 @@ def network_mode() -> str:
     That covers both a load that raises and a config.json (with its .bak) that
     is present but cannot be read, which load_config_checked reports as
     read_ok False. An unset or unrecognised config value resolves to "ask"."""
+    return network_mode_checked()[0]
+
+
+def network_mode_checked() -> tuple:
+    """``(mode, unreadable)``: *mode* as :func:`network_mode` resolves it, and
+    *unreadable* True when it is ``off`` only because the config file could
+    not be read (no ``LOCALM_NET_MODE`` override)."""
     import logging
     logger = logging.getLogger("localm")
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
-        return env
+        return env, False
     try:
         cfg, read_ok = load_config_checked()
     except Exception as exc:
         logger.warning("netpolicy: could not load config (%s); resolving "
                        "net_mode to 'off' (fail-safe) so an unreadable config "
                        "cannot silently re-enable network access", exc)
-        return "off"
+        return "off", True
     if not read_ok:
         logger.warning("netpolicy: config.json is present but unreadable; "
                        "resolving net_mode to 'off' (fail-safe) so an "
                        "unreadable config cannot silently re-enable network "
                        "access")
-        return "off"
+        return "off", True
     mode = str(cfg.get("net_mode", "ask")).strip().lower()
-    return mode if mode in NET_MODES else "ask"
+    return (mode if mode in NET_MODES else "ask"), False
+
+
+def net_off_unreadable_config_refusal(what: str = "") -> str:
+    """The text of a refusal made because the config file could not be read,
+    which turns network access off: the file, *what* was refused (optional),
+    and what to do."""
+    lead = f"{CONFIG_FILE} could not be read, so network access is treated as off"
+    return (f"{lead} and {what}. " if what else f"{lead}. ") + (
+        "Correct that file (or set LOCALM_NET_MODE for this run) and try again.")

@@ -17,7 +17,8 @@ _LOG_TAIL_READ_BYTES = 2_000_000
 
 def _find_run_log(home=None, pid=None):
     """The Path to a run's OWN log, matched by the pid embedded in the log
-    filename (localm_<date>_<time>_<pid>.log), or None if none is found.
+    filename (localm_<date>_<time>_<pid>.log), or None if none is found. With
+    *pid* None, the newest log that is not this process's own.
     Shared by _recent_log_tail (below) and _classify_prior_death's raw-tail
     truncation check, so the two never disagree about WHICH file a crash's
     evidence comes from. Records this process has queued for its debug log
@@ -34,11 +35,7 @@ def _find_run_log(home=None, pid=None):
         return None
     logs = sorted(d.glob("localm_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
     if pid is not None:
-        for p in logs:
-            if p.stem.endswith(f"_{pid}"):
-                return p
-    # No pid match (older marker): fall back to the most recent log that is
-    # NOT this current run's, so we do not just echo the recovering start.
+        return next((p for p in logs if p.stem.endswith(f"_{pid}")), None)
     import os as _os
     cur = f"_{_os.getpid()}.log"
     return next((p for p in logs if not p.name.endswith(cur)), None)
@@ -216,19 +213,47 @@ def live_server_hang_trace(home=None) -> str:
     Empty when no live server captured a freeze. Never raises - a registry hiccup
     must not break filing a bug report."""
     try:
-        from localm import instances
         if home is None:
             from localm.config import HOME_DIR
             home = HOME_DIR
-        entries = sorted(instances.list_entries(home),
-                         key=lambda e: e.get("started") or "", reverse=True)
-        for entry in entries:
-            pid = entry.get("pid")
-            if not isinstance(pid, int) or not instances.pid_alive(pid):
-                continue
+        for pid in _live_server_pids(home):
             trace = _recent_hang_traces(home, pid=pid)
             if trace:
                 return trace
         return ""
     except Exception:
         return ""
+
+
+def _live_server_pids(home, *, verified: bool = False) -> list:
+    """The pids of the live servers of the data folder *home* (from the
+    instance registry, ``<home>/run/*.json``, kept only when the process is
+    alive, and with *verified* only when its start identity matches the entry,
+    so a reused pid is left out), the most recently started first. Raises when
+    the registry cannot be read."""
+    from localm import instances
+    entries = sorted(instances.list_entries(home),
+                     key=lambda e: e.get("started") or "", reverse=True)
+    if verified:
+        return [e["pid"] for e in entries if isinstance(e.get("pid"), int)
+                and instances.entry_process_state(e)[0] == "same"]
+    return [e["pid"] for e in entries
+            if isinstance(e.get("pid"), int) and instances.pid_alive(e["pid"])]
+
+
+def live_server_log_pid(home=None):
+    """The pid of the live server of this install whose own debug log a
+    ``localm bug-report`` filed from a separate process attaches: the most
+    recently started live server, proven to be the process its registry entry
+    describes, that has a log file, else None (no such server, none with a
+    log, or the registry could not be read). Never raises."""
+    try:
+        if home is None:
+            from localm.config import HOME_DIR
+            home = HOME_DIR
+        for pid in _live_server_pids(home, verified=True):
+            if _find_run_log(home, pid) is not None:
+                return pid
+        return None
+    except Exception:
+        return None

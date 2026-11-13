@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +75,21 @@ def _serve_requested_model(base_url: str, token: Optional[str], model: str, *,
     return served.name, served.note
 
 
+def _terminal() -> bool:
+    """Whether stdin and stdout are both a terminal, so a question can be asked."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+@dataclass(frozen=True)
+class _ServerDecision:
+    """The part of an attached server's routing decision the terminal shows:
+    the model it suggests, why it did not use it, and the capability gaps."""
+
+    suggested: str
+    ask_reason: str = ""
+    gaps: dict = field(default_factory=dict)
+
+
 class _TurnRouter:
     """Picks the engine that answers each turn of ``localm run MODEL``.
 
@@ -82,8 +98,11 @@ class _TurnRouter:
     answered by an installed model that has it, unless *pinned*.
 
     Attached to a server (*build* is None) the server routes the request
-    itself; this only works out the context window to ask for, so the
-    conversation is not compacted when a roomier model can hold it. Loaded in
+    itself; this works out the context window to ask for, so the
+    conversation is not compacted when a roomier model can hold it, and when
+    the server refuses a turn naming a model that could answer it, asks
+    *confirm* and on yes sends the turn again naming that model
+    (:meth:`chat_stream`). Loaded in
     this process, candidates are sized against what is loaded here
     (``routing_fit``): one that fits beside MODEL is loaded beside it; one that
     would unload MODEL, run on the CPU only, read its weights from disk or
@@ -214,6 +233,44 @@ class _TurnRouter:
             eng.load()
         self.current = name
         return eng
+
+    def chat_stream(self, engine, messages: list, **opts):
+        """``engine.chat_stream(messages, **opts)``. Attached, when *engine*
+        refuses the turn with a refusal whose routing names a model that could
+        answer it, :meth:`refusal_offer` asks *confirm*, and on yes the turn is
+        streamed again naming that model; otherwise the refusal is raised as
+        it came."""
+        from localm.inference.backends.base import UnsupportedInputError
+        try:
+            yield from engine.chat_stream(messages, **opts)
+        except (UnsupportedInputError, RuntimeError):
+            other = self.refusal_offer(engine)
+            if other is None:
+                raise
+            yield from engine.chat_stream(messages, model=other, **opts)
+
+    def refusal_offer(self, engine) -> Optional[str]:
+        """Attached and not pinned, after *engine* refused a turn: the model the
+        refusal's routing (``engine.refusal_routing``: ``suggested``,
+        ``ask_reason``, ``gaps``) names, when *confirm* agrees to it; else None.
+        ``last_decision`` becomes the server's decision whenever *confirm* is
+        asked. Nothing is asked in process, when pinned, without *confirm*, or
+        when the refusal names no model."""
+        if self.in_process or self.pinned or self._confirm is None:
+            return None
+        data = getattr(engine, "refusal_routing", None)
+        if not isinstance(data, dict):
+            return None
+        suggested = data.get("suggested")
+        if not isinstance(suggested, str) or not suggested or suggested == self.model_name:
+            return None
+        gaps = data.get("gaps")
+        reason = data.get("ask_reason")
+        decision = _ServerDecision(
+            suggested=suggested, ask_reason=reason if isinstance(reason, str) else "",
+            gaps=dict(gaps) if isinstance(gaps, dict) else {})
+        self.last_decision = decision
+        return suggested if self._confirm(decision) else None
 
     def suggested_model(self) -> Optional[str]:
         """The model routing suggested for the last planned turn, or None."""
@@ -612,11 +669,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             build=lambda name: _build_cli_engine(
                 name, n_gpu_layers=gpu_layers, device=device),
             known=_projector_known(mmproj_path))
-        if sys.stdin.isatty() and sys.stdout.isatty():
-            router._confirm = router.ask
     else:
         router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
                              pinned=pin_model)
+    if _terminal():
+        router._confirm = router.ask
 
     cfg = load_config()
     # settings_schema calls chat_system_prompt 'the system prompt every new chat
@@ -674,7 +731,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     if router.min_context:
                         stream_opts["min_context"] = router.min_context
                 response = _stream_once(engine, messages, suggested=router.suggested_model(),
-                                        **stream_opts)
+                                        router=router, **stream_opts)
                 note = _routed_note or router.note(engine)
                 if note and response:
                     console.print(f"[dim]({escape(note)})[/dim]")
@@ -919,10 +976,11 @@ def _log_worker_death(exc: BaseException) -> None:
 
 
 def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
-                 **kwargs) -> str:
+                 router=None, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text.
     *suggested* (the model capability routing suggests) is named first in the
-    guidance printed when the engine refuses an image or audio clip."""
+    guidance printed when the engine refuses an image or audio clip. With
+    *router* the reply streams through ``router.chat_stream``."""
     import time as _time
     from rich.markup import escape
 
@@ -941,7 +999,9 @@ def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
         stream_kwargs["on_status"] = status_lines.status
     try:
         with native_console_paused():
-            for token in engine.chat_stream(messages, **stream_kwargs):
+            stream = (router.chat_stream(engine, messages, **stream_kwargs)
+                      if router is not None else engine.chat_stream(messages, **stream_kwargs))
+            for token in stream:
                 if first_at is None:
                     first_at = _time.monotonic()
                     status_lines.first_token()
@@ -963,7 +1023,9 @@ def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
     except UnsupportedInputError as e:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # model this install has that can take the input, or how to get one.
-        guidance = _input_refusal_text(engine, messages, e, suggested=suggested)
+        guidance = _input_refusal_text(
+            engine, messages, e,
+            suggested=router.suggested_model() if router is not None else suggested)
         console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
@@ -1119,7 +1181,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             interactive_opts["on_status"] = status_lines.status
         try:
             with native_console_paused():
-                for token in engine.chat_stream(messages, **interactive_opts):
+                for token in router.chat_stream(engine, messages, **interactive_opts):
                     if first_at is None:
                         first_at = _time.monotonic()
                         status_lines.first_token()

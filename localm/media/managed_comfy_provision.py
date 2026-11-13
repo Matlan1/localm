@@ -39,6 +39,7 @@ from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media import source_archive
+from localm.folder_swap import replace_dir
 
 
 class ProgressEvent(str):
@@ -87,7 +88,7 @@ _NON_SOURCE_DIRS = (
     "__pycache__", ".git",
 )
 
-# torch/torchvision/torchaudio pinned as e.g. ``torch==2.4.1+rocm6.2``. pip does NOT
+# torch/torchvision/torchaudio pinned as e.g. ``torch==<version>+rocm6.2``. pip does NOT
 # record the index-url a package came from, so we recover the PyTorch wheel index
 # from the local version label after the ``+``.
 _TORCH_LABEL_RE = re.compile(
@@ -100,12 +101,20 @@ _AMD_MULTI_ARCH_INDEX = "https://repo.amd.com/rocm/whl-multi-arch/"
 _AMD_DEVICE_PACKAGE_RE = re.compile(
     r"^(?:amd-torch(?:vision|audio)?-device|rocm-sdk-device)-[A-Za-z0-9-]+==",
     re.IGNORECASE)
-# The packages a freeze with AMD device packages installs from AMD's index alone:
-# AMD's own rocm / rocm-* / amd-*-device-* names, and torch builds labelled +rocm.
+# A freeze from one of AMD's per-family Windows ROCm indexes names that family's
+# libraries package (rocm-sdk-libraries-gfx110x-all==...).
+_AMD_FAMILY_LIBRARIES_RE = re.compile(r"^rocm-sdk-libraries-(gfx[0-9a-z]+)-all==",
+                                      re.IGNORECASE)
+# AMD's own package names: rocm, rocm-*, amd-*-device-*.
+_AMD_NAME_RE = re.compile(
+    r"^(?:amd-[A-Za-z0-9-]+-device-[A-Za-z0-9-]+|rocm|rocm-[A-Za-z0-9-]+)==", re.IGNORECASE)
+# The packages a freeze from an AMD index installs from that index alone: AMD's
+# own names, and torch builds labelled +rocm.
 _AMD_ONLY_PACKAGE_RE = re.compile(
     r"^(?:(?:amd-[A-Za-z0-9-]+-device-[A-Za-z0-9-]+|rocm|rocm-[A-Za-z0-9-]+)=="
     r"|(?:torch|torchvision|torchaudio|triton)==[^+\s]+\+rocm)",
     re.IGNORECASE)
+_AMD_INDEX_PREFIX = "https://repo.amd.com/"
 
 
 @dataclass(frozen=True)
@@ -381,15 +390,26 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
 def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
     """The PyTorch wheel index-url implied by *freeze_lines*: AMD's multi-arch
     ROCm index when the freeze holds an AMD per-GPU device package
-    (``amd-torch-device-gfx1030==...``, ``rocm-sdk-device-gfx1030==...``), else
+    (``amd-torch-device-gfx1030==...``, ``rocm-sdk-device-gfx1030==...``), AMD's
+    Windows ROCm index of a GPU family when it holds that family's libraries
+    package (``rocm-sdk-libraries-gfx110x-all==...``,
+    ``hwdetect.amd_rocm_win_index``), else
     the one implied by a torch pin's local version label
-    (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
+    (``torch==<version>+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
     None when torch is a plain PyPI build (no ``+label``) or absent. pip does not
     record the index a package came from, so these names and labels are the only
     signal we have."""
     lines = [line.strip() for line in freeze_lines]
     if any(_AMD_DEVICE_PACKAGE_RE.match(line) for line in lines):
         return _AMD_MULTI_ARCH_INDEX
+    from localm import hwdetect
+    for line in lines:
+        m = _AMD_FAMILY_LIBRARIES_RE.match(line)
+        if m:
+            try:
+                return hwdetect.amd_rocm_win_index(m.group(1).lower())
+            except KeyError:
+                break
     for line in lines:
         m = _TORCH_LABEL_RE.match(line.strip())
         if m:
@@ -452,7 +472,7 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
             copied.append(rel)
         staging.mkdir(parents=True, exist_ok=True)
         source_archive.write_record(staging, str(user_workdir), commit, copied)
-        os.replace(staging, source_archive.long_path(managed_root))
+        replace_dir(staging, source_archive.long_path(managed_root))
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
         return False, str(e)
@@ -500,13 +520,16 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     derived PyTorch index is added as an extra index so torch resolves to the same
     wheel while everything else still comes from PyPI.
 
-    With AMD's multi-arch index, the AMD packages (``_AMD_ONLY_PACKAGE_RE``) are
+    With one of AMD's indexes, the AMD packages (``_AMD_ONLY_PACKAGE_RE``) are
     installed first from that index alone, without dependencies, and the rest of
-    the freeze from PyPI alone, so no package can come from the other index."""
+    the freeze from PyPI alone, so no package can come from the other index. A
+    freeze that names AMD's own packages (``rocm``, ``rocm-*``,
+    ``amd-*-device-*``) without an AMD index is not installed: returns
+    ``(False, reason)`` and runs nothing."""
     req_file = managed_root / "localm-replicated-requirements.txt"
     req_file.write_text("\n".join(freeze_lines) + "\n", encoding="utf-8")
     pip = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
-    if index_url == _AMD_MULTI_ARCH_INDEX:
+    if index_url and index_url.startswith(_AMD_INDEX_PREFIX):
         amd = [ln for ln in freeze_lines if _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
         rest = [ln for ln in freeze_lines if not _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
         amd_file = managed_root / "localm-replicated-requirements-amd.txt"
@@ -520,6 +543,11 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
         ok2, out2 = _run(pip + ["-r", str(rest_file)], on_progress=on_progress,
                          timeout=3600)
         return ok2, out + "\n" + out2
+    amd_names = [ln.strip() for ln in freeze_lines if _AMD_NAME_RE.match(ln.strip())]
+    if amd_names:
+        return False, ("not installed: " + ", ".join(amd_names) + " are AMD packages, and "
+                       "localm cannot tell which of AMD's indexes they came from; they are "
+                       "never looked up on PyPI")
     cmd = list(pip)
     if index_url:
         cmd += ["--extra-index-url", index_url]

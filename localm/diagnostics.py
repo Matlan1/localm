@@ -49,10 +49,12 @@ comparable.
 from __future__ import annotations
 
 import json
+import os
 import multiprocessing as mp
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 # Status vocabulary, shared by findings, checks and the aggregate verdict.
@@ -287,12 +289,50 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     ``find_binary_dir`` is injected rather than imported so ``doctor`` can pass
     the accessor it resolved from ``localm.cli`` at call time (which is what
     tests monkeypatch); the default is the real one.
+
+    When ``LLAMA_CPP_LIB`` is set and supplies the library, that folder is the
+    one checked, since it is the one localm loads. When it is set but does not
+    supply the library, the result carries a warning finding saying it is
+    ignored, and its status and summary stay those of the library that is used.
     """
     if find_binary_dir is None:
         from localm.config import find_binary_dir as _fbd
         find_binary_dir = _fbd
     label = _LIB_LABEL
     binary_dir = find_binary_dir()
+    override = _llama_cpp_lib_override()
+    if override and override[0] is not None:
+        binary_dir = override[0]
+    override_findings = ([Finding(WARN, override[1])]
+                         if override and override[0] is None else [])
+    result = _check_lib_in(binary_dir, label)
+    if not override_findings:
+        return result
+    return _result("llama_lib", label, override_findings + list(result.findings),
+                   summary=result.summary, status=result.status)
+
+
+def _llama_cpp_lib_override():
+    """``(folder, None)`` when ``LLAMA_CPP_LIB`` supplies the llama library
+    (the folder localm loads it from), ``(None, text)`` when it is set but is
+    ignored, *text* saying so, or None when it is not set. Never raises."""
+    explicit = os.environ.get("LLAMA_CPP_LIB")
+    if not explicit:
+        return None
+    try:
+        from localm.setup_llama import runtime_in_use
+        use = runtime_in_use()
+    except Exception as e:  # noqa: BLE001 - reported as the reason below.
+        return None, (f"LLAMA_CPP_LIB={explicit} could not be checked ({e}); "
+                      "the folder shown below may not be the one localm loads")
+    if use.get("source") == "LLAMA_CPP_LIB" and use.get("dir"):
+        return Path(use["dir"]), None
+    return None, (f"LLAMA_CPP_LIB={explicit} does not hold the llama library; it is "
+                  "ignored and the runtime below is used")
+
+
+def _check_lib_in(binary_dir, label) -> CheckResult:
+    """``check_llama_lib`` for the folder *binary_dir* (None: not found)."""
     if not binary_dir:
         return _result("llama_lib", label, [Finding(
             FAIL, "llama binary dir not found - GGUF backend unavailable")])
@@ -405,6 +445,31 @@ def _worker_spawn_probe(conn) -> None:
         conn.close()
 
 
+# Environment switches that make a worker fail or stop on purpose. Product code
+# reads each one; tests set them. See test_every_fault_switch_is_listed.
+FAULT_SWITCH_VARIABLES = (
+    "LOCALM_GGUF_FAULT_FOR_TEST",
+    "LOCALM_GGUF_FORCE_LOAD_CANCEL_FOR_TEST",
+    "LOCALM_HF_FAULT_FOR_TEST",
+    "LOCALM_EMBEDDER_FAULT_FOR_TEST",
+    "LOCALM_SPEECH_FAULT_FOR_TEST",
+    "LOCALM_SDCPP_FAULT_FOR_TEST",
+    "LOCALM_VOICE_FAULT_FOR_TEST",
+)
+
+
+def fault_switch_findings(environ=None) -> list:
+    """One WARN finding per variable of ``FAULT_SWITCH_VARIABLES`` set to a
+    non-empty value in *environ* (default ``os.environ``), else an empty
+    list."""
+    env = os.environ if environ is None else environ
+    return [Finding(WARN, f"{name} is set: worker processes started from this "
+                          "environment fail on purpose (a switch for localm's own tests)",
+                    hints=(f"Remove {name} from the environment and start localm "
+                           "again.",))
+            for name in FAULT_SWITCH_VARIABLES if env.get(name)]
+
+
 def check_worker_spawn() -> CheckResult:
     """Verify localm can actually spawn its isolated worker process - the SAME
     ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
@@ -428,7 +493,8 @@ def check_worker_spawn() -> CheckResult:
         # Setup itself failed (e.g. the fix helper or Pipe() errored) - rarer
         # and genuinely different from a spawn failure, so it gets its own line.
         return _result("worker_spawn", label, [Finding(
-            FAIL, f"background worker spawn check errored: {e}")])
+            FAIL, f"background worker spawn check errored: {e}"),
+            *fault_switch_findings()])
 
     reply = None
     error_detail = None
@@ -448,12 +514,14 @@ def check_worker_spawn() -> CheckResult:
     if reply == "ok":
         return _result("worker_spawn", label, [Finding(
             OK, "background worker spawn: OK "
-                "(model loads and voice transcription use this)")])
+                "(model loads and voice transcription use this)"),
+            *fault_switch_findings()])
     detail = f" ({error_detail})" if error_detail else ""
     return _result("worker_spawn", label, [Finding(
         FAIL, f"background worker spawn FAILED{detail} - GGUF "
               "model loads and voice transcription will fail even though the "
-              "runtime above checks out")])
+              "runtime above checks out"),
+        *fault_switch_findings()])
 
 
 # ------------------------------------------------------------------ #

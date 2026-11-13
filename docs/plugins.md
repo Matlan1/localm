@@ -92,7 +92,7 @@ a few routes) are two small worked examples in `localm/plugins/builtin/`.
 
 ```toml
 [plugin]
-name = "myplugin"            # required; CLI name, must be a valid identifier (hyphens allowed)
+name = "myplugin"            # required; must be a valid identifier (hyphens allowed)
 version = "1.0.0"
 api_version = 1              # contract version the engine must support (default 1)
 description = "What it does"
@@ -105,7 +105,8 @@ capabilities = ["feature"]   # declared capabilities; "inference-backend" is the
 data_subdir = "my_data"      # one folder name; "" = none. Get the folder from host.data_dir() (third-party: <data dir>/plugin-data/<name>/my_data)
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
-cli = "module:attr"          # optional legacy Click command entry point
+cli = "module:attr"          # optional Click command, added to `localm` under its own name;
+                             # first-party (bundled) plugins only, ignored for any other
 
 [surface]                    # optional GUI/SPA contribution
 tab_id = "mytab"             # "" = no tab (settings-only or headless plugin)

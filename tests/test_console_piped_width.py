@@ -76,3 +76,16 @@ def test_key_list_written_to_a_pipe_keeps_long_names(monkeypatch, tmp_path):
     result = CliRunner().invoke(main, ["key", "list"])
     assert result.exit_code == 0, result.output
     assert name in result.output
+
+
+def test_key_list_prints_on_the_shared_console(monkeypatch, tmp_path):
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    from localm import auth
+    from localm.cli import keys, main
+    buf = io.StringIO()
+    monkeypatch.setattr(keys, "console", SafeConsole(file=buf))
+    auth.create_key("kitchen-tablet", ["chat"])
+    result = CliRunner().invoke(main, ["key", "list"])
+    assert result.exit_code == 0, result.output
+    assert "kitchen-tablet" in buf.getvalue()

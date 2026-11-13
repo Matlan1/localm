@@ -153,9 +153,10 @@ net_off_remedy="Turn it on in Settings > Server & network > Network access, or r
 # it (LOCALM_NET_MODE, else net_mode in the data dir's config.json, or its .bak when
 # config.json is absent; an unset or unknown value, or a file that is not a JSON
 # object, means ask), or unknown when neither file exists, or one is present and
-# cannot be read the way localm reads it (strict UTF-8 JSON), where localm itself
-# turns network access off. The data dir is LOCALM_HOME, else (in a clone) the
-# first line of localm-home.cfg, else ./home.
+# cannot be read the way localm reads it (strict UTF-8 JSON, with or without a
+# BOM), where localm itself turns network access off. The data dir is
+# LOCALM_HOME, else (in a clone) the first line of localm-home.cfg (relative to
+# the clone), else ./home.
 ri_net_mode() {
   local env_mode home cfg
   env_mode="$(printf '%s' "${LOCALM_NET_MODE:-}" | tr '[:upper:]' '[:lower:]' \
@@ -176,6 +177,7 @@ ri_net_mode() {
     my $p = shift;
     open(my $fh, "<:raw", $p) or do { print "unknown\t$p could not be read\n"; exit 0 };
     local $/; my $raw = <$fh>; close $fh;
+    $raw =~ s/\A\xEF\xBB\xBF//;
     my $cfg = eval { JSON::PP->new->utf8->allow_nonref->decode($raw) };
     if ($@) { print "unknown\t$p could not be read (not valid JSON)\n"; exit 0 }
     my $m = (ref $cfg eq "HASH" && defined $cfg->{net_mode}) ? lc("$cfg->{net_mode}") : "ask";

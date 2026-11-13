@@ -185,6 +185,44 @@ def test_a_repo_the_hub_does_not_show_is_422(gui_app, monkeypatch, http_status):
     assert "was not found" in r.json()["detail"]
 
 
+@pytest.mark.parametrize("http_status", [401, 403, 404])
+def test_a_civitai_version_civitai_does_not_show_is_422(gui_app, monkeypatch, http_status):
+    app, _disc = gui_app
+
+    class _Answer:
+        status_code = http_status
+
+    class _HttpError(Exception):
+        response = _Answer()
+
+    def _fail(url, **kw):
+        raise _HttpError(f"{http_status} from CivitAI")
+
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _fail)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/files?repo=999999999&source=civitai", headers=_hdr())
+    assert r.status_code == 422, r.text
+    assert f"HTTP {http_status}" in r.json()["detail"]
+
+
+def test_a_civitai_server_error_stays_502(gui_app, monkeypatch):
+    app, _disc = gui_app
+
+    class _Answer:
+        status_code = 503
+
+    class _HttpError(Exception):
+        response = _Answer()
+
+    def _fail(url, **kw):
+        raise _HttpError("503 from CivitAI")
+
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _fail)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/files?repo=1&source=civitai", headers=_hdr())
+    assert r.status_code == 502, r.text
+
+
 def test_a_discover_error_without_a_cause_is_422_whatever_it_says(gui_app, monkeypatch):
     from localm.discover import DiscoverError
     app, disc = gui_app

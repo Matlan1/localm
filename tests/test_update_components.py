@@ -274,7 +274,7 @@ def test_kobold_installs_each_installed_build_with_its_setup_backend(tmp_path, i
     staged = _write_tree(tmp_path / "s", _files("0.3.2", kobold="v1.123.1"))
     p = _plans(staged, install)["koboldcpp"]
     assert p["update"] and p["items"] == ["nocuda"]
-    assert uc._commands(p, staged) == [[sys.executable, "-m", "localm", "setup-music",
+    assert list(uc._commands(p, staged)) == [[sys.executable, "-m", "localm", "setup-music",
                                         "--backend", "cpu", "--no-models", "--no-test"]]
 
 
@@ -484,6 +484,32 @@ def test_a_uv_that_cannot_be_installed_leaves_the_old_one_and_the_code(tmp_path,
     assert "the download failed" in ei.value.reason
     assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
     assert _v(inst) == "0.3.1"
+
+
+def test_a_uv_swap_that_is_refused_keeps_the_installed_uv(tmp_path, home,
+                                                          fake_uv_version, monkeypatch):
+    from localm import folder_swap
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1", uv="0.13.4"))
+    _contained_uv(inst, "0.13.4")
+    monkeypatch.setattr(uv_tool, "bootstrap_uv", _bootstrap())
+    real_move = folder_swap.move_dir
+    moves = []
+
+    def refuse_new_uv(src, dst):
+        moves.append((Path(src).name, Path(dst).name))
+        if Path(src).name == ".uv-update":
+            raise PermissionError(32, "in use by another process")
+        real_move(src, dst)
+    monkeypatch.setattr(folder_swap, "move_dir", refuse_new_uv)
+    data, sig = _release(_files("0.3.2", uv="0.13.6"))
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: 0)
+    assert any(src == ".uv-update" for src, _dst in moves)
+    assert "could not swap in the new uv" in ei.value.reason
+    assert (inst / ".uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4"
+    assert not (inst / ".uv-update").exists()
+    assert not [d.name for d in inst.iterdir() if ".previous-" in d.name]
 
 
 def test_a_running_uv_refuses_the_update_with_nothing_changed(tmp_path, home,
@@ -921,16 +947,16 @@ def test_comfy_update_installs_the_pinned_torch_only_when_it_differs(tmp_path, m
     site.mkdir(parents=True)
     _dist(site, "torch", "2.9.1+rocm7.13.0", {"torch/__init__.py": b"x"})
     py = venv / "Scripts" / "python.exe"
-    spec = f.ComfyTorchSpec("rocm", ("torch==2.9.1+rocm7.13.0",), extra_index_url="https://x/")
+    spec = f.ComfyTorchSpec("rocm", ("torch==2.9.1+rocm7.13.0",), index_url="https://x/")
     monkeypatch.setattr(f, "comfy_torch_spec", lambda det=None: spec)
     ran = []
     monkeypatch.setattr(upd, "_run", lambda argv, **kw: ran.append(argv) or (True, ""))
     assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
     assert ran == []
-    spec = f.ComfyTorchSpec("rocm", ("torch==2.11.0+rocm7.13.0",), extra_index_url="https://x/")
+    spec = f.ComfyTorchSpec("rocm", ("torch==2.11.0+rocm7.13.0",), index_url="https://x/")
     assert upd._sync_pinned_torch(py, None, lambda m: None) == (True, "")
     assert ran == [[str(py), "-m", "pip", "install", "--disable-pip-version-check",
-                    "torch==2.11.0+rocm7.13.0", "--extra-index-url", "https://x/"]]
+                    "torch==2.11.0+rocm7.13.0", "--index-url", "https://x/"]]
 
 
 # ------------------------------ the Linux CUDA libraries ----------------------

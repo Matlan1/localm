@@ -906,3 +906,19 @@ test("the service worker precaches the runtime and every language catalog", () =
   }
   assert.ok(shell[1].includes('"/app/i18n.js"') && shell[1].includes('"/app/i18n-en.js"'));
 });
+
+test("the chat drawer's Max tokens field says what blank or 0 does, in every language",
+  async () => {
+    const { window } = await loadIn("en");
+    const box = window.document.getElementById("p-max-tokens");
+    const en = evalIn(window, 'I18N_EN["chat.maxTokens.title"]');
+    assert.match(en, /Blank or 0 uses Max tokens per reply/);
+    assert.equal(box.getAttribute("title"), en);
+    assert.equal(box.getAttribute("min"), "0", "0 is a value the field accepts");
+    for (const [id, cat] of Object.entries(CATALOGS)) {
+      const { window: w } = await loadIn(id);
+      assert.equal(w.document.getElementById("p-max-tokens").getAttribute("title"),
+        cat["chat.maxTokens.title"], id);
+      assert.notEqual(cat["chat.maxTokens.title"], en, `${id} must not read English`);
+    }
+  });

@@ -374,7 +374,11 @@ none of its messages, replies or raw model output written to that server's
 debug log, and memory treats it as privacy mode (nothing stored, and nothing
 recalled unless you opted into read-only recall in privacy mode).
 While such a request is being answered, the debug log holds back the content
-of every other chat on that server as well.
+of every other chat on that server as well. That includes the native llama.cpp
+lines that repeat generated text (the tool-call grammar's trigger trace): they
+are written without that text, and replies the model generates alongside a
+privacy one are recorded the same way until the model next has no reply in
+progress.
 
 The browser plugin's log lines (a request it refused, a request that failed,
 a window it replaced) name the host only; the full address (path and query

@@ -38,6 +38,20 @@ _SYM_FOR = {diagnostics.OK: _OK_SYM,
             diagnostics.WARN: _WARN_SYM,
             diagnostics.FAIL: _FAIL_SYM}
 
+# The failure lines printed by the current ``doctor`` run; ``doctor`` exits 1
+# when it is not empty. Filled only by ``_line``.
+_failures: list = []
+
+
+def _line(sym: str, text: str) -> None:
+    """Print one status line, ``sym`` then ``text`` (Rich markup, already
+    escaped by the caller), and record it when ``sym`` is the failure symbol.
+    Every line that can carry ``_FAIL_SYM`` goes through here.
+    See test_every_failure_symbol_goes_through_line."""
+    if sym == _FAIL_SYM:
+        _failures.append(text)
+    console.print(f"  {sym}  {text}")
+
 
 def _render(result) -> None:
     """Print one ``diagnostics.CheckResult``.
@@ -53,7 +67,7 @@ def _render(result) -> None:
         # diagnostics.py builds text/note/hints from raw probe output and never
         # escapes; this renderer is where the markup escaping happens.
         note = f" [dim]({escape(f.note)})[/dim]" if f.note else ""
-        console.print(f"  {_SYM_FOR.get(f.status, _WARN_SYM)}  {escape(f.text)}{note}")
+        _line(_SYM_FOR.get(f.status, _WARN_SYM), f"{escape(f.text)}{note}")
         for hint in f.hints:
             console.print(f"       [dim]{escape(hint)}[/dim]")
 
@@ -64,9 +78,9 @@ def _check_python() -> None:
     import sys as _sys
     major, minor = _sys.version_info[:2]
     if (major, minor) == (3, 12):
-        console.print(f"  {_OK_SYM}  Python {major}.{minor}")
+        _line(_OK_SYM, f"Python {major}.{minor}")
     else:
-        console.print(f"  {_FAIL_SYM}  Python {major}.{minor} - 3.12 required")
+        _line(_FAIL_SYM, f"Python {major}.{minor} - 3.12 required")
 
 
 def _check_llama_lib(find_binary_dir) -> bool:
@@ -332,7 +346,7 @@ def _check_staged_cuda(find_binary_dir) -> None:
     ok, lines = check_staged_cuda_runtime(binary_dir)
     sym = _OK_SYM if ok else _FAIL_SYM
     for text in lines:
-        console.print(f"  {sym}  {escape(text)}")
+        _line(sym, escape(text))
 
 
 def _check_runtime_build(find_binary_dir) -> None:
@@ -345,9 +359,13 @@ def _check_runtime_build(find_binary_dir) -> None:
     from rich.markup import escape
 
     try:
-        from localm.setup_llama import installed_build, pinned_tag
+        from localm.setup_llama import installed_backend, installed_build, pinned_tag
+        from localm.setup_llama.versions import runtime_target
         build = installed_build()
+        backend = installed_backend()
         pin = pinned_tag()
+        pin_applies = bool(pin) and (
+            backend is None or runtime_target(backend, pin=pin)[1] == "pin")
     except Exception as e:
         console.print(f"  {_WARN_SYM}  could not read the llama.cpp build "
                       f"[dim]({escape(str(e))})[/dim]")
@@ -357,13 +375,20 @@ def _check_runtime_build(find_binary_dir) -> None:
     # escaped.
     if build:
         console.print(f"  {_OK_SYM}  llama.cpp build: {escape(build)}")
+    elif backend == "custom":
+        console.print(f"  {_OK_SYM}  llama.cpp build: your own (installed with "
+                      "'setup-llama --from' or '--url'); its version is not recorded")
     else:
         console.print(f"  {_WARN_SYM}  llama.cpp build not recorded - this "
                       "install predates build recording")
         console.print("     [dim]'localm setup-llama --force' records it; "
                       "until then a bug report cannot say which build this "
                       "is[/dim]")
-    if pin and build and pin != build:
+    if pin and not pin_applies:
+        console.print(f"     [dim]pinned to {escape(pin)}; the pin does not apply to the "
+                      f"{escape(str(backend))} backend, whose build comes with this localm "
+                      "release[/dim]")
+    elif pin and build and pin != build:
         # The pin and the disk disagree: a pin was set but never provisioned
         # through (setup-llama not re-run, or it fell back to another backend).
         console.print(f"  {_WARN_SYM}  pinned to {escape(pin)} but {escape(build)} "
@@ -396,6 +421,14 @@ def _check_runtime_matches_release(build) -> None:
                       f"release [dim]({escape(str(e))})[/dim]")
         return
     fix = f"localm setup-llama --backend {backend} --force"
+    kept = updater_runtime.kept_runtime(setup_llama._repo_runtime_lib()) if backend else None
+    if (kept is not None and kept["backend"] == backend and kept["target"] == target
+            and kept["kept"] == build and not current):
+        console.print(f"  {_WARN_SYM}  kept the {escape(str(backend))} runtime {escape(build)}: "
+                      f"this release's {escape(str(target))} did not work here "
+                      f"({escape(kept['why'])})")
+        console.print(f"     [dim]to try it again: {escape(fix)}[/dim]")
+        return
     if pending is not None:
         console.print(f"  {_WARN_SYM}  the last localm update left the {escape(str(backend))} "
                       f"runtime update to {escape(str(pending.get('target')))} pending; it "
@@ -451,7 +484,7 @@ def _probe_gpu_devices() -> Optional[dict]:
     return _run_probe_subprocess(_GPU_PROBE_CODE, "GPU_PROBE:")
 
 
-def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> None:
+def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> bool:
     """Report GPU capability from what localm will ACTUALLY use for inference,
     not from nvidia-smi / rocm-smi / torch alone, which miss the Vulkan, Metal
     and bundled-ROCm paths.
@@ -468,7 +501,10 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     reported as its own verdict between (2) and (3).
 
     "CPU mode only" is emitted only for a genuine cpu build, a runtime that
-    loads with no GPU device, or a truly indeterminate no-signal case."""
+    loads with no GPU device, or a truly indeterminate no-signal case.
+
+    Returns True when the verdict is a GPU used for inference (a GPU device in
+    the loaded runtime, or a trusted GPU backend marker), else False."""
     from rich.markup import escape
 
     backend = _provisioned_backend_name(find_binary_dir)
@@ -507,9 +543,9 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
             # names), same risk class as nvidia-smi/rocm-smi output.
             console.print(f"  {_OK_SYM}  GPU: {', '.join(escape(g) for g in gpu)}"
                           f"{tag} - used for inference")
-        else:
-            console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
-        return
+            return True
+        console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
+        return False
 
     # (2) No device registry (older build) or the probe could not enumerate:
     #     trust the provisioned backend NAME, but only when the runtime is not
@@ -521,11 +557,11 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     if marker_trustworthy and backend in _GPU_BACKENDS:
         console.print(f"  {_OK_SYM}  GPU: '{escape(backend)}' backend provisioned "
                       "- used for inference")
-        return
+        return True
     if marker_trustworthy and backend == "cpu":
         console.print(f"  {_WARN_SYM}  GPU: 'cpu' backend provisioned - CPU mode only")
         console.print("       [dim]run 'localm setup-llama --backend vulkan' to enable GPU[/dim]")
-        return
+        return False
 
     # (2b) The probe RAN AND FAILED: not "no GPU" but "could not find out", and
     #      the runtime being unable to load is itself the fault to report. This
@@ -542,16 +578,46 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
         # about a runtime that will not load.
         console.print("       [dim]the runtime is installed but did not load, so this is not "
                       "a statement about your hardware[/dim]")
-        return
+        return False
+
+    # (2c) A card smi/torch can see, but no healthy llama.cpp library to use it.
+    if not lib_healthy and smi_or_torch_gpu:
+        console.print(f"  {_WARN_SYM}  GPU: not used for GGUF models until the llama.cpp "
+                      "library above is fixed")
+        console.print("       [dim]the card listed above is there; the runtime that "
+                      "would use it is missing or broken[/dim]")
+        return False
 
     # (3) No trustworthy runtime signal. A GPU seen by smi/torch is positive
     #     proof (already printed by those checks); their silence is NOT proof
     #     of CPU-only, so the line is hedged.
     if smi_or_torch_gpu:
-        return
+        return False
     console.print(f"  {_WARN_SYM}  No GPU detected (nvidia-smi / rocm-smi / torch) - CPU mode only")
     console.print("       [dim]those miss Vulkan/Metal/bundled-ROCm GPUs; run "
                   "'localm setup-llama' to provision one[/dim]")
+    return False
+
+
+def _check_adapter_probe() -> None:
+    """Say so when the install-time graphics-adapter detection
+    (``hwdetect.detect``) could not run, which leaves the backend choice of
+    setup at ``cpu`` for lack of an answer. Silent when it ran."""
+    from rich.markup import escape
+    try:
+        from localm import hwdetect
+        det = hwdetect.detect()
+    except Exception as e:  # noqa: BLE001 - a check must not fail doctor; surface why.
+        console.print(f"  {_WARN_SYM}  graphics adapter detection skipped "
+                      f"[dim]({escape(str(e))})[/dim]")
+        return
+    if det.gpu_state != "unknown":
+        return
+    console.print(f"  {_WARN_SYM}  graphics adapters could not be listed: "
+                  f"{escape(det.probe_error or 'the probe did not run')}")
+    console.print("       [dim]setup cannot tell which GPU this machine has and picks the "
+                  "cpu backend; 'localm setup-llama --backend vulkan' (or cuda, hip, "
+                  "metal) chooses one by hand[/dim]")
 
 
 def _loader_gpu_type() -> int:
@@ -661,7 +727,7 @@ def _check_packages() -> dict:
             sym = _WARN_SYM
             # An exception class name can be arbitrary, so it is escaped.
             ver_str = f" - import failed ({escape(type(e).__name__)})"
-        console.print(f"  {sym}  {label}{ver_str}")
+        _line(sym, f"{label}{ver_str}")
     return modules
 
 
@@ -876,12 +942,16 @@ def doctor():
       - Every part of the install (the venv's install record and dependencies,
         the native runtime, the components) is at the installed localm version
     Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
+
+    Exits with code 1 when any line is a failure (a red cross); warnings
+    leave the exit code at 0.
     """
     # Resolve find_binary_dir from the package at call time so tests that
     # monkeypatch localm.cli.find_binary_dir affect this call site.
     from localm import cli as _cli
     find_binary_dir = _cli.find_binary_dir
 
+    _failures.clear()
     _check_python()
     lib_healthy = _check_llama_lib(find_binary_dir)
     # Immediately after the lib line and BEFORE the ABI check.
@@ -898,7 +968,10 @@ def doctor():
     # verdict is derived from what localm will actually load.
     gpu_found = _check_gpu_driver()
     torch_gpu_found = _check_vram_torch()
-    _check_gpu_verdict(find_binary_dir, lib_healthy, gpu_found or torch_gpu_found)
+    gpu_in_use = _check_gpu_verdict(find_binary_dir, lib_healthy,
+                                    gpu_found or torch_gpu_found)
+    if not gpu_in_use:
+        _check_adapter_probe()
     modules = _check_packages()
     _check_hf_backend_usable(modules.get("torch"), modules.get("transformers"))
     _check_plugin_deps()
@@ -906,3 +979,5 @@ def doctor():
     _check_managed_comfy()
     _check_components()
     _check_installed_parts()
+    if _failures:
+        sys.exit(1)

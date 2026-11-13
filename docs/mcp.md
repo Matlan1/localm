@@ -144,6 +144,8 @@ The output looks like:
 
 `command` is the full path of the Python interpreter of the localm install that printed the block, so the client starts that install even when no global `localm` command is on its PATH (a Portable install, for example).
 
+When `LOCALM_HOME` is set in the shell that prints the block, the block also carries it, as an absolute path, under `env`, so the client starts the server on the same data folder.
+
 ### Step 3: Paste into Claude Desktop config
 
 Open the config file in your editor and paste the block from Step 2 (if the file is new, paste it whole). If you have other MCP servers configured, add localm as another entry under `mcpServers`.
@@ -195,6 +197,20 @@ claude --plugin-dir /path/to/this/repo
 `--plugin-dir` loads the same skill and MCP server for that one session
 only (operational guidance on picking a model/quant, when to delegate a
 whole task versus a single chat call, and what image generation needs).
+
+The plugin's `.mcp.json` starts the server with the global `localm mcp`
+command, because one file has to work for every install and platform. When no
+global `localm` command is on your PATH (a Portable install, for example), the
+plugin's MCP server does not start; the skill still loads. Register the server
+for Claude Code yourself instead, with the interpreter `localm mcp --print-config`
+prints (run it with your install's launcher, `localm.bat` or `./localm.sh`):
+
+```bash
+claude mcp add --scope user localm -- /path/to/localm/python -m localm mcp
+```
+
+Add `-e LOCALM_HOME=/path/to/data` when the printed block carries an `env`
+entry.
 
 ## Coder + external MCP servers
 

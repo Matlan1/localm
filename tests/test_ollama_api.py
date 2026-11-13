@@ -878,11 +878,17 @@ def test_unload_idiom_needs_models_write_in_protected_mode(protected, engine):
     assert allowed.status_code == 200 and engine.loaded is False
 
 
-def test_non_ollama_paths_keep_their_detail_error_shape(protected):
+def test_non_ollama_paths_answer_in_their_own_error_shape(protected):
+    """A /v1 refusal keeps "detail" and carries OpenAI's error object with the
+    same message, never Ollama's "error" string."""
     app, _keys = protected
     with TestClient(app) as c:
         r = c.get("/v1/models")
-    assert r.status_code == 401 and _has_key(r, "detail") and not _has_key(r, "error")
+    assert r.status_code == 401 and _has_key(r, "detail")
+    detail = r.json()["detail"]
+    assert r.json() == {"detail": detail,
+                        "error": {"message": detail, "type": "authentication_error",
+                                  "param": None, "code": None}}
 
 
 # ------------------------------------------------------------------ open mode: origin guard

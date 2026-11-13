@@ -236,7 +236,10 @@ def _embedder_download_status(request: Request | None) -> dict:
     "memory"+"config:write" but not "rag" would 403 there regardless of
     holding config:write. Withholds the model name (returns embedder_model:
     None) whenever can_download is False, so a caller who could not act on
-    it is not told what it is either."""
+    it is not told what it is either. ``embedder_missing`` names the missing
+    model for whoever gets the button and for the owner even when the button
+    cannot be offered (the owner can run ``localm setup-embeddings``); None
+    otherwise."""
     try:
         from localm import scopes
         from localm.config import load_config
@@ -260,11 +263,16 @@ def _embedder_download_status(request: Request | None) -> dict:
             if (rag_mounted and request is not None
                     and _hs.caller_grants(request, "rag")
                     and _hs.caller_grants(request, scopes.CONFIG_WRITE)):
-                return {"can_download_embedder": True, "embedder_model": model}
+                return {"can_download_embedder": True, "embedder_model": model,
+                        "embedder_missing": model}
+            if request is not None and _hs.caller_is_operator(request):
+                return {"can_download_embedder": False, "embedder_model": None,
+                        "embedder_missing": model}
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory embedder-download hint skipped: %s", e)
-    return {"can_download_embedder": False, "embedder_model": None}
+    return {"can_download_embedder": False, "embedder_model": None,
+            "embedder_missing": None}
 
 
 async def _off_loop(fn, *, embedder_bound: bool = True):
@@ -332,15 +340,34 @@ def _read_memory() -> str:
         raise
 
 
+def _fact_key(text: str) -> str:
+    """*text* compared as a fact: case and runs of whitespace ignored."""
+    return " ".join(text.casefold().split())
+
+
 def _strip_bullet(line: str) -> str:
     """Strip any leading list markers (a model may emit '- ', '* ', or even a
     nested '- - ') and surrounding whitespace, leaving the bare fact."""
     return re.sub(r"^[\s\-*]+", "", line).strip()
 
 
-def _legacy_bullets() -> list:
-    """Bare fact lines parsed out of the legacy chat-memory.md (bullets stripped)."""
-    return [_strip_bullet(ln) for ln in _read_memory().splitlines()
+def _owns_legacy_file(store) -> bool:
+    """True when *store* is the owner's chat namespace, the only namespace the
+    legacy chat-memory.md (written before memory had namespaces) belongs to."""
+    return (store.principal == _OWNER and store.agent == "chat"
+            and not store.scope_key)
+
+
+def _legacy_text(store) -> str:
+    """The legacy chat-memory.md text when *store* owns it (see
+    ``_owns_legacy_file``), else "". Raises OSError as ``_read_memory`` does."""
+    return _read_memory() if _owns_legacy_file(store) else ""
+
+
+def _legacy_bullets(store) -> list:
+    """Bare fact lines parsed out of the legacy chat-memory.md (bullets stripped),
+    or [] when *store* does not own that file."""
+    return [_strip_bullet(ln) for ln in _legacy_text(store).splitlines()
             if _strip_bullet(ln)]
 
 
@@ -367,13 +394,18 @@ def _migrate_legacy(store, before_embed=None) -> None:
     batch.
 
     The embedder is resolved only when a bullet actually needs embedding: an
-    absent, empty or already-imported legacy file loads no model."""
+    absent, empty or already-imported legacy file loads no model.
+
+    Only the owner's chat namespace imports the file (``_owns_legacy_file``);
+    for any other namespace this does nothing and writes nothing."""
+    if not _owns_legacy_file(store):
+        return
     marker = _legacy_marker(store)
     if marker.exists() or not _persist_enabled():
         return
     try:
         from localm.memory import MemoryRecord
-        bullets = _legacy_bullets()
+        bullets = _legacy_bullets(store)
         ef = None
         ef_resolved = False
         added = False
@@ -446,15 +478,16 @@ def _forgotten_item(entry: dict) -> dict:
 
 def _rendered_text(store) -> str:
     """The store's facts as a markdown bullet list (what the memory modal textarea
-    shows). Falls back to the legacy flat file only while the structured store is
-    empty and that file has not been imported into it yet."""
+    shows). Falls back to the legacy flat file only for the namespace that owns
+    it (``_owns_legacy_file``), while the structured store is empty and that file
+    has not been imported into it yet."""
     recs = store.all()
     if recs:
         return "\n".join(f"- {r.text}" for r in recs)
     if _legacy_marker(store).exists():
         return ""
     try:
-        return _read_memory().strip()
+        return _legacy_text(store).strip()
     except OSError:
         # Unreadable legacy file (already WARN-logged in _read_memory): show an
         # empty textarea rather than 500 the memory modal. The migration path still
@@ -488,11 +521,15 @@ async def memory_get(request: Request = None):
 @_router.put("/api/memory")
 async def memory_put(req: MemoryUpdate, request: Request = None):
     """Bulk-edit from the memory dialog: *text* is the edited list and *base* the
-    list the edit started from. A fact in *base* that is no longer in *text* is
-    deleted; a line of *text* that matches an existing record keeps that record
-    as-is; any other line becomes a new user record. A record that is in neither
-    (added after *base* was read, by another tab, the background pass, the CLI or
-    an MCP client) is kept, so a dialog opened earlier never deletes it.
+    list the edit started from. Lines and facts are matched with case and
+    spacing ignored, as ``add_user_fact`` matches them. A fact in *base* that is
+    no longer in *text* is deleted; a line of *text* that matches an existing
+    record keeps that record, taking the line's text when it differs (and
+    then counting as a user record, as ``add_user_fact`` makes it); a line
+    that repeats an earlier one is dropped; any other line becomes a new user
+    record. A record that is in neither (added after *base* was read, by another
+    tab, the background pass, the CLI or an MCP client) is kept, so a dialog
+    opened earlier never deletes it.
 
     The existing/records diff below is a snapshot-then-decide-then-write sequence,
     so this route holds the namespace lock across the whole thing: a concurrent
@@ -505,8 +542,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         raise HTTPException(413, "Memory too large (max 64k chars)")
     facts = [_strip_bullet(ln)[:MAX_TEXT_LEN]
              for ln in req.text.splitlines() if _strip_bullet(ln)]
-    base_facts = {_strip_bullet(ln)[:MAX_TEXT_LEN]
-                  for ln in req.base.splitlines() if _strip_bullet(ln)}
+    base_keys = {_fact_key(_strip_bullet(ln))
+                 for ln in req.base.splitlines() if _strip_bullet(ln)}
     # Reject over-cap writes at the door rather than accept facts the next prune would
     # hard-delete.
     if len(facts) > N_MAX:
@@ -524,25 +561,37 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         with store.lock():
             store._load()
             current = store.all()
-            existing = {r.text: r for r in current}
+            existing: dict = {}
+            for r in current:
+                existing.setdefault(_fact_key(r.text), r)
             seen: set = set()
             records: list = []
+            retexted: list = []
             for f in facts:
-                if f in seen:
+                key = _fact_key(f)
+                if key in seen:
                     continue                  # collapse duplicate lines
-                seen.add(f)
-                keep = existing.get(f)
-                records.append(keep if keep is not None else MemoryRecord(
-                    text=f, kind="semantic", source="user", importance=0.8))
+                seen.add(key)
+                keep = existing.get(key)
+                if keep is None:
+                    records.append(MemoryRecord(
+                        text=f, kind="semantic", source="user", importance=0.8))
+                    continue
+                if keep.text != f:
+                    keep.text = f
+                    keep.source = "user"
+                    keep.importance = max(keep.importance, 0.8)
+                    retexted.append(keep.id)
+                records.append(keep)
             newer = [r for r in current
-                     if r.text not in seen and r.text not in base_facts]
+                     if _fact_key(r.text) not in seen and _fact_key(r.text) not in base_keys]
             records.extend(newer)
             if len(records) > N_MAX:
                 raise HTTPException(
                     413, f"Too many memory records ({len(records)}, with "
                     f"{len(newer)} added since this list was opened); the store "
                     f"keeps at most {N_MAX}. Trim the list before saving.")
-            store.replace(records, embed_fn=_embed_fn())
+            store.replace(records, embed_fn=_embed_fn(), invalidate_ids=retexted)
         return records, len(newer)
 
     records, kept_newer = await _off_loop(_do_put)
@@ -1740,11 +1789,10 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
     through here."""
     from localm.memory import MemoryRecord
     from localm.memory import store as _store_mod
-    key = " ".join(fact[:_store_mod.MAX_TEXT_LEN].casefold().split())
+    key = _fact_key(fact[:_store_mod.MAX_TEXT_LEN])
     with store.lock():
         store._load()
-        same = next((r for r in store.all()
-                     if " ".join(r.text.casefold().split()) == key), None)
+        same = next((r for r in store.all() if _fact_key(r.text) == key), None)
         if same is not None:
             if same.source == "user":
                 return "exists", same
@@ -1866,7 +1914,7 @@ def _memory_inlet(messages, ctx, announce=None):
             # Privacy-recall opt-in with an un-migrated store: read the legacy flat
             # file, strictly read-only (no migration, no write).
             block_records = [{"text": b}
-                             for b in _legacy_bullets()[:_mem.MAX_INJECT]]
+                             for b in _legacy_bullets(store)[:_mem.MAX_INJECT]]
         # Stash what recall selected and why it degraded BEFORE the empty-block early
         # return, so a zero-recall or degraded turn is still visible to the client.
         _stash_memory_used(ctx, block_records, diag)

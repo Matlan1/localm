@@ -314,12 +314,35 @@ def set_api_key(key: Optional[str]) -> None:
             "'localm key generate' produces). Spaces, punctuation, and non-English "
             "letters cannot be sent reliably in an HTTP Authorization header, so "
             "most clients would fail to authenticate with such a key.")
+    _store_owner_key(key)
+
+
+def _store_owner_key(key: str, *, keep_existing: bool = False) -> str:
+    """Write *key* to ``auth.key`` (atomic, owner-only perms) under the file's
+    store lock, then record and pre-derive it as :func:`set_api_key` does.
+    With *keep_existing*, an owner key already in the file is kept and
+    returned instead, and nothing is written; the read and the write happen
+    under the same lock, and a file that exists but cannot be read raises
+    ``ConfigUnreadable`` without being written. Returns the key the file
+    holds afterwards. The caller validates *key*."""
     from localm.config import ensure_dirs
     from localm.storekit import store_lock
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     with store_lock(path):
+        if keep_existing:
+            status, text, err = _read_owner_key_file()
+            if status == _KEY_UNREADABLE:
+                from localm.storekit import ConfigUnreadable
+                logger.warning("owner key file %s exists but is unreadable (%s); "
+                               "no new owner key was written over it", path, err)
+                raise ConfigUnreadable(
+                    "the owner key file exists but cannot be read, so no new "
+                    "owner key was written over it")
+            existing = _key_text_or_none(text or "")
+            if existing:
+                return existing
         _atomic_write_private(path, key.strip() + "\n", retrying=True)
     _record_event("key_minted", principal="owner")
     # The key changed, so any memoised derivation for the OLD one is stale.
@@ -337,6 +360,7 @@ def set_api_key(key: Optional[str]) -> None:
     except Exception as e:
         logger.warning("could not pre-derive the owner key identity (%s); it "
                        "will be derived on first use instead", e)
+    return key.strip()
 
 
 def clear_api_key() -> list[dict[str, str]]:
@@ -407,6 +431,20 @@ def regenerate_key(nbytes: int = 32) -> str:
     return key
 
 
+def ensure_owner_key(nbytes: int = 32) -> tuple[str, bool]:
+    """``(key, created)``: the owner key in force, generated and persisted
+    only when none is configured. The check of ``auth.key`` and the write
+    happen under that file's store lock, so callers in several processes
+    asking at once end up with one key. A ``LOCALM_API_KEY`` set in the
+    environment is returned with *created* False and nothing is written."""
+    existing = get_api_key()
+    if existing:
+        return existing, False
+    key = generate_key(nbytes)
+    stored = _store_owner_key(key, keep_existing=True)
+    return stored, stored == key
+
+
 def require_auth_refusal() -> Optional[str]:
     """Why ``require_auth`` cannot be turned on now, or None when it can. With no
     key configured every keyless request would answer 401."""
@@ -426,9 +464,12 @@ def require_auth_enabled() -> bool:
     On a config-read failure this resolves to True: a security kill-switch
     resolves toward MORE restriction when config is unreadable, never less.
     That covers a load that raises and a config.json (with its .bak) that is
-    present but cannot be read (read_ok False)."""
+    present but cannot be read (read_ok False). Raises
+    ``config.ConfigReadSlow`` (answered 503 by the server) when a read on the
+    event loop cannot finish in time; the caller then decides nothing."""
     if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
         return True
+    from localm.config import ConfigReadSlow
     try:
         from localm.config import load_config_checked
         cfg, read_ok = load_config_checked()
@@ -439,6 +480,8 @@ def require_auth_enabled() -> bool:
                 "can be read")
             return True
         return bool(cfg.get("require_auth", False))
+    except ConfigReadSlow:
+        raise
     except Exception:
         # The load itself raised (e.g. ensure_dirs() on an inaccessible home
         # dir): fail closed, same as an unreadable config.json above.
@@ -970,9 +1013,9 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
         return
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
@@ -1537,9 +1580,9 @@ def _touch_last_used(key_hash: str) -> None:
         _last_used_writes[key_hash] = now
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY
