@@ -223,15 +223,17 @@ def _run_bat(tmp_path, exit_code, args):
 
     stdin is /dev/null so `pause` returns at once; its prompt in stdout is what
     says the window was held."""
+    from tests._fake_clone import CREATE_NO_WINDOW, make_windows_clone
     src = (ROOT / "localm.bat").read_text(encoding="utf-8")
     stub = f"cmd /c exit /b {exit_code}"
     patched = (src.replace('"%PY%" -m localm %*', stub)
-                  .replace('"%PY%" -m localm run %MODEL%', stub))
-    assert stub in patched, "the localm invocation moved; this test is blind"
-    bat = tmp_path / "probe.bat"
-    bat.write_text(patched, encoding="utf-8")
-    out = subprocess.run(["cmd", "/c", str(bat), *args], capture_output=True,
-                         text=True, stdin=subprocess.DEVNULL, cwd=str(tmp_path))
+                  .replace('"%PY%" -m localm run "%MODEL%"', stub))
+    invocations = [ln for ln in patched.splitlines() if ln.startswith('"%PY%" -m localm')]
+    assert stub in patched and not invocations, "the localm invocation moved; this test is blind"
+    clone = make_windows_clone(tmp_path, text=patched)
+    out = subprocess.run(["cmd", "/c", str(clone / "localm.bat"), *args], capture_output=True,
+                         text=True, stdin=subprocess.DEVNULL, cwd=str(tmp_path),
+                         creationflags=CREATE_NO_WINDOW)
     return "press any key" in (out.stdout or "").lower()
 
 

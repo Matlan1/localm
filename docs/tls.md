@@ -126,7 +126,7 @@ localm gui -H 0.0.0.0 --tls-cert D:\certs\localm.crt --tls-key D:\certs\localm.k
 network only. `--tls-cert`/`--tls-key` let you supply your own certificate (for
 example one issued for a real hostname) instead of the built-in local CA.
 
-### From the GUI: Settings > Server
+### From the GUI: Settings > Server & network
 
 Everything above has a Settings equivalent, so a browser-only user (no
 terminal) can bind past loopback too - Settings > Server & network:

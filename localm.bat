@@ -1,16 +1,21 @@
 @echo off
 rem localm launcher. No arguments: opens an interactive chat with the first
-rem registered model (or LOCALM_MODEL if set). With arguments: forwards them
+rem registered chat model (or LOCALM_MODEL if set). With arguments: forwards them
 rem to the CLI - needed because cmd.exe checks the current directory before
 rem PATH, so a bare "localm ..." typed from this folder would otherwise hit
 rem this file instead of the global shim and silently open chat.
-cd /d "%~dp0"
+rem The current directory is left as it is, so a relative path argument means
+rem the folder it was typed in.
 title LocaLM
 
-rem Prefer this clone's own .venv (created by setup.bat) - self-contained
-set "PY=python"
-if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+set "PY=%~dp0.venv\Scripts\python.exe"
+if exist "%PY%" goto :have_venv
+echo No .venv found in %~dp0
+echo Run setup.bat in that folder first - it creates a private .venv there.
+set "RC=1"
+goto :held
 
+:have_venv
 rem Forwarding must stay outside any ( ... ) block: cmd.exe expands
 rem %errorlevel% once at parse time, so a block would always report the
 rem errorlevel from before it started, not from the command that just ran.
@@ -23,23 +28,28 @@ if not "%LOCALM_MODEL%"=="" (
     goto run
 )
 
-rem Default: first model name from the registry.
-rem %PY% must stay unquoted here - usebackq strips the backtick command's
-rem leading quote, which mangles a quoted path. %PY% is always space-free
-rem ("python" or the relative .venv path), so this is safe.
-for /f "usebackq delims=" %%m in (`%PY% -c "from localm.config import load_registry; r=load_registry(); print(sorted(r)[0] if r else '')"`) do set "MODEL=%%m"
+rem Default: the first chat model in the registry, by the rule the launcher
+rem and the Models page use (is_llm).
+rem The query runs from this folder with the relative .venv path: usebackq
+rem strips the backtick command's leading quote, so the interpreter path must
+rem be unquoted and space-free there.
+set "MODEL="
+pushd "%~dp0"
+for /f "usebackq delims=" %%m in (`.venv\Scripts\python.exe -c "from localm.config import load_registry; from localm.model_manager import is_llm; r=load_registry(); n=sorted(k for k, v in r.items() if is_llm(v)); print(n[0] if n else '')"`) do set "MODEL=%%m"
+popd
 
 if "%MODEL%"=="" (
-    echo No models registered yet.
-    echo   localm pull ^<name^>   to download one
-    echo   localm add ^<path^>    to register a local file
-    pause
-    exit /b 1
+    echo No chat model registered yet. From this window you can run:
+    echo   "%~dp0localm.bat" pull ^<name^>   to download one
+    echo   "%~dp0localm.bat" add ^<path^>    to register a local file
+    echo   "%~dp0localm.bat" gui            to open the web GUI, which offers both
+    set "RC=1"
+    goto :held
 )
 
 :run
 echo Starting LocaLM with model: %MODEL%
-"%PY%" -m localm run %MODEL%
+"%PY%" -m localm run "%MODEL%"
 set "RC=%errorlevel%"
 if not "%RC%"=="0" goto :held
 exit /b 0
