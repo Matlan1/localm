@@ -29,10 +29,12 @@ from localm import procid, sysprog
 logger = logging.getLogger("localm")
 
 
-def atomic_write(path: Path, data: str | Iterable[str]) -> None:
+def atomic_write(path: Path, data: str | Iterable[str], *, errors: str = "strict") -> None:
     """Write *data* to *path* atomically: write a unique per-writer temp
     file, then replace *path* with it. *data* is a string, or an iterable of
-    strings written one after another.
+    strings written one after another, encoded as UTF-8 with the codec error
+    handler *errors* (``"surrogateescape"`` writes back bytes that were read
+    with the same handler).
 
     The temp name is unique per (pid, thread), so two independent writers
     never collide on the same temp file even outside a lock (e.g. a sidecar
@@ -48,9 +50,9 @@ def atomic_write(path: Path, data: str | Iterable[str]) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         if isinstance(data, str):
-            tmp.write_text(data, encoding="utf-8")
+            tmp.write_text(data, encoding="utf-8", errors=errors)
         else:
-            with open(tmp, "w", encoding="utf-8") as fh:
+            with open(tmp, "w", encoding="utf-8", errors=errors) as fh:
                 for piece in data:
                     fh.write(piece)
         for attempt in range(5):
