@@ -574,13 +574,13 @@ def test_torch_pip_args_rocm_win_gfx103x_uses_bundled(monkeypatch):
 
 
 def test_torch_pip_args_rocm_win_gfx110x_uses_amd_wheels(monkeypatch):
-    """RX 7000/9000 resolve from their family's AMD index as an extra index."""
+    """RX 7000/9000 resolve from their family's AMD index alone."""
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     args = hwdetect.torch_pip_args("amd-rocm", Detection(vendors=["amd"], gpu_names="rx 7900"))
-    assert f"--extra-index-url {hwdetect.amd_rocm_win_index('gfx110x')}" in args
+    assert f"--index-url {hwdetect.amd_rocm_win_index('gfx110x')}" in args
     assert "--find-links" not in args
     assert "--torch-backend" not in args
-    assert "--index-url" not in args
+    assert "--extra-index-url" not in args
 
 
 def test_torch_pip_args_rocm_win_unknown_amd_is_empty(monkeypatch):
