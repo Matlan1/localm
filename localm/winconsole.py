@@ -149,32 +149,65 @@ _SHELL_IMAGES = frozenset({"cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe",
                            "wsl.exe", "nu.exe", "tcc.exe"})
 
 
-def _console_process_names() -> list:
-    """Lower-cased image names of every process attached to this process's
-    console (Windows), or [] when there is none or they cannot be read."""
+def _console_processes() -> list:
+    """``(pid, parent pid, lower-cased image name)`` of every process attached
+    to this process's console (Windows), or [] when there is none. Raises
+    OSError when the process table cannot be read."""
     if sys.platform != "win32":
         return []
-    try:
-        import ctypes
+    import ctypes
+    from ctypes import wintypes
 
-        import psutil
-        pids = (ctypes.c_uint32 * 64)()
-        n = ctypes.windll.kernel32.GetConsoleProcessList(pids, 64)
-        names = []
-        for pid in pids[:min(n, 64)]:
-            try:
-                names.append(psutil.Process(pid).name().lower())
-            except Exception:
-                continue
-        return names
-    except Exception:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    pids = (wintypes.DWORD * 64)()
+    n = kernel32.GetConsoleProcessList(pids, 64)
+    attached = set(pids[:min(n, 64)])
+    if not attached:
         return []
 
+    class _Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260)]
 
-def console_has_a_shell() -> bool:
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snap in (None, wintypes.HANDLE(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        out = []
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.th32ProcessID in attached:
+                out.append((entry.th32ProcessID, entry.th32ParentProcessID,
+                            entry.szExeFile.lower()))
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        return out
+    finally:
+        kernel32.CloseHandle(snap)
+
+
+def console_has_a_shell(launcher_pid=None) -> bool:
     """True when a command shell (cmd, PowerShell, bash, ...) shares this
-    process's console, which makes it a person's own console window."""
-    return any(name in _SHELL_IMAGES for name in _console_process_names())
+    process's console, which makes it a person's own console window. A shell
+    whose parent is *launcher_pid* (the launcher that opened this console and
+    runs the server through ``cmd /c``) does not count. True, after logging why,
+    when the attached processes cannot be read."""
+    try:
+        procs = _console_processes()
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("could not list the processes sharing this console (%s); "
+                       "leaving it visible", e)
+        return True
+    return any(name in _SHELL_IMAGES and parent != launcher_pid
+               for _pid, parent, name in procs)
 
 
 def hide_console() -> bool:

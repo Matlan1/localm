@@ -1255,7 +1255,7 @@ class Launcher(tk.Tk):
         # is ours to hide once the server is up (it then runs like a background
         # app). Debug mode keeps the console visible so its live log stays readable.
         if self.mode.get() == "gui" and not self.debug.get():
-            env["LOCALM_OWN_CONSOLE"] = "1"
+            env["LOCALM_OWN_CONSOLE"] = str(os.getpid())
 
         # --- authentication: persist the key + require flag, inject into env ---
         a = _auth()

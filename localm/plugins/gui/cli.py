@@ -103,16 +103,27 @@ def _empty_registry_hint(api_mode: bool, pull_spec) -> str:
             + (" (download starting)…" if pull_spec else "."))
 
 
-def _pull_before_api_start(pull_spec: str) -> None:
+def _pull_before_api_start(pull_spec: str):
     """Download *pull_spec* with the same ``model_manager.pull_model`` call
     ``localm pull SPEC`` makes, in this process, before an API-only server
-    starts (it has no GUI page to download from). Exits 1 when the download
-    fails."""
+    starts (it has no GUI page to download from). Returns the registry name the
+    download added, or None when it added none (already registered). Exits 1
+    when the download fails, 130 when Ctrl+C stopped it."""
+    from localm.config import load_registry
     from localm.model_manager import pull_model
+    from localm.console import console
     from localm.model_manager.pull import forget_stopped_download
+    before = set(load_registry())
     forget_stopped_download()
-    if not pull_model(pull_spec, None):
+    try:
+        ok = pull_model(pull_spec, None)
+    except KeyboardInterrupt:
+        console.print("Download stopped; run the same command again to continue it.")
+        sys.exit(130)
+    if not ok:
         sys.exit(1)
+    added = sorted(set(load_registry()) - before)
+    return added[0] if len(added) == 1 else None
 
 
 def _no_loadable_model_hint(api_mode: bool) -> str:
@@ -1200,7 +1211,8 @@ def _mark_ready_when_listening(app_face, self_host: str, port: int) -> None:
     """Poll ``(self_host, port)`` every 0.25 s for up to 160 attempts, then mark
     *app_face* ready either way. When LOCALM_OWN_CONSOLE is set (a launcher
     started this process with its own console), hide that console, unless a
-    shell is attached to it (a person's own console window)."""
+    shell other than the launcher's own ``cmd /c`` (the launcher's pid is the
+    variable's value) is attached to it: a person's own console window."""
     import os
     import socket
     for _ in range(160):
@@ -1212,7 +1224,8 @@ def _mark_ready_when_listening(app_face, self_host: str, port: int) -> None:
     app_face.set_ready()
     if os.environ.get("LOCALM_OWN_CONSOLE"):
         from localm.winconsole import console_has_a_shell, hide_console
-        if not console_has_a_shell():
+        own = os.environ["LOCALM_OWN_CONSOLE"]
+        if not console_has_a_shell(int(own) if own.isdigit() else None):
             hide_console()
 
 
@@ -1410,12 +1423,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         return
 
     _sync_models_folder(console)
-    if api_mode and pull_spec:
-        _pull_before_api_start(pull_spec)
-        pull_spec = None
+    model_from_registry = not model
     registry, model, model_less = _select_startup_model(
-        console, model, no_model=no_model, pull_spec=pull_spec, api_mode=api_mode)
+        console, model, no_model=no_model,
+        pull_spec=None if api_mode else pull_spec, api_mode=api_mode)
     plan = _resolve_gui_bind(console, host, insecure=insecure, api_mode=api_mode)
+    if api_mode and pull_spec:
+        pulled = _pull_before_api_start(pull_spec)
+        pull_spec = None
+        if pulled and not no_model and model_from_registry:
+            from localm.config import load_registry
+            registry, model, model_less = load_registry(), pulled, False
     info, model_path, display_name = _resolve_startup_model_file(
         console, model, registry, model_less=model_less)
     _resolve_gui_tls(console, plan, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)

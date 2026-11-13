@@ -793,9 +793,9 @@ def attach_gui(
         ``Callable[[], str]`` - name of the currently served model.
 
     Removes an API-only server's ``GET /`` redirect to /docs (create_app's
-    ``api_landing``) first, so the GUI serves ``/``.
+    ``api_landing``) as its last step, so the GUI serves ``/``; a call that
+    raises before that leaves the routes it found plus the ones it appended.
     """
-    app.router.routes[:] = [r for r in app.router.routes if not _is_api_landing(r)]
     manager = SessionManager()
 
     # attach_engine creates the background-job manager, so a headless `localm serve`
@@ -961,5 +961,6 @@ def attach_gui(
     # (mount_gui_surface) is idempotent whether the GUI was attached at startup or
     # live on a running api instance.
     app.state.gui_mounted = True
+    app.router.routes[:] = [r for r in app.router.routes if not _is_api_landing(r)]
 
     return manager
