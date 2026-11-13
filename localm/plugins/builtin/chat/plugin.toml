@@ -1,7 +1,7 @@
 [plugin]
 name = "chat"
 version = "1.0.0"
-description = "Chat with your local model: conversation history, assistant memory, and personas."
+description = "Chat with your local model: conversation history and personas. Memory is a plugin of its own."
 scope = "chat"
 register = "plug"
 protected = true

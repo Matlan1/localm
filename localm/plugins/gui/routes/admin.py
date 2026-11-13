@@ -88,7 +88,7 @@ def register(app: FastAPI, ctx) -> None:
         import shutil
         import time as _time
         from localm.config import home_dir
-        from localm.debuglog import logs_dir
+        from localm.debuglog import drain_debug_log, logs_dir
         dest = (req.dest or "").strip()
         if not dest:
             raise HTTPException(400, "Choose a destination folder first.")
@@ -103,6 +103,7 @@ def register(app: FastAPI, ctx) -> None:
         if not dest_dir.is_dir():
             raise HTTPException(400, "That folder does not exist.")
         sources = []
+        drain_debug_log()
         try:
             sources.append(logs_dir())
             sources.append(home_dir())               # home root for stray *.log
