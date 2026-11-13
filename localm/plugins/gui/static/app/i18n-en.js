@@ -1926,7 +1926,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Models
   "settings.field.importMaxDepth.label": "Folder import depth",
-  "settings.field.importMaxDepth.help": "Folder levels `localm add <dir>` and the models-folder scan search for GGUF files and HuggingFace model folders. The models-folder scan always searches at least 2 levels.",
+  "settings.field.importMaxDepth.help": "Folder levels `localm add <dir>` and the models-folder scan search for GGUF files and HuggingFace model folders: 1 is the folder itself, 2 also its subfolders, and so on. The models-folder scan always searches at least 2 levels.",
   "settings.field.confirmRemove.label": "Confirm before deleting models",
   "settings.field.confirmRemove.help": "Ask for confirmation before `localm rm` deletes a model's files on disk. The Remove button on the Models page always asks.",
   "settings.field.autopruneMissingModels.label": "Auto-remove entries for missing files",
@@ -1972,7 +1972,7 @@ export const I18N_EN = {
   "settings.field.tlsEnabled.label": "Encrypt network traffic (TLS)",
   "settings.field.tlsEnabled.help": "Serve HTTPS on a network bind (built-in certificate, or a custom pair). Off = plain HTTP, so the API key crosses the network readable by anyone on it. Loopback is always plain HTTP.",
   "settings.field.tlsCert.label": "Custom TLS certificate (PEM)",
-  "settings.field.tlsCert.help": "Use this certificate instead of localm's built-in one; blank = built-in. Needs the matching private key. If the pair cannot be loaded, localm warns and falls back to its built-in certificate.",
+  "settings.field.tlsCert.help": "Use this certificate instead of localm's built-in one; blank = built-in. Needs the matching private key. If the pair cannot be loaded, localm warns on the console and in its debug log and falls back to its built-in certificate.",
   "settings.field.tlsKey.label": "Custom TLS private key (PEM)",
   "settings.field.tlsKey.help": "Private key for the custom TLS certificate.",
   "settings.field.corsOrigins.label": "CORS origins",
@@ -2032,7 +2032,7 @@ export const I18N_EN = {
   "settings.field.mode.label": "Session persistence",
   "settings.field.mode.help": "What localm saves: privacy = nothing written automatically; log = a JSONL audit trail; full = log plus Markdown transcripts of chat, server and coder sessions (coder ones in the project).",
   "settings.field.chatMode.label": "Chat persistence override",
-  "settings.field.chatMode.help": "Overrides Session persistence for chat only. What the server records of chat is only ever made more private by it. (inherit) follows whatever Session persistence is set to.",
+  "settings.field.chatMode.help": "Overrides Session persistence for chat only, in either direction: full or log keeps chat conversations on disk even while Session persistence is privacy. What the server itself records of chat only ever gets more private. (inherit) follows whatever Session persistence is set to.",
   "settings.field.coderMode.label": "Coder persistence override",
   "settings.field.coderMode.help": "Overrides Session persistence for the coder, unless the project's .localcoder/config.toml sets a mode. An open session keeps its mode. The server's own record only gets more private. (inherit) follows Session persistence.",
 

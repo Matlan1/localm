@@ -460,8 +460,9 @@ CORE_FIELDS: list = [
                  group="Timeouts", min=1, step=1000, tier=Tier.CONFIG_WRITE),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Folder levels `localm add <dir>` and the models-folder scan search for "
-                 "GGUF files and HuggingFace model folders. The models-folder scan "
-                 "always searches at least 2 levels.",
+                 "GGUF files and HuggingFace model folders: 1 is the folder itself, 2 "
+                 "also its subfolders, and so on. The models-folder scan always "
+                 "searches at least 2 levels.",
                  group="Models", min=1, max=10, step=1, tier=Tier.CONFIG_WRITE),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
@@ -572,8 +573,8 @@ CORE_FIELDS: list = [
     SettingField("tls_cert", Widget.PATH, "Custom TLS certificate (PEM)",
                  "Use this certificate instead of localm's built-in one; blank "
                  "= built-in. Needs the matching private key. If the pair "
-                 "cannot be loaded, localm warns and falls back to its "
-                 "built-in certificate.",
+                 "cannot be loaded, localm warns on the console and in its debug "
+                 "log and falls back to its built-in certificate.",
                  group="Server", applies=Applies.RESTART, tier=Tier.OWNER),
     SettingField("tls_key", Widget.PATH, "Custom TLS private key (PEM)",
                  "Private key for the custom TLS certificate.",
@@ -728,9 +729,11 @@ CORE_FIELDS: list = [
     # Both children name the parent setting rather than pointing at a position:
     # in the two-column grid the parent sits to the LEFT, not above.
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
-                 "Overrides Session persistence for chat only. What the server "
-                 "records of chat is only ever made more private by it. (inherit) "
-                 "follows whatever Session persistence is set to.",
+                 "Overrides Session persistence for chat only, in either direction: "
+                 "full or log keeps chat conversations on disk even while Session "
+                 "persistence is privacy. What the server itself records of chat "
+                 "only ever gets more private. (inherit) follows whatever Session "
+                 "persistence is set to.",
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
                  tier=Tier.OWNER),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
