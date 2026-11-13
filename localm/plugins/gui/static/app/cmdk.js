@@ -126,13 +126,3 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault(); runCmdk(_cmdkSel);
   }
 });
-
-// Trigger the browser's native unsaved-changes prompt on tab close or reload
-// while Settings has unsaved edits. An empty returnValue triggers it.
-window.addEventListener("beforeunload", (e) => {
-  if (window.settingsDirty && window.settingsDirty()) {
-    e.preventDefault();
-    e.returnValue = "";
-  }
-});
-

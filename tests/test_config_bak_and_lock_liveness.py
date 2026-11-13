@@ -30,6 +30,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
     return h
 
 

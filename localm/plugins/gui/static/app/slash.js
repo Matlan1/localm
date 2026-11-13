@@ -44,6 +44,23 @@ export const CODER_COMMANDS = [
   { cmd: "help", hint: "slash.coderCmd.help.hint" },
 ];
 
+/** Per media, an async function returning the model fields that media page's
+ *  Generate would send, or null when that page would refuse to generate (set
+ *  by the page; the entry is null when the page is not loaded). */
+export const chatPageModelChoice = { image: null, music: null, video: null };
+
+/** The model fields *media*'s page would send with its Generate ({} when the
+ *  page is not loaded), or null when that page would refuse to generate. */
+async function chatModelFields(media) {
+  const pick = chatPageModelChoice[media];
+  return pick ? pick() : {};
+}
+
+/** The preflight body for the model fields *picked*. */
+function preflightBody(picked) {
+  return { model_overrides: picked.model_overrides, native_models: picked.native_models };
+}
+
 export async function runImagineInChat(promptText) {
   if (!promptText) { toast(t("slash.usage.image"), true); return; }
   if (!currentConv()) newConversation();
@@ -56,13 +73,14 @@ export async function runImagineInChat(promptText) {
   body.textContent = t("slash.generatingImage");
   box.scrollTop = box.scrollHeight;
   try {
-    if (!(await checkModelsBeforeGenerate("image", null, {}))) {
+    const picked = await chatModelFields("image");
+    if (!picked || !(await checkModelsBeforeGenerate("image", null, preflightBody(picked)))) {
       body.textContent = t("slash.modelsNotDownloaded");
       return;
     }
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ prompt: promptText }),
+      body: JSON.stringify({ prompt: promptText, ...picked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -153,13 +171,14 @@ export async function runMusicInChat(tags) {
   body.textContent = t("slash.generatingTrack");
   box.scrollTop = box.scrollHeight;
   try {
-    if (!(await checkModelsBeforeGenerate("music", null, {}))) {
+    const picked = await chatModelFields("music");
+    if (!picked || !(await checkModelsBeforeGenerate("music", null, preflightBody(picked)))) {
       body.textContent = t("slash.modelsNotDownloaded");
       return;
     }
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ tags }),
+      body: JSON.stringify({ tags, ...picked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -199,13 +218,14 @@ export async function runVideoInChat(promptText) {
   body.textContent = t("slash.generatingClip");
   box.scrollTop = box.scrollHeight;
   try {
-    if (!(await checkModelsBeforeGenerate("video", null, {}))) {
+    const picked = await chatModelFields("video");
+    if (!picked || !(await checkModelsBeforeGenerate("video", null, preflightBody(picked)))) {
       body.textContent = t("slash.modelsNotDownloaded");
       return;
     }
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ prompt: promptText }),
+      body: JSON.stringify({ prompt: promptText, ...picked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);

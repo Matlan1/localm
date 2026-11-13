@@ -66,36 +66,39 @@ NET_OFF_REFUSAL = ("Network access is off (net_mode=off), so the report was not 
                    f"{NET_OFF_REMEDY}.")
 
 
-def _home_cfg_line(marker: Path) -> str:
-    """The first line of localm-home.cfg as localm reads it: UTF-8 (with or
-    without a BOM), else on Windows the console (OEM) code page. Raises OSError,
-    ValueError or LookupError when it cannot be read."""
-    raw = marker.read_bytes()
+def _load_home_cfg():
+    """The clone's ``localm/_home_cfg.py`` loaded by file path (it imports only
+    the standard library). Raises OSError when it is missing or fails to load."""
+    import importlib.util
+    path = REPO_ROOT / "localm" / "_home_cfg.py"
     try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
+        spec = importlib.util.spec_from_file_location("_localm_report_issue_home_cfg", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        raise OSError(f"{path} could not be loaded ({e.__class__.__name__})") from e
+    return mod
 
 
 def localm_home() -> Path:
     """The data dir localm uses: LOCALM_HOME, else (in a clone) the first line of
-    localm-home.cfg, else the clone's ./home."""
+    localm-home.cfg (a relative line taken relative to the clone), else the
+    clone's ./home. Raises OSError when localm-home.cfg exists but its reader,
+    ``localm/_home_cfg.py``, cannot be loaded."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        return Path(env).expanduser().absolute()
     marker = REPO_ROOT / "localm-home.cfg"
     if (REPO_ROOT / "pyproject.toml").is_file() and marker.is_file():
+        reader = _load_home_cfg()
         try:
-            line = _home_cfg_line(marker)
+            line = reader.read_line(marker)
         except (OSError, ValueError, LookupError):
             line = ""
         if line:
-            return Path(line).expanduser()
+            return reader.data_dir(line, REPO_ROOT)
     return REPO_ROOT / "home"
 
 
@@ -120,8 +123,9 @@ def network_mode() -> tuple:
     (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
     ``.bak`` when config.json is absent; an unset or unknown value, or a file that
     is not a JSON object, means ``ask``). None when neither file exists, or when
-    one is present and cannot be read the way localm reads it (strict UTF-8 JSON),
-    where localm itself turns network access off; *why* says which."""
+    one is present and cannot be read the way localm reads it (strict UTF-8 JSON,
+    with or without a BOM), where localm itself turns network access off; *why*
+    says which."""
     env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
     if env in NET_MODES:
         return env, ""
@@ -130,12 +134,12 @@ def network_mode() -> tuple:
         bak = main.with_name("config.json.bak")
         present = [p for p in (main, bak) if p.is_file()]
     except OSError as e:
-        return None, f"the data directory could not be read ({e.__class__.__name__})"
+        return None, f"the data directory could not be read ({e or e.__class__.__name__})"
     if not present:
         return None, f"{main} does not exist"
     path = present[0]
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except (ValueError, OSError, RecursionError) as e:
         return None, f"{path} could not be read ({e.__class__.__name__})"

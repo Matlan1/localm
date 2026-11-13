@@ -102,23 +102,100 @@ def _not_family(families: frozenset):
     return lambda info: info.kind != "music" and info.family not in families
 
 
-def _role_fits() -> dict:
+# The companion slots of a diffusion family that hold a text encoder.
+_TEXT_SLOTS = ("clip_l", "clip_g", "t5xxl", "llm")
+
+
+def _image_vae_fits(info) -> bool:
+    """Whether *info* can fill the image VAE role of a workflow of unknown
+    family: a VAE some image family decodes with (``families.accepts``, so the
+    3D VAE classified ``wan2.1`` that Qwen-Image and Anima use is kept), or
+    any other non-music file outside the video families."""
+    from localm.media.sdcpp import families
+    if info.kind == "music":
+        return False
+    if info.kind != "vae":
+        return info.family not in families.VIDEO_FAMILIES
+    return any(families.accepts("vae", fam, info) for fam in families.IMAGE_FAMILIES)
+
+
+def _family_fits(family: str, variant: Optional[str]) -> dict:
+    """``{role_id: test}`` for the image component roles of a workflow whose
+    diffusion model is of the image family *family* (*variant* is passed to
+    ``families.accepts``): a text-encoder role takes a file that fits any
+    text-encoder slot of that family, the VAE role a VAE that family decodes
+    with."""
+    from localm.media.sdcpp import families
+    req = families.requirements(families.FileInfo("diffusion", family))
+    text = [r.slot for r in req if r.slot in _TEXT_SLOTS]
+
+    def text_fits(info) -> bool:
+        return any(families.accepts(s, family, info, variant) for s in text)
+
+    def vae_fits(info) -> bool:
+        return families.accepts("vae", family, info, variant)
+
+    return {"image-clip1": text_fits, "image-clip2": text_fits, "image-vae": vae_fits}
+
+
+def _role_fits(family: Optional[str] = None, variant: Optional[str] = None) -> dict:
     """``{role_id: test}`` for the roles the built-in media plugins declare;
     each test takes a classified file (``families.FileInfo``) and says whether
-    it can fill that role."""
-    from localm.media.sdcpp.families import IMAGE_FAMILIES, VIDEO_FAMILIES
-    return {
-        "image-unet": _not_family(VIDEO_FAMILIES),
-        "image-vae": _not_family(VIDEO_FAMILIES),
-        "image-clip1": lambda info: info.kind in ("clip_l", "clip_h"),
+    it can fill that role. With *family*, the diffusion family of the active
+    workflow's model (and *variant*, its size), when that is an image family,
+    the image text-encoder and VAE roles take only files that family can
+    use."""
+    from localm.media.sdcpp import families
+    image, video = families.IMAGE_FAMILIES, families.VIDEO_FAMILIES
+    fits = {
+        "image-unet": _not_family(video),
+        "image-vae": _image_vae_fits,
+        "image-clip1": lambda info: info.kind in ("clip_l", "clip_h", "llm"),
         "image-clip2": lambda info: info.kind in ("t5xxl", "clip_g"),
-        "video-unet": _not_family(IMAGE_FAMILIES),
-        "video-vae": _not_family(IMAGE_FAMILIES),
+        "video-unet": _not_family(image),
+        "video-vae": _not_family(image),
         "video-clip": lambda info: info.kind in ("t5xxl", "umt5", "llm", "clip_l"),
         "music-unet": lambda info: info.kind == "music",
         "music-clip": lambda info: info.kind in ("music", "umt5", "t5xxl"),
-        "music-vae": lambda info: info.family not in IMAGE_FAMILIES | VIDEO_FAMILIES,
+        "music-vae": lambda info: info.family not in image | video,
     }
+    if family in image:
+        fits.update(_family_fits(family, variant))
+    return fits
+
+
+def workflow_family(slots: Optional[list],
+                    registry: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
+    """``(family, variant)`` of the diffusion model the active workflow loads:
+    the registered file whose basename is the ``current`` value of the
+    workflow's diffusion-model slots, classified from its header. ``(None,
+    None)`` when *slots* is None, no such slot names a registered file, the
+    file is not a diffusion model of a known family, or two slots name models
+    of different families. Never raises."""
+    if not slots:
+        return None, None
+    from localm.media.sdcpp import families
+    entries = None
+    found: set = set()
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        if model_type_for_node(str(slot.get("class_type") or "")) != "diffusion-unet":
+            continue
+        current = slot.get("current")
+        if not isinstance(current, str) or not current:
+            continue
+        if entries is None:
+            entries = {filename.lower(): entry for _name, entry, filename
+                       in _component_entries("diffusion-unet", registry)}
+        entry = entries.get(current.replace("\\", "/").rsplit("/", 1)[-1].lower())
+        info = _entry_info(entry) if entry is not None else None
+        if info is None or info.kind != "diffusion" or not families.known_family(info.family):
+            continue
+        found.add((info.family, info.detail.get("variant")))
+    if len(found) == 1:
+        return next(iter(found))
+    return None, None
 
 
 def _entry_info(entry):
@@ -138,17 +215,22 @@ def _entry_info(entry):
     return None if info.kind == "unknown" else info
 
 
-def registry_models_for_role(role: dict, registry: Optional[dict] = None) -> list:
+def registry_models_for_role(role: dict, registry: Optional[dict] = None,
+                             family: Optional[str] = None,
+                             variant: Optional[str] = None) -> list:
     """Registered models that can fill *role*, as ``[{"name", "filename"}, ...]``:
     the models of the role's ``model_type`` (see :func:`registry_models_of_type`),
     less the files whose header shows they belong elsewhere (a CLIP-L file for a
     T5 role, an image checkpoint for the music model role, a music file for an
-    image role). A file whose header cannot be read or classified is kept. A
-    role a built-in media plugin did not declare is not filtered."""
+    image role). With *family* (and *variant*), the diffusion family of the
+    active workflow's model (:func:`workflow_family`), an image text-encoder
+    or VAE role keeps only the files that image family can use. A file whose header cannot
+    be read or classified is kept. A role a built-in media plugin did not
+    declare is not filtered."""
     mtype = role.get("model_type")
     if not mtype:
         return []
-    fits = _role_fits().get(role.get("role_id"))
+    fits = _role_fits(family, variant).get(role.get("role_id"))
     out = []
     for name, entry, filename in _component_entries(mtype, registry):
         if fits is not None:
@@ -249,14 +331,16 @@ def describe_roles(roles: list, slots: Optional[list],
     * ``installed`` - whether ComfyUI actually has the file the slot names, or
       None when there is no slot to ask about.
     * ``registry_models`` - this box's registered models that can fill the
-      role (:func:`registry_models_for_role`). Independent of ComfyUI, so it is
-      populated even when ComfyUI is down.
+      role (:func:`registry_models_for_role`), narrowed to the family of the
+      workflow's diffusion model when :func:`workflow_family` can tell it.
+      Populated even when ComfyUI is down.
     * ``registry_only`` - registered models of this type that ComfyUI is NOT
       offering for the slot, and ONLY when the slot is unsatisfied. On a slot
       ComfyUI serves fine this is always empty."""
     from localm.config import load_registry
     reg = load_registry() if registry is None else registry
     paired = _pair_roles_to_slots(slots, roles) if slots is not None else {}
+    family, variant = workflow_family(slots, reg)
     slot_by_role = {}
     for index, slot in enumerate(slots or []):
         role = paired.get(index)
@@ -268,7 +352,7 @@ def describe_roles(roles: list, slots: Optional[list],
         role_id = role.get("role_id")
         mtype = role.get("model_type")
         slot = slot_by_role.get(role_id)
-        known = registry_models_for_role(role, reg)
+        known = registry_models_for_role(role, reg, family, variant)
         installed = None if slot is None else slot_is_satisfied(slot)
         if installed is not False:
             # registry_only is populated only where ComfyUI has FAILED to serve

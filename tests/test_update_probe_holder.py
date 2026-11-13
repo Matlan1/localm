@@ -375,4 +375,4 @@ def test_the_pytorch_step_leaves_the_project_alone(tmp_path, spec):
     for cmd in commands:
         assert "-e" not in cmd and "--editable" not in cmd
         assert not any(a.startswith(".[") or a == "." for a in cmd)
-    assert commands[-1][-5:-4] == ["pyproject.toml"] and commands[-1].count("--extra") == 2
+    assert commands[-1][5:6] == ["pyproject.toml"] and commands[-1].count("--extra") == 2

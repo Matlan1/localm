@@ -104,8 +104,24 @@ def test_update_setup_class_warns_to_run_setup(monkeypatch):
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
     monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
         "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
-    r = CliRunner().invoke(main, ["update", "--yes"])
-    assert "setup.bat" in r.output
+    for script in ("setup.bat", "setup.sh"):
+        monkeypatch.setattr(updater, "setup_script", lambda script=script: script)
+        r = CliRunner().invoke(main, ["update", "--yes"])
+        assert f"needs {script} re-run" in r.output, script
+
+
+def test_update_of_a_git_clone_says_git_lists_the_replaced_files(monkeypatch):
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
+    for clone in (True, False):
+        monkeypatch.setattr(updater, "apply", lambda aid, clone=clone, **kw: {
+            "applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b",
+            "git_clone": clone})
+        r = CliRunner().invoke(main, ["update", "--yes"])
+        output = " ".join(r.output.split())
+        assert ("This install is a git clone, so git now lists the files the update "
+                "replaced as changed" in output) is clone
 
 
 def test_update_rollback(monkeypatch):

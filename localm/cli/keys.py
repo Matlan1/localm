@@ -219,8 +219,8 @@ def key_clear(yes):
     if last:
         _refuse_unattended_last_key_removal("clear the API key")
     if (not yes or last) and not click.confirm(
-            "Clear the API key? The server will then accept unauthenticated "
-            "requests (unless require_auth is on)"):
+            "Clear the owner key and delete every named key? The server will "
+            "then accept unauthenticated requests (unless require_auth is on)"):
         console.print("[dim]Cancelled.[/dim]")
         return
     from rich.markup import escape
@@ -376,8 +376,7 @@ def key_list():
               show_default=True,
               help="Host filesystem reach: none (device upload only) or host (the "
                    "whole server disk). Defaults to none so a shared key cannot "
-                   "browse your disk. (A confined 'shared'/designated-roots tier "
-                   "is reserved but not yet enforced.)")
+                   "browse your disk.")
 @click.option("--rag-root", "rag_roots", multiple=True,
               help="A folder this key may index/query via RAG (repeatable). "
                    "Setting this CONFINES the key's RAG reach to exactly these "

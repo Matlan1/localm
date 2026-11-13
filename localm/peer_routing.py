@@ -555,7 +555,7 @@ async def forward(route: PeerRoute, request, path: str, *,
                   body: Optional[bytes] = None, headers: Optional[dict] = None):
     """Forward *request* to *route*'s peer at the fixed literal *path*
     (never a path taken from *request* itself) and stream the response back
-    unchanged. Returns a ``fastapi.responses.StreamingResponse``. *body*, when
+    unchanged. Returns a ``localm.streaming_response.StreamingResponse``. *body*, when
     given, is sent instead of the request's own body (see
     :func:`forward_body`). *headers* are added to the response returned to
     the client.
@@ -588,7 +588,7 @@ async def forward(route: PeerRoute, request, path: str, *,
     raised, as for a failed forward. The forwarded request carries the mode in
     the session-mode header."""
     from fastapi import HTTPException
-    from fastapi.responses import StreamingResponse
+    from localm.streaming_response import StreamingResponse
 
     if not is_routable_peer_endpoint(route.host, route.scheme):
         clear_route(route.model)

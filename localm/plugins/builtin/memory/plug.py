@@ -236,7 +236,10 @@ def _embedder_download_status(request: Request | None) -> dict:
     "memory"+"config:write" but not "rag" would 403 there regardless of
     holding config:write. Withholds the model name (returns embedder_model:
     None) whenever can_download is False, so a caller who could not act on
-    it is not told what it is either."""
+    it is not told what it is either. ``embedder_missing`` names the missing
+    model for whoever gets the button and for the owner even when the button
+    cannot be offered (the owner can run ``localm setup-embeddings``); None
+    otherwise."""
     try:
         from localm import scopes
         from localm.config import load_config
@@ -260,11 +263,16 @@ def _embedder_download_status(request: Request | None) -> dict:
             if (rag_mounted and request is not None
                     and _hs.caller_grants(request, "rag")
                     and _hs.caller_grants(request, scopes.CONFIG_WRITE)):
-                return {"can_download_embedder": True, "embedder_model": model}
+                return {"can_download_embedder": True, "embedder_model": model,
+                        "embedder_missing": model}
+            if request is not None and _hs.caller_is_operator(request):
+                return {"can_download_embedder": False, "embedder_model": None,
+                        "embedder_missing": model}
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory embedder-download hint skipped: %s", e)
-    return {"can_download_embedder": False, "embedder_model": None}
+    return {"can_download_embedder": False, "embedder_model": None,
+            "embedder_missing": None}
 
 
 async def _off_loop(fn, *, embedder_bound: bool = True):

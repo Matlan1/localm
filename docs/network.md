@@ -34,6 +34,20 @@ fetch through `ask`'s per-request friction, exactly like clicking "download
 now" is itself the consent, and it changes nothing about how the next
 request is handled.
 
+A download nobody asked for is different. When a background task (memory
+consolidation after a chat, memory recall, a scheduled job, Knowledge search)
+needs the embedding model or the Whisper model and it is missing, it is
+downloaded automatically only under `allow`. Under `ask` the task does not
+download it: it carries on without it (memory and Knowledge fall back to
+keyword search) and says once in the debug log which model is missing and how
+to get it, and the memory dialog and Knowledge page offer the one-time
+download. Under `off` nothing is downloaded, and `net_allow_model_downloads`
+does not change that for a background task. One exception today: the vision
+projector of a model you pulled from Hugging Face. If it is missing, localm
+fetches it from that model's repository when it starts (and on `localm
+list`) under `ask` as well, and under `off` only with
+`net_allow_model_downloads` on.
+
 Online coder providers (`--online`, `--anthropic`) are a separate case and
 are not covered by this policy at all: every request to OpenAI/Anthropic
 goes out over HTTPS through a direct provider client, outside
@@ -293,7 +307,9 @@ coding agent's shell access, so you can grant one without the other.
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`
   (including `off`). The embedding model that memory and Knowledge need is
-  fetched automatically on first use under `ask` and `allow`. Both check the
+  fetched automatically on first use only under `allow`; under `ask` it is
+  fetched only by the one-time download you start (see
+  [the one rule](#the-one-rule)). Both check the
   Hugging Face endpoint against the policy (the domain lists and the address
   check) and then fetch from a fixed, hardcoded repository named by
   localm's own code rather than a caller-supplied URL; the transfer itself

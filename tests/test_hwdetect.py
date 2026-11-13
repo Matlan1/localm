@@ -574,16 +574,13 @@ def test_torch_pip_args_rocm_win_gfx103x_uses_bundled(monkeypatch):
 
 
 def test_torch_pip_args_rocm_win_gfx110x_uses_amd_wheels(monkeypatch):
-    """AMD's official Windows ROCm preview repo is a flat wheel listing, not a
-    pip/uv package index - reachable only via --find-links, never
-    --torch-backend/--index-url (see test_amd_rocm_win_find_links_resolves_live
-    in test_torch_pip_args.py)."""
+    """RX 7000/9000 resolve from their family's AMD index alone."""
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     args = hwdetect.torch_pip_args("amd-rocm", Detection(vendors=["amd"], gpu_names="rx 7900"))
-    assert "--find-links" in args
-    assert "repo.radeon.com" in args
+    assert f"--index-url {hwdetect.amd_rocm_win_index('gfx110x')}" in args
+    assert "--find-links" not in args
     assert "--torch-backend" not in args
-    assert "--index-url" not in args
+    assert "--extra-index-url" not in args
 
 
 def test_torch_pip_args_rocm_win_unknown_amd_is_empty(monkeypatch):

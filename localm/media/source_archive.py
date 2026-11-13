@@ -37,8 +37,8 @@ SOURCE_RECORD = ".localm-source.json"
 
 # sha256 of the GitHub zip archive of each pinned commit, keyed by commit.
 ARCHIVE_SHA256 = {
-    "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24":
-        "01f381c8330f5c5bec9bd3d4c651e8b53b45ffb70020b9e1e947fc63f93a1548",
+    "989d93d0d968e704c589ce0146bb18c77f6b50cc":
+        "2cf3eef6f4016b234dcc8c2d978abe42e6665121f1ca008ca60acb62fe830c63",
     "6ea2651e7df66d7585f6ffee804b20e92fb38b8a":
         "aad273a0b774684285b4496f6edff7e2293bd29d71ef89926d6861bfdf4947ac",
 }
@@ -221,7 +221,7 @@ def fetch_tree(repo: str, commit: str, dest: Path, *, on_progress: Progress = No
         staging = work / "tree"
         files = _unpack(archive, staging, commit)
         write_record(staging, repo, commit, files)
-        from localm.media.runtime_files import move_dir
+        from localm.folder_swap import move_dir
         try:
             move_dir(staging, dest)
         except OSError as e:

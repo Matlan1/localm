@@ -56,11 +56,16 @@ def refuse_when_network_off(what: str, *, exempt: bool, update: bool = False) ->
     resolves to ``off`` (``config.network_mode``), so it refuses too. Every
     request to the localm proxy passes here before a connection is opened.
     The error's ``reason`` is the remedy and its ``hint`` the whole refusal;
-    *update* names the update channel's own switch in both."""
+    *update* names the update channel's own switch in both. When the config
+    file could not be read, both name that file instead of the switch."""
     if exempt:
         return
     from localm import config
-    if config.network_mode() == "off":
+    mode, unreadable = config.network_mode_checked()
+    if mode == "off" and unreadable:
+        text = config.net_off_unreadable_config_refusal(what)
+        raise LocalmError(text, reason=text, stage="network_off", hint=text)
+    if mode == "off":
         raise LocalmError(
             config.net_off_lead(what),
             reason=config.NET_OFF_UPDATE_REMEDY if update else config.NET_OFF_REMEDY,

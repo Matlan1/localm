@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional, TypeVar, cast
 
-from localm import mgmt_events
+from localm import _home_cfg, mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
     READ_ABSENT,
     READ_CURRENT,
@@ -148,22 +148,6 @@ def _warn_unconfigured_home(path: Path) -> None:
           "or set LOCALM_HOME to choose where data lives.", file=sys.stderr)
 
 
-def _read_home_cfg(path: Path) -> str:
-    """The first line of ``localm-home.cfg``: read as UTF-8 (with or without a
-    BOM), or on Windows, when that fails, in the console (OEM) code page that
-    cmd.exe's ``echo`` writes. Raises ValueError when neither decodes."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -175,7 +159,10 @@ def _detect_home() -> Path:
          sits in a source tree (pyproject.toml next to it) that contains a
          ``localm-home.cfg`` (one line: the data path) or a ``home``
          directory, that wins.  Created by setup.bat's "keep data in this
-         folder" option.
+         folder" option. A relative path in ``localm-home.cfg`` is relative
+         to the checkout; a relative LOCALM_HOME is made absolute against the
+         working folder at the first read and stored back into the
+         environment.
       3. Contained fallback: ``./home`` INSIDE the install, with a stderr
          warning, when NOTHING is configured. Reaching here is a special case
          (setup never ran, or the config/marker was lost), not a normal default -
@@ -184,16 +171,22 @@ def _detect_home() -> Path:
     """
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        home = Path(env).expanduser()
+        if not home.is_absolute():
+            # A relative LOCALM_HOME is made absolute against the working folder
+            # at the first read and written back to the environment.
+            home = home.absolute()
+            os.environ["LOCALM_HOME"] = str(home)
+        return home
 
     repo_root = Path(__file__).resolve().parents[1]
     if (repo_root / "pyproject.toml").is_file():       # source checkout only
-        cfg_marker = repo_root / "localm-home.cfg"
+        cfg_marker = repo_root / _home_cfg.NAME
         if cfg_marker.is_file():
             try:
-                line = _read_home_cfg(cfg_marker)
+                line = _home_cfg.read_line(cfg_marker)
                 if line:
-                    return Path(line).expanduser()
+                    return _home_cfg.data_dir(line, repo_root)
             except (OSError, ValueError, LookupError) as e:
                 # The marker EXISTS but could not be read: warn and fall back to
                 # the default data dir rather than silently switching. stderr
@@ -1744,7 +1737,9 @@ def instance_id() -> str:
     Served to the GUI over ``/v1/config``, which compares it against the id it
     last saw for this browser origin to tell a restart of the same install
     apart from a different install sharing that origin's localStorage. The
-    value is kept in memory per data folder after the first call."""
+    value is kept in memory per data folder after the first call, so a file
+    that cannot be read or written still gives one id for the whole process.
+    A file that exists but cannot be read is never overwritten."""
     home = HOME_DIR
     val = _instance_ids.get(home)
     if val is None:
@@ -1766,17 +1761,16 @@ def _instance_id_now() -> str:
                 if val:
                     return val
             except OSError as e:
-                # The marker exists but could not be read: warn, then fall
-                # through and mint a fresh id for this run.
-                print(f"[localm] WARNING: cannot read {path} ({e}); minting a "
-                      "fresh instance id for this run.", file=sys.stderr)
+                # The file exists but cannot be read: it is left as it is and
+                # a fresh id is used in memory.
+                print(f"[localm] WARNING: cannot read {path} ({e}); using an "
+                      "in-memory id for this run; the file is left unchanged.",
+                      file=sys.stderr)
+                return uuid.uuid4().hex
         val = uuid.uuid4().hex
         try:
             path.write_text(val, encoding="utf-8")
         except OSError as e:
-            # Cannot persist: this run's id will not survive a restart, so the
-            # client treats the next launch as a new pairing and starts empty /
-            # re-syncs from the server.
             print(f"[localm] WARNING: cannot persist instance id to {path} "
                   f"({e}); using an in-memory-only id for this run (it will "
                   "change on the next start).", file=sys.stderr)
@@ -2441,23 +2435,39 @@ def network_mode() -> str:
     That covers both a load that raises and a config.json (with its .bak) that
     is present but cannot be read, which load_config_checked reports as
     read_ok False. An unset or unrecognised config value resolves to "ask"."""
+    return network_mode_checked()[0]
+
+
+def network_mode_checked() -> tuple:
+    """``(mode, unreadable)``: *mode* as :func:`network_mode` resolves it, and
+    *unreadable* True when it is ``off`` only because the config file could
+    not be read (no ``LOCALM_NET_MODE`` override)."""
     import logging
     logger = logging.getLogger("localm")
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
-        return env
+        return env, False
     try:
         cfg, read_ok = load_config_checked()
     except Exception as exc:
         logger.warning("netpolicy: could not load config (%s); resolving "
                        "net_mode to 'off' (fail-safe) so an unreadable config "
                        "cannot silently re-enable network access", exc)
-        return "off"
+        return "off", True
     if not read_ok:
         logger.warning("netpolicy: config.json is present but unreadable; "
                        "resolving net_mode to 'off' (fail-safe) so an "
                        "unreadable config cannot silently re-enable network "
                        "access")
-        return "off"
+        return "off", True
     mode = str(cfg.get("net_mode", "ask")).strip().lower()
-    return mode if mode in NET_MODES else "ask"
+    return (mode if mode in NET_MODES else "ask"), False
+
+
+def net_off_unreadable_config_refusal(what: str = "") -> str:
+    """The text of a refusal made because the config file could not be read,
+    which turns network access off: the file, *what* was refused (optional),
+    and what to do."""
+    lead = f"{CONFIG_FILE} could not be read, so network access is treated as off"
+    return (f"{lead} and {what}. " if what else f"{lead}. ") + (
+        "Correct that file (or set LOCALM_NET_MODE for this run) and try again.")

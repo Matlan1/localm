@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { chat, deleteAllServerConversations, lsSetScoped, retainConversations } from "../app/chat.js";
-import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, showInlineError, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, reloadApp, showInlineError, streamJob, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
@@ -1072,7 +1072,7 @@ $("gui-clear-convs").onclick = () => {
         }
       }
       localStorage.removeItem("localm.conversations");
-      location.reload();
+      reloadApp();
     });
 };
 
