@@ -57,6 +57,12 @@ def unregister_plugin(plugin_name: str) -> int:
         return before - len(_DESCRIPTORS)
 
 
+def has_plugin(plugin_name: str) -> bool:
+    """True while *plugin_name* has at least one registered descriptor."""
+    with _LOCK:
+        return any(d.plugin_name == plugin_name for d in _DESCRIPTORS)
+
+
 def registered() -> list:
     """A snapshot of the registered descriptors in the order they are asked:
     first-party plugins' descriptors, then third-party ones, each group in

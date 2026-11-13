@@ -223,8 +223,9 @@ def _log_backend_eviction(plugin_name: str, fut) -> None:
                       "backend", plugin_name, model)
         else:
             _log.warning("plugin %s: model %s, which runs on its inference "
-                         "backend, is still loaded (%s)", plugin_name, model,
-                         result.get("status"))
+                         "backend, is still loaded (%s%s)", plugin_name, model,
+                         result.get("status"),
+                         f": {result['detail']}" if result.get("detail") else "")
 
 
 def _purge_plugin_modules(uniq: str) -> None:
@@ -2205,7 +2206,7 @@ class PluginManager:
         # install, plugin-data/<name> for a third-party one) before any rmtree.
         root = home if spec.builtin else (home / "plugin-data" / spec.name).resolve()
         d = target.resolve()
-        if d == home or not d.is_relative_to(root):
+        if d == home or not root.is_relative_to(home) or not d.is_relative_to(root):
             _log.warning(
                 "plugin %s: refusing to delete data_subdir %r -> %s (it does "
                 "not resolve inside the data dir); the data is NOT deleted",

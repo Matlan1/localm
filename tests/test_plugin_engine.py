@@ -1988,3 +1988,24 @@ def test_a_complete_install_is_still_reported_as_installed(env):
     with pytest.raises(ValueError, match="already installed"):
         mgr.set_installed_from_dir(src)
     mgr.set_installed_from_dir(src, force=True)
+
+
+def _link_dir(link, target):
+    import os
+    import sys
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_delete_data_refuses_a_plugin_data_root_linked_out_of_the_data_dir(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
+    outside = tmp_path / "outside"
+    (outside / "evil_data").mkdir(parents=True)
+    (outside / "evil_data" / "keep.txt").write_text("important", encoding="utf-8")
+    (home / "plugin-data").mkdir()
+    _link_dir(home / "plugin-data" / "evil", outside)
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    assert (outside / "evil_data" / "keep.txt").read_text(encoding="utf-8") == "important"

@@ -600,3 +600,49 @@ class TestDisableUnloadsItsModels:
         mgr.disable("fakeexl")
         assert plugins_engine._BACKEND_EVICTIONS == set()
         assert backend_registry.registered() == []
+
+
+class _PluginEngine(_BuiltinEngine):
+    backend_plugin = "fakeexl"
+
+    def __init__(self, fail=False):
+        super().__init__()
+        self.fail = fail
+
+    def unload(self):
+        if self.fail:
+            raise OSError("worker would not stop")
+        self.loaded = False
+
+
+class TestEvictionEdges:
+    def test_a_load_that_ends_after_its_plugin_was_disabled_is_undone(self, tmp_path):
+        from localm.inference.engine import Engine
+        from localm.plugins.engine import PluginManager
+        root = tmp_path / "installed"
+        _make_backend_plugin(root, source=LOADABLE_BACKEND_PLUGIN)
+        mgr = PluginManager(FastAPI(), installed_root=root, builtin_root=None)
+        mgr.install("fakeexl")
+        kept = Engine(str(_exl2_dir(tmp_path)))
+        kept.load()
+        assert kept.loaded is True
+        late = Engine(str(_exl2_dir(tmp_path)))
+        mgr.disable("fakeexl")
+        with pytest.raises(RuntimeError, match="was disabled while it loaded"):
+            late.load()
+        assert late.loaded is False
+
+    def test_one_failing_unload_does_not_stop_the_others(self, monkeypatch):
+        import asyncio
+
+        from localm.inference import http_server as hs
+        bad, good = _PluginEngine(fail=True), _PluginEngine()
+        monkeypatch.setattr(hs, "_engines", {"bad": bad, "good": good})
+        monkeypatch.setattr(hs, "_engines_lru", ["bad", "good"])
+        monkeypatch.setattr(hs, "_inference_sems", {})
+        monkeypatch.setattr(hs, "_active_model_name", None)
+        results = asyncio.run(hs.unload_models_of_backend_plugin("fakeexl"))
+        assert [(r["model"], r["status"]) for r in results] == [
+            ("bad", "error"), ("good", "unloaded")]
+        assert "worker would not stop" in results[0]["detail"]
+        assert good.loaded is False

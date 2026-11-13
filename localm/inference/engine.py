@@ -577,7 +577,10 @@ class Engine:
 
     def _load_locked(self) -> None:
         """The body of load(), for a backend that is not loaded yet. Caller
-        must hold the load lock."""
+        must hold the load lock. Raises RuntimeError, with the backend unloaded
+        again, when the plugin whose inference backend built it no longer has
+        that backend registered once the load returns (it was disabled or
+        uninstalled during the load)."""
         args = getattr(self, "_backend_args", None)
         if args is not None and not getattr(self, "_backend_fresh", True):
             # A reload builds a new backend: config-read settings take their
@@ -596,6 +599,14 @@ class Engine:
             console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
                           f"(scale {scale:g})[/dim]")
         self._backend.load()
+        plugin = self.backend_plugin
+        if plugin is not None:
+            from localm.inference import backend_registry
+            if not backend_registry.has_plugin(plugin):
+                self._backend.unload()
+                raise RuntimeError(
+                    f"{self.display_name} was not kept loaded: plugin {plugin!r}, "
+                    f"whose backend runs it, was disabled while it loaded")
 
     def _attach_registered_adapters(self) -> None:
         """Give a GGUF backend the LoRA adapters currently attached to this

@@ -3523,16 +3523,27 @@ async def unload_models_of_backend_plugin(plugin_name: str) -> list[dict]:
     backend that *plugin_name* registered (``Engine.backend_plugin``). Each
     goes through ``unload_one_model``: it first waits for its requests in
     flight to finish, and is unloaded with *force* when they do not. Returns
-    one ``unload_one_model`` result per model, in ``_engines`` order."""
+    one ``unload_one_model`` result per model, in ``_engines`` order; an
+    unload that raises is logged at WARNING and reported as
+    ``{"status": "error", "model": name, "detail": ...}``, and the remaining
+    models are still unloaded."""
     results = []
     for name, engine in list(_engines.items()):
         if not getattr(engine, "loaded", False):
             continue
         if getattr(engine, "backend_plugin", None) != plugin_name:
             continue
-        result = await unload_one_model(name)
-        if result.get("status") == "confirm_required":
-            result = await unload_one_model(name, force=True)
+        try:
+            result = await unload_one_model(name)
+            if result.get("status") == "confirm_required":
+                result = await unload_one_model(name, force=True)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("plugin %s: unloading model %s, which runs on its "
+                           "inference backend, failed (%s: %s)",
+                           plugin_name, name, type(e).__name__, e)
+            result = {"status": "error", "model": name,
+                      "detail": f"{type(e).__name__}: {e}"}
         results.append(result)
     return results
 
