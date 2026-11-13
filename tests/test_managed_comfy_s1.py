@@ -621,6 +621,7 @@ def test_a_running_managed_comfyui_says_a_restart_lists_new_models(home, tmp_pat
     mc.write_extra_model_paths()
     monkeypatch.setitem(comfy_client._launched_model_folders, url,
                         mc.registered_folders_in_file())
+    monkeypatch.setattr(comfy_client, "spawned_pid", lambda u=None: 4242)
     monkeypatch.setattr(comfy_client, "is_comfy_confirmed", lambda u=None: True)
     assert comfy_client.ensure_comfy(url) == (True, "ComfyUI is running.")
     vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
@@ -628,3 +629,25 @@ def test_a_running_managed_comfyui_says_a_restart_lists_new_models(home, tmp_pat
     for _ in range(2):
         ok, msg = comfy_client.ensure_comfy(url)
         assert ok and msg.endswith(comfy_client.STALE_MODEL_FOLDERS)
+
+
+def test_a_managed_comfyui_another_process_started_says_so_on_every_job(
+        home, tmp_path, monkeypatch):
+    _install_managed(home)
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+    url = mc.managed_comfy_api_url()
+    mc.write_extra_model_paths()
+    listener = {"pid": 111}
+    monkeypatch.setattr(comfy_client, "spawned_pid", lambda u=None: None)
+    monkeypatch.setattr(comfy_client, "comfy_port_holder",
+                        lambda u, timeout=1.0: {"port": 1, "pid": listener["pid"],
+                                                "name": "python", "localm_launched": False})
+    monkeypatch.setattr(comfy_client, "is_comfy_confirmed", lambda u=None: True)
+    assert comfy_client.ensure_comfy(url) == (True, "ComfyUI is running.")
+    vae = _st(tmp_path / "v" / "vae.safetensors", ["decoder.conv_in.weight"])
+    _register({"vae": (vae, "vae")})
+    for _ in range(3):
+        ok, msg = comfy_client.ensure_comfy(url)
+        assert ok and msg.endswith(comfy_client.STALE_MODEL_FOLDERS)
+    listener["pid"] = 222
+    assert comfy_client.ensure_comfy(url) == (True, "ComfyUI is running.")

@@ -39,6 +39,7 @@ from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media import source_archive
+from localm.folder_swap import replace_dir
 
 
 class ProgressEvent(str):
@@ -452,7 +453,7 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
             copied.append(rel)
         staging.mkdir(parents=True, exist_ok=True)
         source_archive.write_record(staging, str(user_workdir), commit, copied)
-        os.replace(staging, source_archive.long_path(managed_root))
+        replace_dir(staging, source_archive.long_path(managed_root))
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
         return False, str(e)

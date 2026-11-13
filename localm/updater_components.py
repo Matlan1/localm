@@ -1847,20 +1847,12 @@ def _update_uv(p: dict, root: Path, say: Callable, bootstrap: Optional[Callable]
     if got != p["target"]:
         shutil.rmtree(staging, ignore_errors=True)
         return f"the installed uv reports {got or 'no version'}, not {p['target']}"
-    live = root / ".uv"
-    old = root / ".uv-previous"
+    from localm.folder_swap import replace_dir
     try:
-        shutil.rmtree(old, ignore_errors=True)
-        os.replace(live, old)
-        try:
-            os.replace(staging, live)
-        except OSError:
-            os.replace(old, live)
-            raise
+        replace_dir(staging, root / ".uv")
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
         return f"could not swap in the new uv: {e}"
-    shutil.rmtree(old, ignore_errors=True)
     return None
 
 

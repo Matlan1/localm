@@ -206,6 +206,14 @@ def test_generate_writes_a_clean_wav_and_a_sidecar(tmp_path, fake_generate):
     assert "requested 2 s" in msg and "seed 42" in msg
 
 
+def test_generate_hands_koboldcpp_the_gpu_list_the_main_gpu_counts_in(tmp_path,
+                                                                     fake_generate):
+    from localm.discover import list_gpus
+    ok, msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0)
+    assert ok, msg
+    assert fake_generate[0]["gpus"] is list_gpus
+
+
 def test_privacy_mode_writes_no_sidecar(tmp_path, fake_generate):
     out = tmp_path / "t.wav"
     ok, _msg = native.generate(_s(), "x", out, write_sidecar=False, duration_seconds=1.0)
