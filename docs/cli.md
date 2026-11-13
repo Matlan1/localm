@@ -533,7 +533,7 @@ running localm server (`--url` to point at a non-default one, also on `reembed`)
 matching the GUI's hybrid retrieval; `add` and `query` fall back to lexical-only
 when no server is reachable. `repair` without `--embed` on a collection that has embeddings drops
 them for every re-indexed document, so it asks first (`-y` accepts the drop); with
-nobody to answer (a script, cron) it keeps the embeddings by recomputing them.
+nobody to answer (a script, cron) it keeps the embeddings by recomputing them. A repair that would compute embeddings but reaches no server exits 1 and changes nothing. `repair` names source files that no longer exist instead of re-indexing them, and `resync` keeps naming a document that is still missing on every run.
 
 `resync` is the incremental one to run regularly (`--prune-missing` to also drop
 entries whose file is gone; off by default so an unplugged drive cannot delete
