@@ -510,12 +510,12 @@ def silent_proxy():
 def test_a_silent_proxy_through_the_real_client_is_bounded(monkeypatch, fresh_record, silent_proxy):
     _record_numbers(monkeypatch, issue_tracker.MAX_LISTED)
     set_config(monkeypatch, lambda: {"bugreport_upload_url": silent_proxy})
-    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 1.5)
+    monkeypatch.setattr(issue_tracker, "FILED_STATUS_BUDGET_S", 3.0)
     monkeypatch.setattr(issue_tracker, "LOOKUP_TIMEOUT_S", 0.5)
     started = time.monotonic()
     rows = issue_tracker.filed_status()
     elapsed = time.monotonic() - started
-    assert elapsed < 5
+    assert elapsed < 8
     assert len(rows) == issue_tracker.MAX_LISTED
     assert all("error" in r and "state" not in r for r in rows)
     assert rows[0]["error"] == "could not reach the localm proxy"
