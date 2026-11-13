@@ -1229,7 +1229,7 @@ Uninstall returns `{"status": "uninstalled", "name"}`. Uninstalling a
 protected plugin (chat) or a known plugin that is not installed returns 409;
 an unknown plugin returns 404; a failed install or uninstall returns 400; an
 uninstall that disabled and unloaded the plugin but could not remove everything
-it owns from disk, or a settings file that cannot be written, returns 500.
+it owns from disk, or a settings file that cannot be read or written, returns 500.
 
 ### `POST /api/plugins/refresh` / `POST /api/plugins/{name}/refresh`
 
@@ -1246,7 +1246,7 @@ other refresh failure of the `{name}` route returns 500.
 Toggle an installed plugin active or inactive in config. Disabling a
 protected plugin (chat) returns 409; enabling or disabling a known plugin that
 is not installed returns 409; an unknown plugin returns 404; a settings file
-that cannot be written returns 500 and leaves the plugin as it was; any other
+that cannot be read or written returns 500 and leaves the plugin as it was; any other
 failure returns 400. They return `{"status": "enabled" | "disabled", "name"}`.
 
 ### `POST /api/plugins/install-external`

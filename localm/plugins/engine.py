@@ -1210,9 +1210,13 @@ class PluginManager:
         return out
 
     def run_startup_callbacks(self) -> None:
-        """Run every queued startup callback once. Called by the app lifespan
-        with the event loop running. Best-effort per callback: one plugin's
-        failure is logged and does not stop the others or the server."""
+        """Unload every third-party plugin whose routes clash with a route
+        registered after it loaded (``_unload_route_clashes``), then run every
+        queued startup callback once. Called by the app lifespan with the
+        event loop running, once every route of the app exists. Best-effort
+        per callback: one plugin's failure is logged and does not stop the
+        others or the server."""
+        self._unload_route_clashes()
         callbacks, self._startup_callbacks = self._startup_callbacks, []
         for name, cb in callbacks:
             try:
@@ -1389,7 +1393,8 @@ class PluginManager:
     def _set_enabled(self, name: str, on: bool) -> None:
         """Add/remove *name* in config["plugins_enabled"] atomically (read-modify-
         write under the I/O lock), so concurrent toggles can't lose updates.
-        Raises PluginConfigWriteError when the settings file cannot be written."""
+        Raises PluginConfigWriteError when the settings file cannot be read
+        or written."""
         from localm.config import update_config
 
         def _mutate(cfg: dict) -> None:
@@ -1398,11 +1403,11 @@ class PluginManager:
             cfg["plugins_enabled"] = sorted(cur)
         try:
             update_config(_mutate)
-        except OSError as e:
+        except Exception as e:
             reason = getattr(e, "strerror", None) or str(e) or type(e).__name__
             raise PluginConfigWriteError(
                 f"plugin {name!r} could not be {'enabled' if on else 'disabled'}: "
-                f"the settings file (config.json) could not be written ({reason})"
+                f"the settings file (config.json) could not be saved ({reason})"
             ) from e
 
     def _enable_or_unload(self, name: str) -> None:
@@ -1517,8 +1522,39 @@ class PluginManager:
             unloaded.append(name)
             _log.info("plugin %s unloaded: it was %s outside this server", name,
                       "uninstalled" if gone else "disabled")
+        unloaded += self._unload_route_clashes()
         self._forget_stale_errors()
         return self._load_pending(self._pending_specs()), unloaded
+
+    def _unload_route_clashes(self) -> list:
+        """Unload every loaded third-party plugin with a route that another
+        route of the app (localm's own, or another plugin's) also answers,
+        recording the clash as its load error; mount_router refuses such a
+        route at load time, and this catches a route registered after the
+        plugin loaded. Returns the names unloaded. Runs the unloads through
+        ``_on_loop``."""
+        if self.app is None:
+            return []
+        from starlette.routing import Mount
+        out = []
+        for name in sorted(self._loaded):
+            spec, _module, host, _uniq = self._loaded[name]
+            if spec.builtin:
+                continue
+            own = [r for r in host._routes if not isinstance(r, Mount)]
+            own_ids = {id(r) for r in host._routes}
+            others = [r for r in self.app.router.routes if id(r) not in own_ids]
+            clashes = _route_clashes(own, others)
+            if not clashes:
+                continue
+            self._unload(name)
+            self._errors[name] = (f"load failed: plugin {name!r}: route(s) "
+                                  f"{clashes!r} are already served by localm or "
+                                  f"another plugin")
+            self._error_stamps[name] = _dir_stamp(self._plugin_dir(spec))
+            _log.warning("plugin %s unloaded: %s", name, self._errors[name])
+            out.append(name)
+        return out
 
     async def reconcile_off_loop(self) -> tuple:
         """:meth:`reconcile` for a request handler, through
@@ -2234,6 +2270,7 @@ class PluginManager:
             self._enable_or_unload(name)
         except Exception:
             if copied:
+                self._unload(name)
                 self._remove_installed_dir(name)     # roll back OUR copy only
             raise
         self._record_event("plugin_installed", name)
@@ -2242,10 +2279,14 @@ class PluginManager:
     def _left_disabled_for_requires(self, name: str) -> bool:
         """True, logging why at WARNING, when *name* just installed declares a
         required plugin that is not installed, so the install leaves it
-        disabled (``enable`` refuses it the same way)."""
+        disabled (``enable`` refuses it the same way): an enabled flag left by
+        an earlier install is cleared and a loaded copy unloaded."""
         problem = self._requires_problem(name)
         if problem is None:
             return False
+        if name in self._enabled_set():
+            self._set_enabled(name, False)
+        self._unload(name)
         _log.warning("plugin %s is installed but not enabled: %s", name, problem)
         return True
 
@@ -2279,6 +2320,7 @@ class PluginManager:
             self._invoke_hook(name, "on_install")    # optional lifecycle hook
             self._enable_or_unload(name)
         except Exception:
+            self._unload(name)
             self._remove_installed_dir(name)
             raise
         self._record_event("plugin_installed", name)
@@ -2296,9 +2338,9 @@ class PluginManager:
         spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
         self._provision_and_verify(name)
+        self._record_event("plugin_installed", name)
         if enable and not self._left_disabled_for_requires(name):
             self._set_enabled(name, True)
-        self._record_event("plugin_installed", name)
         return spec0
 
     def enable(self, name: str) -> None:
@@ -2500,10 +2542,10 @@ class PluginManager:
             copied = self._provision_from_store(name)  # raises if unknown
             # Roll back ONLY what this call created - see _provision_from_store.
             self._provision_and_verify(name, rollback_on_fail=copied)
-            if enable and not self._left_disabled_for_requires(name):
-                self._set_enabled(name, True)
             if copied:
                 self._record_event("plugin_installed", name)
+            if enable and not self._left_disabled_for_requires(name):
+                self._set_enabled(name, True)
         else:
             self.discover()
             if name not in self._installed_set() and not self._installed_dir_on_disk(name):

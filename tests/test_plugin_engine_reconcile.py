@@ -240,6 +240,25 @@ def test_a_startup_load_cannot_shadow_a_management_route(env, monkeypatch):
     assert "plugins" in c.get("/api/plugins").json()
 
 
+def test_a_route_registered_after_the_startup_load_unloads_the_clashing_plugin(
+        env, monkeypatch):
+    """The GUI's routes are registered after attach_engine loaded the plugins;
+    the lifespan's run_startup_callbacks finds the clash and unloads it."""
+    _cli(env).set_installed_from_dir(
+        _make_plugin(env / "src", "early", _ping("early", "/api/late/route")))
+    app, mgr, c = _server(env, monkeypatch)
+    assert "early" in mgr._loaded
+
+    @app.get("/api/late/route")
+    def late():
+        return {"who": "kernel"}
+
+    mgr.run_startup_callbacks()
+    assert "early" not in mgr._loaded
+    assert "already served" in mgr._errors["early"]
+    assert c.get("/api/late/route").json() == {"who": "kernel"}
+
+
 def test_a_first_party_route_clash_is_mounted_and_logged(env, monkeypatch, caplog):
     store = env / "store"
     _make_plugin(store, "fpone", _ping("fpone", "/api/plugins"))
@@ -341,6 +360,28 @@ def test_an_install_with_a_missing_required_plugin_is_left_disabled(env, path):
     assert name not in mgr._loaded
 
 
+def test_a_forced_reinstall_that_now_misses_a_required_plugin_is_disabled(env):
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=env / "store", installed_root=env / "installed")
+    mgr.install_external(_make_plugin(env / "src", "grow", _ping("grow")))
+    assert mgr.is_enabled("grow") and "grow" in mgr._loaded
+
+    mgr.install_external(_make_plugin(env / "src", "grow", _ping("grow"), _NEEDY),
+                         force=True)
+    assert not mgr.is_enabled("grow")
+    assert "grow" not in mgr._loaded
+
+
+def test_mcp_list_plugins_names_a_plugin_that_cannot_run_here(env, monkeypatch):
+    from localm.plugins import catalog
+    from localm.plugins.mcpserver.tools import plugin_admin
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
+    reply = plugin_admin.build()["list_plugins"]["handler"]({})
+    text = " ".join(c["text"] for c in reply["content"])
+    line = next(ln for ln in text.splitlines() if ln.startswith("exllama"))
+    assert "which this machine does not have" in line
+
+
 def _plugin_events(env):
     f = env / "logs" / "management.jsonl"
     lines = f.read_text(encoding="utf-8").splitlines() if f.is_file() else []
@@ -376,19 +417,23 @@ def test_install_route_reports_a_plugin_left_disabled(env, monkeypatch):
 #  The settings file cannot be written                                        #
 # --------------------------------------------------------------------------- #
 
-def _config_write_fails(monkeypatch):
+def _config_write_fails(monkeypatch, unreadable=False):
     import localm.config as cfg
+    from localm.storekit import ConfigUnreadable
 
     def _fail(mutator):
+        if unreadable:
+            raise ConfigUnreadable("config.json exists but could not be read")
         raise PermissionError(13, "Access is denied")
     monkeypatch.setattr(cfg, "update_config", _fail)
 
 
-def test_enable_unloads_again_when_the_flag_cannot_be_saved(env, monkeypatch):
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_enable_unloads_again_when_the_flag_cannot_be_saved(env, monkeypatch, unreadable):
     app, mgr, c = _server(env, monkeypatch)
     _cli(env).set_installed_from_dir(_make_plugin(env / "src", "webx", _ping("webx")),
                                      enable=False)
-    _config_write_fails(monkeypatch)
+    _config_write_fails(monkeypatch, unreadable)
     r = c.post("/api/plugins/webx/enable")
     assert r.status_code == 500
     assert "settings file" in r.json()["detail"]
