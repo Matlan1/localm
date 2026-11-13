@@ -235,6 +235,38 @@ def test_an_open_mode_stream_survives_the_first_key(monkeypatch):
     assert "data: 29" in r.text
 
 
+def test_an_open_mode_stream_ends_when_the_first_key_comes_before_its_first_chunk(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi.responses import StreamingResponse
+
+    from localm.inference.http_server import create_app
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+    sent = []
+
+    async def _gen():
+        auth.set_api_key("owner-key-owner-key-9999")
+        for i in range(200):
+            sent.append(i)
+            yield f"data: {i}\n\n"
+
+    @app.get("/v1/test-stream")
+    async def _stream():
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(app) as c:
+        r = c.get("/v1/test-stream",
+                  headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200
+    assert "data: 0" in r.text
+    assert "data: 5" not in r.text
+    assert len(sent) < 10
+
+
 def test_the_credential_recheck_reads_key_files_once_per_stream_and_never_on_the_loop(monkeypatch):
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse, StreamingResponse
