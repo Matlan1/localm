@@ -187,7 +187,7 @@ def _lookup_row(entry: dict, opener, timeout: float) -> dict:
     try:
         issue = get_issue(entry["number"], opener=opener, timeout=timeout)
     except LocalmError as e:
-        row["error"] = e.summary
+        row["error"] = e.hint if e.stage == "network_off" and e.hint else e.summary
     except Exception as e:
         logger.warning("looking up issue #%s failed: %s: %s", entry["number"],
                        type(e).__name__, e)
