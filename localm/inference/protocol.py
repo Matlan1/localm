@@ -232,9 +232,10 @@ class CompletionRequest(SamplingFields):
 
 
 def _zero_cap_as_omitted(v):
-    """``None`` for a reply cap of 0 (an int, not a bool), else *v* unchanged.
-    The engine reads a cap <= 0 as unlimited, so 0 never reaches it."""
-    if isinstance(v, int) and not isinstance(v, bool) and v == 0:
+    """``None`` for a reply cap of 0 (an int or a float equal to 0, not a
+    bool), else *v* unchanged. The engine reads a cap <= 0 as unlimited, so 0
+    never reaches it."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0:
         return None
     return v
 

@@ -323,7 +323,7 @@ def repair(*, installed=None, defer: bool = False, runner: Optional[Callable] = 
                 status = updater_runtime.finish_pending(root=root, runner=runner, say=say)
                 if status is not None:
                     notes.append(status["note"])
-                    if status["state"] not in ("updated", "current"):
+                    if updater_runtime.failed(status):
                         raise LocalmError("the native runtime could not be repaired",
                                           reason=status["note"])
         plans = uc.plan(root, root, deep=not defer)

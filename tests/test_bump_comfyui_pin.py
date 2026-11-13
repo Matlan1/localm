@@ -320,6 +320,9 @@ def test_checklist_mentions_reinstall_requirements_only_when_the_receipt_says_so
     without_change = bump.checklist("v0.32.0", False)
     assert "--reinstall-requirements" in with_change
     assert "--reinstall-requirements" not in without_change
+    unknown = bump.checklist("v0.32.0", None)
+    assert "NOT compared" in unknown and "--reinstall-requirements" in unknown
+    assert "NOT compared" not in with_change and "NOT compared" not in without_change
     assert "v0.32.0" in with_change and "v0.32.0" in without_change
 
 

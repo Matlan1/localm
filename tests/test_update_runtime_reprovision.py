@@ -322,7 +322,9 @@ def test_deps_and_runtime_both_run_in_that_order(install, tmp_path, monkeypatch)
     assert res["runtime"]["state"] == "updated"
 
 
-def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install):
+def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(install))
     data, sig = _release()
     with pytest.raises(LocalmError) as ei:
@@ -335,7 +337,10 @@ def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install):
     assert updater_runtime.read_pending() is None
 
 
-def test_a_fallback_to_another_backend_counts_as_failed(install):
+def test_a_fallback_with_a_previous_runtime_that_does_not_load_counts_as_failed(install,
+                                                                                monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(install))
     data, sig = _release()
     with pytest.raises(LocalmError) as ei:
@@ -584,6 +589,8 @@ def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do
                   defer_runtime=True)
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: install)
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     fake = _fake_setup_llama(install, "b1355-cpu-b11908", rc=1)
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
@@ -731,6 +738,8 @@ def test_first_start_adds_missing_kernel_packs_once(tmp_path, cfg, monkeypatch,
 def test_first_start_retries_after_a_failure_and_keeps_the_old_runtime(
         updated_by_an_old_updater, monkeypatch):
     inst = updated_by_an_old_updater
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(inst))
     _start(inst, monkeypatch, rc=1)
     assert au._tree_signature(_lib(inst)) == before
@@ -912,3 +921,154 @@ def test_a_runtime_that_cannot_be_restored_leaves_the_code_too(install, monkeypa
     assert "nothing was rolled back" in ei.value.summary
     assert au._tree_signature(_lib(install)) == before
     assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+# ------------------------- a release build that does not work -----------------
+
+def test_a_fallback_with_a_previous_runtime_that_loads_is_kept_and_the_update_goes_on(
+        install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    data, sig = _release()
+    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                        runner=_fake_setup_llama(install, "b11928", backend="vulkan"))
+    assert res["runtime"]["state"] == "kept", res["runtime"]
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update went on"
+    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
+    assert updater_runtime.kept_runtime(_lib(install)) == {
+        "backend": "amd-rocm", "kept": "b1349-cpu-b11719", "target": "b1355-cpu-b11908",
+        "why": "setup-llama installed the vulkan runtime instead of amd-rocm"}
+    assert "kept the amd-rocm runtime b1349-cpu-b11719" in res["runtime_note"]
+    assert "To try it again: localm setup-llama --backend amd-rocm --force" in res["runtime_note"]
+    assert updater_runtime.last_status()["state"] == "kept"
+    after = updater_runtime.plan(install, install)
+    assert after["reprovision"] is False and "kept the amd-rocm runtime" in after["note"]
+
+
+def test_a_failed_setup_keeps_the_previous_runtime_but_tries_the_release_again(
+        install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    data, sig = _release()
+    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                        runner=_fake_setup_llama(install, "x", rc=1))
+    assert res["runtime"]["state"] == "kept"
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert "could not be installed (setup-llama exited 1)" in res["runtime_note"]
+    assert "tried again on the next start" in res["runtime_note"]
+    assert updater_runtime.kept_runtime(_lib(install)) is None
+    assert updater_runtime.plan(install, install)["reprovision"] is True
+
+
+def test_the_kept_record_is_not_part_of_the_runtime_and_never_writes_into_a_snapshot(tmp_path):
+    lib = _provision(tmp_path / "inst", "vulkan", "b11757")
+    snap = tmp_path / "snap"
+    au.snapshot_runtime(lib, snap)
+    updater_runtime._record_kept(lib, "vulkan", "b11757", "b11928", "did not load")
+    assert au.runtime_differs(lib, snap) is False
+    twin = snap / updater_runtime.KEPT_RECORD
+    import os
+    os.link(lib / updater_runtime.KEPT_RECORD, twin)
+    updater_runtime._record_kept(lib, "vulkan", "b11757", "b12000", "did not load")
+    assert '"b11928"' in twin.read_text(encoding="utf-8")
+    assert updater_runtime.kept_runtime(lib)["target"] == "b12000"
+
+
+def test_a_previous_runtime_that_does_not_load_either_still_rolls_the_update_back(
+        install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "registered no GPU device"))
+    data, sig = _release()
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                      runner=_fake_setup_llama(install, "x", rc=1))
+    assert "does not load either (registered no GPU device)" in ei.value.reason
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert updater_runtime.kept_runtime(_lib(install)) is None
+
+
+def test_a_kept_record_for_another_build_or_backend_does_not_stop_the_reprovision(tmp_path, cfg):
+    inst = _tree(tmp_path / "inst", _PINS_031)
+    lib = _provision(inst, "vulkan", "b11757")
+    updater_runtime._record_kept(lib, "vulkan", "b11000", "b11928", "did not load")
+    assert updater_runtime.plan(_tree(tmp_path / "s"), inst)["reprovision"] is True
+    updater_runtime._record_kept(lib, "cuda", "b11757", "b11928", "did not load")
+    assert updater_runtime.plan(_tree(tmp_path / "s"), inst)["reprovision"] is True
+    updater_runtime._record_kept(lib, "vulkan", "b11757", "b11928", "did not load")
+    assert updater_runtime.plan(_tree(tmp_path / "s"), inst)["reprovision"] is False
+
+
+def test_the_load_check_loads_this_installs_library_through_the_probe(tmp_path):
+    from types import SimpleNamespace
+    seen = {}
+    sl = SimpleNamespace(
+        _lib_name=lambda: "llama.lib-under-test",
+        _native_gpu_loads_ok=lambda env=None: seen.update(gpu=env["LLAMA_CPP_LIB"]) or (True, ""),
+        _native_loads_ok=lambda env=None: seen.update(cpu=env["LLAMA_CPP_LIB"]) or (False, "no"))
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    ok, why = updater_runtime._runtime_loads(lib, "cuda", sl)
+    assert ok is False and "llama.lib-under-test is missing" in why and seen == {}
+    (lib / "llama.lib-under-test").write_bytes(b"x")
+    assert updater_runtime._runtime_loads(lib, "cuda", sl) == (True, "")
+    assert updater_runtime._runtime_loads(lib, "cpu", sl) == (False, "no")
+    library = str(lib / "llama.lib-under-test")
+    assert seen == {"gpu": library, "cpu": library}
+
+
+@pytest.mark.parametrize("state, stops", [("failed", True), ("waiting", True), ("kept", False),
+                                           ("updated", False), ("current", False)])
+def test_only_failed_and_waiting_stop_an_update(state, stops):
+    assert updater_runtime.failed({"state": state}) is stops
+    assert updater_runtime.failed(None) is False
+
+
+def test_doctor_names_a_kept_runtime_and_how_to_try_again(tmp_path, cfg, monkeypatch):
+    import importlib
+    import localm.setup_llama as sl
+    from localm.setup_llama.pins import _PINNED_TAG
+    doctor = importlib.import_module("localm.cli.doctor")
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: _lib(tmp_path / "inst"))
+    lib = _provision(tmp_path / "inst", "vulkan", "b11000")
+    updater_runtime._record_kept(lib, "vulkan", "b11000", _PINNED_TAG, "the load test failed")
+    out = io.StringIO()
+    from rich.console import Console
+    monkeypatch.setattr(doctor, "console", Console(file=out, width=300))
+    doctor._check_runtime_matches_release("b11000")
+    text = out.getvalue()
+    assert (f"kept the vulkan runtime b11000: this release's {_PINNED_TAG} did not work here "
+            "(the load test failed)") in text
+    assert "to try it again: localm setup-llama --backend vulkan --force" in text
+    assert "ships llama.cpp build" not in text
+
+
+def test_the_kept_record_names_the_build_read_from_the_restored_runtime(tmp_path, cfg,
+                                                                       monkeypatch):
+    inst = _tree(tmp_path / "inst")
+    lib = _provision(inst, "vulkan", "b11757")
+    pending = {"backend": "vulkan", "current": None, "target": "b11928",
+               "pins": updater_runtime.staged_pins(inst)}
+    updater_runtime.write_pending(pending, root=inst, version="0.3.2")
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    st = updater_runtime.finish_pending(
+        root=inst, runner=_fake_setup_llama(inst, "b11928", backend="cpu"), wait=0)
+    assert st["state"] == "kept", st
+    assert updater_runtime.kept_runtime(lib)["kept"] == "b11757"
+    assert "kept the vulkan runtime b11757" in st["note"]
+    assert updater_runtime.plan(inst, inst)["reprovision"] is False
+
+
+def test_a_restored_runtime_with_no_recorded_build_is_kept_and_names_how_to_try_again(
+        tmp_path, cfg, monkeypatch):
+    inst = _tree(tmp_path / "inst")
+    lib = _provision(inst, "vulkan", None)
+    pending = {"backend": "vulkan", "current": None, "target": "b11928",
+               "pins": updater_runtime.staged_pins(inst)}
+    updater_runtime.write_pending(pending, root=inst, version="0.3.2")
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    st = updater_runtime.finish_pending(
+        root=inst, runner=_fake_setup_llama(inst, "b11928", backend="cpu"), wait=0)
+    assert st["state"] == "kept", st
+    assert updater_runtime.kept_runtime(lib) is None
+    assert "did not work here" in st["note"] and "To try it again: " in st["note"]
+    assert "could not be installed" not in st["note"]
+    assert "tried again on the next start" not in st["note"]
+    assert updater_runtime.plan(inst, inst)["reprovision"] is False

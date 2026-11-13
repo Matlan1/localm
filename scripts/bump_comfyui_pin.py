@@ -267,7 +267,7 @@ def _write(path: Path, text: str, newline: str) -> None:
     path.write_bytes(text.replace("\n", newline).encode("utf-8"))
 
 
-def checklist(tag: str, requirements_changed: bool) -> str:
+def checklist(tag: str, requirements_changed: bool | None) -> str:
     lines = [
         "REMAINING STEPS, not automated - each has its own check:",
         "  1. pytest tests/test_check_comfyui_pin.py tests/test_bump_comfyui_pin.py",
@@ -283,6 +283,11 @@ def checklist(tag: str, requirements_changed: bool) -> str:
             "       - mention 'localm comfy update --reinstall-requirements': plain "
             "'update' does not reinstall requirements.txt by default, and the "
             "receipt shows it changed for this bump")
+    elif requirements_changed is None:
+        lines.append(
+            "       - requirements.txt was NOT compared (no receipt, or the confirm could not "
+            "read it): compare it between the two commits by hand; if it changed, mention "
+            "'localm comfy update --reinstall-requirements'")
     lines += [
         "  3. python scripts/check_comfyui_pin.py --gate",
         "       must report the pin as current",
@@ -311,7 +316,7 @@ def main(argv=None) -> int:
     tag = args.tag.strip()
     commit = args.commit.strip().lower()
     require = tuple(args.require) if args.require else DEFAULT_REQUIRE
-    requirements_changed = False
+    requirements_changed = None
     try:
         if not _TAG_RE.match(tag):
             raise Refused(f"{tag!r} is not an upstream release tag (vX.Y[.Z...])")
@@ -324,8 +329,7 @@ def main(argv=None) -> int:
             receipt = load_receipt(Path(args.receipt), tag, commit, require)
             print(f"receipt: {tag}@{commit} confirmed on "
                  f"{', '.join(sorted(c for c in receipt.get('checks', {}) if receipt['checks'][c].get('verdict') == 'PASS'))}")
-            requirements_changed = bool(
-                (receipt.get("baseline") or {}).get("requirements_changed"))
+            requirements_changed = (receipt.get("baseline") or {}).get("requirements_changed")
         elif args.write:
             raise Refused("--write needs --receipt: a bump without the confirm is "
                           "the untested-build problem the pin exists to remove")
