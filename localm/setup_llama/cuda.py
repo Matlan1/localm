@@ -22,6 +22,7 @@ from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive, ArtifactError
 import localm.setup_llama as _sl
 from localm.http_ssl import read_bounded
+from localm.setup_llama.pins import _CUDA_TOOLKIT
 
 # --------------------------------------------------------------------------- #
 #  NVIDIA / CUDA preflight + self-assembly                                     #
@@ -43,7 +44,7 @@ from localm.http_ssl import read_bounded
 # dropping some pre-Turing arch support). NVIDIA Blackwell (datacenter sm_100,
 # consumer/workstation sm_120 - e.g. RTX 50-series) is not supported by our
 # pinned 12.4 build's fatbin: upstream only added Blackwell kernels starting
-# CUDA 12.8, and our two pinned lines are 12.4 and 13.4. So a Blackwell card
+# CUDA 12.8, and our pinned 12.x line is 12.4 (pins._CUDA_TOOLKIT). So a Blackwell card
 # needs the 13.x line; every older architecture stays on 12.x, the
 # broad-compatibility default. _CUDA_LINE is the fallback used when no
 # architecture information is available at all (see NvidiaInfo.cuda_line).
@@ -67,19 +68,10 @@ _BLACKWELL_MIN_CAP = (10, 0)
 
 
 # Minimum driver-reported CUDA version ("cuda_capability") to trust each
-# line's build, keyed by the line itself since a newer line needs a newer
-# driver. Both match the PINNED asset's own X.Y (not just its major version):
-# the 12.4 entry is the original, long-verified threshold; the 13.4 entry
-# mirrors that same convention rather than relying on CUDA's minor-version-
-# compatibility guarantee across the (very recent) 13.x series, which there is
-# no Blackwell hardware here to confirm against directly. Being exact-match
-# here is the conservative side of that unknown: it can only route a
-# borderline driver to the safe Vulkan fallback, never hand it a build that
-# fails to load.
-_MIN_DRIVER_CUDA = {
-    "cuda-12": (12, 4),
-    "cuda-13": (13, 4),
-}
+# line's build: the X.Y of that line's pinned Windows build (pins._CUDA_TOOLKIT),
+# not only its major. See test_blackwell_card_with_13x_driver_below_pinned_patch_is_not_yet_ok.
+_MIN_DRIVER_CUDA = {line: tuple(int(p) for p in version.split("."))
+                    for line, version in _CUDA_TOOLKIT["win"].items()}
 
 
 def _ver_tuple(v: str) -> Optional[tuple]:
