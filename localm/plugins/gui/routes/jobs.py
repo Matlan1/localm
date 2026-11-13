@@ -125,5 +125,7 @@ def register(app: FastAPI, jobs) -> None:
 
     @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(_require_auth)])
     async def job_cancel(job=Depends(owned_job)):
+        if job.status != "running":
+            return {"status": "not_running", "state": job.status}
         job.cancel()
         return {"status": "cancelling"}

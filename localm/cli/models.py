@@ -2054,9 +2054,7 @@ def cancel_cmd(operation_id):
     url, headers = server
 
     # Resolve the id against what the server says it is doing, BEFORE posting:
-    # that is what lets a prefix work, and what tells "already finished" apart
-    # from "cancelling". POSTing blind to a finished job returns the same
-    # {"status": "cancelling"} as a real cancellation.
+    # that is what lets a prefix work.
     state, payload = server_call(url, headers, "GET", "/api/activity", timeout=10)
     if state != "ok":
         report_server_failure(state, payload, "ask the server what it is doing")

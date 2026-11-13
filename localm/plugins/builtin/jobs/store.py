@@ -518,26 +518,37 @@ class JobStore:
         return True
 
     # ---- results -----------------------------------------------------------
-    def record_result(self, job_id: str, result: dict) -> str:
+    def record_result(self, job_id: str, result: dict) -> Optional[str]:
         """Persist one run *result* for *job_id* and return its result id (the
         iso-ts file stem). Also stamps the job's last_run / last_status /
         last_result_id. Results are saved in every privacy mode (explicit user
-        data). A timestamp collision is disambiguated with a counter suffix."""
+        data). A timestamp collision is disambiguated with a counter suffix.
+
+        Returns None and writes nothing when *job_id* is no longer defined (it
+        was removed while it ran), so a removed job's results folder is not
+        created again. Checked and written under the store lock that ``remove``
+        takes."""
         d = self._result_dir(job_id)
-        d.mkdir(parents=True, exist_ok=True)
         stamp = _iso_stamp(result.get("finished") or result.get("started")
                            or time.time())
-        n = 0
-        while True:
-            result_id = stamp if n == 0 else f"{stamp}_{n}"
-            path = self._confine(d / f"{result_id}.json")
-            record = {"job_id": job_id, "result_id": result_id, **result}
-            try:
-                with open(path, "x", encoding="utf-8") as fh:
-                    fh.write(json.dumps(record, indent=2, ensure_ascii=False))
-                break
-            except FileExistsError:
-                n += 1
+        with self._locked():
+            if job_id not in self._load()[0]:
+                with _HELD_CLAIMS_LOCK:
+                    for tok in [t for t, j in _HELD_CLAIMS.items() if j == job_id]:
+                        del _HELD_CLAIMS[tok]
+                return None
+            d.mkdir(parents=True, exist_ok=True)
+            n = 0
+            while True:
+                result_id = stamp if n == 0 else f"{stamp}_{n}"
+                path = self._confine(d / f"{result_id}.json")
+                record = {"job_id": job_id, "result_id": result_id, **result}
+                try:
+                    with open(path, "x", encoding="utf-8") as fh:
+                        fh.write(json.dumps(record, indent=2, ensure_ascii=False))
+                    break
+                except FileExistsError:
+                    n += 1
         # Stamp the job def (best-effort: a run for a now-deleted job is fine).
         try:
             self._stamp_result(job_id, result, result_id)
