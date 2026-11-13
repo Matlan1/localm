@@ -53,6 +53,7 @@ def id_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "HOME_DIR", tmp_path)
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
     monkeypatch.setattr(config, "_RUN_INSTANCE_IDS", {})
+    monkeypatch.setattr(config, "_instance_ids", {})
     return tmp_path / "instance_id.txt"
 
 
@@ -71,6 +72,9 @@ def test_an_unreadable_instance_id_file_is_not_overwritten_and_the_id_holds(id_h
     assert first != "the-stored-id"
     monkeypatch.setattr(Path, "read_text", real)
     assert id_home.read_text(encoding="utf-8") == "the-stored-id"
+    assert config.instance_id() == first
+    monkeypatch.setattr(config, "_RUN_INSTANCE_IDS", {})
+    monkeypatch.setattr(config, "_instance_ids", {})
     assert config.instance_id() == "the-stored-id"
 
 
