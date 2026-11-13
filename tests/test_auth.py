@@ -792,6 +792,35 @@ def test_ensure_owner_key_returns_the_env_key_and_writes_nothing(auth, monkeypat
     assert auth._read_key_file() is None
 
 
+@pytest.mark.parametrize("failure", ["lock", "unreadable", "oserror"])
+def test_first_key_route_returns_the_named_key_when_the_owner_seed_fails(
+        auth, monkeypatch, failure):
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.config import ConfigLockTimeout
+    from localm.inference.http_server import create_app
+    from localm.storekit import ConfigUnreadable
+
+    raised = {"lock": ConfigLockTimeout("auth.key is locked"),
+              "unreadable": ConfigUnreadable("the owner key file cannot be read"),
+              "oserror": PermissionError("denied")}[failure]
+
+    def fail():
+        raise raised
+
+    monkeypatch.setattr(auth, "ensure_owner_key", fail)
+    app = create_app(None)
+    with TestClient(app) as client:
+        r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
+                        headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["key"] and auth.verify(body["key"])
+    assert body["owner_key_created"] is False
+    assert any("No owner session" in w for w in body["warnings"])
+    assert not r.headers.get_list("set-cookie")
+
+
 def test_first_key_route_seeds_through_the_locked_owner_key_check(auth, monkeypatch):
     """The first-key route keeps an owner key that appears between its open-mode
     check and its seeding, and reports that it created none."""

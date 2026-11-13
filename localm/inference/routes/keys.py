@@ -43,7 +43,7 @@ def register(app: FastAPI, ctx) -> None:
     async def create_key_ep(request: Request, response: Response, body: dict):
         from localm import auth
         from localm.auth import create_key
-        from localm.config import ConfigUnreadable
+        from localm.config import ConfigLockTimeout, ConfigUnreadable
         # Capture BEFORE minting: True only when this is the very first key on an
         # otherwise-keyless install (the open -> protected transition).
         was_open = not auth.any_key_configured()
@@ -136,7 +136,9 @@ def register(app: FastAPI, ctx) -> None:
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
             try:
                 owner, owner_created = auth.ensure_owner_key()
-            except ConfigUnreadable as e:
+            except (ConfigUnreadable, ConfigLockTimeout, OSError) as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("first key: the owner key was not seeded: %s", e)
                 created = {**created, "owner_key_created": False, "warnings": [
                     *created.get("warnings", []),
                     f"No owner session was set up for this browser: {e}."]}

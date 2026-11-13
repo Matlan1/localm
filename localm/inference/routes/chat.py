@@ -705,10 +705,13 @@ def register(app: FastAPI, ctx) -> None:
         # configured ``embedding_model``. Both checks are needed: setup-embeddings
         # registers under a prefixed alias while the ``embedding_model`` config value
         # stays the raw known-key string, which is what _make_self_embed sends.
+        from localm.config import ConfigReadSlow
         try:
             from localm.config import load_config, load_registry
             _reg = load_registry()
             _emb_cfg_name = str(load_config().get("embedding_model") or "").strip()
+        except ConfigReadSlow:
+            raise
         except Exception:
             _reg = None
             _emb_cfg_name = ""

@@ -156,6 +156,26 @@ class TestClearRouteDoesNotClaimSuccess:
         assert r.json()["still_protected"] == "require_auth"
         assert c.get("/v1/config").status_code == 401, "the server really refuses everyone"
 
+    def test_a_slow_settings_read_after_the_clear_still_reports_it_done(
+            self, runner, monkeypatch):
+        from localm.config import ConfigReadSlow
+        runner.invoke(main, ["key", "generate"])
+        key = auth.get_api_key()
+        real = auth.require_auth_enabled
+
+        def slow_once_cleared():
+            if not auth.key_file().exists():
+                raise ConfigReadSlow("config.json", 2.5)
+            return real()
+
+        monkeypatch.setattr(auth, "require_auth_enabled", slow_once_cleared)
+        c = self._client()
+        r = c.post("/api/auth/key/clear", headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"cleared": True, "warnings": [],
+                            "still_protected": "require_auth"}
+        assert not auth.key_file().exists()
+
     def test_failed_clear_reports_not_cleared_with_reasons(self, runner, monkeypatch):
         runner.invoke(main, ["key", "generate"])
         key = auth.get_api_key()

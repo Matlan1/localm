@@ -287,6 +287,16 @@ def test_past_the_bound_a_fresh_read_slower_than_its_wait_is_refused(monkeypatch
     assert len(refused) == 1, refused
 
 
+def test_the_idle_unload_check_survives_a_slow_settings_read(monkeypatch):
+    from localm.inference import http_server as hs
+
+    def slow():
+        raise config.ConfigReadSlow("config.json", 2.5)
+
+    monkeypatch.setattr(config, "load_config", slow)
+    assert hs._idle_unload_ttl() == 0
+
+
 def test_the_fresh_read_wait_is_at_least_the_kept_read_wait():
     assert config.LOOP_READ_WAIT_S <= config.LOOP_FRESH_READ_WAIT_S
 
