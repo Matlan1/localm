@@ -651,10 +651,16 @@ class TestEngineCacheMultiResidency:
             return real_fits(self, name, required)
 
         monkeypatch.setattr(srv.EngineCache, "_fits_alongside", counting_fits)
-        threading.Timer(0.1, lambda: setattr(a, "active_requests", 0)).start()
         logged = []
+
+        def log(message):
+            logged.append(message)
+            # 'a' finishes its request only once the load is waiting for it.
+            if "waiting for ['a']" in message:
+                threading.Timer(0.05, lambda: setattr(a, "active_requests", 0)).start()
+
         with _too_tight(), _sized(), _cfg(), _no_vram_wait(), \
-             patch.object(srv, "_log", logged.append):
+             patch.object(srv, "_log", log):
             cache.get("b")
         a.unload.assert_called_once()
         assert cache.resident == ["b"]
