@@ -317,6 +317,7 @@ def generate_video(
     swap: bool = True,
     cancel_check: Optional[callable] = None,
     delete_outputs: bool = False,
+    containment_required: bool = False,
     placement: Optional[dict] = None,
 ) -> tuple[bool, str]:
     """
@@ -379,6 +380,9 @@ def generate_video(
         Remove ComfyUI's copies: its history entry and its output file after a
         fetch, and the uploaded *input_image* on every way out once it is uploaded
         (see ``UploadedInputCopy``). A copy that stays is named in the message.
+    containment_required
+        With *delete_outputs*, a ComfyUI copy or history entry that could not
+        be removed fails the generation: ``(False, "Output withheld: ...")``.
 
     Returns
     -------
@@ -476,18 +480,16 @@ def generate_video(
         if kind == SUBMIT_NO_ID:
             return False, (
                 "ComfyUI accepted the request but returned no prompt_id.\n"
-                "Check the ComfyUI console for workflow validation errors - "
-                "missing Wan 2.2 model files are the usual cause (see "
-                "docs/video.md for the download list), and the Wan nodes "
-                "need ComfyUI v0.3.46+."
+                "Check the ComfyUI console for workflow validation errors: a node "
+                "this ComfyUI lacks (the Wan nodes need ComfyUI v0.3.46+) or a value "
+                "it refuses."
             )
         elif kind == SUBMIT_HTTP_ERROR:
             return False, (
                 f"ComfyUI rejected the Wan 2.2 workflow (HTTP {value.code}):\n"
                 f"{comfy_http_error_detail(value)}\n"
-                "Missing Wan 2.2 model files are the usual cause (see "
-                "docs/video.md for the download list); the Wan nodes need "
-                "ComfyUI v0.3.46+."
+                "This ComfyUI may lack a node the workflow uses (the Wan nodes need "
+                "ComfyUI v0.3.46+)."
             )
         elif kind == SUBMIT_URL_ERROR:
             return False, f"Could not connect to ComfyUI at {api_url}: {value}"
@@ -572,6 +574,8 @@ def generate_video(
             output_sha256=output_sha256,
             delete_outputs=delete_outputs,
         )
+        if containment_required and contain_warning:
+            return False, f"Output withheld: {contain_warning}"
 
         # Sidecar JSON - everything needed to reproduce or tweak the clip.
         # Skipped entirely in privacy mode (write_sidecar=False): with the container

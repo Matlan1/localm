@@ -43,7 +43,7 @@ def main(backend: str, force: bool, status: bool) -> None:
         rt = runtime.provision(backend, force=force,
                                on_progress=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except runtime.ProvisionError as e:
-        console.print(f"[red]Could not install the native image runtime: {escape(str(e))}[/red]")
+        console.print(f"[red]Could not install the stable-diffusion.cpp runtime: {escape(str(e))}[/red]")
         sys.exit(1)
-    console.print(f"[green]Native image runtime installed ({rt.backend}) at "
+    console.print(f"[green]The {runtime.RUNTIME_LABEL} is installed ({rt.backend}) at "
                   f"{escape(str(rt.path))}[/green]")

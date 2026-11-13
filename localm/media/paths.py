@@ -139,6 +139,33 @@ def _expand_data_dir_label(raw: str, home: Path) -> str:
     return raw
 
 
+def _is_bare_name(raw: str) -> bool:
+    """True when *raw* is a file name with no folder, drive or device part."""
+    return (bool(raw) and raw not in (".", "..") and not any(c in raw for c in "/\\:")
+            and Path(raw).name == raw)
+
+
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, False for a path the system refuses to look at (a
+    name too long, for example) instead of raising."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _bare_name_target(raw: str, home: Path) -> str:
+    """The path of the file named *raw* (a bare file name) in the uploads folder
+    or a generated-media gallery, or *raw* unchanged when no root holds it.
+    Raises InputImageRefused when more than one root holds that name."""
+    hits = [root / raw for root in _home_input_roots(home) if _is_file(root / raw)]
+    if len(hits) > 1:
+        raise InputImageRefused(
+            f"'{raw}' is in more than one of the uploads folder and the generated-media "
+            "galleries; give the full path of the one you mean.")
+    return str(hits[0]) if hits else raw
+
+
 def check_input_image(raw: str) -> Path:
     """Resolve and confine an ``input_image`` to an allowed root, or raise.
 
@@ -147,8 +174,10 @@ def check_input_image(raw: str) -> Path:
     InputImageUnavailable when the data dir cannot be resolved at all. A path
     starting with ``pathscrub.DATA_DIR_LABEL`` (the scrubbed gallery form a
     caller other than the local operator is given) is read relative to the data
-    dir. Symlinks are resolved first, so a link inside an allowed root that targets outside it
-    is still rejected.
+    dir. A bare file name (no folder) names the file of that name in the uploads
+    folder or one of the generated-media galleries; a name more than one of them
+    holds is refused. Symlinks are resolved first, so a link inside an allowed
+    root that targets outside it is still rejected.
 
     Messages name the allowed LOCATIONS but never an absolute path: the data dir
     contains the OS username, and every caller of this is reachable by a
@@ -164,6 +193,8 @@ def check_input_image(raw: str) -> Path:
             "Cannot resolve the localm data directory, so no input image can be "
             "authorised. See the server log for the cause.")
     target = _expand_data_dir_label(raw, home)
+    if _is_bare_name(target):
+        target = _bare_name_target(target, home)
     # BEFORE any syscall on the caller's string: a UNC path would be refused
     # below anyway (it cannot be under a local data dir), but only AFTER
     # .resolve() had already dialled SMB and stalled the event loop for minutes.
@@ -183,7 +214,7 @@ def check_input_image(raw: str) -> Path:
             "uploads folder) or one of the generated-media galleries. Other "
             "locations, including the localm data directory itself and the "
             "localm install directory, are not readable here.")
-    if not resolved.is_file():
+    if not _is_file(resolved):
         raise InputImageRefused(f"Input image not found: {raw}")
     return resolved
 

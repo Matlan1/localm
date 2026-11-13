@@ -324,6 +324,50 @@ def test_a_release_without_the_extra_archive_is_incomplete(bump):
         bump.build_tables(_release_view(answers), cur["assets"], cur["extra"])
 
 
+def _renamed_ubuntu(answers: dict, ubuntu: str) -> dict:
+    for a in answers["release"]["assets"]:
+        a["name"] = a["name"].replace("-Linux-Ubuntu-24.04-", f"-Linux-Ubuntu-{ubuntu}-")
+    return answers
+
+
+def test_a_linux_archive_built_on_a_newer_ubuntu_than_the_docker_image_refuses(bump):
+    ceiling = bump.linux_build_ceiling()
+    newer = f"{int(ceiling.split('.')[0]) + 2}.04"
+    answers = _renamed_ubuntu(_release(), newer)
+    cur = bump.read_pins(_pins_text())
+    with pytest.raises(bump.UnsupportedLinuxBuild,
+                       match=rf"newer Ubuntu than {ceiling}.*Ubuntu-{newer}-x86_64\.zip"):
+        bump.build_tables(_release_view(answers), cur["assets"], cur["extra"])
+
+
+def test_a_linux_archive_built_on_an_older_ubuntu_than_the_docker_image_is_accepted(bump):
+    answers = _renamed_ubuntu(_release(), "22.04")
+    cur = bump.read_pins(_pins_text())
+    assets, _extra = bump.build_tables(_release_view(answers), cur["assets"], cur["extra"])
+    assert "Ubuntu-22.04" in assets[("linux", "cpu")][0]
+
+
+def test_the_linux_build_ceiling_is_the_docker_images_ubuntu_release(bump):
+    text = bump.DOCKERFILE.read_text(encoding="utf-8")
+    ceiling = bump.linux_build_ceiling()
+    assert f"ARG UBUNTU_IMAGE=ubuntu:{ceiling}" in text
+    assert all(p.isdigit() for p in ceiling.split("."))
+
+
+@pytest.mark.parametrize("content", ["FROM scratch\n",
+                                     "ARG UBUNTU_IMAGE=ubuntu:24.04\nARG UBUNTU_IMAGE=ubuntu:26.04\n"])
+def test_a_dockerfile_without_exactly_one_ubuntu_image_refuses(bump, tmp_path, content):
+    path = tmp_path / "Dockerfile"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(bump.Refused, match="exactly one"):
+        bump.check_linux_build_os(["sd-master-x-bin-Linux-Ubuntu-24.04-x86_64.zip"], path)
+
+
+def test_a_missing_dockerfile_refuses(bump, tmp_path):
+    with pytest.raises(bump.Refused, match="could not read"):
+        bump.linux_build_ceiling(tmp_path / "absent")
+
+
 def test_an_ambiguous_release_refuses_to_guess(bump):
     answers = _release()
     answers["release"]["assets"].append(

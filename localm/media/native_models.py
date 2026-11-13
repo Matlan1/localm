@@ -351,12 +351,17 @@ def music_options(reg: Optional[dict] = None) -> dict:
 
 ACESTEP_V1_REASON = ("ACE-Step v1: the native music backend runs ACE-Step 1.5 GGUF parts "
                      "only, so this checkpoint works in ComfyUI only")
+ACESTEP_15_SAFETENSORS_REASON = (
+    "ACE-Step 1.5 as .safetensors: the native music backend runs the ACE-Step 1.5 GGUF "
+    "parts (localm setup-music, or the download offer on the Music page, fetches them); "
+    "ComfyUI may run this file with an ACE-Step 1.5 workflow")
 
 def unsupported_music(reg: Optional[dict] = None) -> list:
     """``[{"name", "file", "reason"}]``: registered music files the native
-    music backend cannot run (today: ACE-Step v1, the all-in-one checkpoint or
-    its transformer alone, as ``families.music_entry`` classifies them), so
-    the picker can say why they are not offered. LoRAs and GGUF files are not
+    music backend cannot run, as ``families.music_entry`` classifies them:
+    ACE-Step v1 (the all-in-one checkpoint or its transformer alone) and an
+    ACE-Step 1.5 transformer as ``.safetensors``, so the picker can say why
+    they are not offered and what runs instead. LoRAs and GGUF files are not
     read."""
     from pathlib import Path
 
@@ -372,9 +377,11 @@ def unsupported_music(reg: Optional[dict] = None) -> list:
         if Path(raw).suffix.lower() == ".gguf":
             continue
         info = families.music_entry(entry)
-        if info is not None and info.detail.get("acestep") == "v1":
+        version = info.detail.get("acestep") if info is not None else None
+        reason = {"v1": ACESTEP_V1_REASON, "1.5": ACESTEP_15_SAFETENSORS_REASON}.get(str(version))
+        if reason:
             out.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
-                        "reason": ACESTEP_V1_REASON})
+                        "reason": reason})
     return out
 
 

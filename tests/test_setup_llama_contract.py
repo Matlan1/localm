@@ -43,6 +43,9 @@ from localm.bugreport import LocalmError
 from localm.http_ssl import RedirectDowngradeRefused
 
 PIN = sl._PINNED_TAG
+CUDA13 = "%d.%d" % sl._MIN_DRIVER_CUDA["cuda-13"]
+W13 = pins._CUDA_TOOLKIT["win"]["cuda-13"]
+U13 = pins._CUDA_TOOLKIT["ubuntu"]["cuda-13"]
 ROCM = sl._ROCM_TAG
 API = "https://api.github.com/repos"
 UPSTREAM = "ggml-org/llama.cpp"
@@ -849,7 +852,7 @@ def test_amd_rocm_cpu_overlay_that_cannot_be_rolled_back_is_not_reported_as_load
 
 @pytest.mark.parametrize("cap, cuda, line, ver, need, blackwell", [
     ("8.9", "12.5", "cuda-12", "12.4", "12.4", ""),
-    ("12.0", "13.4", "cuda-13", "13.4", "13.4", " (Blackwell)"),
+    ("12.0", CUDA13, "cuda-13", W13, CUDA13, " (Blackwell)"),
 ])
 def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, line, ver, need,
                                                              blackwell):
@@ -857,7 +860,7 @@ def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, l
     world.nvidia = ("555.85", cuda, "NVIDIA GeForce RTX 4090", cap)
     build = f"llama-{PIN}-bin-win-{line}-x64.zip".replace(line, f"cuda-{ver}")
     cudart = f"cudart-llama-bin-win-cuda-{ver}-x64.zip"
-    other = "13.4" if ver == "12.4" else "12.4"
+    other = W13 if ver == "12.4" else "12.4"
     urls = world.release(UPSTREAM, PIN, [
         (cudart, _zip(WIN_CUDART, 6), "ok"),
         (f"cudart-llama-bin-win-cuda-{other}-x64.zip", _zip({"z.dll": b"z"}, 7), "ok"),
@@ -954,12 +957,12 @@ def _linux_arm64_cuda_release(world):
     world.platform("linux")
     world.arch = "arm64"
     world.vendors = ["nvidia"]
-    build = f"llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
-    cudart = f"cudart-llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
+    build = f"llama-{PIN}-bin-ubuntu-cuda-{U13}-arm64.tar.gz"
+    cudart = f"cudart-llama-{PIN}-bin-ubuntu-cuda-{U13}-arm64.tar.gz"
     urls = world.release(UPSTREAM, PIN, [
         (cudart, _targz(LINUX_ARM64_CUDART, 6), "ok"),
         (build, _targz(LINUX_ARM64_CUDA, 5), "ok"),
-        (f"llama-{PIN}-bin-ubuntu-cuda-13.4-x64.tar.gz", _targz({"x/libllama.so": b"x64"}, 7), "ok"),
+        (f"llama-{PIN}-bin-ubuntu-cuda-{U13}-x64.tar.gz", _targz({"x/libllama.so": b"x64"}, 7), "ok"),
         (f"llama-{PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
          _targz({"v/libllama.so": b"libllama@vulkan"}, 8), "ok"),
     ])
@@ -968,7 +971,7 @@ def _linux_arm64_cuda_release(world):
 
 def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
     build, cudart, urls = _linux_arm64_cuda_release(world)
-    world.nvidia = ("580.95", "13.4", "NVIDIA GB10", "12.1")
+    world.nvidia = ("580.95", CUDA13, "NVIDIA GB10", "12.1")
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
     _in_order(r.text, "Compute capability 12.1 (Blackwell) -> cuda-13 line",
@@ -987,7 +990,7 @@ def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
 
 def test_linux_arm64_cuda_12_line_gpu_gets_vulkan_without_downloading_cuda(world):
     build, cudart, urls = _linux_arm64_cuda_release(world)
-    world.nvidia = ("580.95", "13.4", "NVIDIA GH200", "9.0")
+    world.nvidia = ("580.95", CUDA13, "NVIDIA GH200", "9.0")
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
     _in_order(r.text, "Compute capability 9.0 -> cuda-12 line",
@@ -1004,7 +1007,7 @@ def test_linux_arm64_cuda_12_line_gpu_gets_vulkan_without_downloading_cuda(world
 
 def test_linux_arm64_cuda_without_its_runtime_bundle_installs_no_cuda(world):
     build, cudart, urls = _linux_arm64_cuda_release(world)
-    world.nvidia = ("580.95", "13.4", "NVIDIA GB10", "12.1")
+    world.nvidia = ("580.95", CUDA13, "NVIDIA GB10", "12.1")
     world.release(UPSTREAM, PIN, [
         (build, _targz(LINUX_ARM64_CUDA, 5), "ok"),
         (f"llama-{PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
@@ -1513,7 +1516,7 @@ def test_tag_default_clears_the_pin_and_reinstalls_the_confirmed_build(world):
     r = world.invoke("--backend", "vulkan", "--tag", "default")
     assert r.exit_code == 0, r.output
     assert (f"Back to localm's confirmed build ({PIN}) - the one this release was tested with. "
-            "Re-run setup-llama --force to install it now.") in r.text
+            "Installing it now.") in r.text
     assert world.pin() is None
     assert world.marker() == f"vulkan {PIN}\n"
 

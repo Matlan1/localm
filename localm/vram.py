@@ -625,6 +625,15 @@ def wait_for_vram_release(
 # via a self-authenticated round trip to /v1/models/unload and /v1/models/load.
 # Only the progress-message wording differs between them.
 
+def _job_headers(job: Any) -> Optional[dict]:
+    """The headers *job* sends on a request to the server's own API
+    (``jobmanager.Job.self_request_headers``), or None for an object that is not
+    a ``Job``."""
+    method = getattr(type(job), "self_request_headers", None)
+    headers = method(job) if callable(method) else None
+    return headers if isinstance(headers, dict) else None
+
+
 def unload_chat_for_media(job: Any, self_url: str, media_label: str,
                           instance_token: Optional[str] = None) -> bool:
     """Unload the chat model BEFORE a media (image/music/video) model loads, so
@@ -651,7 +660,8 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
     try:
         from localm.selfclient import self_request
         resp = self_request("POST", "/models/unload?media=false", timeout=300,
-                            base_url=self_url, instance_token=instance_token)
+                            base_url=self_url, instance_token=instance_token,
+                            headers=_job_headers(job))
         if not resp.ok:
             job.push({"type": "line", "text":
                       f"Could not unload the chat model (HTTP {resp.status_code}) - "
@@ -1016,6 +1026,9 @@ _handover_jobs = 0
 _handover_reloading = False
 _handover_deferred: Optional[tuple] = None
 _handover_deferred_backends: list = []
+# The self-request headers of every job that left its chat reload to a later
+# job; the reload that runs sends them along with its own job's.
+_handover_deferred_headers: dict = {}
 
 
 def _handover_enter(job: Any) -> bool:
@@ -1079,6 +1092,7 @@ def _drop_deferred_reload_if_last() -> None:
         if _handover_jobs <= 1:
             _handover_deferred = None
             _handover_deferred_backends.clear()
+            _handover_deferred_headers.clear()
 
 
 @contextlib.contextmanager
@@ -1144,6 +1158,7 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     with _handover_cv:
         if _handover_jobs > 1:
             _handover_deferred = (self_url, s, backend, media_label, instance_token)
+            _handover_deferred_headers.update(_job_headers(job) or {})
             if all(b is not backend for b, _s, _label in _handover_deferred_backends):
                 _handover_deferred_backends.append((backend, s, media_label))
             job.push({"type": "line", "text":
@@ -1153,6 +1168,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         _handover_reloading = True
         others = [d for d in _handover_deferred_backends if d[0] is not backend]
         _handover_deferred_backends.clear()
+        reload_headers = {**_handover_deferred_headers, **(_job_headers(job) or {})}
+        _handover_deferred_headers.clear()
     try:
         for other_backend, other_s, other_label in others:
             if not other_backend.free_vram(other_s):
@@ -1169,7 +1186,7 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         try:
             from localm.selfclient import self_request
             resp = self_request("POST", "/models/load", timeout=300, base_url=self_url,
-                                instance_token=instance_token)
+                                instance_token=instance_token, headers=reload_headers)
             if not resp.ok:
                 # A non-2xx (503 "No model specified", 401, or a 500 when the engine
                 # load fails because the media backend still holds VRAM - the exact

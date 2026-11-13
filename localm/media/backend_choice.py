@@ -20,12 +20,13 @@ AUTO_PROBE_TIMEOUT = 1.5
 
 def comfy_is_set_up(full_config: dict, comfy_blk: dict, api_url: str) -> bool:
     """Whether this machine has a ComfyUI a media plugin is meant to use: the
-    managed instance installed and selected, ``comfy_target`` set to the user's
-    own ComfyUI, ``FLUX_API_URL`` set, any ComfyUI address/launcher/folder
-    configured (globally or in *comfy_blk*), or a ComfyUI that answered at
-    *api_url* recently. Reads config and the readiness cache only; no network
+    managed instance installed and selected, ``FLUX_API_URL`` set, any ComfyUI
+    address/launcher/folder configured (globally or in *comfy_blk*), or a
+    ComfyUI that answered at *api_url* recently. ``comfy_target`` set to the
+    user's own ComfyUI counts only together with one of those, since it names
+    no ComfyUI by itself. Reads config and the readiness cache only; no network
     call."""
-    if managed_comfy_active(full_config) or full_config.get("comfy_target") == "user":
+    if managed_comfy_active(full_config):
         return True
     if os.environ.get("FLUX_API_URL"):
         return True

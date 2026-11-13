@@ -1333,3 +1333,96 @@ def test_a_directory_with_the_uploaded_name_is_reported(stub):
         stub.base_url, name, comfy_output_dir=str(stub.output_dir))
     assert (stub.input_dir / name).is_dir()
     assert "may remain" in warn
+
+
+# --------------------------------------------------------------------------- #
+#  A strict generation (privacy, or a file handed out as it is) fails when    #
+#  ComfyUI's copy stays, and leaves no local file behind                       #
+# --------------------------------------------------------------------------- #
+
+_STRICT_KINDS = {
+    "image": (comfy, "_WORKFLOW_EXAMPLE_PATH", "output", ".png", "img.png", {}),
+    "music": (music_comfy, "_WORKFLOW_PATH", "audio", ".flac", "track.flac",
+              {"duration_seconds": 5.0}),
+    "video": (video_comfy, "_WORKFLOW_PATH", "videos", ".mp4", "clip.mp4",
+              {"seconds": 1.0}),
+}
+
+
+def _strict_setup(plugin, stub, tmp_path, monkeypatch):
+    mod, wf, kind, ext, name, extra = _STRICT_KINDS[plugin]
+    monkeypatch.setattr(mod, "workflow_path", lambda: getattr(mod, wf))
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    if plugin != "image":
+        stub.output_kind = kind
+    stub.file_ext = ext
+    return tmp_path / "saved" / name, extra
+
+
+@pytest.mark.parametrize("plugin", sorted(_STRICT_KINDS))
+def test_privacy_generation_with_a_comfy_copy_left_is_withheld(
+        plugin, stub, tmp_path, monkeypatch):
+    out, extra = _strict_setup(plugin, stub, tmp_path, monkeypatch)
+
+    ok, msg = _facade_generate(plugin, stub, "a fox", out, privacy=True,
+                               write_sidecar=False, **extra)
+
+    assert not ok, msg
+    assert msg.startswith("Output withheld: ")
+    assert list(stub.output_dir.glob("ComfyUI_*"))          # the copy that stayed
+    assert not out.exists()                                 # nothing kept locally
+
+
+@pytest.mark.parametrize("plugin", sorted(_STRICT_KINDS))
+def test_outside_privacy_a_comfy_copy_left_is_a_warning(
+        plugin, stub, tmp_path, monkeypatch):
+    out, extra = _strict_setup(plugin, stub, tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCALM_MODE", "log")
+
+    from importlib import import_module
+    backend = import_module(f"localm.plugins.builtin.{plugin}.backend")
+    s = {"backend": "comfy", "api_url": stub.base_url, "launch_cmd": "",
+         "workdir": "", "output_dir": "", "delete_outputs": True}
+    ok, msg = backend.generate(s, "a fox", out, self_url=None, write_sidecar=False,
+                               **extra)
+
+    assert ok, msg
+    assert out.is_file()
+    assert "ComfyUI" in msg and "Output withheld" not in msg
+
+
+def test_handed_out_file_whose_strip_fails_is_withheld(stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(music_comfy, "workflow_path",
+                        lambda: music_comfy._WORKFLOW_PATH)
+    stub.output_kind = "audio"
+    stub.file_ext = ".flac"
+    stub.media_bytes = b"FAKEMEDIADATA"
+    out = tmp_path / "saved" / "track.flac"
+
+    ok, msg = _facade_generate("music", stub, "lofi, chill", out,
+                               withhold_on_trace=True, duration_seconds=5.0,
+                               write_sidecar=False)
+
+    assert not ok
+    assert msg.startswith("Output withheld: WARNING: generated file is not FLAC")
+    assert not out.exists()
+
+
+def test_privacy_generation_that_fails_after_the_fetch_leaves_no_file(
+        stub, tmp_path, monkeypatch):
+    monkeypatch.setattr(comfy, "workflow_path", lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    out = tmp_path / "saved" / "img.png"
+    fetched = []
+
+    def contain(*a, **k):
+        fetched.append(out.is_file())
+        raise RuntimeError("containment broke")
+    monkeypatch.setattr(comfy, "contain_comfy_artifacts", contain)
+
+    ok, msg = _facade_generate("image", stub, "a dog", out, privacy=True,
+                               write_sidecar=False)
+
+    assert fetched == [True]                                # the file was written
+    assert not ok
+    assert "containment broke" in msg
+    assert not out.exists()

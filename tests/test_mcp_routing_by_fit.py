@@ -14,6 +14,7 @@ from localm.inference import capability_routing as cr
 from localm.inference import http_server as hs
 from localm.inference import routing_fit
 from localm.plugins.mcpserver.server import EngineCache
+from tests._routing_fit import pin_vram_reading
 from tests.test_mcp_routing import _call, _cache, reg  # noqa: F401
 
 _BIG = 1 << 50
@@ -25,8 +26,7 @@ def _auto(monkeypatch):
 
 
 def _measure(monkeypatch, cls):
-    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
-        free=1, total=_BIG, usable=True))
+    pin_vram_reading(monkeypatch, routing_fit.VramReading(free=1, total=_BIG, usable=True))
     from localm.inference.backends.llamacpp import _sizing
     monkeypatch.setattr(_sizing, "ram_reading", lambda: (_BIG, _BIG))
     monkeypatch.setattr(routing_fit, "classify",

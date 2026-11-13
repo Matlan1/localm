@@ -408,6 +408,7 @@ export function buildSettingControl(field) {
               statusTag.className = "secret-status-tag is-clearing";
             }
             secretClearBtn.textContent = t("settings.field.secretUndoButton");
+            secretClearBtn.title = t("settings.field.secretUndoTitle");
           } else {
             input.placeholder = configuredPlaceholder;
             if (statusTag) {
@@ -415,6 +416,7 @@ export function buildSettingControl(field) {
               statusTag.className = "secret-status-tag is-set";
             }
             secretClearBtn.textContent = t("settings.field.secretClearButton");
+            secretClearBtn.title = t("settings.field.secretClearTitle");
           }
           markSettingDirty(input);
         };
@@ -427,7 +429,10 @@ export function buildSettingControl(field) {
             statusTag.textContent = t("settings.field.secretNewValueTag");
             statusTag.className = "secret-status-tag is-set";
           }
-          if (secretClearBtn) secretClearBtn.textContent = t("settings.field.secretClearButton");
+          if (secretClearBtn) {
+            secretClearBtn.textContent = t("settings.field.secretClearButton");
+            secretClearBtn.title = t("settings.field.secretClearTitle");
+          }
         } else if (isConfigured && !isEnv) {
           if (!willClear) {
             if (statusTag) {
@@ -475,6 +480,7 @@ export function buildSettingControl(field) {
       // browse or set server paths; the server still enforces on write.
       if (caps.fsAccess !== "host") return null;
       const list = el("div", "pathlist");
+      const pickTitle = fieldCatalogText(field, "pickTitle", t("settings.field.pathlistPickTitle"));
       // The list container is the dirty anchor: a removed row's <input> is
       // disconnected (so settingsDirty ignores it), but `list` stays in the DOM,
       // so marking IT keeps the unsaved-changes signal honest across add/remove.
@@ -491,7 +497,7 @@ export function buildSettingControl(field) {
         const browse = el("button", "btn-secondary dir-picker-btn", t("settings.field.browse"));
         browse.type = "button";
         browse.onclick = async () => {
-          const picked = await pickDirectory(t("settings.field.pathlistPickTitle"), inp.value.trim());
+          const picked = await pickDirectory(pickTitle, inp.value.trim());
           if (picked) { inp.value = picked; dirty(); }
         };
         const rm = el("button", "btn-secondary pathlist-rm");
@@ -512,7 +518,7 @@ export function buildSettingControl(field) {
       add.onclick = async () => {
         // Open the picker straight away (the common case); if the user cancels,
         // still add an empty row they can type into.
-        const picked = await pickDirectory(t("settings.field.pathlistPickTitle"), "");
+        const picked = await pickDirectory(pickTitle, "");
         addRow(picked || "");
         dirty();
       };
@@ -584,7 +590,11 @@ export function buildSettingControl(field) {
         };
       } else {
         input.value = stored;
-        read = () => (input.value.trim() === "" ? null : input.value.trim());
+        // A cleared box returns the field to its shipped default (null when
+        // that default is blank).
+        const cleared = typeof field.shipped_default === "string" && field.shipped_default
+          ? field.shipped_default : null;
+        read = () => (input.value.trim() === "" ? cleared : input.value.trim());
       }
       break;
     }
@@ -1589,13 +1599,25 @@ export function savedToastKey(updates) {
   return "settings.toast.saved";
 }
 
-/** Save the controls of section *secId* (only those inside *within*, when
- *  given) whose value differs from the value they show as saved. Returns true
- *  when the server holds the shown values afterwards (saved now, or nothing
- *  changed), false when nothing was saved. */
-export async function saveSettingsSection(secId, within) {
+/** A save refusal *detail* with a leading "<setting key>: " replaced by that
+ *  setting's label as the page shows it. Any other detail is returned as is. */
+export function labelledRefusal(detail, controls) {
+  if (typeof detail !== "string") return detail;
+  const m = /^([a-z][a-z0-9_]*): /.exec(detail);
+  if (!m) return detail;
+  const ctrl = (controls || []).find((c) => c.field && c.field.key === m[1]);
+  if (!ctrl) return detail;
+  const label = fieldCatalogText(ctrl.field, "label", ctrl.field.label || ctrl.field.key);
+  return `${label}: ${detail.slice(m[0].length)}`;
+}
+
+/** The edits in section *secId* (only those inside *within*, when given):
+ *  ``{updates, saved}``, where *updates* maps each setting key whose control
+ *  differs from the value it shows as saved to its new value and *saved* lists
+ *  the ``[control, value]`` pairs. Null when the section is not on the page. */
+export function settingsSectionEdits(secId, within) {
   const panel = $("settings-sec-" + secId);
-  if (!panel) return;
+  if (!panel) return null;
   const box = within || panel;
   const updates = {};
   const saved = [];
@@ -1607,6 +1629,17 @@ export async function saveSettingsSection(secId, within) {
     updates[ctrl.field.key] = value;
     saved.push([ctrl, value]);
   }
+  return { updates, saved };
+}
+
+/** Save the controls of section *secId* (only those inside *within*, when
+ *  given) whose value differs from the value they show as saved. Returns true
+ *  when the server holds the shown values afterwards (saved now, or nothing
+ *  changed), false when nothing was saved. */
+export async function saveSettingsSection(secId, within) {
+  const edits = settingsSectionEdits(secId, within);
+  if (!edits) return;
+  const { updates, saved } = edits;
   if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return true; }
   // A request that cannot reach the server says so and saves nothing.
   const patch = async (body) => {
@@ -1644,9 +1677,10 @@ export async function saveSettingsSection(secId, within) {
     refreshSettingsPage();   // re-render to reflect server-normalized values
     // Re-reads the session mode and the other chat values a save can change.
     refreshCtxLimit();
+    refreshPerfEstimate();
     return true;
   }
-  toast(data.detail || t("settings.toast.saveFailed"), true);
+  toast(labelledRefusal(data.detail, _settingsControls) || t("settings.toast.saveFailed"), true);
   return false;
 }
 
@@ -1707,7 +1741,7 @@ export function buildBrowserSetupBox() {
     }
     if (st.ready) {
       statusLine.textContent = st.engine === "system"
-        ? t("browser.setup.readySystem", { browser: (st.system_browsers || [])[0] || "" })
+        ? t("browser.setup.readySystem", { browser: (st.system_browsers || []).join(", ") })
         : t("browser.setup.readyBundled");
     } else if (st.problem === "bundled_missing") {
       statusLine.textContent = t("browser.setup.bundledMissing");
@@ -1924,7 +1958,7 @@ export async function refreshSettingsPage() {
       const sttStatus = el("div", "sub voice-setup-status", t("settings.voice.checking"));
       const sttActions = el("div", "actions");
       sttActions.style.marginTop = "0.5rem";
-      const sttBtn = el("button", "btn-secondary voice-download-model-btn", t("settings.voice.download"));
+      const sttBtn = el("button", "btn-secondary voice-download-model-btn", t("settings.voice.downloadNow"));
       sttBtn.type = "button";
       sttBtn.style.display = "none";
       sttActions.appendChild(sttBtn);
@@ -2002,7 +2036,12 @@ export async function refreshSettingsPage() {
       saveReload.dataset.sec = sec.id;
       saveReload.hidden = !modelCache.active;
       saveReload.onclick = () => whileBusy(saveReload, t("settings.saveReload.working"), async () => {
-        if (await saveSettingsSection(sec.id)) await reloadActiveModelAfterSave();
+        const edits = settingsSectionEdits(sec.id);
+        if (edits && !Object.keys(edits.updates).length) {
+          await reloadActiveModelAfterSave({ saved: false });
+        } else if (await saveSettingsSection(sec.id)) {
+          await reloadActiveModelAfterSave();
+        }
       });
       actions.appendChild(saveReload);
     }
@@ -2619,7 +2658,7 @@ export async function buildTtsSection(form) {
   panel.dataset.sec = "tts";
   panel.dataset.group = "plugins";
   panel.dataset.secLabel = t("settings.sectionHeading.tts");
-  panel.appendChild(settingsSectionHead(t("settings.sectionHeading.ttsPlugin"), "plugins"));
+  panel.appendChild(settingsSectionHead(t("settings.sectionHeading.tts"), "plugins"));
   panel.appendChild(el("div", "sub",
     t("settings.tts.intro")));
 
@@ -2803,9 +2842,8 @@ export async function buildTtsSection(form) {
         const cfg = cfgRes.ok ? await cfgRes.json() : {};
         const mode = cfg.net_mode || "ask";
         const allowOff = !!cfg.net_allow_model_downloads;
-        if (mode !== "allow" && !(mode === "off" && allowOff)) {
-          throw new Error(t("settings.tts.needsNetwork"));
-        }
+        if (mode === "off" && !allowOff) throw new Error(t("settings.tts.needsNetwork"));
+        if (mode !== "allow" && mode !== "off") throw new Error(t("settings.tts.cannotAsk"));
         const libUrl = new URL(cfg.library || "vendor/kokoro.min.js", window.location.origin + "/plugins/tts/");
         const mod = await import(libUrl.href);
         const dev = cfg.device && cfg.device !== "auto" ? cfg.device : "wasm";
@@ -2814,7 +2852,10 @@ export async function buildTtsSection(form) {
       }
       toast(t("settings.tts.modelReady"));
     } catch (err) {
-      toast(t("settings.tts.setupFailed", { message: err.message || err }), true);
+      // A provider error flagged `shown` has already been toasted with its reason.
+      if (!(err && err.shown)) {
+        toast(t("settings.tts.setupFailed", { message: (err && err.message) || err }), true);
+      }
     } finally {
       setupBtn.disabled = false;
       await updateKokoroStatus();
@@ -2845,7 +2886,7 @@ export async function saveTtsSettings() {
     method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.detail || t("settings.toast.saveFailed"), true); return; }
+  if (!r.ok) { toast(labelledRefusal(data.detail, _ttsControls) || t("settings.toast.saveFailed"), true); return; }
   if (!Array.isArray(data.fields)) {
     // A 200 whose body we cannot read means the save probably landed but we
     // cannot say what is now in effect - do not claim a clean "Saved".
@@ -2977,7 +3018,7 @@ export async function savePluginSettings(name) {
     method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.detail || t("settings.toast.saveFailed"), true); return; }
+  if (!r.ok) { toast(labelledRefusal(data.detail, ctrls) || t("settings.toast.saveFailed"), true); return; }
   toast(t("settings.toast.saved"));
   refreshSettingsPage();
 }
@@ -3686,7 +3727,7 @@ export async function saveMediaPlugin(name) {
       refreshSettingsPage();   // fallback if the response shape is unexpected
     }
   } else {
-    toast(data.detail || t("settings.toast.saveFailed"), true);
+    toast(labelledRefusal(data.detail, controls) || t("settings.toast.saveFailed"), true);
   }
 }
 

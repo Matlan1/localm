@@ -72,11 +72,12 @@ class TestBackendNote:
         be._note_routing(_headers(note=NOTE))
         assert seen == [NOTE, NOTE]
 
-    def test_a_routed_reply_carries_no_note(self):
+    def test_a_routed_reply_says_which_model_answered_and_keeps_no_note(self):
         be, seen = _backend(), []
         be.on_routing_note = seen.append
         be._note_routing(_headers(routed=True, resolved="big", note=NOTE))
-        assert be.routing_note is None and seen == []
+        assert be.routing_note is None
+        assert len(seen) == 1 and seen[0].startswith("This reply came from big")
 
     def test_a_pinned_reply_carries_no_note(self):
         be = _backend()

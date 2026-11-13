@@ -25,6 +25,13 @@ ri = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ri)
 
 
+@pytest.fixture(autouse=True)
+def _network_access_ask(monkeypatch):
+    """Network access reads as ask; test_report_issue_net_mode.py covers off,
+    allow and an unreadable setting."""
+    monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+
+
 # ----------------------------- read_proxy --------------------------------- #
 
 def test_read_proxy_extracts_url_and_token(tmp_path):

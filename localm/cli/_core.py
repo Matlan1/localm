@@ -271,6 +271,57 @@ def _stdout_is_a_pipe() -> bool:
         return False
 
 
+SUBCOMMAND_ARGS = "localm.subcommand_args"
+
+
+def _session_mode_param(cmd):
+    """The parameter of *cmd* that selects the session mode: an option whose
+    type is a ``click.Choice`` of exactly the ``audit.SessionMode`` values, or
+    None."""
+    from localm.audit import SessionMode
+    modes = {m.value for m in SessionMode}
+    for p in cmd.params:
+        if (isinstance(p, click.Option) and isinstance(p.type, click.Choice)
+                and {str(c).lower() for c in p.type.choices} == modes):
+            return p
+    return None
+
+
+def _export_subcommand_mode(ctx) -> None:
+    """When the subcommand in *ctx* takes a session-mode option
+    (:func:`_session_mode_param`) and was given a value, export it as
+    ``audit.MODE_ENV_VAR``, as that subcommand does itself, so the steps the
+    group runs before it follow the same session mode. The arguments are parsed
+    by the subcommand's own parser without callbacks. Arguments it cannot parse
+    export nothing (the subcommand then reports them); any other failure exports
+    nothing and is logged at debug level. Never raises."""
+    import os
+    try:
+        from localm.audit import MODE_ENV_VAR, SessionMode
+        args = ctx.meta.get(SUBCOMMAND_ARGS)
+        if not args:
+            return
+        name, cmd, rest = ctx.command.resolve_command(ctx, list(args))
+        if cmd is None:
+            return
+        param = _session_mode_param(cmd)
+        if param is None:
+            return
+        sub = cmd.make_context(name, list(rest), parent=ctx, resilient_parsing=True)
+        mode = sub.params.get(param.name)
+        if isinstance(mode, str) and mode.strip():
+            os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
+    except click.ClickException:
+        return
+    except Exception as e:   # noqa: BLE001 - see test_a_failing_mode_read_never_stops_the_command
+        try:
+            from localm.debuglog import logger
+            logger.debug("could not read the subcommand's --mode before the start-up "
+                         "steps (%s: %s); they follow the configured mode",
+                         type(e).__name__, e)
+        except Exception:   # noqa: BLE001
+            pass
+
 HELP_REQUESTED = "localm.help_requested"
 HELP_OPTION_NAMES = ["-h", "--help"]
 
@@ -295,6 +346,13 @@ class _GracefulGroup(click.Group):
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
+
+    def parse_args(self, ctx, args):
+        """Parse as ``click.Group`` does and keep the subcommand's name and
+        arguments in ``ctx.meta[SUBCOMMAND_ARGS]`` for the group callback."""
+        rest = super().parse_args(ctx, args)
+        ctx.meta[SUBCOMMAND_ARGS] = [*getattr(ctx, "_protected_args", ()), *ctx.args]
+        return rest
 
     def add_command(self, cmd, name=None) -> None:
         """Register *cmd* with ``-h`` and ``--help`` as its own help options,
@@ -356,18 +414,23 @@ class _GracefulGroup(click.Group):
         # report falls back to a one-line message.
         try:
             from localm import bugreport
+            from localm.audit import automatic_write_allowed, request_privacy
             interactive = bugreport.stdin_is_interactive()
-            if isinstance(e, bugreport.LocalmError):
-                bugreport.report_failure(
-                    summary=e.summary, reason=e.reason,
-                    error=e.__cause__ or e, context=e.context,
-                    interactive=interactive)
-            else:
-                bugreport.report_failure(
-                    summary="localm hit an unexpected error",
-                    reason=str(e), error=e,
-                    context={"command": getattr(ctx, "invoked_subcommand", None)},
-                    interactive=interactive)
+            command = getattr(ctx, "invoked_subcommand", None)
+            # A failed chat command reports under the chat surface's mode.
+            with request_privacy(command == "run"
+                                 and not automatic_write_allowed("chat")):
+                if isinstance(e, bugreport.LocalmError):
+                    bugreport.report_failure(
+                        summary=e.summary, reason=e.reason,
+                        error=e.__cause__ or e, context=e.context,
+                        interactive=interactive)
+                else:
+                    bugreport.report_failure(
+                        summary="localm hit an unexpected error",
+                        reason=str(e), error=e,
+                        context={"command": command},
+                        interactive=interactive)
         except Exception:
             # Broken-pipe is handled above, so stdout is live here for a real
             # failure.
@@ -549,6 +612,7 @@ def main() -> None:
     honor_env_debug()
     bugreport.install_global_handlers()
     ctx = click.get_current_context()
+    _export_subcommand_mode(ctx)
     if not ctx.meta.get(HELP_REQUESTED):
         _update_steps_at_start(ctx.invoked_subcommand)
 
@@ -616,7 +680,9 @@ def _finish_pending_runtime_update(command) -> None:
     older build the server restarts once to carry them out
     (:func:`_defer_update_steps_to_a_restart`). A failure is printed, the
     previous runtime stays in use, the command still runs, and the next start
-    tries again."""
+    tries again. When the re-provision an update left pending fails and the
+    previous runtime cannot be kept (``state`` ``failed``), the update is rolled
+    back (:func:`_roll_back_update_at_start`), unless a repair recorded it."""
     from localm import updater_runtime
     if command not in updater_runtime.RUNTIME_COMMANDS:
         return
@@ -628,7 +694,7 @@ def _finish_pending_runtime_update(command) -> None:
                           f"update ({escape(str(pending.get('backend')))} "
                           f"{escape(str(pending.get('target')))}) ...[/dim]")
         else:
-            found = updater_runtime.catch_up()
+            found = updater_runtime.catch_up(repair=True)
             if found is None:
                 return
             if found.get("kernel_packs"):
@@ -650,6 +716,11 @@ def _finish_pending_runtime_update(command) -> None:
         from rich.markup import escape
         style = "green" if status["state"] in ("updated", "current") else "yellow"
         console.print(f"[{style}]Native runtime: {escape(status['note'])}[/{style}]")
+        if status["state"] == "failed" and pending is not None and not pending.get("repair"):
+            from localm import updater_components
+            updater_components.clear_pending()
+            _roll_back_update_at_start("the native runtime of this update could not be "
+                                       "installed")
 
 
 
@@ -663,25 +734,32 @@ def _finish_pending_component_update(command) -> None:
     outcome. Skipped for every other command, and by the start-up hook in a
     process a restart re-executed (see :func:`_finish_pending_runtime_update`).
     A failure is printed, the previous versions stay in use, the command still
-    runs, and the next start tries again."""
+    runs, and the next start tries again; when the component update an update
+    left pending fails (``state`` ``failed``; ``waiting`` keeps it pending), the
+    update is rolled back
+    (:func:`_roll_back_update_at_start`), unless a repair recorded it."""
     from localm import updater_components
     if command not in updater_components.COMPONENT_COMMANDS:
         return
     from rich.markup import escape
+    pending = None
     try:
-        if updater_components.read_pending() is not None:
+        pending = updater_components.read_pending()
+        if pending is not None:
             console.print("[dim]Finishing the component update from the last localm "
                           "update ...[/dim]")
         else:
-            found = updater_components.catch_up()
+            found = updater_components.catch_up(repair=True)
             if found is None:
                 return
+            pending = updater_components.read_pending()
             console.print(f"[dim]This localm release ships other versions of installed "
                           f"components: {escape(updater_components.summary(found) or '')}"
                           " ...[/dim]")
         status = updater_components.finish_pending(
             say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
-        if status is None and updater_components.catch_up() is not None:
+        if status is None and updater_components.catch_up(repair=True) is not None:
+            pending = updater_components.read_pending()
             status = updater_components.finish_pending(
                 say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except Exception as e:
@@ -691,6 +769,30 @@ def _finish_pending_component_update(command) -> None:
     if status is not None and status.get("note"):
         style = "green" if status["state"] in ("updated", "current") else "yellow"
         console.print(f"[{style}]Components: {escape(status['note'])}[/{style}]")
+    if (status is not None and status["state"] == "failed"
+            and pending is not None and not pending.get("repair")):
+        _roll_back_update_at_start("the components of this update could not be installed")
+
+
+def _roll_back_update_at_start(why: str) -> None:
+    """Roll the last update back (``updater.rollback_last``: components and venv,
+    runtime, code) because *why*, print each step and the outcome, and exit with
+    status 1: this process runs the code the rollback replaced. Never returns."""
+    from rich.markup import escape
+    from localm import _version, updater
+    from localm.bugreport import LocalmError
+    console.print(f"[yellow]localm {escape(_version.AT_START)}: {escape(why)}; rolling the "
+                  "update back ...[/yellow]")
+    try:
+        updater.rollback_last(say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+    except LocalmError as e:
+        console.print(f"[red]The update could not be rolled back ({escape(e.summary)}: "
+                      f"{escape(str(e.reason))}). localm {escape(_version.read_version())} is "
+                      "installed; `localm doctor` shows which parts disagree.[/red]")
+        raise SystemExit(1) from None
+    console.print(f"[yellow]localm {escape(_version.read_version())} and its parts were put "
+                  "back. Run the command again.[/yellow]")
+    raise SystemExit(1)
 
 
 def console_main() -> None:

@@ -290,7 +290,9 @@ class _SessionMixin:
         return p, n
 
     def save_history(self, path: Path) -> None:
+        """Write the conversation as JSON to *path*, creating its folder."""
         import json as _json
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             _json.dumps(self._messages, indent=2, ensure_ascii=False),
             encoding="utf-8",

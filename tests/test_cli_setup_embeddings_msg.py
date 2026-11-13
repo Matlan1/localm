@@ -201,8 +201,9 @@ class TestSetupEmbeddingsUnreadableMemoryNamespace:
 
         ns_dir = tmp_path / ".localm" / "memory" / "chat"
         ns_dir.mkdir(parents=True, exist_ok=True)
+        # A namespace stamped with a format version newer than this build reads.
         (ns_dir / ("0" * 16 + ".jsonl")).write_bytes(
-            b'{"id":"a"}\n\xff\xfe not utf-8\n')
+            b'{"v": 99999, "id": "a", "text": "from a newer localm"}\n')
 
         result = cli_runner.invoke(setup_embeddings, [])
         assert result.exit_code == 0, result.output

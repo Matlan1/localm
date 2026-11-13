@@ -625,15 +625,13 @@ def test_validation_error_shape():
     assert "(got" not in flag_part
 
 
-def test_validation_error_names_max_tokens_zero():
+def test_validation_error_names_max_tokens_like_any_other_field():
     app = _app_with_probe_routes()
     response = TestClient(app).post(
         "/characterize/validate", json={"count": 1, "flag": True, "max_tokens": 0},
         headers=_shell_auth(app))
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "max_tokens must be 1 or more - 0 is not 'no limit'. "
-        "Omit max_tokens entirely to use the model's default")
+    assert response.json()["detail"] == "max_tokens must be greater than or equal to 1 (got 0)"
 
 
 def test_validation_error_renders_a_non_finite_input():

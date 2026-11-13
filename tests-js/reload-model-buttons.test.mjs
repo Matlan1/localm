@@ -324,6 +324,29 @@ test("Settings: Save and reload model with nothing changed still reloads the run
   assert.deepEqual(sideEffects(calls), ["unload", "load"], "nothing to save, so no PATCH");
 });
 
+test("Settings: Save and reload model with nothing changed says so instead of Saved", async () => {
+  const { window, calls, toasts } = await renderSettings(
+    { active: "run", models: [LLM("run", { active: true, loaded: true })] }, { edit: false });
+  saveReloadButton(window).click();
+  assert.ok(await waitFor(() => toasts.some((x) => /Reloaded run/.test(x.msg))),
+    JSON.stringify(toasts));
+  assert.deepEqual(sideEffects(calls), ["unload", "load"]);
+  assert.ok(toasts.some((x) => x.msg === "Nothing changed - reloading run with the saved settings"),
+    JSON.stringify(toasts));
+  assert.ok(!toasts.some((x) => /^Saved/.test(x.msg)), JSON.stringify(toasts));
+});
+
+test("Settings: Save and reload model after an edit still toasts Saved", async () => {
+  const { window, toasts } = await renderSettings(
+    { active: "run", models: [LLM("run", { active: true, loaded: true })] });
+  saveReloadButton(window).click();
+  assert.ok(await waitFor(() => toasts.some((x) => /Reloaded run/.test(x.msg))),
+    JSON.stringify(toasts));
+  assert.ok(toasts.some((x) => x.msg === "Saved - reloading run with the new settings"),
+    JSON.stringify(toasts));
+  assert.ok(!toasts.some((x) => /^Nothing changed/.test(x.msg)), JSON.stringify(toasts));
+});
+
 test("Settings: Save and reload model saves, then unloads and loads the running model", async () => {
   const { window, calls } = await renderSettings({ active: "run", models: [LLM("run", { active: true, loaded: true })] });
   const btn = saveReloadButton(window);

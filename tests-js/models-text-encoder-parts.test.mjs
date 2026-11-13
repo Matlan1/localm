@@ -33,7 +33,7 @@ test("a text encoder row says what it is used for", async () => {
   const row = rows.find((r) => r.querySelector(".name")?.textContent === "umt5-xxl-encoder-Q4_K_M");
   assert.ok(row, "the encoder row renders");
   assert.equal(row.querySelector(".role-hint").textContent,
-    "Text encoder (used by image and video models)");
+    "Text encoder (used by image, video and music models)");
   assert.ok(row.querySelector("select.type-text-encoder"), "wears the text-encoder type");
   assert.equal(row.querySelector(".arch-badge").textContent, "t5encoder");
 });

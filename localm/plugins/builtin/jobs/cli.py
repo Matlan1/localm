@@ -304,7 +304,7 @@ def job_run(job_id):
     if server is not None:
         result = _run_on_server(job_id, *server)
         if result is not None:
-            if result.get("status") == "ok":
+            if result.get("status") in ("ok", "skipped"):
                 _safe_echo(result.get("output", ""))
                 _echo_routing(result)
                 return
@@ -323,7 +323,7 @@ def job_run(job_id):
         store.release_claim(job_id, claimed.claim)
         raise
     store.record_result(job_id, result)
-    if result.get("status") == "ok":
+    if result.get("status") in ("ok", "skipped"):
         _safe_echo(result.get("output", ""))
         _echo_routing(result)
     else:
@@ -339,7 +339,7 @@ def _echo_routing(result: dict) -> None:
 
 @main.command("results")
 @click.argument("job_id")
-@click.option("--limit", type=int, default=None,
+@click.option("--limit", type=click.IntRange(min=1), default=None,
               help="Show at most N results (newest first). Default: all.")
 @click.option("--offset", type=int, default=0, show_default=True,
               help="Skip the newest N results before applying --limit.")
@@ -365,6 +365,8 @@ def job_results(job_id, limit, offset):
             else (r.get("output") or "(no output)")
         for line in text.splitlines() or [""]:
             _safe_echo(f"    {line}")
+        if r.get("answered_by"):
+            _safe_echo(f"    (answered by: {r['answered_by']})")
         if r.get("routing"):
             _safe_echo(f"    (model routing: {r['routing']})")
         click.echo()
