@@ -232,12 +232,6 @@ def register_exception_handlers(app: FastAPI) -> None:
             # `input`, so echoing it back is noise, not evidence.
             got = ("" if err.get("type") == "missing" or "input" not in err
                    else f" (got {err.get('input')!r})")
-            # max_tokens=0 gets its own message: it reads as a legitimate "no
-            # limit" but collides with the engine's internal unlimited sentinel,
-            # which would turn it into an unbounded generation.
-            if name == "max_tokens" and err.get("input") in (0, "0"):
-                return ("max_tokens must be 1 or more - 0 is not 'no limit'. "
-                        "Omit max_tokens entirely to use the model's default")
             return f"{name} {msg}{got}"
 
         # `detail` is the human sentence, because every client in this repo does
