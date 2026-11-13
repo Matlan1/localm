@@ -1987,7 +1987,7 @@
   "memory.embedder.incomplete": "Le téléchargement du modèle d'embeddings n'a pas abouti",
   "memory.embedder.alreadyInstalled": "Déjà installé",
   "memory.embedder.downloadFailed": "Échec du téléchargement : {message}",
-  "memory.embedder.hint": "Le rappel sémantique reste désactivé tant que '{model}' n'est pas téléchargé une fois. Il est téléchargé la première fois que le rappel en a besoin, ou maintenant avec le bouton ci-dessous.",
+  "memory.embedder.hint": "Le rappel sémantique reste désactivé tant que '{model}' n'est pas téléchargé une fois. Téléchargez-le maintenant avec le bouton ci-dessous. Avec l'accès réseau sur allow, il est aussi téléchargé la première fois que le rappel en a besoin.",
   "memory.modal.title": "Mémoire - ce que le modèle sait de vous",
   "memory.modal.writable": "Faits durables que localm retient sur vous, ajoutés au prompt tant que l'interrupteur de mémoire est activé. Avec « Enrichir la mémoire automatiquement » activé, la mémoire grandit aussi pendant que vous discutez. Modifiez librement - un fait par ligne ; Enregistrer remplace la liste.",
   "memory.modal.readOnly": "Lecture seule : le mode privé bloque l'écriture dans la mémoire (aucune nouvelle trace). La mémoire existante n'est rappelée que si \"Autoriser le rappel de mémoire en mode privé\" est activé.",

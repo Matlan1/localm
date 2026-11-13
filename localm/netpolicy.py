@@ -109,6 +109,18 @@ def downloads_allowed_when_off() -> bool:
         return False
 
 
+def automatic_download_allowed() -> bool:
+    """Whether a download nobody asked for may start: a model fetched on first
+    use by a background task (memory consolidation, recall, a scheduled job) or
+    by a startup sync. True only under ``net_mode=allow``.
+
+    Under ``ask`` such a download needs the user's own action, passed as a
+    one-call authorization (``allow_download=True``) by the code that collected
+    it; under ``off`` it never starts, and ``net_allow_model_downloads`` does
+    not change that (it exempts only downloads the user triggers)."""
+    return network_mode() == "allow"
+
+
 def _canonical_host(host: str) -> str:
     """*host* lowercased, without a trailing dot, and with a non-ASCII name
     converted to its IDNA A-label form (UTS #46 mapping, the same encoding

@@ -41,7 +41,18 @@ localm setup-embeddings          # installs bge-small-en-v1.5 for semantic recal
 ```
 
 Without it, recall still works but is lexical only (exact-word BM25). See
-[How recall ranks](#how-recall-ranks-facts).
+[How recall ranks](#how-recall-ranks-facts). You can also download it from the
+memory dialog's Download button or the Knowledge page.
+
+What memory's own background work (consolidation after a chat, recall, the
+vector backfill, a scheduled memory job) does when the embedding model is
+missing depends on `net_mode` (see [network.md](network.md)):
+
+| `net_mode` | a missing embedding model |
+|---|---|
+| `allow` | downloaded the first time memory needs it |
+| `ask` (default) | not downloaded; memory stays lexical-only, the debug log says once which model is missing and how to get it, and the memory dialog offers the Download button |
+| `off` | not downloaded; the Download button and `localm setup-embeddings` work only when `net_allow_model_downloads` is on |
 
 ## From the terminal
 

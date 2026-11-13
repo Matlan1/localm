@@ -1793,7 +1793,7 @@ export const I18N_EN = {
   "memory.embedder.incomplete": "Embedding model download did not complete",
   "memory.embedder.alreadyInstalled": "Already installed",
   "memory.embedder.downloadFailed": "Download failed: {message}",
-  "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once. It is downloaded the first time recall needs it, or now with the button below.",
+  "memory.embedder.hint": "Semantic recall is off until '{model}' is downloaded once. Download it now with the button below. With network access set to allow, it is also downloaded the first time recall needs it.",
   "memory.modal.title": "Memory - what the model knows about you",
   "memory.modal.writable": "Durable facts localm remembers about you, added to the prompt while the memory toggle is on. With \"Grow memory automatically\" on, memory also grows as you chat. Edit freely - one fact per line; Save replaces the list.",
   "memory.modal.readOnly": "Read-only: privacy mode blocks memory writes (no new traces). Existing memory is recalled only if \"Allow memory recall in privacy mode\" is on.",

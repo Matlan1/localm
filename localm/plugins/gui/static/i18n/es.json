@@ -1987,7 +1987,7 @@
   "memory.embedder.incomplete": "La descarga del modelo de embeddings no se completó",
   "memory.embedder.alreadyInstalled": "Ya instalado",
   "memory.embedder.downloadFailed": "Error en la descarga: {message}",
-  "memory.embedder.hint": "La recuperación semántica está desactivada hasta que '{model}' se descargue una vez. Se descarga la primera vez que la recuperación lo necesita, o ahora con el botón de abajo.",
+  "memory.embedder.hint": "La recuperación semántica está desactivada hasta que '{model}' se descargue una vez. Descárgalo ahora con el botón de abajo. Con el acceso a la red en allow, también se descarga la primera vez que la recuperación lo necesita.",
   "memory.modal.title": "Memoria: lo que el modelo sabe de ti",
   "memory.modal.writable": "Datos duraderos que localm recuerda sobre ti, añadidos al prompt mientras el interruptor de memoria está activado. Con \"Ampliar la memoria automáticamente\" activado, la memoria también crece mientras chateas. Edítala libremente: un dato por línea; Guardar reemplaza la lista.",
   "memory.modal.readOnly": "Solo lectura: el modo privado bloquea las escrituras en la memoria (sin nuevos rastros). La memoria existente solo se recupera si \"Permitir recuerdo de memoria en modo privado\" está activado.",

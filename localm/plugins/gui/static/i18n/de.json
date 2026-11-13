@@ -1825,7 +1825,7 @@
   "memory.embedder.incomplete": "Download des Embedding-Modells nicht abgeschlossen",
   "memory.embedder.alreadyInstalled": "Bereits installiert",
   "memory.embedder.downloadFailed": "Download fehlgeschlagen: {message}",
-  "memory.embedder.hint": "Der semantische Abruf ist aus, bis '{model}' einmal heruntergeladen wurde. Es wird beim ersten Abruf heruntergeladen, der es braucht, oder jetzt mit der Schaltfläche unten.",
+  "memory.embedder.hint": "Der semantische Abruf ist aus, bis '{model}' einmal heruntergeladen wurde. Laden Sie es jetzt mit der Schaltfläche unten herunter. Ist der Netzwerkzugriff auf allow gestellt, wird es auch beim ersten Abruf heruntergeladen, der es braucht.",
   "memory.modal.title": "Gedächtnis - was das Modell über Sie weiß",
   "memory.modal.writable": "Dauerhafte Fakten, die localm über Sie behält; sie werden dem Prompt hinzugefügt, solange der Gedächtnis-Schalter an ist. Ist \"Gedächtnis automatisch wachsen lassen\" an, wächst das Gedächtnis auch beim Chatten. Frei bearbeiten - ein Fakt pro Zeile; Speichern ersetzt die Liste.",
   "memory.modal.readOnly": "Nur lesen: Der Privatmodus sperrt Schreibzugriffe aufs Gedächtnis (keine neuen Spuren). Vorhandenes Gedächtnis wird nur abgerufen, wenn \"Gedächtnis-Abruf im Privatmodus zulassen\" an ist.",
