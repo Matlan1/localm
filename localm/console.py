@@ -54,8 +54,25 @@ def markup_safe(value: object) -> str:
     return escape(strip_controls(str(value)))
 
 
+PIPED_WIDTH = 200
+
+
 class SafeConsole(Console):
-    """A ``Console`` whose rendered text never carries a terminal control character."""
+    """A ``Console`` whose rendered text never carries a terminal control
+    character, and which lays out at least ``PIPED_WIDTH`` columns when its
+    output is not a terminal and no width was given (by ``width=`` or
+    ``COLUMNS``), where a plain ``Console`` assumes 80."""
+
+    @property
+    def size(self):
+        size = super().size
+        if self._width is None and not self.is_terminal and size.width < PIPED_WIDTH:
+            return size._replace(width=PIPED_WIDTH)
+        return size
+
+    @size.setter
+    def size(self, new_size) -> None:
+        Console.size.fset(self, new_size)
 
     def render(self, renderable: RenderableType,
                options: Optional[ConsoleOptions] = None) -> Iterable[Segment]:
