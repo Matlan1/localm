@@ -1187,7 +1187,7 @@ def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
         "NOTHING into your ComfyUI install, and self-expires once ComfyUI ships its "
         "own fix. " + apply_hint + "\n"
         "To stop being asked, turn on 'Fix ComfyUI ACE-Step __func__ crash (in-memory)' "
-        "in Settings > Media > Shared (or run: localm config comfy_func_shim on).")
+        "in Settings > Media (or run: localm config comfy_func_shim on).")
 
 
 # ---------------------------------------------------------------------------
@@ -2431,7 +2431,7 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     return False, (
         f"ComfyUI did not come up within {launch_wait_text(wait_seconds)}. If it is "
         "just a slow first (ZLUDA / ROCm) start, raise 'ComfyUI launch timeout (s)' in "
-        "Settings > Media > Shared (or run: localm config comfy_launch_timeout 600)."
+        "Settings > Media (or run: localm config comfy_launch_timeout 600)."
         f"{log_hint}"
     )
 

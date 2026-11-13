@@ -55,7 +55,7 @@ def test_auto_without_comfyui_is_native(no_comfy):
 
 
 @pytest.mark.parametrize("cfg", [
-    {"comfy_target": "user"},
+    {"comfy_target": "user", "comfy_api_url": "http://127.0.0.1:8190"},
     {"comfy_launch_cmd": "run_comfy.bat"},
     {"comfy_api_url": "http://127.0.0.1:8188"},
     {"plugins": {"image": {"comfy": {"workdir": "C:/ComfyUI"}}}},

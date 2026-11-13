@@ -99,7 +99,7 @@ def test_the_launch_timeout_names_the_settings_field_and_an_empty_log(monkeypatc
         ok, msg = comfy_client.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "within 30 seconds" in msg and "0 minutes" not in msg
-    assert "'ComfyUI launch timeout (s)' in Settings > Media > Shared" in msg
+    assert "'ComfyUI launch timeout (s)' in Settings > Media (or run" in msg
     assert "launcher window" not in msg
     assert "wrote nothing to its log" in msg
 
@@ -107,7 +107,7 @@ def test_the_launch_timeout_names_the_settings_field_and_an_empty_log(monkeypatc
 def test_the_func_shim_advice_names_the_settings_field():
     msg = comfy_client.comfy_exec_error_message(
         "'function' object has no attribute '__func__'", "http://127.0.0.1:8188")
-    assert "'Fix ComfyUI ACE-Step __func__ crash (in-memory)' in Settings > Media > Shared" in msg
+    assert "'Fix ComfyUI ACE-Step __func__ crash (in-memory)' in Settings > Media (or run" in msg
 
 
 @pytest.mark.parametrize("url", ["http://169.254.169.254:8188", "http://[::1"])
