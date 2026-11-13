@@ -17,9 +17,15 @@ The public surface:
     this package at call time, so a patch on ``localm.cli.<name>`` reaches the
     call site.
 """
+from .._venvguard import require_venv
+
+# Runs before the first third-party import. See
+# test_the_console_script_without_its_dependencies_shows_the_venv_message.
+require_venv()
+
 # sys/click on the package surface for test monkeypatch.
-import sys  # noqa: F401
-import click  # noqa: F401
+import sys  # noqa: F401,E402
+import click  # noqa: F401,E402
 
 # Config + model-manager names on the package for test monkeypatch.
 from ..config import (  # noqa: F401

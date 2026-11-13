@@ -1,8 +1,9 @@
+import os
 import sys
 
 if __name__ == "__main__":
+    launcher = r".venv\Scripts\localm" if os.name == "nt" else ".venv/bin/localm"
     sys.exit(
-        "Error: You are trying to run 'localm' directly with the system Python, "
-        "but it must be run from its virtual environment.\n"
-        "Please use '.venv\\Scripts\\localm' or activate the venv first."
-    )
+        "Error: localm is not started by running this file. "
+        f"Use '{launcher}' from the install folder, or activate its virtual "
+        "environment and run 'localm'.")

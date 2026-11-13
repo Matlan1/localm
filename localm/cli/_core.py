@@ -271,6 +271,9 @@ def _stdout_is_a_pipe() -> bool:
         return False
 
 
+HELP_REQUESTED = "localm.help_requested"
+
+
 class _GracefulGroup(click.Group):
     """Single, cross-cutting failure handler for the whole CLI.
 
@@ -283,6 +286,16 @@ class _GracefulGroup(click.Group):
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
+
+    def resolve_command(self, ctx, args):
+        """Resolve the subcommand and record in ``ctx.meta[HELP_REQUESTED]``
+        whether its arguments ask for help (``-h`` or ``--help`` before any
+        ``--``). The group callback runs before the subcommand parses."""
+        given = list(args[1:])
+        if "--" in given:
+            given = given[:given.index("--")]
+        ctx.meta[HELP_REQUESTED] = any(a in ("-h", "--help") for a in given)
+        return super().resolve_command(ctx, args)
 
     def invoke(self, ctx):
         try:
@@ -518,7 +531,9 @@ def main() -> None:
     # semantics. No-op unless the env var is set.
     honor_env_debug()
     bugreport.install_global_handlers()
-    _update_steps_at_start(click.get_current_context().invoked_subcommand)
+    ctx = click.get_current_context()
+    if not ctx.meta.get(HELP_REQUESTED):
+        _update_steps_at_start(ctx.invoked_subcommand)
 
 
 def _update_steps_at_start(command) -> None:
