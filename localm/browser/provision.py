@@ -267,11 +267,10 @@ def install_chromium(*, force: bool = False,
                     f"{chromium_executable_path()}.")
 
     if not download_allowed():
+        from localm.config import net_off_download_refusal
         return ProvisionResult(
             ok=False,
-            message="Network access is disabled (net_mode=off). Enable it "
-                    "with:  localm config net_mode ask - or allow just "
-                    "downloads:  localm config net_allow_model_downloads true")
+            message=net_off_download_refusal("the browser was not downloaded"))
 
     cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
     if force:

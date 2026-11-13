@@ -270,7 +270,7 @@ def _upload_with_retries(summary: str, path: Optional[Path], text: str, up_url, 
             # failed, keep the file, and offer to retry.
             console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
             console.print(f"[dim]The report is saved at {where}.[/dim]")
-            if attempt >= 3 or e.stage == "not_filed":
+            if attempt >= 3 or e.stage in ("not_filed", "network_off"):
                 console.print(f"[dim]Email it to {MAINTAINER_EMAIL} when you can.[/dim]")
                 break
             again = (ask("  Retry sending now? [y/N]") or "").strip().lower()
