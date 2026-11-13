@@ -246,9 +246,13 @@ def test_hf_backend_latches_a_dropped_grammar_and_refuses_the_next(monkeypatch, 
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
     msgs = [{"role": "user", "content": "hi"}]
 
+    seen = []
     with caplog.at_level(logging.WARNING, logger="localm"):
-        assert list(b.chat_stream(msgs, grammar='root ::= "a"')) == ["ok"]
+        with pytest.raises(GrammarUnsupportedError):
+            for tok in b.chat_stream(msgs, grammar='root ::= "a"'):
+                seen.append(tok)
 
+    assert seen == ["ok"]
     assert b.supports_grammar is False
     assert any("later grammar requests to this model are refused" in r.getMessage() for r in caplog.records)
     with pytest.raises(GrammarUnsupportedError):

@@ -99,6 +99,14 @@ def register_plugin_tools() -> tuple[list[str], list[str]]:
     except Exception as e:                       # discovery must never crash the agent
         return [], [f"Plugin discovery failed: {e}"]
 
+    # An enabled plugin that discovery refused (an unreadable manifest, a scope
+    # collision) is not in specs; say so, since its tools are missing.
+    for name, err in sorted(getattr(manager, "_discover_errors", {}).items()):
+        if name in enabled and name not in specs:
+            warnings.append(
+                f"Plugin {name!r} was skipped ({err}), so none of its tools are "
+                "available in this session.")
+
     for manifest in (specs[n] for n in sorted(specs)):
         if manifest.name not in enabled or not manifest.tool_exports:
             continue

@@ -124,8 +124,9 @@ class Agent(
         set_model recomputes it for the new model. True: max_tokens was an
         explicit caller/project-config value and set_model leaves it alone.
     interactive_tools:
-        Offer ask_user and the plan-mode tools. Only a session with a terminal
-        the user answers on sets it; otherwise they are disabled.
+        Offer ask_user and the plan-mode tools; otherwise they are disabled. A
+        terminal session sets it, and a GUI session sets it with ask_user in
+        *disabled_tools* (plan approval is an approval card there).
     server_side:
         True for an agent that runs inside the server (a GUI coder session, a
         scheduled job): a backend 401/403 fails the turn instead of asking for an
@@ -665,6 +666,11 @@ class Agent(
         except Exception:
             self._untrusted_provenance = True
 
+    def _warn_and_emit(self, text: str) -> None:
+        """Print *text* as a warning and send it to the event sink as ``info``."""
+        _agent.print_warning(text)
+        self._emit("info", text=text)
+
     def _init_reviewer(self) -> None:
         # Pre-done self-review: an optional reviewer model reads the diff before the
         # agent declares done and feeds blocking issues back. Off by default; a
@@ -673,7 +679,7 @@ class Agent(
         try:
             from ..reviewer import reviewer_for_agent
             self._reviewer = reviewer_for_agent(
-                self.backend, self.mode, self.restricted)
+                self.backend, self.mode, self.restricted, warn=self._warn_and_emit)
         except Exception:
             self._reviewer = None
 

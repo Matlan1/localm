@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
-import { $ } from "./helpers.js";
+import { $, confirmDangerAsync } from "./helpers.js";
 import { t } from "./i18n.js";
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
@@ -29,14 +29,29 @@ export function isSettingsView() {
 }
 window.isSettingsView = isSettingsView;
 
+// True while the leave-Settings question is open.
+let _leaveAsked = false;
+
+/** Show view *name*. Leaving Settings with unsaved edits first asks in the
+ *  in-page dialog and shows *name* only when the person chooses to leave. */
 export function showView(name) {
   // Fall back to chat for an unknown name or a view whose section is missing.
   if (!$("view-" + name)) name = "chat";
-  // Leaving Settings with unsaved edits asks for confirmation first.
   if (name !== "settings" && isSettingsView() &&
       window.settingsDirty && window.settingsDirty()) {
-    if (!confirm(t("settings.unsavedConfirm"))) return;
+    if (_leaveAsked) return;
+    _leaveAsked = true;
+    confirmDangerAsync(t("nav.leaveSettings.title"), t("settings.unsavedConfirm"),
+      t("nav.leaveSettings.leave")).then((leave) => {
+      _leaveAsked = false;
+      if (leave) _showViewNow(name);
+    });
+    return;
   }
+  _showViewNow(name);
+}
+
+function _showViewNow(name) {
   _applyActiveClasses(name);
   // Remembered across reloads.
   lsSetScoped("localm.activeView", name);

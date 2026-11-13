@@ -215,9 +215,9 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     prev_commit = _rev_parse_head(root)
     if prev_commit is None:
         return _result(False, "error",
-                       "The managed ComfyUI has no recorded source commit (it was installed "
-                       "via the non-git copy fallback), so a pinned-version update is not "
-                       "possible. Reinstall it: 'localm comfy remove' then "
+                       "The managed ComfyUI has no recorded source commit (its source "
+                       "record is missing or unreadable), so a pinned-version update is "
+                       "not possible. Reinstall it: 'localm comfy remove' then "
                        "'localm comfy setup'.")
 
     # Everything from here on MUTATES the working tree (source replace, patch, and

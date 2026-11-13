@@ -70,6 +70,10 @@ class JobCreate(BaseModel):
     enabled: bool = True
 
 
+# JobUpdate fields a request may set to null to clear them.
+_CLEARABLE_FIELDS = frozenset({"model", "cwd", "scope"})
+
+
 class JobUpdate(BaseModel):
     name: str | None = None
     task_kind: str | None = None
@@ -424,7 +428,8 @@ async def get_job(job: Job = Depends(owned_job)):
 async def update_job(job_id: str, req: JobUpdate, request: Request,
                      job: Job = Depends(owned_job)):
     store = _store()
-    changes = {k: v for k, v in req.model_dump().items() if v is not None}
+    changes = {k: v for k, v in req.model_dump(exclude_unset=True).items()
+               if v is not None or k in _CLEARABLE_FIELDS}
     can_shell = _caller_can_allow_shell(request)
     # Escalating an existing job to shell execution is privileged (same gate as
     # create); de-escalating (allow_shell -> False) is always allowed.
@@ -469,7 +474,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
 
 
 @_router.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str, job: Job = Depends(owned_job)):
+async def delete_job(job_id: str, request: Request, job: Job = Depends(owned_job)):
+    if getattr(job, "allow_shell", False) and not _caller_can_allow_shell(request):
+        raise HTTPException(
+            403, "deleting a shell-enabled job needs the owner key or a coder:full key.")
     store = _store()
     if not await run_in_threadpool(store.remove, job_id):
         raise HTTPException(404, f"No such job: {job_id}")
@@ -527,7 +535,18 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
-    result_id = await run_in_threadpool(store.record_result, job_id, result)
+    try:
+        result_id = await run_in_threadpool(store.record_result, job_id, result)
+    except BaseException:
+        try:
+            job_now = store.get(job_id)
+            if job_now is not None:
+                store.release_claim(job_id, job_now.claim)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("jobs: the run claim of job %s could not be released after "
+                           "its result failed to save (%s)", job_id, e)
+        raise
     return {"result_id": result_id, **result}
 
 

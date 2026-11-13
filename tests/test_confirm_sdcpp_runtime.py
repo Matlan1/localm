@@ -1234,6 +1234,35 @@ def test_current_notices_an_asset_that_left_the_release(cf, bump):
         cf.resolve_candidate(None, True, opener)
 
 
+def test_a_candidate_whose_linux_build_needs_a_newer_ubuntu_fails_not_inconclusive(cf, bump):
+    pins = bump.read_pins(bump.PINS_PATH.read_text(encoding="utf-8"))
+    _num, old_short = bump.parse_tag(pins["tag"])
+    tag, short, commit = "master-99999-abcdef1", "abcdef1", "abcdef1" + "2" * 33
+    listing = []
+    for n, s in [*pins["assets"].values(), *(e for es in pins["extra"].values() for e in es)]:
+        name = n.replace(old_short, short).replace("-Linux-Ubuntu-24.04-", "-Linux-Ubuntu-99.04-")
+        listing.append({"name": name, "size": 4000, "digest": "sha256:" + s})
+    routes = {bump.RELEASE_URL % (bump.UPSTREAM_REPO, tag):
+              {"tag_name": tag, "target_commitish": commit, "assets": listing},
+              bump.COMMIT_URL % (bump.UPSTREAM_REPO, tag): {"sha": commit}}
+
+    class Resp:
+        def __init__(self, body):
+            self.b = json.dumps(body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.b
+
+    with pytest.raises(ValueError, match="newer Ubuntu than"):
+        cf.resolve_candidate(tag, False, lambda req, timeout=30: Resp(routes[req.full_url]))
+
+
 def test_current_without_the_api_is_inconclusive(cf, bump):
     def down(req, timeout=30):
         raise OSError("offline")

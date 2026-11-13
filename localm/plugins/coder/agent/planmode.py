@@ -49,6 +49,16 @@ PLAN_MODE_NOTE = (
     "change, the changes, how to verify them); the user approves it or asks "
     "for a revision. Do not describe edits as done while in plan mode."
 )
+_ASK_USER_SENTENCE = ("Use ask_user to clarify a requirement you cannot settle "
+                      "from the code. ")
+
+
+def plan_mode_note(ask_user_available: bool = True) -> str:
+    """:data:`PLAN_MODE_NOTE`, without its ask_user sentence when that tool is
+    not available to the session."""
+    if ask_user_available:
+        return PLAN_MODE_NOTE
+    return PLAN_MODE_NOTE.replace(_ASK_USER_SENTENCE, "")
 
 
 def plan_mode_refusal(name: str, tool_def: Any) -> Optional[str]:
@@ -109,7 +119,8 @@ class _PlanModeMixin:
         while plan mode is on."""
         if self.plan_mode:
             from localm.textguard import compose
-            content = compose(content, "\n\n" + PLAN_MODE_NOTE)
+            content = compose(content, "\n\n" + plan_mode_note(
+                "ask_user" not in getattr(self, "disabled_tools", frozenset())))
         self._add_user(content)
 
     def _begin_plan_autorun(self) -> Optional[Any]:

@@ -1299,6 +1299,19 @@ def test_github_candidate_none_when_the_pin_is_newest(monkeypatch):
     assert find() is None
 
 
+def test_the_sdcpp_candidate_skips_a_release_whose_linux_build_needs_a_newer_ubuntu(monkeypatch):
+    pin_file, pattern = "localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"'
+    pinned = cp._read_const(pin_file, pattern)
+    ok, too_new = "master-99998-bbbbbbb", "master-99999-aaaaaaa"
+    newer_ubuntu = dict(_rel(too_new, 1), assets=[
+        {"name": "sd-master-aaaaaaa-bin-Linux-Ubuntu-99.04-x86_64.zip"}])
+    monkeypatch.setattr(cp, "_get_json", lambda url: [_rel(pinned, 30), _rel(ok, 2), newer_ubuntu])
+    advancer = next(a for a in pw.build_advancers() if a.key == "sdcpp")
+    assert advancer.candidate() == (pinned, ok)
+    monkeypatch.setattr(cp, "_get_json", lambda url: [_rel(pinned, 30), newer_ubuntu])
+    assert advancer.candidate() is None
+
+
 def test_github_candidate_unparseable_pin_raises(monkeypatch):
     monkeypatch.setattr(cp, "_get_json", lambda url: [_rel("v9", 1)])
     find = pw._github_candidate("o/r", "localm/media/koboldcpp/pins.py", r'^TAG = "([^"]+)"',

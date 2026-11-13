@@ -119,9 +119,9 @@ even exists.
 | `GET /api/jobs` | List the caller's own jobs: `{"jobs": [...], "scheduler_warning": ...}`, where `scheduler_warning` is null while the scheduler's ticks are healthy. |
 | `POST /api/jobs` | Create a job. |
 | `GET /api/jobs/{id}` | Job detail. |
-| `PUT /api/jobs/{id}` | Update a job. |
-| `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
+| `PUT /api/jobs/{id}` | Update a job. Fields left out keep their value; `model`, `cwd` and `scope` sent as `null` are cleared (a coder job still needs a `cwd`). |
+| `DELETE /api/jobs/{id}` | Delete a job and its results. Deleting a shell-enabled job needs the owner key or a `coder:full` key, like editing or running one. A run that finishes after its job was deleted records nothing. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result (`result_id` is null when the job was deleted while it ran). `409` if another run (this job or another) is already in progress in the server, so runs inside one server never stack model loads. `localm job run` uses this route when a server is running for the same data folder and directory, so the run shares the server's loaded model and its one-run-at-a-time guard. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
@@ -133,8 +133,15 @@ Creating a job needs the scope for its task kind as well as `jobs`: `chat`,
 `coder`, `memory` or `rag` (a `jobs`-only key gets `403`). At run time a job
 created by a key other than the owner key runs only while that key still exists
 and still holds that scope; a job whose creating key was revoked, expired or
-narrowed is not run and records an error result instead. Jobs created with the
-owner key, or in open mode, are not affected.
+narrowed is not run and records an error result instead. A run already in
+progress when that happens is stopped at its next step (a coder tool call, a
+chat or memory model call, a knowledge file) and records an error: at once for
+a revoke in the running server, within about five seconds for a revoke from
+another process, an expiry or a narrowed scope. What the run wrote before it
+stopped (files a coder run edited, facts a memory run saved, documents a
+knowledge run indexed) stays. Jobs created with the owner key, or in open mode,
+are not affected. A run with nothing to do (a memory job in privacy mode, or with
+no new sessions) records the result `skipped`.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.
@@ -204,8 +211,9 @@ hour after it finishes, and only when some new operation starts, so an idle
 server may keep showing it longer; an operation still marked `running` is
 never dropped, at any age.
 
-Cancelling always answers `{"status": "cancelling"}`, whatever state the
-operation was in. It terminates the subprocess behind a model pull, a model
+Cancelling an operation that has not finished answers `{"status": "cancelling"}`;
+one that already ended answers `{"status": "not_running", "state": ...}` with the state
+it ended in. It terminates the subprocess behind a model pull, a model
 removal or a ComfyUI setup; for the in-process operations it is only a request
 the work has to notice, and image, video, music and text-to-speech generation
 (and a browser live view) are the ones that notice it, while a knowledge index,

@@ -101,7 +101,9 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `processing_progress` (a long prompt is still being read; its delta also carries
 `status_args` with `done` and `total`, the prompt tokens read so far and in all),
-`encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
+`processing_layers` (a HuggingFace-format model is still reading a long prompt;
+`status_args` `done` and `total` are the model layers the prompt has passed so far and
+in all), `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
 `audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
 `downloading_embedder` (the embedding model memory recall needs, on its first
@@ -226,7 +228,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 
 | Field | Behaviour |
 |---|---|
-| `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
+| `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. 0 means no request cap (the configured default applies), the same as leaving it out; a negative value is a 422. |
 | `temperature`, `top_p`, `seed`, `stop` | Applied. The finish chunk, or the non-streaming choice, carries `stop_sequence` (a localm extension): the stop sequence that ended the reply, or `null`. |
 | `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
 | `response_format` | See [Structured output](#structured-output). |
@@ -779,6 +781,11 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
+The image is returned only when its embedded metadata (which can carry the prompt)
+was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;
+otherwise the request fails with `502` and the reason, and no file is kept. Any
+other warning the generation reported is listed in the response's `warnings`.
+
 Failures: `400` an empty or over-long prompt, a bad `size`, an `output_format` other
 than `png`, a bad `response_format`, or `url` where none can be served (above);
 `422` an `n` outside 1 to 4 or a body that does not validate; `409` the job was
@@ -993,15 +1000,21 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
-`GET /v1/config` returns the whole config plus eight read-only extras:
+`GET /v1/config` returns the whole config plus up to ten read-only extras (the
+two network ones only for the owner):
 `effective_mode`, `effective_chat_mode`, `effective_coder_mode`,
-`effective_ctx_max`, `effective_ctx_model`, `effective_ctx_model_key`,
-`instance_id` and `instance_port`.
-PATCH ignores those eight, so a client can send back what it read, and returns
+`effective_net_mode` (the network access mode in force: the stored `net_mode`,
+or the server's `LOCALM_NET_MODE` when set), `net_mode_from_env` (true when
+`LOCALM_NET_MODE` sets it), `effective_ctx_max`, `effective_ctx_model`,
+`effective_ctx_model_key`, `instance_id` and `instance_port`.
+PATCH ignores those ten (and `warnings`), so a client can send back what it read, and returns
 the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them
-unchanged. A change to `embedding_model` that would leave an existing
+unchanged. A new `embedding_model` that names a registered model of another type
+(a chat model, for example) or a reranker is refused with a 400; one that names no
+known key, registered model or file yet is saved, and the answer carries
+`warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
 `{"needs_confirm": true, "model", "collections", "note"}`, and the same body with
 `"confirm": true` applies it. PATCH errors: 400 for an unknown key, an invalid
@@ -1242,7 +1255,8 @@ directory without a `plugin.toml`, or a rejected plugin is a 400.
 `plugins:admin` scope. Installs a plugin's pip extras on this host (the HTTP
 sibling of `localm plugin install-deps NAME`). The POST starts the install in the
 background and returns `{"status": "running"|"done"|"error", "name", "missing",
-"lines"}`; an unknown plugin is a 404. Both routes are a 403 on a server bound
+"lines"}`; an unknown plugin is a 404 and a plugin that is not installed is a
+409. Both routes are a 403 on a server bound
 beyond loopback, because a remote client may never trigger a server-side pip.
 The events route replays the whole log and then follows it as server-sent events:
 `data: {"type": "log", "line": "..."}` per line, then `data: {"type": "end", "ok",
@@ -1274,7 +1288,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`; any other value is read as `none`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Owner here means a request presenting an owner key: in open mode (no key configured yet) these grants are refused too. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out; that response carries `owner_key_created` (true when the owner key was made by this request), and `localm key show --reveal` or rolling it from the Owner key card shows it. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (owner key, scope `admin`; CSRF-protected for
@@ -1379,8 +1393,8 @@ namespace.
 |---|---|
 | `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. Returns `{"text", "writable", "items": [{"id", "text", "importance", "source", "kind", "uses", "updated"}], "corrections": [{"id", "action", "proposed_text", "target_id", "target_text", "confidence", "created", "target_updated"}], "path", "can_download_embedder", "embedder_model"}`; `corrections` is empty when writes are not allowed. |
 | `PUT /api/memory` | Bulk edit. Body `{"text", "base"}`: `text` is the edited list, `base` the `text` that `GET /api/memory` returned when the edit started. A line matching an existing fact keeps that record; new lines are added; a fact in `base` that is no longer in `text` is deleted; a fact added since `base` was read is kept. Returns `{"status": "saved", "count", "kept_newer"}` (`kept_newer`: facts added since `base` that were kept). `base` is required: without it the request is refused with `422` (`"loc": ["body", "base"], "msg": "Field required"`) and nothing changes. `413` past the 256-record or 64k-char cap. |
-| `POST /api/memory/append` | Add one fact. Body `{"text": ...}`; returns `{"status": "appended", "id"}`; `400` for empty text, `413` at the record cap. |
-| `PATCH /api/memory/{id}` | Edit one record's text or importance. Returns `{"status": "saved", "item"}`; `404` for an unknown id. |
+| `POST /api/memory/append` | Add one fact. Body `{"text": ...}`; returns `{"status": "appended", "id"}`, or `{"status": "exists", "id"}` when you already added the same text (case and spacing ignored), which then is not stored again; `400` for empty text, `413` at the record cap. |
+| `PATCH /api/memory/{id}` | Edit one record's text or importance. Returns `{"status": "saved", "item"}`; `400` for empty text, `404` for an unknown id. |
 | `DELETE /api/memory/{id}` | Delete one record. Returns `{"status", "id"}` with `status` `deleted` or `absent`; an unknown id is a `200` with `absent`. |
 | `POST /api/memory/corrections/{id}/accept` | Apply a proposed correction (the auto-synthesis job spotted a new fact that contradicts a saved one): replaces or deletes the target record, archiving its old value. Returns `{"status", "id", "target_id", "action"}` with `status` `updated`, `deleted` or `target_gone`; `404` for an unknown correction, `500` when the old value could not be archived (nothing is applied). |
 | `POST /api/memory/corrections/{id}/reject` | Discard a proposed correction, leaving the target record untouched. Returns the same object with `status` `rejected` or `target_gone`, and fails like accept. |

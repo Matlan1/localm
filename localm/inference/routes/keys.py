@@ -133,7 +133,9 @@ def register(app: FastAPI, ctx) -> None:
         # (future `localm gui` loads re-establish it; web.py). Loopback plus
         # open-mode only.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
-            owner = auth.get_api_key() or auth.regenerate_key()
+            existing_owner = auth.get_api_key()
+            owner = existing_owner or auth.regenerate_key()
+            created = {**created, "owner_key_created": existing_owner is None}
             # An OPAQUE owner session (id in the cookie, never the key), so this
             # browser keeps full access across a later key roll.
             from localm import sessions

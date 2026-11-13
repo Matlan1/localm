@@ -95,20 +95,24 @@ def _header(headers, name: str):
     return getter(name) if callable(getter) else None
 
 
-def _raise_for_status(resp) -> None:
-    """Turn a 401/403 into a CoderAuthError whose message tells the user how to
-    supply an API key. Any other non-2xx response with server-provided detail
+_LOCALM_KEY_ADVICE = (
+    "This server requires an API key. Run `localm key show --reveal` to "
+    "view the current key (or `localm key generate` to mint one), then "
+    "pass it with `--api-key <key>` or set the LOCALM_API_KEY environment "
+    "variable.")
+
+
+def _raise_for_status(resp, auth_advice: str = _LOCALM_KEY_ADVICE) -> None:
+    """Turn a 401/403 into a CoderAuthError whose message ends with
+    *auth_advice* (how to supply the key this server wants; localm's own key
+    advice by default). Any other non-2xx response with server-provided detail
     (see _response_detail) raises CoderServerError with that detail folded in;
     otherwise falls back to plain resp.raise_for_status() (no detail was
     extractable, e.g. a non-JSON, non-text response)."""
     if resp.status_code in (401, 403):
         raise CoderAuthError(
             f"Authentication failed (HTTP {resp.status_code}) for {resp.url}. "
-            "This server requires an API key. Run `localm key show --reveal` to "
-            "view the current key (or `localm key generate` to mint one), then "
-            "pass it with `--api-key <key>` or set the LOCALM_API_KEY environment "
-            "variable."
-        )
+            f"{auth_advice}")
     if resp.status_code < 400:
         return
     detail = _response_detail(resp)
@@ -523,7 +527,7 @@ class HTTPBackend(BaseLLMBackend):
                 "but may not load models: switching models needs the models:write "
                 "scope. Use the owner key (`localm key show --reveal`) or a key "
                 "minted with models:write.")
-        _raise_for_status(resp)
+        _raise_for_status(resp, self._auth_advice())
         from localm.jsonreply import response_json
         body = response_json(resp)
         return body if isinstance(body, dict) else {}
@@ -531,6 +535,20 @@ class HTTPBackend(BaseLLMBackend):
     @property
     def model_id(self) -> str:
         return self._model
+
+    def _auth_advice(self) -> str:
+        """How to supply the key this backend's server wants, for an auth error."""
+        if self.anthropic:
+            return ("Set the ANTHROPIC_API_KEY environment variable to a valid "
+                    "Anthropic API key.")
+        if self._base_url == OPENAI_BASE_URL:
+            return ("Set the OPENAI_API_KEY environment variable to a valid "
+                    "OpenAI API key.")
+        if self._is_local_server:
+            return _LOCALM_KEY_ADVICE
+        return ("Pass the key this server expects with `--api-key <key>` or set "
+                "the LOCALM_API_KEY environment variable. For a localm server, "
+                "`localm key show --reveal` shows its key.")
 
     def set_model(self, model: str, *, pinned: Optional[bool] = None) -> None:
         """Repoint this backend at a different model NAME, in place. *pinned*,
@@ -558,11 +576,16 @@ class HTTPBackend(BaseLLMBackend):
         is when the server kept this session's model because a model that
         could have answered was skipped or failed to load. Any other reply
         clears ``routing_note``. A note different from the previous one is
-        passed to ``on_routing_note``."""
+        passed to ``on_routing_note``. A reply the server routed to another
+        model (``routed`` with a ``resolved`` model other than ``requested``)
+        passes a note naming both to ``on_routing_note`` when that model differs
+        from the one the previous routed reply named."""
         import json as _json
         getter = getattr(headers, "get", None)
         raw = getter("X-Localm-Model-Routing") if callable(getter) else None
         note = None
+        routed_to = None
+        data = None
         if isinstance(raw, str) and raw:
             try:
                 data = _json.loads(raw)
@@ -573,9 +596,21 @@ class HTTPBackend(BaseLLMBackend):
                 text = data.get("note")
                 if isinstance(text, str) and text:
                     note = text
+            elif isinstance(data, dict) and data.get("routed"):
+                resolved, requested = data.get("resolved"), data.get("requested")
+                if isinstance(resolved, str) and resolved and resolved != requested:
+                    routed_to = resolved
         previous, self.routing_note = self.routing_note, note
         if note and note != previous and self.on_routing_note is not None:
             self.on_routing_note(note)
+        previous_routed = getattr(self, "_routed_to", None)
+        self._routed_to = routed_to
+        if routed_to and routed_to != previous_routed and self.on_routing_note is not None:
+            requested = (data.get("requested") if isinstance(data, dict) else None) or self._model
+            self.on_routing_note(
+                f"This reply came from {routed_to}, not {requested}: the server "
+                "picked a model that can serve this request. Pin the model to "
+                f"always use {requested}.")
 
     def _note_answer(self, model, usage) -> None:
         """Record which model answered, and the context capacity it reported
@@ -836,7 +871,7 @@ class HTTPBackend(BaseLLMBackend):
             retry_503=not self._is_local_server,
             pinned=self._pinned,
         )
-        _raise_for_status(resp)
+        _raise_for_status(resp, self._auth_advice())
         self._note_routing(getattr(resp, "headers", None))
         self.last_reply_compacted = (
             _header(getattr(resp, "headers", None), "X-Localm-Context-Compacted") == "1")
@@ -895,7 +930,7 @@ class HTTPBackend(BaseLLMBackend):
             retry_503=not self._is_local_server,
             pinned=self._pinned,
         ) as resp:
-            _raise_for_status(resp)
+            _raise_for_status(resp, self._auth_advice())
             headers = getattr(resp, "headers", None)
             if _header(headers, "X-Localm-Context-Compacted") == "1":
                 self.last_reply_compacted = True
@@ -1005,7 +1040,7 @@ class HTTPBackend(BaseLLMBackend):
             retry_503=not self._is_local_server,
             pinned=self._pinned,
         ) as resp:
-            _raise_for_status(resp)
+            _raise_for_status(resp, self._auth_advice())
             for line in resp.iter_lines():
                 if not line:
                     continue

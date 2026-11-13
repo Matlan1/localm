@@ -222,6 +222,19 @@ def request_is_privacy() -> bool:
     return _REQUEST_PRIVACY.get()
 
 
+def privacy_headers(private: bool) -> dict:
+    """The headers a request to this server's own API sends so the server
+    handles it in privacy mode: ``{SESSION_MODE_HEADER: "privacy"}`` when
+    *private*, else an empty dict."""
+    return {SESSION_MODE_HEADER: SessionMode.PRIVACY.value} if private else {}
+
+
+def request_privacy_headers() -> dict:
+    """:func:`privacy_headers` for the current work: privacy inside a
+    :func:`request_privacy` block."""
+    return privacy_headers(request_is_privacy())
+
+
 def carry_request_privacy(fn):
     """*fn* for another thread (``threading.Thread``, ``run_in_executor``):
     when called from inside a :func:`request_privacy` block, the returned
@@ -349,13 +362,15 @@ def effective_unattended_mode(surface: str, cwd=None) -> SessionMode:
     return resolved
 
 
-def diagnostics_allowed() -> bool:
+def diagnostics_allowed(*, private_request: bool = False) -> bool:
     """Whether localm may write an AUTOMATIC diagnostic trace right now.
 
     True in the log and full session modes, and in privacy mode only when the
     user opted into keeping diagnostics (config ``keep_diagnostics`` or the
-    ``LOCALM_KEEP_DIAGNOSTICS`` env). False when the mode or the config cannot
-    be resolved. Never raises.
+    ``LOCALM_KEEP_DIAGNOSTICS`` env). Without that opt-in it is also False
+    inside a :func:`request_privacy` block, and when *private_request* is true
+    (the answer for work of such a request, asked from outside its block).
+    False when the mode or the config cannot be resolved. Never raises.
     """
     try:
         from localm.config import keep_diagnostics_enabled
@@ -363,6 +378,8 @@ def diagnostics_allowed() -> bool:
             return True
     except Exception:
         pass
+    if private_request or request_is_privacy():
+        return False
     try:
         return effective_mode("server") != SessionMode.PRIVACY
     except Exception:
