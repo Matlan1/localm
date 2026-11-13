@@ -48,24 +48,30 @@ function _seedPerfControls(cfg) {
 }
 
 /** Re-read the saved GPU layers and context window into the untouched Live
- *  tuning controls, so the card shows what another card saved. */
+ *  tuning controls, so the card shows what another card saved. Resolves true
+ *  when a control's value changed. */
 async function _reseedPerfControls() {
-  if (_perfTouched.gl && _perfTouched.ctx) return;
+  const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
+  if (!gl || !ctx || (_perfTouched.gl && _perfTouched.ctx)) return false;
+  const before = gl.value + "|" + _perfCtxValue(ctx);
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (r.ok) { _seedPerfControls(await r.json()); syncPerfCtxHelp(); }
   } catch { /* server unreachable: the controls keep their values */ }
+  return gl.value + "|" + _perfCtxValue(ctx) !== before;
 }
 
 /** Redraw the Live tuning VRAM estimate (and the reload offer). When the server
  *  sizes no model (none loaded) it says so instead of showing figures for a
- *  model that does not exist. Unless *reseed* is false it first re-reads the saved values into the
- *  untouched controls. */
+ *  model that does not exist. Unless *reseed* is false it also re-reads the saved values into the
+ *  untouched controls and redraws again when one changed. */
 export async function refreshPerfEstimate({ reseed = true } = {}) {
   syncPerfReloadButton();
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
-  if (reseed) await _reseedPerfControls();
+  if (reseed) {
+    _reseedPerfControls().then((changed) => { if (changed) refreshPerfEstimate({ reseed: false }); });
+  }
   try {
     const q = new URLSearchParams({ n_ctx: _perfCtxValue(ctx), n_gpu_layers: gl.value });
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
