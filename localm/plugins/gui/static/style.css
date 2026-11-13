@@ -718,6 +718,30 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   margin: 4px 0;
 }
 .msg-row.tool-event .msg-meta { margin-top: 4px; }
+/* The sources of a turn, listed under its reply */
+.reply-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.reply-sources .tool-section {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.reply-sources .tool-sid {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--yellow);
+  margin-right: 4px;
+}
+.reply-sources .tool-link { color: var(--text); }
+/* A conversation held in this tab only (started in privacy mode) */
+.conv-item.conv-ephemeral .title { font-style: italic; opacity: 0.8; }
 /* NEW-1: inline marker where the active model changed between turns */
 .model-switch {
   text-align: center;

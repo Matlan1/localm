@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, revealFilledAdvanced, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast, updateAdvancedCount } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, copyTextWithFeedback, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, revealFilledAdvanced, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast, updateAdvancedCount } from "./helpers.js";
 import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
@@ -414,11 +414,11 @@ export function planSummaryPasses(entries, ctxMax, reply, overhead) {
 /** One summariser request for *content*: the visible reply text, or "" when
  *  the request fails, is aborted through *signal*, is refused, or ends with
  *  a finish reason other than "stop" or "length". Never rejects. */
-async function summaryPass(content, maxTokens, signal, pinnedModel) {
+async function summaryPass(content, maxTokens, signal, pinnedModel, surfaceHeaders) {
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(CHAT_SURFACE_HEADERS),
+      headers: authHeaders(surfaceHeaders || CHAT_SURFACE_HEADERS),
       body: JSON.stringify({
         model: pinnedModel || modelSelect.value || modelCache.active,
         pin_model: !!pinnedModel,
@@ -540,7 +540,7 @@ export async function compactConversation(conv, signal = null) {
         ? ROLLING_SUMMARY_INSTRUCTION + "\n\nSummary of the earlier part:\n" +
           fitTokens(summary, earlierSummaryTokens(reply)) + "\n\nLater turns:\n" + excerpt
         : SUMMARY_INSTRUCTION + "\n\n" + excerpt;
-      summary = await summaryPass(content, reply, signal, pinnedModel);
+      summary = await summaryPass(content, reply, signal, pinnedModel, convSurfaceHeaders(conv));
       if (!summary) break;
     }
   } finally {
@@ -809,6 +809,7 @@ export async function refreshCtxLimit() {
           setWebAskSession(null);                        // R27: forget the session choice
           renderConvList();
           renderChat();
+          showPrivacyLeftovers();
         }
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
@@ -831,12 +832,10 @@ export async function refreshCtxLimit() {
         // rest of the tab's life.
         chat.privacyWiped = false;
         document.getElementById("privacy-hint")?.remove();
-        // Left privacy mode while this page was open: save what is on screen
-        // now and connect to the server's conversation store.
-        if (wasPrivacy) {
-          saveConversations();
-          initServerConversations();
-        }
+        document.getElementById("privacy-leftovers")?.remove();
+        // Left privacy mode while this page was open: what is on screen stays
+        // in this tab only and is never saved; new chats are saved.
+        if (wasPrivacy) leavePrivacyMode();
       }
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
@@ -849,6 +848,50 @@ export async function refreshCtxLimit() {
     if (!reconciled) markInstanceUnknown(e && e.message ? e.message : String(e));
   }
 }
+
+/** Privacy mode was left while this page was open: every conversation on
+ *  screen was held under privacy mode, so it is marked `ephemeral` (kept in
+ *  this tab, never written to this browser or the server), a toast says so
+ *  when there is one, and the page connects to the server's conversation
+ *  store. A conversation started after this is saved as usual. */
+export function leavePrivacyMode() {
+  let held = 0;
+  for (const c of chat.conversations) {
+    if (!c.ephemeral) held++;
+    c.ephemeral = true;
+  }
+  if (held) {
+    toast(tn("chat.conv.privacyKept", held));
+    renderConvList();
+  }
+  initServerConversations();
+}
+
+/** In privacy mode, asks the server how many conversations saved before are
+ *  still on disk and, when there are any, shows a note under the privacy hint
+ *  that says so and how to remove them. Shows nothing when the count cannot
+ *  be read. */
+export async function showPrivacyLeftovers() {
+  let stored = 0;
+  try {
+    const r = await fetch("/api/conversations?meta=true&limit=1&offset=0",
+                          { headers: authHeaders() });
+    if (r.ok) stored = Number((await r.json()).stored) || 0;
+  } catch { /* no count: no note */ }
+  document.getElementById("privacy-leftovers")?.remove();
+  if (!chat.privacy || stored <= 0) return;
+  const anchor = document.getElementById("privacy-hint")
+    || document.querySelector("#conversations h3");
+  if (!anchor) return;
+  const note = el("div", "privacy-hint");
+  note.id = "privacy-leftovers";
+  note.textContent = tn("chat.privacyLeftovers", stored);
+  note.title = t("chat.privacyLeftovers.title");
+  anchor.after(note);
+}
+document.addEventListener("localm:language", () => {
+  if (document.getElementById("privacy-leftovers")) showPrivacyLeftovers();
+});
 
 // LM-DA-047: privacy mode's "no traces, not even localStorage" guarantee used
 // to rest on two independently hand-maintained mechanisms - a per-call-site
@@ -977,8 +1020,26 @@ function _updateUnsavedIndicator() {
   h.after(warn);
 }
 
+/** The headers that name the chat surface on a request made for *conv*: a
+ *  conversation held in this tab only (`ephemeral`) also asks the server to
+ *  record the request under privacy mode. */
+export function convSurfaceHeaders(conv) {
+  return conv && conv.ephemeral
+    ? { ...CHAT_SURFACE_HEADERS, "X-Localm-Session-Mode": "privacy" }
+    : CHAT_SURFACE_HEADERS;
+}
+
+/** True when *conv* may be written to this browser's cache or the server
+ *  store: false for a conversation held in this tab only (`ephemeral`, set on
+ *  every conversation on screen when privacy mode is left) and for a deleted
+ *  one. saveConversations and pushConversation both ask this. */
+export function convPersistable(conv) {
+  return !!conv && !conv.ephemeral && !conv.deleted;
+}
+
 export function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
+  if (changed && !changed._meta) changed.updated_at = Date.now();
   if (!chat.modeKnown) {
     // The mode is not confirmed yet: the localStorage write waits for
     // settlePendingScopedWrites(); the server push gates itself on chat.persist.
@@ -989,7 +1050,7 @@ export function saveConversations(changed) {
   // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
   // caching them would shadow a real local copy and show empty conversations
   // offline. Only full conversations are cached locally.
-  const cacheable = chat.conversations.filter((c) => !c._meta);
+  const cacheable = chat.conversations.filter((c) => !c._meta && convPersistable(c));
   let localOk = true;
   try {
     localStorage.setItem("localm.conversations",
@@ -1015,57 +1076,183 @@ export const _convPushTimers = new Map();
 let _convPushWarned = false;   // one warning per breakage, re-armed on success
 const _convTooLargeWarned = new Set();   // conversation ids already toasted for a 413
 
-/** Debounced upsert of one conversation to the server store. */
+// The save of each conversation in flight, by id: the next save of the same
+// conversation waits for it, so it carries the revision that save returned.
+const _convPushChain = new Map();
+
+/** Debounced upsert of one conversation to the server store. The save names
+ *  the stored revision it replaces (`conv.rev`, null for a conversation not
+ *  stored yet); when the store holds a different one, the conversation was
+ *  changed or deleted elsewhere and reloadConversation takes the stored copy. */
 export function pushConversation(conv) {
-  if (!chat.persist || conv.deleted) return;
+  if (!chat.persist || !convPersistable(conv)) return;
+  // An index row's messages are loaded first, so the save does not store an empty chat.
+  if (conv._meta) {
+    saveIndexRowChange(conv);
+    return;
+  }
   // Brand-new conversations with nothing in them yet aren't worth a file.
   if (!conv.messages.length && conv.title === "New chat") return;
   conv.updated_at = Date.now();
   clearTimeout(_convPushTimers.get(conv.id));
-  _convPushTimers.set(conv.id, setTimeout(async () => {
+  _convPushTimers.set(conv.id, setTimeout(() => {
     _convPushTimers.delete(conv.id);
-    if (!chat.persist || conv.deleted) return;   // privacy mode, or the chat was deleted, while this waited
-    try {
-      const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
-        method: "PUT",
-        headers: authHeaders(),
-        body: JSON.stringify({ title: conv.title,
-                               updated_at: conv.updated_at,
-                               pinned: !!conv.pinned,
-                               folder: conv.folder || null,
-                               pinned_model: pinnedModelName(conv) || null,
-                               branches: conv.branches || [],
-                               messages: conv.messages }),
-      });
-      if (!r.ok) {
-        _remoteSaveOk = false;
-        if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
-          _convTooLargeWarned.add(conv.id);
-          toast(t(_localSaveOk ? "chat.conv.tooLarge" : "chat.conv.tooLargeTabOnly"), true);
-        }
-        if (!_convPushWarned) {
-          _convPushWarned = true;
-          console.error("conversation save failed (HTTP " + r.status + ") - " +
-            (_localSaveOk
-              ? "server-side persistence may be stale; the local copy is intact"
-              : "server-side persistence may be stale, and the local copy " +
-                "could not be saved either"));
-        }
-      } else {
-        _convPushWarned = false;
-        _remoteSaveOk = true;
-      }
-    } catch (e) {
+    const prev = _convPushChain.get(conv.id) || Promise.resolve();
+    const run = prev.then(() => _putConversation(conv));
+    _convPushChain.set(conv.id, run);
+    run.finally(() => {
+      if (_convPushChain.get(conv.id) === run) _convPushChain.delete(conv.id);
+    });
+  }, 600));
+}
+
+/** Saves a change of title, pin, folder or pinned model made on *conv*, an
+ *  index row whose messages are not loaded: loads the stored copy, puts the
+ *  change back on it and saves it. A toast says so when the copy cannot be
+ *  loaded. */
+function saveIndexRowChange(conv) {
+  const keep = { title: conv.title, pinned: !!conv.pinned, folder: conv.folder || null,
+                 pinnedModel: conv.pinnedModel };
+  hydrateConversation(conv).then((ok) => {
+    if (!ok || conv._meta) {
+      toast(t("chat.conv.saveFailed", { name: keep.title || "" }), true);
+      return;
+    }
+    conv.title = keep.title;
+    if (keep.pinned) conv.pinned = true;
+    else delete conv.pinned;
+    conv.folder = keep.folder;
+    if (keep.pinnedModel) conv.pinnedModel = keep.pinnedModel;
+    else delete conv.pinnedModel;
+    saveConversations(conv);
+    renderConvList();
+  });
+}
+
+/** The PUT of one conversation (see pushConversation). Never throws. */
+async function _putConversation(conv) {
+  if (!chat.persist || !convPersistable(conv)) return;   // privacy mode, or the chat was deleted, while this waited
+  // Nothing changed since the copy the store holds (a save queued before a reload).
+  if (conv._syncedAt != null && conv.updated_at === conv._syncedAt) return;
+  const sentAt = conv.updated_at;
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+      method: "PUT",
+      headers: authHeaders(),
+      body: JSON.stringify({ title: conv.title,
+                             updated_at: conv.updated_at,
+                             pinned: !!conv.pinned,
+                             folder: conv.folder || null,
+                             pinned_model: pinnedModelName(conv) || null,
+                             params: conv.params || {},
+                             base_rev: Number.isInteger(conv.rev) ? conv.rev : null,
+                             branches: conv.branches || [],
+                             messages: conv.messages }),
+    });
+    if (r.status === 409) {
+      while (chatBusy()) await new Promise((res) => setTimeout(res, 500));
+      await reloadConversation(conv);
+    } else if (!r.ok) {
       _remoteSaveOk = false;
+      if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
+        _convTooLargeWarned.add(conv.id);
+        toast(t(_localSaveOk ? "chat.conv.tooLarge" : "chat.conv.tooLargeTabOnly"), true);
+      }
       if (!_convPushWarned) {
         _convPushWarned = true;
-        console.error("conversation save: could not reach the server" +
-          (_localSaveOk ? " - the local copy is intact"
-                        : " - and the local copy could not be saved either") + ":", e);
+        console.error("conversation save failed (HTTP " + r.status + ") - " +
+          (_localSaveOk
+            ? "server-side persistence may be stale; the local copy is intact"
+            : "server-side persistence may be stale, and the local copy " +
+              "could not be saved either"));
+      }
+    } else {
+      _convPushWarned = false;
+      _remoteSaveOk = true;
+      const saved = await r.json().catch(() => null);
+      if (saved && Number.isInteger(saved.rev)) {
+        conv.rev = saved.rev;
+        conv._syncedAt = sentAt;
+        saveConversations();
       }
     }
+  } catch (e) {
+    _remoteSaveOk = false;
+    if (!_convPushWarned) {
+      _convPushWarned = true;
+      console.error("conversation save: could not reach the server" +
+        (_localSaveOk ? " - the local copy is intact"
+                      : " - and the local copy could not be saved either") + ":", e);
+    }
+  }
+  _updateUnsavedIndicator();
+}
+
+/** Copies the stored body *data* (GET /api/conversations/{id}) into *conv*:
+ *  messages, branches, title, pin, folder, pinned model, per-chat parameters
+ *  and the revision. A file saved without parameters leaves conv.params as it
+ *  is; one saved without a revision counts as revision 0. When *conv* is the
+ *  conversation the parameters drawer shows, the drawer shows the new values. */
+export function applyStoredConversation(conv, data) {
+  conv.messages = data.messages || [];
+  conv.branches = data.branches || [];
+  if (data.title != null) conv.title = data.title;
+  conv.pinned = !!data.pinned;
+  conv.folder = data.folder || null;
+  delete conv.pinnedModelId;
+  if (data.pinned_model) conv.pinnedModel = data.pinned_model;
+  else delete conv.pinnedModel;
+  if (data.params && typeof data.params === "object") {
+    if (Object.keys(data.params).length) conv.params = { ...data.params };
+    else delete conv.params;
+  }
+  conv.rev = Number.isInteger(data.rev) ? data.rev : 0;
+  if (Number.isFinite(data.updated_at)) conv.updated_at = data.updated_at;
+  conv._syncedAt = conv.updated_at;
+  migrateConversation(conv);
+  if (conv.id === _paramsOwner) showConvParams(conv.params);
+}
+
+/** Replaces *conv* with the copy the server store holds, after a save was
+ *  refused because the store holds a different revision: the stored copy is
+ *  shown, or the conversation is removed here when the store no longer has it,
+ *  and a toast says which. When the stored copy cannot be read, nothing changes
+ *  and a toast says the save failed. Never throws. */
+export async function reloadConversation(conv) {
+  clearTimeout(_convPushTimers.get(conv.id));
+  _convPushTimers.delete(conv.id);
+  let r;
+  try {
+    r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                    { headers: authHeaders() });
+  } catch {
+    r = null;
+  }
+  if (r && r.status === 404) {
+    conv.deleted = true;
+    const i = chat.conversations.indexOf(conv);
+    if (i !== -1) chat.conversations.splice(i, 1);
+    if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
+    chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
+    toast(t("chat.conv.deletedElsewhere", { name: conv.title || "" }), true);
+  } else if (r && r.ok) {
+    const data = await r.json().catch(() => null);
+    if (!data || typeof data !== "object") {
+      toast(t("chat.conv.reloadFailed"), true);
+      return;
+    }
+    applyStoredConversation(conv, data);
+    delete conv._meta;
+    toast(t("chat.conv.changedElsewhere", { name: conv.title || "" }), true);
+  } else {
+    _remoteSaveOk = false;
     _updateUnsavedIndicator();
-  }, 600));
+    toast(t("chat.conv.reloadFailed"), true);
+    return;
+  }
+  saveConversations();
+  renderConvList();
+  renderChat();
 }
 
 export function deleteConversationRemote(convId) {
@@ -1149,15 +1336,7 @@ export async function hydrateConversation(conv) {
                           { headers: authHeaders() });
     if (!r.ok) return false;
     const data = await r.json();
-    conv.messages = data.messages || [];
-    conv.branches = data.branches || [];
-    if (data.title != null) conv.title = data.title;
-    conv.pinned = !!data.pinned;
-    conv.folder = data.folder || null;
-    delete conv.pinnedModelId;
-    if (data.pinned_model) conv.pinnedModel = data.pinned_model;
-    else delete conv.pinnedModel;
-    migrateConversation(conv);
+    applyStoredConversation(conv, data);
     delete conv._meta;
     saveConversations();   // cache the now-full conversation locally
     return true;
@@ -1184,10 +1363,32 @@ export async function initServerConversations() {
     const unreadable = (data.unreadable || []).length;
     if (unreadable) toast(tn("chat.conv.unreadable", unreadable), true);
     // Remote rows are index-only placeholders until opened.
-    const byId = new Map((data.conversations || []).map(
-      (c) => [c.id, { ...c, _meta: true, messages: [] }]));
+    const rows = data.conversations || [];
+    const byId = new Map(rows.map((c) => [c.id, { ...c, _meta: true, messages: [] }]));
+    // Every stored conversation is listed: one missing from the list is not stored.
+    const complete = Number.isInteger(data.total) && data.total <= rows.length;
+    const unreadableIds = new Set(data.unreadable || []);
+    let removedElsewhere = 0;
     for (const local of chat.conversations) {
+      if (!convPersistable(local)) {
+        // Held in this tab only: shown, never uploaded.
+        if (chat.instanceState !== "mismatched") byId.set(local.id, local);
+        continue;
+      }
       const remote = byId.get(local.id);
+      if (!remote && unreadableIds.has(local.id)) {
+        byId.set(local.id, local);
+        continue;
+      }
+      if (!remote && Number.isInteger(local.rev)) {
+        // Stored before and no longer stored: it was deleted elsewhere.
+        if (complete && chat.instanceMatch) {
+          removedElsewhere++;
+        } else if (chat.instanceState !== "mismatched") {
+          byId.set(local.id, local);
+        }
+        continue;
+      }
       if (!remote) {
         // AUD-INSTANCEID residual 2: a cached conversation THIS backend's own
         // index does not know about is either (a) a real local-only chat not
@@ -1211,22 +1412,34 @@ export async function initServerConversations() {
         // offline boot, must still work) - but only a CONFIRMED match
         // (chat.instanceMatch) may write it into the backend's own store.
         if (chat.instanceState !== "mismatched") byId.set(local.id, local);
-        if (chat.instanceMatch) pushConversation(local);
+        if (chat.instanceMatch && complete) pushConversation(local);
         continue;
       }
-      // Keep the local FULL copy unless the server has a strictly newer version
-      // (>= keeps it on a tie, so an already-cached conversation is not demoted to
-      // an index-only placeholder that would need a needless re-fetch / break offline).
-      if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
+      if (!Number.isInteger(local.rev)) {
+        // Cached before revisions existed: the newer copy wins (a tie keeps the
+        // local full copy), and the local one takes the stored revision.
+        if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
+          local.rev = Number.isInteger(remote.rev) ? remote.rev : 0;
+          byId.set(local.id, local);
+          if ((local.updated_at || 0) > (remote.updated_at || 0)) pushConversation(local);
+          else local._syncedAt = local.updated_at;
+        }
+        continue;
+      }
+      // Same revision: the local full copy is kept, and saved when it holds a
+      // change made after it was last stored. Another revision: the stored copy wins.
+      if (local.rev === remote.rev) {
         byId.set(local.id, local);
-        pushConversation(local);
+        if (local.updated_at !== local._syncedAt) pushConversation(local);
       }
     }
+    if (removedElsewhere) toast(tn("chat.conv.removedElsewhere", removedElsewhere), true);
     chat.conversations = [...byId.values()]
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    if (!chat.activeId && chat.conversations.length) {
-      chat.activeId = chat.conversations[0].id;
+    if (!chat.conversations.some((c) => c.id === chat.activeId)) {
+      chat.activeId = chat.conversations[0]?.id || null;
     }
+    chat.queue = chat.queue.filter((q) => !q.convId || byId.has(q.convId));
     await hydrateConversation(currentConv());   // load the active conversation's body
     saveConversations();
     renderConvList();
@@ -1385,7 +1598,8 @@ export function applyModelRename(from, to) {
   for (const c of moved) c.pinnedModel = to;
   if (moved.length) {
     saveConversations();
-    for (const c of moved) pushConversation(c);
+    // A stored chat was renamed in the store; one never stored is saved.
+    for (const c of moved) if (!Number.isInteger(c.rev)) pushConversation(c);
   }
   const avatars = chat.modelAvatarOverrides;
   if (avatars && Object.prototype.hasOwnProperty.call(avatars, from)) {
@@ -1456,11 +1670,12 @@ function showConvParams(params) {
 }
 
 /** Stores the drawer's current per-conversation values on the conversation
- *  they are showing, locally. Call after a programmatic write into the fields. */
+ *  they are showing, in this browser and the server store. Call after a
+ *  programmatic write into the fields. */
 export function persistChatParams() {
   const conv = currentConv();
   if (!conv || conv.id !== _paramsOwner) return;
-  if (captureConvParams(conv)) saveConversations();
+  if (captureConvParams(conv)) saveConversations(conv);
 }
 
 /** Makes the drawer show the active conversation's own values: the outgoing
@@ -1472,10 +1687,75 @@ function syncChatParams(conv) {
   if (id === _paramsOwner) return;
   const prev = _paramsOwner
     ? chat.conversations.find((c) => c.id === _paramsOwner) : null;
-  if (prev && captureConvParams(prev)) saveConversations();
-  if (conv && _paramsOwner === null && !conv.params) captureConvParams(conv);
-  else showConvParams(conv ? conv.params : null);
+  if (prev && captureConvParams(prev)) saveConversations(prev);
+  if (conv && _paramsOwner === null && !conv.params) {
+    if (captureConvParams(conv)) saveConversations(conv);
+  } else {
+    showConvParams(conv ? conv.params : null);
+  }
   _paramsOwner = id;
+}
+
+/* ---- per-conversation composer ---- */
+
+// The id of the conversation the message box and the attachment lists belong
+// to; null when they belong to no conversation.
+let _composerOwner = null;
+// What each other conversation's message box held when it was left, by id:
+// { text, attachments, docs, clips }. Kept in this tab's memory only.
+const _drafts = new Map();
+
+/** The attachment list *key* ("attachments", "docs" or "clips") of the
+ *  message box of the conversation with id *owner*: the live list when the box
+ *  belongs to it (or *owner* is null), else the draft kept for it. */
+export function composerList(owner, key) {
+  if (owner === null || owner === _composerOwner) return chat[key];
+  let d = _drafts.get(owner);
+  if (!d) {
+    d = { text: "", attachments: [], docs: [], clips: [] };
+    _drafts.set(owner, d);
+  }
+  return d[key];
+}
+
+/** True when the message box or an attachment list holds anything. */
+function composerHasContent() {
+  const input = $("chat-input");
+  return !!((input && input.value.trim()) || chat.attachments.length ||
+    chat.docs.length || chat.clips.length);
+}
+
+/** Makes the message box and the attachment lists belong to *conv*: what the
+ *  outgoing conversation held is kept for it, the incoming one gets back what
+ *  it held (an empty box when nothing). What was typed with no conversation
+ *  open stays for the first conversation that appears. Drafts of conversations
+ *  no longer listed are dropped. */
+export function syncComposer(conv) {
+  const id = conv ? conv.id : null;
+  if (id === _composerOwner) return;
+  const input = $("chat-input");
+  if (_composerOwner !== null) {
+    if (composerHasContent()) {
+      _drafts.set(_composerOwner, { text: input ? input.value : "",
+        attachments: chat.attachments, docs: chat.docs, clips: chat.clips });
+    } else {
+      _drafts.delete(_composerOwner);
+    }
+    const d = id !== null ? _drafts.get(id) : null;
+    _drafts.delete(id);
+    if (input) {
+      input.value = d ? d.text : "";
+      autoGrow(input);
+    }
+    chat.attachments = d ? d.attachments : [];
+    chat.docs = d ? d.docs : [];
+    chat.clips = d ? d.clips : [];
+    renderAttachChips();
+  }
+  _composerOwner = id;
+  for (const key of [..._drafts.keys()]) {
+    if (!chat.conversations.some((c) => c.id === key)) _drafts.delete(key);
+  }
 }
 
 for (const evt of ["input", "change"]) {
@@ -1488,7 +1768,7 @@ for (const evt of ["input", "change"]) {
  *  (no messages, default title, no folder, pin or model pin) is reused and
  *  moved to the top instead of adding another. */
 export function newConversation() {
-  const idle = chat.conversations.find((c) => c.title === "New chat" &&
+  const idle = chat.conversations.find((c) => c.title === "New chat" && !c.ephemeral &&
     !(c.messages || []).length && !(c.branches || []).length && !c.folder && !c.pinned && !c.pinnedModel && !c.params);
   if (idle) {
     chat.conversations.splice(chat.conversations.indexOf(idle), 1);
@@ -1713,6 +1993,10 @@ export function searchSnippet(conv, term) {
 
 export function buildConvItem(conv, snippet) {
   const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
+  if (conv.ephemeral) {
+    item.classList.add("conv-ephemeral");
+    item.title = t("chat.conv.ephemeral.title");
+  }
   const title = el("span", "title");
   title.appendChild(document.createTextNode(
     conv.title === "New chat" ? t("chat.conv.newTitle") : conv.title));
@@ -1962,6 +2246,13 @@ const MEMORY_DEGRADE_LABELS = {
   query_embed_failed: "chat.memoryChip.queryEmbedFailed",
 };
 
+/** The readable name of capability word *cap* from a routing note: its
+ *  catalog entry, else the word with underscores as spaces. */
+export function capabilityLabel(cap) {
+  const word = String(cap ?? "");
+  return tOr("chat.routed.cap." + word, word.replace(/_/g, " "));
+}
+
 /** A chip on an assistant turn that was answered by a different model than
  *  the one selected, because the selected one lacked something the request
  *  needed. *routed* is { from, gaps: [capability, ...], placement? }, or
@@ -1975,7 +2266,7 @@ export function buildRoutedChip(routed) {
     : el("span", "routed-chip");
   chip.appendChild(iconEl("models", "btn-ic"));
   if (routed.suggest) {
-    const needs = (routed.gaps || []).map((g) => t("chat.routed.cap." + g)).join(", ") || "?";
+    const needs = (routed.gaps || []).map(capabilityLabel).join(", ") || "?";
     chip.appendChild(document.createTextNode(t("chat.routed.suggestChip", { model: routed.suggest })));
     chip.title = t("chat.routed.suggestTitle", {
       from: routed.from || "?", needs, model: routed.suggest });
@@ -1995,7 +2286,7 @@ export function buildRoutedChip(routed) {
     chip.title = routed.fallback;
     return chip;
   }
-  const gaps = (routed.gaps || []).map((g) => t("chat.routed.cap." + g));
+  const gaps = (routed.gaps || []).map(capabilityLabel);
   chip.appendChild(document.createTextNode(t("chat.routed.chip", { from: routed.from || "?" })));
   chip.title = t("chat.routed.title", {
     from: routed.from || "?", needs: gaps.join(", ") || "?" });
@@ -2131,6 +2422,58 @@ function speakToggle(btn, text) {
   setSpeakButtonActive(btn, started);
 }
 
+/** The web sources of the tool events of one turn, for the line under its
+ *  reply: one { id, url, title } per distinct address, in the order found. */
+export function turnSources(events) {
+  const out = [];
+  const seen = new Set();
+  for (const ev of events) {
+    for (const s of Array.isArray(ev.sources) ? ev.sources : []) {
+      const url = (s && (s.final_url || s.url)) || "";
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      out.push({ id: s.id || "", url, title: (s.title || "").trim() || url });
+    }
+    const page = ev.tool === "fetch" && ev.status === "done" ? ev.page : null;
+    const url = (page && page.url) || "";
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      out.push({ id: "", url, title: url });
+    }
+  }
+  return out;
+}
+
+/** The "Sources" line under a reply: each source of *sources* (from
+ *  turnSources) as its id and a link. */
+export function buildReplySources(sources) {
+  const line = el("div", "reply-sources");
+  line.appendChild(el("span", "tool-section", t("chat.tool.sourcesTitle")));
+  for (const s of sources) {
+    const item = el("span", "reply-source");
+    if (s.id) item.appendChild(el("span", "tool-sid", s.id));
+    item.appendChild(toolSourceLink(s.url, s.title));
+    line.appendChild(item);
+  }
+  return line;
+}
+
+/** The ‹ k/N › control that switches between the sibling timelines at a
+ *  fork point. *variant* is { k, n, prev, next }. */
+export function buildVariantNav(variant) {
+  const nav = el("span", "variant");
+  const prev = el("button", "action", "‹");
+  prev.title = t("chat.variant.previous");
+  prev.onclick = variant.prev;
+  const next = el("button", "action", "›");
+  next.title = t("chat.variant.next");
+  next.onclick = variant.next;
+  nav.appendChild(prev);
+  nav.appendChild(el("span", "k", `${variant.k}/${variant.n}`));
+  nav.appendChild(next);
+  return nav;
+}
+
 export function addMessageRow(container, role, text, opts = {}) {
   // A note row (opts.cls set: injected web/kb/doc results, a queued-task
   // marker) is not something the human typed, so it must not carry the role
@@ -2223,6 +2566,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     fetchImageURL(url).then((u) => (player.src = u)).catch(() => player.remove());
     body.appendChild(player);
   }
+  if (opts.sources && opts.sources.length) body.appendChild(buildReplySources(opts.sources));
   row.appendChild(body);
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
@@ -2240,31 +2584,10 @@ export function addMessageRow(container, role, text, opts = {}) {
       else setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(plain);
-      copy.textContent = t("chat.copied");
-      setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
-    } catch {
-      // Matches the image branch above: a real failure (permission denied,
-      // insecure context) must never be reported as "copied" - that is
-      // claiming a step happened that did not.
-      toast(t("chat.copyBlocked"), true);
-    }
+    await copyTextWithFeedback(copy, plain, t("chat.copy"), t("chat.copied"));
   };
   meta.appendChild(copy);
-  if (opts.variant) {
-    const nav = el("span", "variant");
-    const prev = el("button", "action", "‹");
-    prev.title = t("chat.variant.previous");
-    prev.onclick = opts.variant.prev;
-    const next = el("button", "action", "›");
-    next.title = t("chat.variant.next");
-    next.onclick = opts.variant.next;
-    nav.appendChild(prev);
-    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
-    nav.appendChild(next);
-    meta.appendChild(nav);
-  }
+  if (opts.variant) meta.appendChild(buildVariantNav(opts.variant));
   for (const [label, fn, icon] of opts.actions || []) {
     const btn = el("button", "action");
     if (icon) { btn.appendChild(iconEl(icon, "ic")); btn.title = label; }
@@ -2437,29 +2760,10 @@ export function addToolEventRow(container, ev, opts = {}) {
 function appendToolEventMeta(row, ev, opts) {
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
-  copy.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(ev.tool === "note" ? toolEventNotice(ev) : msgText(ev));
-      copy.textContent = t("chat.copied");
-      setTimeout(() => (copy.textContent = t("chat.copy")), 1200);
-    } catch {
-      toast(t("chat.copyBlocked"), true);
-    }
-  };
+  copy.onclick = () => copyTextWithFeedback(copy,
+    ev.tool === "note" ? toolEventNotice(ev) : msgText(ev), t("chat.copy"), t("chat.copied"));
   meta.appendChild(copy);
-  if (opts.variant) {
-    const nav = el("span", "variant");
-    const prev = el("button", "action", "‹");
-    prev.title = t("chat.variant.previous");
-    prev.onclick = opts.variant.prev;
-    const next = el("button", "action", "›");
-    next.title = t("chat.variant.next");
-    next.onclick = opts.variant.next;
-    nav.appendChild(prev);
-    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
-    nav.appendChild(next);
-    meta.appendChild(nav);
-  }
+  if (opts.variant) meta.appendChild(buildVariantNav(opts.variant));
   row.appendChild(meta);
 }
 
@@ -2605,6 +2909,7 @@ export function renderChat() {
   pruneClipUrls(conv);
   syncPinModelToggle(conv);
   syncChatParams(conv);
+  syncComposer(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
   // _hydrateFailed so we never spin).
@@ -2616,11 +2921,13 @@ export function renderChat() {
       else conv._hydrateFailed = true;
     });
   }
-  if (!conv || conv.messages.length === 0) {
+  const pending = conv && !chatBusy() ? pendingBranch(conv) : null;
+  if (!conv || (conv.messages.length === 0 && !pending)) {
     box.appendChild(buildEmptyHint());
     updateUsageDisplay(null);
     return;
   }
+  const sourcesAt = replySourcesByIndex(conv.messages);
   // NEW-1 model-switch-indication: track the model of the previous assistant turn
   // so a small divider marks where the active model changed mid-conversation.
   let lastAssistantModel = null;
@@ -2684,6 +2991,7 @@ export function renderChat() {
       model: m.model,
       memory: m.memory,           // F11: "used N memories" chip (assistant turns)
       routed: m.routed,
+      sources: sourcesAt.get(i),
       cls: tag ? "web-note" : "",
       label: noteLabel(m) || undefined,
       // A settled turn from history: let renderMarkdown surface a "(no reply
@@ -2691,6 +2999,7 @@ export function renderChat() {
       final: true,
     });
   });
+  if (pending) box.appendChild(buildPendingBranchRow(pending));
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail
   // runs on every re-render (incl mid-stream web/finalize), so an unconditional
   // scroll here used to yank a reader back down while a reply was still streaming.
@@ -2702,6 +3011,58 @@ export function renderChat() {
   const lastMsg = conv.messages[conv.messages.length - 1];
   updateUsageDisplay(lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null);
   if (typeof renderQueuedIndicator === "function") renderQueuedIndicator();
+}
+
+/** The sources line of each reply, by message index: the last assistant
+ *  reply of a turn (the messages after a typed user message) gets the sources
+ *  of the turn's tool events. */
+export function replySourcesByIndex(messages) {
+  const out = new Map();
+  let events = [];
+  let lastReply = -1;
+  const close = () => {
+    if (lastReply !== -1 && events.length) {
+      const sources = turnSources(events);
+      if (sources.length) out.set(lastReply, sources);
+    }
+    events = [];
+    lastReply = -1;
+  };
+  messages.forEach((m, i) => {
+    if (isToolEvent(m)) events.push(m);
+    else if (m.role === "user" && !m.tag) close();
+    else if (m.role === "assistant" && !m.tag) lastReply = i;
+  });
+  close();
+  return out;
+}
+
+/** The fork at the end of the live timeline of *conv* (an edit that parked
+ *  the old messages and has not been sent yet) as { k, n, prev, next } for
+ *  buildVariantNav, or null when there is none. */
+export function pendingBranch(conv) {
+  const n = conv.messages.length;
+  const pid = n ? conv.messages[n - 1].id : "root";
+  if (!pid) return null;
+  const rec = (conv.branches || []).find((b) => b.parent === pid);
+  if (!rec || rec.tails.length < 2) return null;
+  return {
+    k: rec.current + 1,
+    n: rec.tails.length,
+    prev: () => switchBranch(conv, n, -1),
+    next: () => switchBranch(conv, n, +1),
+  };
+}
+
+/** The row shown where an edited message will go until it is sent: it says
+ *  the earlier version is kept and carries the arrows to switch back to it. */
+export function buildPendingBranchRow(variant) {
+  const row = el("div", "msg-row tool-event tool-notice-row branch-pending");
+  row.appendChild(el("div", "tool-notice", t("chat.branch.pending")));
+  const meta = el("div", "msg-meta");
+  meta.appendChild(buildVariantNav(variant));
+  row.appendChild(meta);
+  return row;
 }
 
 /* ---- message branching ----
@@ -2809,14 +3170,46 @@ export function editMessage(conv, index) {
   // state. Bail while a reply streams, like switchBranch / regenerate do.
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   const m = conv.messages[index];
-  $("chat-input").value = msgText(m);
-  autoGrow($("chat-input"));
-  // Fork instead of destroy: the old timeline (this message and everything
-  // after it) stays reachable via ‹ › once the edited version is sent.
-  forkAt(conv, index);
-  saveConversations(conv);
-  renderChat();
-  $("chat-input").focus();
+  confirmReplaceComposer(m, () => {
+    if (chatBusy() || conv.messages[index] !== m) return;
+    fillComposerFrom(m);
+    // Fork instead of destroy: the old timeline (this message and everything
+    // after it) stays reachable via ‹ ›, also before the edit is sent.
+    forkAt(conv, index);
+    saveConversations(conv);
+    renderChat();
+    $("chat-input").focus();
+  });
+}
+
+/** Puts the text, pictures and audio clips of message *m* into the message box
+ *  and the attachment lists, replacing what they held. */
+export function fillComposerFrom(m) {
+  const input = $("chat-input");
+  input.value = msgText(m);
+  autoGrow(input);
+  chat.attachments = msgImages(m).filter((url) => url.startsWith("data:"))
+    .map((dataUri) => ({ name: imageFilename(dataUri), dataUri }));
+  chat.clips = msgAudioClips(m).map((c) => ({
+    name: c.name, data: c.data, format: c.format,
+    size: Math.floor(c.data.length * 3 / 4), seconds: c.seconds }));
+  chat.docs = [];
+  renderAttachChips();
+}
+
+/** Runs *apply* when the message box and the attachment lists hold nothing
+ *  that *m* would not put back; otherwise asks first whether to replace what
+ *  they hold, and runs *apply* only on yes. */
+export function confirmReplaceComposer(m, apply) {
+  const input = $("chat-input");
+  const typed = input ? input.value : "";
+  const same = typed.trim() === "" || typed === msgText(m);
+  if (same && !chat.attachments.length && !chat.docs.length && !chat.clips.length) {
+    apply();
+    return;
+  }
+  confirmDanger(t("chat.edit.replaceDraft.title"), t("chat.edit.replaceDraft.body"),
+    t("chat.edit.replaceDraft.confirm"), apply);
 }
 
 export function regenerate(conv) {
@@ -2852,10 +3245,11 @@ export function branchesLostByRevert(conv, index) {
 export function revertTo(conv, index) {
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
   if (index < 0 || index >= conv.messages.length) return;
-  const text = msgText(conv.messages[index]);
+  const m = conv.messages[index];
   const lost = branchesLostByRevert(conv, index);
 
   const apply = () => {
+    if (chatBusy() || conv.messages[index] !== m) return;
     const orig = conv.messages;
     // Keep only forks that diverge STRICTLY before the revert point. A fork at
     // or after it (parent inside the removed region, or the live tail being
@@ -2869,21 +3263,22 @@ export function revertTo(conv, index) {
     });
     conv.messages = orig.slice(0, index);
     pruneBranches(conv);
-    $("chat-input").value = text;
-    autoGrow($("chat-input"));
+    fillComposerFrom(m);
     saveConversations(conv);
     renderChat();
     $("chat-input").focus();
   };
 
-  if (lost > 0) {
-    confirmDanger(
-      t("chat.revert.title"),
-      tn("chat.revert.body", lost),
-      t("chat.revert.confirm"), apply);
-  } else {
-    apply();
-  }
+  confirmReplaceComposer(m, () => {
+    if (lost > 0) {
+      confirmDanger(
+        t("chat.revert.title"),
+        tn("chat.revert.body", lost),
+        t("chat.revert.confirm"), apply);
+    } else {
+      apply();
+    }
+  });
 }
 
 export function chatParams() {
@@ -3076,6 +3471,7 @@ export function wavSeconds(blob) {
  *  server's limit is removed again. Other formats show no length and the server
  *  judges them. */
 export async function attachAudio(file) {
+  const owner = _composerOwner;
   if (file.size > AUDIO_MAX_BYTES) {
     throw new Error(t("chat.audio.tooLarge", {
       name: file.name, size: (file.size / 1e6).toFixed(1),
@@ -3094,12 +3490,13 @@ export async function attachAudio(file) {
   const data = uri.split(",", 2)[1] || "";
   if (!data) throw new Error(t("chat.audio.readError", { name: file.name }));
   const clip = { name: file.name, data, format, size: file.size, seconds: 0 };
-  chat.clips.push(clip);
+  composerList(owner, "clips").push(clip);
   renderAttachChips();
   const seconds = await wavSeconds(file);
-  if (chat.clips.indexOf(clip) === -1) return;
+  const clips = composerList(owner, "clips");
+  if (clips.indexOf(clip) === -1) return;
   if (seconds > AUDIO_MAX_SECONDS) {
-    chat.clips.splice(chat.clips.indexOf(clip), 1);
+    clips.splice(clips.indexOf(clip), 1);
     renderAttachChips();
     throw new Error(t("chat.audio.tooLong", {
       name: file.name, minutes: String(Math.ceil(seconds / 60)),
@@ -3111,6 +3508,7 @@ export async function attachAudio(file) {
 /** Document attachment → text via /api/chat/extract. The file is converted
  *  in memory on the server and never written to disk (privacy-clean). */
 export async function attachDocument(file) {
+  const owner = _composerOwner;
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
@@ -3125,8 +3523,8 @@ export async function attachDocument(file) {
   // below is the clean statusText, not a JSON parse error.
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
-  chat.docs.push({ name: data.filename, text: data.text,
-                   chars: data.chars, truncated: data.truncated });
+  composerList(owner, "docs").push({ name: data.filename, text: data.text,
+                                     chars: data.chars, truncated: data.truncated });
   renderAttachChips();
 }
 
@@ -3136,9 +3534,10 @@ export async function attachDocument(file) {
 export function addAttachedFiles(files) {
   for (const file of files) {
     if (file.type.startsWith("image/")) {
+      const owner = _composerOwner;
       const reader = new FileReader();
       reader.onload = () => {
-        chat.attachments.push({ name: file.name, dataUri: reader.result });
+        composerList(owner, "attachments").push({ name: file.name, dataUri: reader.result });
         renderAttachChips();
       };
       reader.readAsDataURL(file);

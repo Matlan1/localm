@@ -341,8 +341,9 @@ const MODE_SWITCH_FETCH = `
   window.chatState = chat;
 `;
 
-test("a Settings switch out of privacy mode while the page is open saves the " +
-     "conversation on screen and drops the privacy hint", async () => {
+test("a Settings switch out of privacy mode while the page is open keeps the " +
+     "conversation on screen in this tab only, unsaved, and drops the privacy hint",
+     async () => {
   const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-x" }) });
   runScript(window, `window.__mode = "privacy";` + MODE_SWITCH_FETCH + `refreshCtxLimit();`);
   await drain();
@@ -368,11 +369,28 @@ test("a Settings switch out of privacy mode while the page is open saves the " +
   assert.equal(window.chatState.privacy, false);
   assert.equal(window.document.getElementById("privacy-hint"), null,
     "the privacy hint must go once the server reports a non-privacy mode");
+  assert.ok(window.chatState.conversations.some((c) => c.id === "typed-in-privacy"),
+    "the conversation typed under privacy mode stays on screen");
   const stored = window.localStorage.getItem("localm.conversations") || "";
-  assert.ok(stored.includes("keep me"),
-    "the conversation on screen must be saved once the mode leaves privacy");
-  assert.ok(await waitFor(() => window.__puts.some((u) => u.endsWith("/typed-in-privacy"))),
-    "the conversation must reach the server store once it reports enabled");
+  assert.ok(!stored.includes("keep me"),
+    "a conversation held under privacy mode is not written to this browser " +
+    "when the mode leaves privacy");
+  assert.ok(window.document.querySelector(".conv-item.conv-ephemeral"),
+    "its sidebar row says it is kept in this tab only");
+
+  // A conversation started after the switch is saved, which also proves this
+  // window observes the store's PUTs.
+  runScript(window, `
+    chat.conversations.unshift({ id: "after-switch", title: "After", updated_at: 2000,
+      pinned: false, folder: null, branches: [],
+      messages: [{ role: "user", content: "save me" }] });
+    saveConversations(chat.conversations[0]);
+  `);
+  assert.ok(await waitFor(() => window.__puts.some((u) => u.endsWith("/after-switch"))),
+    "positive control: a conversation started after the switch reaches the store");
+  assert.ok(!window.__puts.some((u) => u.endsWith("/typed-in-privacy")),
+    "the conversation held under privacy mode never reaches the server store");
+  assert.ok((window.localStorage.getItem("localm.conversations") || "").includes("save me"));
 });
 
 test("a Settings switch into privacy mode while the page is open stops pushing " +
