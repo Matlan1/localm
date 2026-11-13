@@ -124,16 +124,6 @@
                 }
             }
         ],
-        "./localm/audit.py": [
-            {
-                "code": "reportPossiblyUnboundVariable",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./localm/auth.py": [
             {
                 "code": "reportArgumentType",
@@ -2404,14 +2394,6 @@
                 "range": {
                     "startColumn": 35,
                     "endColumn": 48,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 28,
-                    "endColumn": 34,
                     "lineCount": 1
                 }
             },

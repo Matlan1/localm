@@ -50,6 +50,25 @@ def mailto_url(summary: str, body: str) -> str:
 #  automatic - a crash report is only saved to a file.                         #
 # --------------------------------------------------------------------------- #
 
+def refuse_when_network_off(what: str, *, exempt: bool, update: bool = False) -> None:
+    """Raise LocalmError (stage ``network_off``) when ``net_mode`` is ``off``
+    and *exempt* is False; *what* says what was not done. An unreadable config
+    resolves to ``off`` (``config.network_mode``), so it refuses too. Every
+    request to the localm proxy passes here before a connection is opened.
+    The error's ``reason`` is the remedy and its ``hint`` the whole refusal;
+    *update* names the update channel's own switch in both."""
+    if exempt:
+        return
+    from localm import config
+    if config.network_mode() == "off":
+        raise LocalmError(
+            config.net_off_lead(what),
+            reason=config.NET_OFF_UPDATE_REMEDY if update else config.NET_OFF_REMEDY,
+            stage="network_off",
+            hint=(config.net_off_update_refusal(what) if update
+                  else config.net_off_refusal(what)))
+
+
 def upload_config() -> tuple:
     """(url, token) for the upload channel from config, or (None, None) when not
     configured. The token is an optional shared secret. Never raises."""
@@ -169,7 +188,8 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
 
     Only the report text (plus an optional shared secret) is sent; the GitHub
     token lives at the proxy. Raises :class:`LocalmError` on any failure - no
-    endpoint, a network error, a non-2xx response, or a reply that says the
+    endpoint, ``net_mode`` off (stage ``network_off``, raised before *opener*
+    is called), a network error, a non-2xx response, or a reply that says the
     report was not filed (``"filed": false``, stage ``not_filed``) - so a failed
     send is NEVER
     reported as success (we do not hide problems). *opener* is injectable for
@@ -206,6 +226,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                           stage="no_endpoint",
                           hint="No bug-report server is configured in this build, so "
                                "the report cannot be filed automatically.")
+    refuse_when_network_off("the report was not sent", exempt=False)
     payload = _json.dumps(
         {"title": (title or "localm bug report")[:200], "body": body or ""}
     ).encode("utf-8")

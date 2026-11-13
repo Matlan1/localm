@@ -147,7 +147,7 @@ def test_unload_request_answered_with_a_hostile_body_is_false(doc, monkeypatch):
 @HOSTILE
 def test_proxy_request_with_a_hostile_reply_is_a_localm_error(doc):
     with pytest.raises(LocalmError, match="non-JSON"):
-        _proxy.request("http://proxy.invalid", "/x",
+        _proxy.request("http://proxy.invalid", "/x", net_exempt=True,
                        opener=lambda *a: (200, doc.encode()))
 
 
