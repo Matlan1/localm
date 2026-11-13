@@ -234,8 +234,9 @@ def _require_writable() -> None:
 @click.option("--kind", type=click.Choice(["semantic", "episodic"]),
               default="semantic", show_default=True,
               help="semantic = a standing fact; episodic = something that happened.")
-@click.option("--importance", default=0.8, show_default=True, type=float,
-              help="Weighting used when recall ranks and prune evicts.")
+@click.option("--importance", default=0.8, show_default=True,
+              type=click.FloatRange(0.0, 1.0),
+              help="Weighting used when recall ranks and prune evicts (0 to 1).")
 def memory_add(text: str, kind: str, importance: float) -> None:
     """Save a fact yourself, without going through a chat turn.
 
@@ -245,15 +246,16 @@ def memory_add(text: str, kind: str, importance: float) -> None:
     _require_writable()
     if not text.strip():
         _fail("Refusing to save an empty memory.")
-    from localm.memory.store import N_MAX, MemoryRecord
-    store = _store()
-    # Refuse past the cap rather than accept a fact the next prune would silently
-    # evict - the same guard, and the same wording, as the append route.
-    if len(store.all()) >= N_MAX:
+    from localm.memory.store import N_MAX
+    from localm.plugins.builtin.memory.plug import add_user_fact
+    status, rec = add_user_fact(_store(), text.strip(), _embed_fn(), kind=kind,
+                                importance=importance)
+    if status == "full":
         _fail(f"Memory is at its {N_MAX}-record cap; forget a fact before "
               "adding another.")
-    rec = store.add(MemoryRecord(text=text.strip(), kind=kind, source="user",
-                                 importance=importance), embed_fn=_embed_fn())
+    if status == "exists":
+        _safe_echo(f"Already in memory as {rec.id}: {_short(rec.text)}")
+        return
     click.echo(f"Remembered {rec.id}: {_short(rec.text)}")
 
 
@@ -276,8 +278,9 @@ def memory_forget(mem_id: str, yes: bool) -> None:
         click.confirm("This deletes it outright and cannot be undone. Continue?",
                       abort=True)
     if not store.delete(mem_id):
-        # get() found it a moment ago, so a False here is a real failure to write,
-        # not a missing id - do not report it as a successful forget.
+        if _store().get(mem_id) is None:
+            click.echo(f"{mem_id} was already deleted by another localm process.")
+            return
         _fail(f"Could not forget {mem_id}: the store refused the delete. "
               "Nothing was changed.")
     click.echo(f"Deleted {mem_id}.")
@@ -299,10 +302,12 @@ def memory_restore(mem_id: str) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation.")
 def memory_clear(yes: bool) -> None:
     """Erase everything localm remembers about you. NOT recoverable."""
+    from localm.plugins.builtin.memory.plug import _legacy_memory_file
     store = _store()
     live = len(store.all())
     gone = len(store.forgotten())
-    if not store.remnants():
+    legacy = _legacy_memory_file()
+    if not store.remnants() and not legacy.exists():
         click.echo("Nothing to clear.")
         return
     if not yes:
@@ -313,11 +318,16 @@ def memory_clear(yes: bool) -> None:
     # readable in the sidecar, so reporting the memory cleared without it would
     # be untrue.
     store.clear(include_forgotten=True)
+    try:
+        legacy.unlink(missing_ok=True)
+    except OSError as e:
+        _fail(f"Erase did not fully complete: {legacy.name} could not be "
+              f"deleted ({e}). This is NOT reported as cleared.")
     # Read back rather than trusting clear(). This command has no undo, so
     # "erased" is only claimed once the read-back confirms it; a partial erase
     # reported as success would leave remembered text on disk.
     after = _store()
-    remnants = after.remnants()
+    remnants = after.remnants() + ([legacy.name] if legacy.exists() else [])
     if remnants:
         _fail(f"Erase did not fully complete: {', '.join(remnants)} still on "
               "disk. This is NOT reported as cleared.")

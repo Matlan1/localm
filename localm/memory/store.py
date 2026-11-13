@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from pathlib import Path
@@ -111,6 +112,9 @@ FORMAT_VERSION = 1
 
 # ---- bounds (DoS / poisoning / bloat) ------------------------------------- #
 MAX_TEXT_LEN = 500          # per-record text cap (truncate on store)
+
+# A byte that was not UTF-8, as decoded with surrogateescape.
+_UNDECODED_BYTE = re.compile("[\udc80-\udcff]")
 N_MAX = 256                 # records per namespace; prune evicts the weakest
 K_CAP = 32                  # hard ceiling on a recall k
 
@@ -519,10 +523,16 @@ class MemoryStore:
             # split_jsonl, not splitlines(): splitlines() also breaks on
             # U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=False) writes
             # RAW, so a memory whose text contains one is torn in half and
-            # silently dropped on load.
-            for line in split_jsonl(self._file.read_text(encoding="utf-8")):
+            # silently dropped on load. Bytes that are not UTF-8 are read with
+            # surrogateescape, their line is carried, and _save writes it back
+            # byte for byte.
+            raw = self._file.read_bytes().decode("utf-8", errors="surrogateescape")
+            for line in split_jsonl(raw):
                 line = line.strip()
                 if not line:
+                    continue
+                if _UNDECODED_BYTE.search(line):
+                    self._carried.append(line)
                     continue
                 try:
                     data = json.loads(line)
@@ -579,7 +589,8 @@ class MemoryStore:
                          for r in self._records)
         if self._carried:
             body = "\n".join(part for part in (body, *self._carried) if part)
-        self._atomic_write(self._file, body + ("\n" if body else ""))
+        _storekit_atomic_write(self._file, body + ("\n" if body else ""),
+                               errors="surrogateescape")
         vf = self._vec_file()
         if self._vectors:
             self._atomic_write(
@@ -668,6 +679,11 @@ class MemoryStore:
 
     def update(self, mem_id: str, *, embed_fn: Optional[EmbedFn] = None,
                save: bool = True, **fields) -> Optional[MemoryRecord]:
+        """Apply *fields* to the record *mem_id* and return it, or None when
+        there is no such record. Raises ValueError when ``text`` is given and is
+        empty after stripping; nothing is changed then."""
+        if isinstance(fields.get("text"), str) and not fields["text"].strip():
+            raise ValueError("a memory cannot be empty")
         with self._wlock('an update'):
             if save:
                 self._load()
@@ -936,9 +952,13 @@ class MemoryStore:
             if diagnostics is not None:
                 diagnostics["degrade_reason"] = "query_embed_failed"
             return None
-        if not qvec or len(qvec) != stored_dim:
+        if not qvec:
             if diagnostics is not None:
                 diagnostics["degrade_reason"] = "query_embed_failed"
+            return None
+        if len(qvec) != stored_dim:
+            if diagnostics is not None:
+                diagnostics["degrade_reason"] = "dim_mismatch"
             return None
         out = [
             _cosine(qvec, self._vectors[r.id]) if r.id in self._vectors else 0.0
