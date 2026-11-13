@@ -198,6 +198,10 @@ def tool_browser_fill(cwd: Path, selector: str, value: str,
     return ToolResult.success("Filled " + selector, summary="filled " + selector)
 
 
+# The largest screenshot shown to the model as an image.
+_MAX_SCREENSHOT_IMAGE_BYTES = 4 * 1024 * 1024
+
+
 def tool_browser_screenshot(cwd: Path, output_path: str = "screenshot.png",
                             full_page: bool = False,
                             _session=None) -> ToolResult:
@@ -218,8 +222,16 @@ def tool_browser_screenshot(cwd: Path, output_path: str = "screenshot.png",
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(data)
     rel = out.relative_to(cwd) if out.is_relative_to(cwd) else out
-    return ToolResult.success("Saved screenshot to " + str(rel),
-                              summary="screenshot " + str(rel))
+    result = ToolResult.success("Saved screenshot to " + str(rel),
+                                summary="screenshot " + str(rel))
+    if len(data) <= _MAX_SCREENSHOT_IMAGE_BYTES:
+        import base64
+        result.images = ["data:image/png;base64," + base64.b64encode(data).decode("ascii")]
+        result.untrusted_output = True
+    else:
+        result.output += (f" ({len(data)} bytes, too large to show to the model; "
+                          "take a smaller screenshot to have it looked at)")
+    return result
 
 
 def tool_browser_console(cwd: Path, _session=None) -> ToolResult:

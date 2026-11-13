@@ -580,7 +580,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "browser_screenshot": ToolDef(
         name="browser_screenshot",
         fn=tool_browser_screenshot,
-        description="Save a PNG screenshot of the open page into the project.",
+        description=("Save a PNG screenshot of the open page into the project. A model "
+                     "that can read images is shown the screenshot with the result."),
         params={
             "output_path": {"type": "string", "description": "Where to save it (default screenshot.png).", "required": False},
             "full_page":   {"type": "bool",   "description": "Capture the whole scrollable page.", "required": False},

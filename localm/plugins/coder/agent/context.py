@@ -1972,15 +1972,29 @@ ws     ::= [ \t\n\r]*
     def _build_messages(self) -> list[dict]:
         """Build the full message list with system prompt prepended.
 
+        Images queued by the last tool results (``_pending_images``) are added
+        to the request's last user message, as OpenAI ``image_url`` parts, for
+        this one request only; the stored history keeps the text.
+
         Called once per turn, right before the LLM call. The system prompt is
         used as it is: file changes the tools made reach it at the next
         compaction (see ``_compact_to``), so every turn of a session shares the
         same prompt prefix.
         """
-        return [
+        messages = [
             {"role": "system", "content": self._system_prompt},
             *self._messages,
         ]
+        images = getattr(self, "_pending_images", None)
+        if images:
+            self._pending_images = []
+            last = messages[-1]
+            if last.get("role") == "user" and isinstance(last.get("content"), str):
+                messages[-1] = {**last, "content": [
+                    {"type": "text", "text": last["content"]},
+                    *({"type": "image_url", "image_url": {"url": u}} for u in images),
+                ]}
+        return messages
 
     def _add_user(self, content: str) -> None:
         self._messages.append({"role": "user", "content": content})

@@ -40,6 +40,9 @@ class ToolResult:
     # just changed (the changed-files/undo tracker) read this one field, fed
     # by the same matching pass.
     changes: list[tuple[str, bytes, str]] | None = None
+    # Images (``data:`` URLs) shown to the model with this result when its
+    # model can read images; the agent says so in the result when it cannot.
+    images: list[str] | None = None
 
     @classmethod
     def success(cls, output: str, summary: str = "",

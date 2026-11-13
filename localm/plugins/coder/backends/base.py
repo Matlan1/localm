@@ -32,6 +32,11 @@ class BaseLLMBackend(ABC):
     # server.
     supports_native_tools: bool = True
 
+    def reads_images(self) -> bool:
+        """Whether this backend's model accepts image parts in a message.
+        False unless a backend knows otherwise."""
+        return False
+
     @abstractmethod
     def chat(self, messages: list[dict], **kwargs) -> str:
         """Send messages, return the complete response string."""

@@ -1869,6 +1869,7 @@ class _LoopMixin:
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         from ..provenance import build_result_block, is_untrusted_tool, taints_session
+        result = self._take_result_images(call, result)
         if taints_session(call.name, TOOL_REGISTRY.get(call.name), result):
             agent = self
             while agent is not None:
@@ -1878,6 +1879,26 @@ class _LoopMixin:
             return result.to_xml(call.name)
         untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name), result)
         return build_result_block(call.name, result, untrusted)
+
+    def _take_result_images(self, call, result):
+        """Queue *result*'s images for the next request when the model can read
+        images, else return *result* with a line saying the model was not shown
+        them. Returns the result to frame."""
+        images = getattr(result, "images", None)
+        if not images:
+            return result
+        reads = getattr(self.backend, "reads_images", None)
+        if callable(reads) and reads() is True:
+            pending = getattr(self, "_pending_images", None)
+            if pending is None:
+                pending = self._pending_images = []
+            pending.extend(images)
+            return result
+        import dataclasses
+        return dataclasses.replace(
+            result, images=None,
+            output=result.output + "\n(The image was not shown to you: this model "
+                   "cannot read images. Describe only what the text results say.)")
 
     def _stopped_text(self) -> str:
         """The final response of a run that stopped before finishing."""

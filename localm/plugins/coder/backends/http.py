@@ -89,6 +89,29 @@ def _response_detail(resp) -> str:
     return ""
 
 
+def _anthropic_parts(parts: list) -> list:
+    """OpenAI message content parts as Anthropic content blocks: text stays
+    text, a ``data:`` URL ``image_url`` becomes a base64 ``image`` block, and
+    any other part becomes a text line saying it was left out."""
+    out: list = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            out.append({"type": "text", "text": str(part.get("text", ""))})
+            continue
+        url = str((part.get("image_url") or {}).get("url", "")) \
+            if part.get("type") == "image_url" else ""
+        head, sep, data = url.partition(",")
+        if url.startswith("data:") and sep and head.endswith(";base64"):
+            media = head[len("data:"):-len(";base64")] or "image/png"
+            out.append({"type": "image",
+                        "source": {"type": "base64", "media_type": media, "data": data}})
+        else:
+            out.append({"type": "text", "text": "(an attachment was left out)"})
+    return out
+
+
 def _header(headers, name: str):
     """*headers*' value for *name*, or None when absent or unreadable."""
     getter = getattr(headers, "get", None)
@@ -344,6 +367,7 @@ class HTTPBackend(BaseLLMBackend):
         self._ctx_capacity_cached = False
         self._ctx_capacity: Optional[int] = None
         self.model_pinned = bool(model_pinned)
+        self._reads_images_for: Optional[tuple[str, bool]] = None
         self.required_capabilities = tuple(required_capabilities or ())
         # The model the server reported answering the most recent request, or
         # None before the first response.
@@ -531,6 +555,41 @@ class HTTPBackend(BaseLLMBackend):
     @property
     def model_id(self) -> str:
         return self._model
+
+    def reads_images(self) -> bool:
+        """Whether this backend's model accepts image parts in a message.
+
+        Asked of a localm server once per model (``GET /v1/models/{id}``, its
+        ``vision`` field); True for the OpenAI and Anthropic endpoints; False
+        for any other server and when a localm server cannot answer (logged at
+        debug)."""
+        cached = getattr(self, "_reads_images_for", None)
+        if cached is not None and cached[0] == self._model:
+            return cached[1]
+        value = self._probe_reads_images()
+        self._reads_images_for = (self._model, value)
+        return value
+
+    def _probe_reads_images(self) -> bool:
+        """The uncached answer of :meth:`reads_images`."""
+        if self.anthropic or self._base_url == OPENAI_BASE_URL:
+            return True
+        if not self._is_local_server or not self._model:
+            return False
+        from urllib.parse import quote
+        url = f"{self._base_url}/models/{quote(self._model, safe='')}"
+        try:
+            resp = self._get(url)
+            if resp.status_code != 200:
+                return False
+            from localm.jsonreply import response_json
+            body = response_json(resp)
+        except Exception as exc:                          # noqa: BLE001
+            from localm.debuglog import logger
+            logger.debug("coder: could not ask %s whether %s reads images (%s)",
+                         self._base_url, self._model, exc)
+            return False
+        return isinstance(body, dict) and body.get("vision") is True
 
     def set_model(self, model: str, *, pinned: Optional[bool] = None) -> None:
         """Repoint this backend at a different model NAME, in place. *pinned*,
@@ -761,6 +820,8 @@ class HTTPBackend(BaseLLMBackend):
                     )
                 if content:
                     system_parts.append(str(content))
+            elif isinstance(m.get("content"), list):
+                convo.append({**m, "content": _anthropic_parts(m["content"])})
             else:
                 convo.append(m)
 
