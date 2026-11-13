@@ -807,6 +807,8 @@ _SCANNER_FILES = {
     "tests/test_native_fault_debug_log_hint.py": _SCANNER_BODY,
     "tests/test_debug_scrub.py": _SCANNER_BODY,
     "tests/test_ci_runner_files.py": _SCANNER_BODY,
+    "tests/test_bugreport.py": _SCANNER_BODY,
+    "tests/test_merge_policy.py": _SCANNER_BODY,
 }
 
 
@@ -826,7 +828,7 @@ def test_a_new_localm_module_selects_the_tests_that_read_every_localm_file(scann
     (root / "localm" / "x" / "y.py").write_text("PIN = 1\n", encoding="utf-8")
     selected = _select(mod, ["localm/x/y.py"])
     assert selected["tests/test_check_pins.py"] == [
-        "greps every tracked localm/*.py for pin-shaped constants under localm/: "
+        "greps every tracked localm/*.py for pin-shaped constants under localm/*.py: "
         "localm/x/y.py changed"]
     assert "tests/test_native_fault_debug_log_hint.py" not in selected
     assert "tests/test_debug_scrub.py" not in selected
@@ -842,6 +844,20 @@ def test_a_scanner_is_selected_by_the_folder_it_reads_and_by_nothing_else(scanne
     assert "tests/test_debug_scrub.py" in _select(mod, ["tests/test_new_one.py"])
     assert "tests/test_ci_runner_files.py" in _select(mod, ["scripts/tool.py"])
     assert "tests/test_check_pins.py" not in _select(mod, ["localm/static/index.html"])
+
+
+def test_a_scanner_of_a_non_python_folder_is_selected_by_a_new_file_there(scanner_repo):
+    mod, _ = scanner_repo
+    docs = _select(mod, ["docs/new-page.md"])
+    assert docs["tests/test_bugreport.py"] == ["reads every docs page under docs/*: docs/new-page.md changed"]
+    assert "tests/test_check_pins.py" not in docs
+    assert "tests/test_bugreport.py" not in _select(mod, ["localm/docs.py"])
+
+
+def test_a_scanner_of_every_file_is_selected_by_any_change(scanner_repo):
+    mod, _ = scanner_repo
+    for rel in ("README.md", "localm/x/y.py", ".github/workflows/ci.yml"):
+        assert "tests/test_merge_policy.py" in _select(mod, [rel]), rel
 
 
 def test_a_scanner_missing_from_the_checkout_is_not_invented(repo):
