@@ -148,8 +148,12 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".vscode"}
 
 # Cache for the LLM format tie-break, keyed by unknown extension, so a corpus of
-# same-extension files classifies at most once per process.
+# same-extension files classifies at most once per process. An attempt that gave
+# no label is cached as "text" until the time.monotonic() deadline recorded in
+# _EXT_CLASSIFICATION_RETRY_AT, then tried again.
 _EXT_CLASSIFICATION_CACHE: dict[str, str] = {}
+_EXT_CLASSIFICATION_RETRY_AT: dict[str, float] = {}
+_FAILED_TIEBREAK_RETRY_S = 600.0
 
 # Canonical, lowercase format labels for the file types localm indexes. A known
 # extension decides; the structural sniff below runs only for an unknown
@@ -302,8 +306,8 @@ def classify_format(text: str, filename: str = "", *,
         return sniffed
     # Unknown extension and inconclusive structure: the only place a model is
     # consulted, and only when the toggle is on. A real guess is cached per
-    # extension, so a same-extension corpus asks once per process; an attempt that
-    # failed or gave no label answers "text" and is not cached. With the toggle off
+    # extension for the process; an attempt that failed or gave no label answers
+    # "text" for _FAILED_TIEBREAK_RETRY_S, then is tried again. With the toggle off
     # the cache is not read. A *classify_fn* whose ``ready()`` is false makes no
     # attempt and nothing is cached.
     if classify_fn is not None:
@@ -317,6 +321,10 @@ def classify_format(text: str, filename: str = "", *,
                        "rag_classify_unknown_files=on: %s", e)
             enabled = True
         if enabled:
+            retry_at = _EXT_CLASSIFICATION_RETRY_AT.get(suffix)
+            if retry_at is not None and time.monotonic() >= retry_at:
+                _EXT_CLASSIFICATION_CACHE.pop(suffix, None)
+                _EXT_CLASSIFICATION_RETRY_AT.pop(suffix, None)
             cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
             if cached is not None:
                 return cached
@@ -324,8 +332,12 @@ def classify_format(text: str, filename: str = "", *,
             if ready is not None and not ready():
                 return "text"
             label = _normalise_label(classify_fn(text[:1000]) or "")
-            if not label:
-                return "text"
+            if label:
+                _EXT_CLASSIFICATION_RETRY_AT.pop(suffix, None)
+            else:
+                label = "text"
+                _EXT_CLASSIFICATION_RETRY_AT[suffix] = (
+                    time.monotonic() + _FAILED_TIEBREAK_RETRY_S)
             _EXT_CLASSIFICATION_CACHE[suffix] = label
             return label
     return "text"
@@ -336,6 +348,11 @@ def sniff_format(data: bytes, filename: str) -> Optional[str]:
     Returns the mapped extension (e.g. '.pdf', '.docx', '.html', '.ipynb', '.txt', '.zip')
     or None if it appears to be binary and unsupported.
     """
+    return _sniff_bytes(data)
+
+
+def _sniff_bytes(data: bytes) -> Optional[str]:
+    """:func:`sniff_format` of *data*."""
     if not data:
         return ".txt"  # empty file behaves as text
 
@@ -419,7 +436,7 @@ def _binary_in_text_file(data: bytes) -> Optional[str]:
     without a byte-order mark, is text."""
     if not data or data.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf")):
         return None
-    sniffed = sniff_format(data, "")
+    sniffed = _sniff_bytes(data)
     named = {".pdf": "a PDF document", ".docx": "a Word document", ".zip": "a ZIP archive",
              ".tar": "an archive", ".png": "a PNG image", ".jpeg": "a JPEG image",
              ".gif": "a GIF image", ".webp": "a WebP image"}.get(sniffed or "")

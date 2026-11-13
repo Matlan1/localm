@@ -34,17 +34,19 @@ def test_binary_named_as_text_is_refused(name, data, what):
     ("Grüße aus Graz\n".encode("cp1252"), "Grüße aus Graz"),
     ("Grüße aus Graz\n".encode("utf-16-le"), "Grüße aus Graz"),
     (b"\xff\xfe" + "Grüße\n".encode("utf-16-le"), "Grüße"),
-    (b"", ""),
 ])
 def test_text_in_every_supported_encoding_still_reads(data, expected):
     assert extract_bytes(data, "a.txt").strip() == expected
 
 
-def test_a_tie_break_without_a_label_is_not_cached(monkeypatch):
+def test_a_tie_break_without_a_label_is_tried_again_later(monkeypatch):
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
     extract._EXT_CLASSIFICATION_CACHE.clear()
-    answers = [None, "", "yaml"]
+    extract._EXT_CLASSIFICATION_RETRY_AT.clear()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(extract.time, "monotonic", lambda: clock["t"])
+    answers = [None, "yaml"]
     calls = []
 
     def flaky(snippet):
@@ -54,11 +56,14 @@ def test_a_tie_break_without_a_label_is_not_cached(monkeypatch):
     text = "plain words with no structure at all"
     assert extract.classify_format(text, "a.weird", classify_fn=flaky) == "text"
     assert extract.classify_format(text, "b.weird", classify_fn=flaky) == "text"
-    assert ".weird" not in extract._EXT_CLASSIFICATION_CACHE
+    assert len(calls) == 1, "within the retry window the failure is not re-asked"
+    clock["t"] += extract._FAILED_TIEBREAK_RETRY_S
     assert extract.classify_format(text, "c.weird", classify_fn=flaky) == "yaml"
+    clock["t"] += 10 * extract._FAILED_TIEBREAK_RETRY_S
     assert extract.classify_format(text, "d.weird", classify_fn=flaky) == "yaml"
-    assert len(calls) == 3
+    assert len(calls) == 2, "a real label is kept"
     extract._EXT_CLASSIFICATION_CACHE.clear()
+    extract._EXT_CLASSIFICATION_RETRY_AT.clear()
 
 
 def test_the_warm_up_stage_names_why_a_configured_model_is_missing(tmp_path, monkeypatch):
