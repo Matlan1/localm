@@ -58,9 +58,10 @@ route behind it refuses keeps that route's status (for example 413 for a prompt
 longer than the context window, 422 for a model that cannot embed, 503 while a
 model cannot be loaded). A reply from that route that is not JSON, and an
 embedding model that returns the wrong number of vectors, are a 502. A stream
-that fails after it has started ends with one `{"error": "..."}` line. The one
-exception is the open-mode origin and shell-token refusal of a model-management
-route, which keeps the `{"detail": "..."}` body the rest of localm's API uses.
+that fails after it has started ends with one `{"error": "..."}` line. The
+open-mode origin and shell-token refusal of an Ollama route, the management
+routes (`/api/pull`, `/api/push`, `/api/delete`, `/api/create`) included, carries
+the same message as both `"error"` and `"detail"`.
 
 ## Chat and generate
 
@@ -132,7 +133,7 @@ served by another instance and the configured `embedding_model` count as registe
   empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
   architecture when recorded, else empty), `families` (a list holding `family`,
   or null), `parameter_size` (the parameter count in the weights' file or
-  folder name, such as `8B` or `8x7B`, else empty) and `quantization_level` (the
+  folder name, such as `8B`, `8x7B` or `135M`, else empty) and `quantization_level` (the
   quantization in that name, such as `Q4_K_M`, else empty).
 - `GET /api/ps` returns `{"models": [...]}`: the loaded models, each with the
   `name`, `model`, `size`, `digest` and `details` of a tag (no `modified_at`),
