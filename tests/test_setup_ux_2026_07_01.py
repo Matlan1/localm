@@ -25,7 +25,7 @@ def test_require_venv_exits_when_deps_absent(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: False)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: ["fastapi"])
     with pytest.raises(SystemExit):
         vg.require_venv()
 
@@ -34,7 +34,7 @@ def test_require_venv_passes_inside_venv(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/proj/.venv")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: [])
     vg.require_venv()   # must not raise
 
 
@@ -42,7 +42,7 @@ def test_require_venv_exits_in_another_projects_venv_without_the_deps(monkeypatc
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/other/.venv")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: False)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: ["fastapi"])
     with pytest.raises(SystemExit) as exc:
         vg.require_venv()
     assert "virtual environment" in str(exc.value.code)
@@ -54,7 +54,7 @@ def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: [])
     vg.require_venv()   # must not raise
 
 

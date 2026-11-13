@@ -524,13 +524,14 @@ def _text_codec(data: bytes) -> Optional[str]:
 
 def _binary_in_text_file(data: bytes) -> Optional[str]:
     """What a file with a plain-text suffix holds instead of text ("a PNG image",
-    "binary data"), or None when its bytes read as text (see ``_text_codec``)."""
-    if _text_codec(data) is not None:
-        return None
-    sniffed = _sniff_bytes(data)
-    return {".pdf": "a PDF document", ".docx": "a Word document", ".zip": "a ZIP archive",
+    "binary data"), or None when its bytes read as text (see ``_text_codec``) and
+    carry no document or image signature."""
+    kind = {".pdf": "a PDF document", ".docx": "a Word document", ".zip": "a ZIP archive",
             ".tar": "an archive", ".png": "a PNG image", ".jpeg": "a JPEG image",
-            ".gif": "a GIF image", ".webp": "a WebP image"}.get(sniffed or "", "binary data")
+            ".gif": "a GIF image", ".webp": "a WebP image"}.get(_sniff_bytes(data) or "")
+    if kind is not None:
+        return kind
+    return None if _text_codec(data) is not None else "binary data"
 
 
 class ExtractError(Exception):
