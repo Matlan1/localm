@@ -192,6 +192,11 @@ class _TurnRouter:
         self.current = name
         return eng
 
+    def suggested_model(self) -> Optional[str]:
+        """The model routing suggested for the last planned turn, or None."""
+        decision = self.last_decision
+        return decision.suggested if decision is not None else None
+
     def suggestion(self) -> Optional[str]:
         """One line naming the model routing would use for the last planned
         turn and why it did not, when it suggested one; else None."""
@@ -680,7 +685,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     router.plan(messages)
                     if router.min_context:
                         stream_opts["min_context"] = router.min_context
-                response = _stream_once(engine, messages, **stream_opts)
+                response = _stream_once(engine, messages, suggested=router.suggested_model(),
+                                        **stream_opts)
                 note = _routed_note or router.note(engine)
                 if note and response:
                     console.print(f"[dim]({escape(note)})[/dim]")
@@ -759,7 +765,8 @@ def _projector_known(mmproj_path: Optional[str]) -> Optional[dict]:
     return known or None
 
 
-def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
+def _input_refusal_text(engine, messages: list, exc: Exception, *,
+                        suggested: Optional[str] = None) -> str:
     """What to tell the user when *engine* refused *messages* with the
     ``UnsupportedInputError`` *exc*: the error itself for an audio clip that
     could not be used, or for audio a model that takes audio could not process;
@@ -778,11 +785,12 @@ def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
             (hears or not has_audio) and (sees or not has_image)):
         return str(exc)
     if has_audio and not hears:
-        return audio_input_guidance(projector_failed=has_projector and not sees)
+        return audio_input_guidance(projector_failed=has_projector and not sees,
+                                    suggested=suggested)
     return vision_input_guidance(
         mmproj_failed=has_projector and not hears,
         active_model_path=getattr(backend, "model_path", None),
-        audio_only=hears and has_projector)
+        audio_only=hears and has_projector, suggested=suggested)
 
 
 
@@ -922,8 +930,11 @@ def _log_worker_death(exc: BaseException) -> None:
                   (str(exc).splitlines() or [""])[0])
 
 
-def _stream_once(engine, messages: list, **kwargs) -> str:
-    """Stream response to stdout, print tok/s on completion, and return the full text."""
+def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
+                 **kwargs) -> str:
+    """Stream response to stdout, print tok/s on completion, and return the full text.
+    *suggested* (the model capability routing suggests) is named first in the
+    guidance printed when the engine refuses an image or audio clip."""
     import time as _time
     from rich.markup import escape
 
@@ -964,7 +975,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     except UnsupportedInputError as e:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # model this install has that can take the input, or how to get one.
-        guidance = _input_refusal_text(engine, messages, e)
+        guidance = _input_refusal_text(engine, messages, e, suggested=suggested)
         console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
@@ -1139,8 +1150,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         except UnsupportedInputError as e:
             # The answering model cannot take the attached image or audio. The
             # message is withdrawn from the conversation.
-            console.print("\n[yellow]" + escape(_input_refusal_text(engine, messages, e))
-                          + "[/yellow]")
+            console.print("\n[yellow]" + escape(_input_refusal_text(
+                engine, messages, e, suggested=router.suggested_model())) + "[/yellow]")
             _withdraw(messages, msg)
             continue
         except Exception as e:

@@ -297,7 +297,7 @@ def register(app: FastAPI, ctx) -> None:
                     detail = vision_input_guidance(
                         mmproj_failed=mmproj_failed,
                         active_model_path=active_model_path,
-                        audio_only=audio_only)
+                        audio_only=audio_only, suggested=route.suggested)
                     if route.load_errors:
                         detail += (" An installed model that can read images "
                                    "could not be loaded: "
@@ -319,7 +319,8 @@ def register(app: FastAPI, ctx) -> None:
                     backend = getattr(engine, "_backend", None)
                     projector_failed = (bool(getattr(backend, "mmproj_path", None))
                                         and engine.supports_images is not True)
-                    detail = audio_input_guidance(projector_failed=projector_failed)
+                    detail = audio_input_guidance(projector_failed=projector_failed,
+                                                  suggested=route.suggested)
                     if route.load_errors:
                         detail += (" An installed model that can take audio "
                                    "could not be loaded: "

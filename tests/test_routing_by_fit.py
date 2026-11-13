@@ -831,3 +831,21 @@ class TestTwoGpusWithoutAPrediction:
         cls, _ = routing_fit.classify(eng, 24 << 30, _reading(free=24 << 30, devices=2),
                                       ram_available=20 << 30, ram_total=32 << 30)
         assert cls == cr.FIT_UNSIZED
+
+
+def test_the_image_refusal_text_names_the_suggested_model_first(monkeypatch):
+    """Two vision models are installed and routing suggests the second: the
+    refusal text tells the user to run the suggested one."""
+    from localm.model_manager import registry
+    monkeypatch.setattr(registry, "vision_capable_models", lambda: ["big-35b", "small-8b"])
+    text = registry.vision_input_guidance(suggested="small-8b")
+    assert "`localm run small-8b`" in text
+    assert text.index("small-8b") < text.index("big-35b")
+    assert "`localm run big-35b`" in registry.vision_input_guidance()
+
+
+def test_the_audio_refusal_text_names_the_suggested_model_first(monkeypatch):
+    from localm.model_manager import registry
+    monkeypatch.setattr(registry, "audio_capable_models", lambda: ["big-asr", "small-asr"])
+    assert "`localm run small-asr" in registry.audio_input_guidance(suggested="small-asr")
+    assert "`localm run big-asr" in registry.audio_input_guidance()
