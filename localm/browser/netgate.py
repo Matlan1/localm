@@ -24,6 +24,7 @@ connection is not caught.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Iterable, Optional
 
 from localm import netpolicy
@@ -44,6 +45,25 @@ WEBSOCKET_SCHEMES = {"ws": "http", "wss": "https"}
 def _scheme_of(url: str) -> str:
     head, sep, _ = url.partition(":")
     return head.lower() if sep else ""
+
+
+#: Every scheme :func:`decide` knows by name.
+_KNOWN_SCHEMES = INERT_SCHEMES | NETWORK_SCHEMES | frozenset(WEBSOCKET_SCHEMES)
+
+
+def with_default_scheme(url: str) -> str:
+    """*url* with ``https://`` in front when it carries no scheme, as a browser
+    address bar reads ``example.com``; a loopback host (``localhost:8080``,
+    ``127.0.0.1``) gets ``http://``. A URL with ``://`` or a scheme
+    :func:`decide` knows (``about:``, ``data:``, ...) is returned unchanged, so
+    an unknown scheme such as ``file://`` still meets the gate as written."""
+    text = (url or "").strip()
+    if not text or "://" in text or _scheme_of(text) in _KNOWN_SCHEMES:
+        return text
+    host = re.split(r"[:/?#]", text.lower(), maxsplit=1)[0]
+    loopback = (host == "localhost" or host.startswith("127.")
+                or text.startswith("[::1]"))
+    return ("http://" if loopback else "https://") + text
 
 
 def _policy_url(url: str, scheme: str) -> str:
