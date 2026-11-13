@@ -5896,7 +5896,13 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
-    rolled_back = _finish_pending_runtime_update()
+    # An update this process applied: the installed version carries the update
+    # steps out at its own start (cli._core._update_steps_at_start).
+    from localm import updater as _updater
+    from localm import updater_components as _uc
+    from localm import updater_runtime as _ur
+    deferred = _updater.applied_here(_ur.read_pending(), _uc.read_pending())
+    rolled_back = False if deferred else _finish_pending_runtime_update()
 
     try:
         from localm import bugreport
@@ -5966,7 +5972,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 pass
 
     _set_restart_env()
-    _execv_restart(port, instance_id, update_steps_done=True)
+    _execv_restart(port, instance_id, update_steps_done=not deferred)
 
 
 def _finish_pending_runtime_update() -> bool:

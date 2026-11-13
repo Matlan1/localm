@@ -958,14 +958,18 @@ def _updates_dir(create: bool = True) -> Path:
     return updater._updates_dir(create=create)
 
 
-def write_pending(plans, *, root, version: str, repair: bool = False) -> None:
+def write_pending(plans, *, root, version: str, repair: bool = False,
+                  applied_by: Optional[str] = None) -> None:
     """Record that the components of *plans* (:func:`needs_finish`) must be
     finished in the install at *root*, for :func:`finish_pending`; *repair*
-    marks a repair of the installed version (a failure rolls nothing back).
-    Raises OSError."""
+    marks a repair of the installed version (a failure rolls nothing back);
+    *applied_by* is the token of the process that applied the update
+    (``updater.applied_here``). Raises OSError."""
     data = {"root": str(Path(root).resolve()), "version": version,
             "components": [p["name"] for p in plans if p["update"] or p.get("check")],
             "repair": bool(repair)}
+    if applied_by:
+        data["applied_by"] = applied_by
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")

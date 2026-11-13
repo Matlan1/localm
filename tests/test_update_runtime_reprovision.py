@@ -1029,3 +1029,19 @@ def test_doctor_names_a_kept_runtime_and_how_to_try_again(tmp_path, cfg, monkeyp
             "(the load test failed)") in text
     assert "to try it again: localm setup-llama --backend vulkan --force" in text
     assert "ships llama.cpp build" not in text
+
+
+def test_the_kept_record_names_the_build_read_from_the_restored_runtime(tmp_path, cfg,
+                                                                       monkeypatch):
+    inst = _tree(tmp_path / "inst")
+    lib = _provision(inst, "vulkan", "b11757")
+    pending = {"backend": "vulkan", "current": None, "target": "b11928",
+               "pins": updater_runtime.staged_pins(inst)}
+    updater_runtime.write_pending(pending, root=inst, version="0.3.2")
+    monkeypatch.setattr(updater_runtime, "_runtime_loads", lambda lib, backend, sl: (True, ""))
+    st = updater_runtime.finish_pending(
+        root=inst, runner=_fake_setup_llama(inst, "b11928", backend="cpu"), wait=0)
+    assert st["state"] == "kept", st
+    assert updater_runtime.kept_runtime(lib)["kept"] == "b11757"
+    assert "kept the vulkan runtime b11757" in st["note"]
+    assert updater_runtime.plan(inst, inst)["reprovision"] is False

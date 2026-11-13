@@ -1297,7 +1297,8 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
             _apply_warn("could not clear an earlier pending component update: %s", e)
         return None, note
     try:
-        updater_components.write_pending(plans, root=target, version=version)
+        updater_components.write_pending(plans, root=target, version=version,
+                                         applied_by=_apply_token())
     except OSError as e:
         _apply_warn("could not record the pending component update: %s", e)
         return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
@@ -1353,6 +1354,26 @@ def _check_package(au, root: Path, target: Path, version: str, scratch: Path,
         raise LocalmError("could not tell whether the update fits on the disk, so nothing "
                           "was updated", reason=str(e)) from None
     return names
+
+
+_APPLY_TOKEN: Optional[str] = None
+
+
+def _apply_token() -> str:
+    """This process's token, written into the pending runtime and component update
+    records an update applied in this process leaves (see :func:`applied_here`)."""
+    global _APPLY_TOKEN
+    if _APPLY_TOKEN is None:
+        _APPLY_TOKEN = uuid.uuid4().hex
+    return _APPLY_TOKEN
+
+
+def applied_here(*pending) -> bool:
+    """Whether a record in *pending* (``read_pending`` results; None allowed) was
+    written by an update this process applied. This process's code is then older
+    than the installed version, which carries the steps out at its own start."""
+    return _APPLY_TOKEN is not None and any(
+        isinstance(p, dict) and p.get("applied_by") == _APPLY_TOKEN for p in pending)
 
 
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
@@ -1728,7 +1749,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _apply_warn("could not clear an earlier pending runtime update: %s", e)
         else:
             try:
-                updater_runtime.write_pending(rt_plan, root=target, version=new_version)
+                updater_runtime.write_pending(rt_plan, root=target, version=new_version,
+                                              applied_by=_apply_token())
             except OSError as e:
                 _apply_warn("could not record the pending runtime update: %s", e)
                 runtime_note = (f"the {rt_plan['backend']} runtime was NOT updated to "

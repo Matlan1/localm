@@ -756,14 +756,18 @@ def _updates_dir() -> Path:
     return updater._updates_dir(create=True)
 
 
-def write_pending(p: dict, *, root, version: str, repair: bool = False) -> None:
+def write_pending(p: dict, *, root, version: str, repair: bool = False,
+                  applied_by: Optional[str] = None) -> None:
     """Record the re-provision :func:`plan` decided for the install at *root*,
     for :func:`finish_pending`; *repair* marks one a repair of the installed
-    version recorded (not an update, so a failure rolls nothing back). Raises
-    OSError when it cannot be written."""
+    version recorded (not an update, so a failure rolls nothing back);
+    *applied_by* is the token of the process that applied the update
+    (``updater.applied_here``). Raises OSError when it cannot be written."""
     data = {"root": str(Path(root).resolve()), "version": version,
             "backend": p["backend"], "from": p["current"], "target": p["target"],
             "pins": p["pins"], "repair": bool(repair)}
+    if applied_by:
+        data["applied_by"] = applied_by
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -1010,8 +1014,9 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     if not restore_errors:
         loads, why_not = _runtime_loads(lib, backend, sl)
         if loads:
-            previous = pending.get("from") or "build"
-            if setup_finished:
+            restored = sl._provisioned_build(lib)
+            previous = restored or pending.get("from") or "build"
+            if setup_finished and restored:
                 try:
                     _record_kept(lib, backend, previous, target, problem)
                 except OSError as e:
