@@ -526,10 +526,13 @@ def test_an_inbox_denied_by_its_acl_is_reported_not_read_as_empty(share_client, 
             denied = False
         except PermissionError:
             denied = True
-        assert denied, (
-            f"the deny for the process token ({account}, {sid}) did not stop listing "
-            f"the inbox; USERNAME={os.environ.get('USERNAME')!r} "
-            f"USER={os.environ.get('USER')!r} LOGNAME={os.environ.get('LOGNAME')!r}")
+        if not denied:
+            privs = subprocess.run([sysprog.require("whoami"), "/priv", "/fo", "csv", "/nh"],
+                                   capture_output=True, text=True).stdout
+            backup = [line for line in privs.splitlines() if "SeBackupPrivilege" in line]
+            pytest.fail(
+                f"the deny for the process token ({account}, {sid}) did not stop listing "
+                f"the inbox; USERNAME={os.environ.get('USERNAME')!r}; {backup or 'no SeBackupPrivilege'}")
         with caplog.at_level(logging.WARNING, logger="localm"):
             share_routes._sweep_expired(share_client.app, inbox)
             pending = share_client.get("/api/share/pending")
