@@ -9,7 +9,7 @@ address*.
 ## The short version
 
 - **Same Wi-Fi:** run `localm gui -H 0.0.0.0` (set an API key first) - or, from
-  a GUI that is already open, set *Settings > Server > Bind address* to
+  a GUI that is already open, set *Settings > Server & network > Bind address* to
   `0.0.0.0` and click *Restart server*. Open the `https://localm.local:<port>/`
   it prints on your phone (or the `https://<your-ip>:<port>/` it prints next to
   it; the Settings *Companion app* card shows that same IP address); trust the
@@ -31,7 +31,7 @@ address*.
      know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows PowerShell:
      `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's Generate
      button), then
-   - `localm gui -H 0.0.0.0`, **or** set *Settings > Server > Bind address* to
+   - `localm gui -H 0.0.0.0`, **or** set *Settings > Server & network > Bind address* to
      `0.0.0.0` and click *Restart server* - no terminal needed. (Without a
      strong key, `-H 0.0.0.0` on the command line refuses to start at all; the
      Settings-driven bind instead falls back and stays on `127.0.0.1`, and the
@@ -66,7 +66,7 @@ address*.
 4. **Enter your key and install.** Type the `LOCALM_API_KEY` into the key screen
    (it is sent over the now-encrypted connection and stored only in that browser),
    or skip the typing: tap **Scan QR code** on that same screen, point the phone
-   at the computer's **Settings -> Companion app** page (it shows a QR of your
+   at the computer's **Settings -> Server & network -> Companion app** card (it shows a QR of your
    key once you are signed in there), and the key is copied over automatically.
    Then choose *Install app* / *Add to Home screen* from the browser menu - localm
    gets its own icon.
@@ -116,7 +116,7 @@ internet use Tailscale or a TLS reverse proxy with a real certificate. See
 
 localm answers only to its own addresses and names (the LAN IP, the `.local`
 names, the Tailscale names). If you reach it under another name, such as one set
-up in your router's DNS, add that name to `allowed_hosts` in Settings > Server
+up in your router's DNS, add that name to `allowed_hosts` in Settings > Server & network
 and restart; otherwise the phone gets "Host not allowed".
 
 ## What localm does NOT do (on purpose)
