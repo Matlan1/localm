@@ -160,7 +160,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
-                    "effective_net_mode", "net_mode_from_env",
+                    "effective_net_mode", "net_mode_from_env", "warnings",
                     "effective_ctx_max", "effective_ctx_model",
                     "effective_ctx_model_key", "instance_id",
                     "instance_port"}
@@ -226,17 +226,23 @@ def register(app: FastAPI, ctx) -> None:
         # there being collections at risk, so an ordinary settings save needs no
         # extra confirm round trip.
         # A NEW embedding model that cannot be one (a reranker, another model
-        # type, a name that names nothing) is refused, confirmed or not; the
-        # stored value sent back unchanged by a section save is not re-checked.
+        # type) is refused, confirmed or not; one that names nothing yet is
+        # saved with a warning. The stored value sent back unchanged by a
+        # section save is not re-checked.
+        save_warnings: list[str] = []
         if "embedding_model" in body and str(body["embedding_model"] or "").strip():
             from localm.config import load_config as _load_cfg
-            from localm.inference.embedder import embedding_model_refusal
+            from localm.inference.embedder import (embedding_model_refusal,
+                                                   embedding_model_unresolved)
             asked = str(body["embedding_model"]).strip()
             stored = str((await run_in_threadpool(_load_cfg)).get("embedding_model") or "").strip()
             if asked != stored:
                 embed_why = await run_in_threadpool(embedding_model_refusal, asked)
                 if embed_why:
                     raise HTTPException(400, embed_why)
+                unresolved = await run_in_threadpool(embedding_model_unresolved, asked)
+                if unresolved:
+                    save_warnings.append(unresolved)
         if "embedding_model" in body and not confirm:
             from localm.config import load_config
             new_model = str(body["embedding_model"]).strip()
@@ -309,6 +315,8 @@ def register(app: FastAPI, ctx) -> None:
         # update_config() returns the FULL merged config, not just the changed
         # keys, so an admin_only field's value is stripped from a non-owner's
         # response echo - the same boundary get_config applies above.
+        if save_warnings:
+            result = {**result, "warnings": save_warnings}
         if is_owner:
             return result
         for k in admin_only_keys():

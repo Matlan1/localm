@@ -998,11 +998,14 @@ two network ones only for the owner):
 or the server's `LOCALM_NET_MODE` when set), `net_mode_from_env` (true when
 `LOCALM_NET_MODE` sets it), `effective_ctx_max`, `effective_ctx_model`,
 `effective_ctx_model_key`, `instance_id` and `instance_port`.
-PATCH ignores those ten, so a client can send back what it read, and returns
+PATCH ignores those ten (and `warnings`), so a client can send back what it read, and returns
 the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them
-unchanged. A change to `embedding_model` that would leave an existing
+unchanged. A new `embedding_model` that names a registered model of another type
+(a chat model, for example) or a reranker is refused with a 400; one that names no
+known key, registered model or file yet is saved, and the answer carries
+`warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
 `{"needs_confirm": true, "model", "collections", "note"}`, and the same body with
 `"confirm": true` applies it. PATCH errors: 400 for an unknown key, an invalid

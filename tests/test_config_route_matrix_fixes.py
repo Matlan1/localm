@@ -47,13 +47,22 @@ def test_patch_ignores_the_read_only_net_mode_extras(app_env):
 
 # ------------------------------------------------------- embedding_model
 
-def test_embedding_model_naming_nothing_is_refused_and_not_saved(app_env, tmp_path):
+def test_embedding_model_naming_nothing_is_saved_with_a_warning(app_env, tmp_path):
     c, _scoped_key, _ = app_env
     missing = str(tmp_path / "no-such" / "model.gguf")
-    r = c.patch("/v1/config", headers=_owner(), json={"embedding_model": missing})
-    assert r.status_code == 400
-    assert "names no registered model" in r.json()["detail"]
-    assert c.get("/v1/config", headers=_owner()).json().get("embedding_model") != missing
+    r = c.patch("/v1/config", headers=_owner(),
+                json={"embedding_model": missing, "confirm": True})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["warnings"]) == 1
+    assert "names no registered model" in r.json()["warnings"][0]
+    assert c.get("/v1/config", headers=_owner()).json()["embedding_model"] == missing
+
+
+def test_a_save_without_a_new_embedding_model_has_no_warnings_key(app_env):
+    c, _scoped_key, _ = app_env
+    r = c.patch("/v1/config", headers=_owner(), json={"user_name": "x"})
+    assert r.status_code == 200
+    assert "warnings" not in r.json()
 
 
 def test_embedding_model_naming_a_chat_model_is_refused(app_env, tmp_path):
