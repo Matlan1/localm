@@ -115,7 +115,9 @@ def test_github_releases_skips_drafts_prereleases_and_undated(monkeypatch):
 def test_github_releases_keep_filters_and_reports_what_it_dropped(monkeypatch):
     _router(monkeypatch, {"api.github.com": [_rel("v1", 1), _rel("v2", 1, assets=["bad"])]})
     dropped = []
-    keep = lambda rel: not any(a["name"] == "bad" for a in rel["assets"])
+
+    def keep(rel):
+        return not any(a["name"] == "bad" for a in rel["assets"])
     assert [t for t, _ in cp._github_releases("r", keep, dropped)] == ["v1"]
     assert dropped == ["v2"]
 
