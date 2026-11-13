@@ -67,14 +67,18 @@ def test_peer_recording_mode_sends_nothing_when_verification_cannot_be_decided(
     assert no_network == []
 
 
+@pytest.mark.parametrize("exc", [FileNotFoundError, _Boom])
 def test_verify_peer_credential_sends_nothing_when_verification_cannot_be_decided(
-        monkeypatch, verify_raises, no_network):
+        monkeypatch, no_network, exc):
+    def _raise(url):
+        raise exc("x")
+    monkeypatch.setattr(tls, "requests_verify", _raise)
     monkeypatch.setattr(peer_routing, "is_routable_peer_endpoint",
                         lambda host, scheme: True)
     monkeypatch.setattr(peer_routing, "peer_listener_is_ours",
                         lambda host, port: True)
     peer = {"scheme": "https", "host": "127.0.0.1", "port": 8651,
             "instance_id": "p"}
-    with pytest.raises(_Boom):
+    with pytest.raises(exc):
         peer_routing.verify_peer_credential(peer, "k")
     assert no_network == []
