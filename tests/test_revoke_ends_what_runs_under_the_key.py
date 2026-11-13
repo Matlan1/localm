@@ -262,9 +262,8 @@ def test_an_open_mode_stream_ends_when_the_first_key_comes_before_its_first_chun
         r = c.get("/v1/test-stream",
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200
-    assert "data: 0" in r.text
-    assert "data: 5" not in r.text
-    assert len(sent) < 10
+    assert "data: 0" not in r.text
+    assert len(sent) < 3
 
 
 def test_the_credential_recheck_reads_key_files_once_per_stream_and_never_on_the_loop(monkeypatch):
@@ -299,3 +298,112 @@ def test_the_credential_recheck_reads_key_files_once_per_stream_and_never_on_the
         assert "data: 19" in c.get("/stream", headers=hdr).text
     assert len(calls) == 1
     assert calls[0] not in loop_threads
+
+
+def test_a_credential_revoked_before_the_first_chunk_gets_no_chunk(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi import Depends
+    from fastapi.responses import StreamingResponse
+
+    from localm.inference.http_server import _require_auth, create_app
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret-ownersecret")
+    created = auth.create_key("S", [scopes.CHAT])
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+
+    async def _gen():
+        auth.revoke_key(created["id"])
+        for i in range(20):
+            yield f"data: {i}\n\n"
+
+    @app.get("/v1/test-stream", dependencies=[Depends(_require_auth)])
+    async def _stream():
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(app) as c:
+        r = c.get("/v1/test-stream",
+                  headers={"Authorization": f"Bearer {created['key']}"})
+    assert r.status_code == 200
+    assert "data: 0" not in r.text
+
+
+def test_a_require_auth_stream_ends_when_its_last_key_is_cleared(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi import Depends
+    from fastapi.responses import StreamingResponse
+
+    from localm.inference.http_server import _require_auth, create_app
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
+    auth.set_api_key("owner-key-owner-key-4321")
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+
+    async def _gen():
+        auth.clear_api_key()
+        for i in range(20):
+            yield f"data: {i}\n\n"
+
+    @app.get("/v1/test-stream", dependencies=[Depends(_require_auth)])
+    async def _stream():
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(app) as c:
+        r = c.get("/v1/test-stream",
+                  headers={"Authorization": "Bearer owner-key-owner-key-4321"})
+    assert r.status_code == 200
+    assert "data: 0" not in r.text
+
+
+def test_two_revokes_at_once_cannot_remove_a_network_server_s_last_key(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from localm.inference import http_server as hs
+    from localm.inference.http_server import create_app
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    auth.clear_api_key()
+    admin = auth.create_key("admin-device", [scopes.KEYS_ADMIN], allow_privileged=True)
+    other = auth.create_key("tablet", [scopes.KEYS_ADMIN], allow_privileged=True)
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+    app.state.bind_host = "192.168.0.10"
+    guards = []
+    second_guard = threading.Event()
+    real_guard, real_revoke = auth.removal_leaves_no_key, auth.revoke_key
+
+    def guard(**kw):
+        guards.append(kw)
+        if len(guards) == 2:
+            second_guard.set()
+        return real_guard(**kw)
+
+    def revoke(key_id):
+        second_guard.wait(1.0)
+        return real_revoke(key_id)
+
+    monkeypatch.setattr(auth, "removal_leaves_no_key", guard)
+    monkeypatch.setattr(auth, "revoke_key", revoke)
+    statuses = {}
+    with TestClient(app) as c:
+        def _delete(rec, by):
+            r = c.delete(f"/v1/keys/{rec['id']}",
+                         headers={"Authorization": f"Bearer {by['key']}"})
+            statuses[rec["id"]] = (r.status_code, r.json().get("detail"))
+        t1 = threading.Thread(target=_delete, args=(other, admin))
+        t2 = threading.Thread(target=_delete, args=(admin, other))
+        t1.start()
+        t2.start()
+        t1.join(10)
+        t2.join(10)
+    assert len(auth.list_keys()) == 1
+    assert sorted(s for s, _ in statuses.values()) == [200, 409]
+    assert hs.LAST_KEY_NETWORK_DETAIL in [d for _, d in statuses.values()]

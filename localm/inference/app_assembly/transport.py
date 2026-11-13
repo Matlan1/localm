@@ -72,14 +72,15 @@ class CredentialRecheckMiddleware:
     cookie once that credential is no longer accepted (revoked, expired,
     cleared, replaced).
 
-    Before each body chunk after the first, the credential is checked again
-    with the request-start check (``http_server._require_auth``) when
-    :func:`localm.auth.revocation_epoch` moved since the last check or
-    :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
+    Before each body chunk, the credential is checked again with the
+    request-start check (``http_server._require_auth``) when
+    :func:`localm.auth.revocation_epoch` moved since the request started or
+    was last checked, or :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
     response is closed with an empty final chunk and the handler is cancelled
     the way a client disconnect cancels it. A response that presented no
-    credential, or whose first body chunk was sent while no key was configured
-    (open mode, where the GUI's shell token is not a key), is not checked.
+    credential, or whose first body chunk came while no key was configured and
+    ``require_auth`` was off (open mode, where the GUI's shell token is not a
+    key), is not checked.
     Whether to check is decided once, off the event loop, at the first body
     chunk that has more to follow; a response sent in one chunk never asks."""
 
@@ -90,9 +91,10 @@ class CredentialRecheckMiddleware:
     def _has_credential(scope) -> bool:
         from starlette.requests import Request
 
-        from localm.auth import any_key_configured
+        from localm import auth
         token, _source = _hs._request_token(Request(scope))
-        return bool(token and token.strip()) and any_key_configured()
+        return bool(token and token.strip()) and (
+            auth.any_key_configured() or auth.require_auth_enabled())
 
     @staticmethod
     def _accepted(scope) -> bool:
@@ -113,7 +115,7 @@ class CredentialRecheckMiddleware:
         from localm import auth
         loop = asyncio.get_running_loop()
         state = {"epoch": auth.revocation_epoch(), "at": loop.time(),
-                 "chunks": 0, "gone": False, "checked_cred": None}
+                 "gone": False, "checked_cred": None}
 
         async def _send(message):
             if state["gone"]:
@@ -124,10 +126,8 @@ class CredentialRecheckMiddleware:
                     self._has_credential, scope)
             if (message["type"] == "http.response.body" and message.get("more_body")
                     and state["checked_cred"]):
-                state["chunks"] += 1
                 epoch = auth.revocation_epoch()
-                if state["chunks"] > 1 and (
-                        epoch != state["epoch"]
+                if (epoch != state["epoch"]
                         or loop.time() - state["at"] >= CREDENTIAL_RECHECK_S):
                     state["epoch"], state["at"] = epoch, loop.time()
                     if not await run_in_threadpool(self._accepted, scope):
