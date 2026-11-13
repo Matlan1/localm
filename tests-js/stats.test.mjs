@@ -272,7 +272,7 @@ test("hw-stats: a multi-GPU board gets one row per card, not the combined figure
   assert.deepEqual(spans.map((s) => s.dataset.metric),
     ["cpu", "ram", "gpu", "vram", "gpu", "vram"],
     "CPU|RAM, then one GPU|VRAM pair per card");
-  assert.deepEqual(text.slice(2), ["GPU0", "20.0/24.0 GB", "GPU1", "2.0/24.0 GB"],
+  assert.deepEqual(text.slice(2), ["GPU 0", "20.0/24.0 GB", "GPU 1", "2.0/24.0 GB"],
     "each card names itself and reports ITS OWN used/total");
 
   // The combined 22/48 must not appear anywhere: it is the number that hides the
