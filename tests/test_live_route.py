@@ -114,6 +114,16 @@ class Server:
         portmux._servers.discard(self.server)
 
 
+@pytest.fixture(autouse=True)
+def _no_stopped_server_left_registered():
+    """A server a test stopped leaves portmux's registry, so portmux.stopping()
+    cannot end the next test's stream at once."""
+    yield
+    for s in list(portmux._servers):
+        if getattr(s, "should_exit", False):
+            portmux._servers.discard(s)
+
+
 @pytest.fixture
 def server(app):
     s = Server(app)
@@ -395,6 +405,7 @@ def test_the_server_stops_at_once_with_a_tab_still_connected(app):
         assert time.monotonic() - t0 < 2.5, "the stream held the stop for the grace period"
     finally:
         r.close(expect_drop=True)
+        portmux._servers.discard(srv.server)
 
 
 def test_a_stream_ends_when_its_key_is_revoked(app, server, monkeypatch):

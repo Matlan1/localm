@@ -617,3 +617,21 @@ test("Runtime: the check names a runtime loaded from an override", async () => {
   assert.match(status, /Up to date/);
   assert.match(status, /localm loads hip from the llama.cpp binary folder setting/);
 });
+
+test("Runtime: a finished provision keeps 'Runtime provisioned.' in front of the re-check's line", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, newer: false, current: "b10361" }],
+    ["/api/runtime/update", () => ({ job_id: "j1" })],
+  ]) });
+  stubJobStream(window, "done");
+  stubConfirm(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  pick(doc, window, "vulkan");
+  doc.getElementById("runtime-update-apply").click();
+  await flush();
+  await flush();
+  const status = doc.getElementById("runtime-update-status").textContent;
+  assert.match(status, /^Runtime provisioned\. Up to date/);
+});

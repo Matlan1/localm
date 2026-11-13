@@ -18,6 +18,7 @@ import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
 from localm.inference import routing_fit
 from localm.inference import switch_admission
+from tests._routing_fit import pin_vram_reading, reset_routing_state
 from tests.test_capability_routing import (_IMAGE_MSG, _answering_model,  # noqa: F401
                                            vision_server)
 
@@ -264,8 +265,7 @@ def _fix_classes(monkeypatch, plan_cls, *, plain_hold=0, need=None):
     """Plan-time measurement: the vision model is *plan_cls*; with *need*,
     it reaches FIT_GPU only once that many bytes are free (the user's plain
     model holds *plain_hold*). The load-time re-check agrees with the plan."""
-    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
-        free=1, total=_BIG, usable=True))
+    pin_vram_reading(monkeypatch, routing_fit.VramReading(free=1, total=_BIG, usable=True))
     from localm.inference.backends.llamacpp import _sizing
     monkeypatch.setattr(_sizing, "ram_reading", lambda: (_BIG, _BIG))
 
@@ -435,7 +435,9 @@ def job_world(monkeypatch, tmp_path):
     monkeypatch.setattr(hs, "_engine_factory",
                         lambda name: SimpleNamespace(model_path=registry[name]["path"]))
     hs._engines.clear()
-    hs._routing_loaded.clear()
+    reset_routing_state()
+    monkeypatch.setattr(hs, "_active_model_name", None)
+    monkeypatch.setattr(hs, "_last_active_model_name", None)
     from localm.plugins.builtin.jobs.store import Job
     return Job(name="nightly", prompt="summarise")
 
@@ -515,8 +517,7 @@ def test_a_context_overflow_carries_the_routing_header(vision_server, monkeypatc
 def test_the_load_time_check_counts_no_unload_that_did_not_happen(monkeypatch):
     """An idle model routing loaded would make room if unloaded, but room-making
     left it resident: the load-time check judges the state as it is."""
-    monkeypatch.setattr(hs, "routing_vram_reading", lambda: routing_fit.VramReading(
-        free=1, total=_BIG, usable=True))
+    pin_vram_reading(monkeypatch, routing_fit.VramReading(free=1, total=_BIG, usable=True))
     from localm.inference.backends.llamacpp import _sizing
     monkeypatch.setattr(_sizing, "ram_reading", lambda: (_BIG, _BIG))
     monkeypatch.setattr(hs, "_routing_residents", lambda exclude="": {
@@ -550,8 +551,7 @@ def test_planning_reuses_a_recent_reading_until_a_load_ends(monkeypatch):
     def measure():
         readings.append(1)
         return routing_fit.VramReading(free=len(readings), total=10, usable=True)
-    monkeypatch.setattr(hs, "routing_vram_reading", measure)
-    hs._forget_routing_reading()
+    pin_vram_reading(monkeypatch, measure)
     first = hs.planning_vram_reading()
     assert hs.planning_vram_reading() is first and len(readings) == 1
     hs._forget_routing_reading()
@@ -886,3 +886,15 @@ async def _cannot_measure(loop, budget, reading=None):
     """A VRAM probe on a box that reports no free figure (a CI runner)."""
     return switch_admission.VramProbe(free=None, probe_ok=True, process_scoped=False,
                                       shortfall=None, shares_adaptive=False)
+
+
+def test_reset_routing_state_drops_every_kind_of_routing_state(monkeypatch):
+    from tests._routing_fit import reset_routing_state
+    monkeypatch.setattr(hs, "_routing_reading_cache", (0.0, object()))
+    hs._routing_loaded.add("x")
+    hs._loads_in_flight["x"] = 1
+    hs._routing_latch.record_failure("x", "no VRAM")
+    reset_routing_state()
+    assert hs._routing_reading_cache is None
+    assert not hs._routing_loaded and not hs._loads_in_flight
+    assert hs._routing_latch.failure("x") is None

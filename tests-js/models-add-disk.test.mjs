@@ -8,7 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-const okFetch = async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" });
+const okFetch = async (url) => ({ ok: true, status: 200, text: async () => "",
+  json: async () => (String(url).includes("/api/capabilities") ? { fs_access: "host" } : {}) });
 
 test("add-models-disk: Browse drops the chosen folder into the model spec field", async () => {
   const { window } = loadAppWithPages({ fetchImpl: okFetch });
@@ -19,7 +20,7 @@ test("add-models-disk: Browse drops the chosen folder into the model spec field"
   assert.ok(browse, "the Browse button exists on the Models page");
   spec.value = "";
   browse.click();
-  await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
   assert.equal(spec.value, "D:/models/my-gguf", "the browsed folder path fills the spec");
 });
 
@@ -29,6 +30,6 @@ test("add-models-disk: a cancelled Browse leaves the spec unchanged", async () =
   const spec = window.document.getElementById("pull-spec");
   spec.value = "owner/repo";
   window.document.getElementById("pull-browse").click();
-  await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
   assert.equal(spec.value, "owner/repo", "cancelling the picker does not clear the field");
 });

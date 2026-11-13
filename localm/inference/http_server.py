@@ -1081,6 +1081,15 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
 
             if healing is not None:
                 healing.unloading = False
+            backend_plugin = getattr(new_engine, "backend_plugin", None)
+            if isinstance(backend_plugin, str) and backend_plugin:
+                from localm.inference import backend_registry
+                if not backend_registry.has_plugin(backend_plugin):
+                    await loop.run_in_executor(None, new_engine.unload)
+                    raise HTTPException(
+                        503, f"'{name}' was not kept loaded: plugin "
+                        f"{backend_plugin!r}, whose backend runs it, was disabled "
+                        f"while it loaded.")
             if newly_routed:
                 _routing_loaded.add(name)
             _switch_commit(name, new_engine, sem, activate=activate or was_active,
@@ -2476,7 +2485,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
     A load that raises is recorded in ``_routing_latch`` (a cancelled or
     superseded one is not) and a load that succeeds clears the model's record.
     The load fingerprint the record is made under is computed off the event
-    loop, before ``engine.load`` starts."""
+    loop, before ``engine.load`` starts. Called inside an
+    ``audit.request_privacy`` block, the load runs inside one too."""
     global _switch_cancel, _switch_loading
     fingerprint = None
     cancel = threading.Event()
@@ -2490,7 +2500,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool,
             return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
-        await loop.run_in_executor(None, _load_for_switch, engine, reading)
+        await loop.run_in_executor(None, carry_request_privacy(
+            functools.partial(_load_for_switch, engine, reading)))
     except ModelLoadCancelled as e:
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
@@ -3770,6 +3781,36 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     return result
+
+
+async def unload_models_of_backend_plugin(plugin_name: str) -> list[dict]:
+    """Unload every loaded model whose backend was built by an inference
+    backend that *plugin_name* registered (``Engine.backend_plugin``). Each
+    goes through ``unload_one_model``: it first waits for its requests in
+    flight to finish, and is unloaded with *force* when they do not. Returns
+    one ``unload_one_model`` result per model, in ``_engines`` order; an
+    unload that raises is logged at WARNING and reported as
+    ``{"status": "error", "model": name, "detail": ...}``, and the remaining
+    models are still unloaded."""
+    results = []
+    for name, engine in list(_engines.items()):
+        if not getattr(engine, "loaded", False):
+            continue
+        if getattr(engine, "backend_plugin", None) != plugin_name:
+            continue
+        try:
+            result = await unload_one_model(name)
+            if result.get("status") == "confirm_required":
+                result = await unload_one_model(name, force=True)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("plugin %s: unloading model %s, which runs on its "
+                           "inference backend, failed (%s: %s)",
+                           plugin_name, name, type(e).__name__, e)
+            result = {"status": "error", "model": name,
+                      "detail": f"{type(e).__name__}: {e}"}
+        results.append(result)
+    return results
 
 
 # Monotonic timestamp of the last inference request, for the optional idle-unload

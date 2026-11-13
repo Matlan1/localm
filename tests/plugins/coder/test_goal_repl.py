@@ -208,8 +208,8 @@ def test_plain_text_uses_goal_loop_when_armed(home, tmp_path, monkeypatch):
     from localm.plugins.coder.cli import repl as repl_mod
     goal_calls = []
 
-    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
-        goal_calls.append((a, task, cmd, max_iters, work_dir))
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir, interactive=False):
+        goal_calls.append((a, task, cmd, max_iters, work_dir, interactive))
         return (True, "ok")
 
     monkeypatch.setattr(repl_mod, "_run_goal_loop", _fake_goal_loop)
@@ -218,7 +218,8 @@ def test_plain_text_uses_goal_loop_when_armed(home, tmp_path, monkeypatch):
 
     assert chat_calls == []
     assert len(goal_calls) == 1
-    a, task, cmd, max_iters, work_dir = goal_calls[0]
+    a, task, cmd, max_iters, work_dir, interactive = goal_calls[0]
+    assert interactive is True
     assert a is agent
     assert task == "fix the bug"
     assert cmd == "pytest -x"
@@ -277,7 +278,7 @@ def test_goal_run_warns_about_a_sensitive_file_it_touched(home, tmp_path,
 
     from localm.plugins.coder.cli import repl as repl_mod
 
-    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir, interactive=False):
         _write_via_tool(a, "tests/test_foo.py")
         return (True, "ok")
 
@@ -298,7 +299,7 @@ def test_goal_run_stays_silent_when_it_touches_nothing_sensitive(
 
     from localm.plugins.coder.cli import repl as repl_mod
 
-    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir, interactive=False):
         _write_via_tool(a, "src/app.py")
         return (True, "ok")
 
@@ -323,7 +324,7 @@ def test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session(
 
     calls = {"n": 0}
 
-    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir, interactive=False):
         calls["n"] += 1
         if calls["n"] == 1:
             _write_via_tool(a, "tests/test_foo.py")
@@ -357,7 +358,7 @@ def test_goal_run_warning_fires_even_when_the_run_is_interrupted(
 
     from localm.plugins.coder.cli import repl as repl_mod
 
-    def _fake_goal_loop(a, task, cmd, max_iters, work_dir):
+    def _fake_goal_loop(a, task, cmd, max_iters, work_dir, interactive=False):
         _write_via_tool(a, "tests/test_foo.py")
         raise KeyboardInterrupt
 

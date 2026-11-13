@@ -45,7 +45,7 @@ test("BM25 row gets a 're-embed needed' badge + warn button when the embedding m
     .find((b) => b.textContent.includes("re-embed"));
   assert.ok(reembedBtn, "the re-embed button is present");
   assert.equal(reembedBtn.className, "warn", "it is styled as the fix for the badge");
-  assert.equal(reembedBtn.textContent, "re-embed needed");
+  assert.equal(reembedBtn.textContent, "re-embed", "the button names the action; the badge says it is needed");
 });
 
 test("BM25 row shows the vector_degrade_reason in the badge tooltip when present", async () => {

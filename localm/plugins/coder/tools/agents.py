@@ -563,9 +563,8 @@ def tool_spawn_agent_background(
     refusal below when no confirmation channel exists at all - this never
     self-approves, it declines to start.
 
-    A background sub-agent CANNOT be stopped once running (there is no
-    cooperative cancellation in ``Agent.run_task``), so there is no kill tool
-    for it.
+    ``kill_shell_job`` with the job id stops it: the child runs no further
+    tool call and ends when its current reply is finished.
     """
     if _parent_agent is None:
         return ToolResult.error(
@@ -708,8 +707,11 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
     # The ToolResult itself stays a success - the POLL worked; it is the child
     # that did not - so a poll never counts toward the tool-failure breaker.
     child_ok = result.get("ok", True)
-    verdict = ("finished in" if child_ok else
-               "DID NOT COMPLETE its task, stopping after")
+    if state == "killed":
+        verdict = "was stopped (kill_shell_job) after"
+    else:
+        verdict = ("finished in" if child_ok else
+                   "DID NOT COMPLETE its task, stopping after")
     from localm.textguard import compose, untrusted_span
     return ToolResult.success(
         compose("sub-agent '", untrusted_span(st["label"]),

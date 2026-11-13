@@ -100,3 +100,55 @@ def test_the_music_route_reports_the_unsupported_list(tmp_path, monkeypatch):
         body = c.get("/api/music/native-models").json()
     assert [u["name"] for u in body["unsupported"]] == ["ace_step_v1_3.5b.safetensors"]
     assert body["components"]["dit"][0]["name"] == "acestep-v15-turbo"
+
+
+# One tensor of each group the official ACE-Step 1.5 turbo checkpoint carries, with
+# its real shape: the header of ACE-Step/Ace-Step1.5 acestep-v15-turbo/model.safetensors.
+ACESTEP_15_OFFICIAL = {
+    "decoder.condition_embedder.bias": (2048,),
+    "decoder.layers.0.cross_attn.k_norm.weight": (128,),
+    "decoder.norm_out.weight": (2048,),
+    "decoder.proj_in.1.bias": (2048,),
+    "decoder.proj_out.1.bias": (64,),
+    "decoder.scale_shift_table": (1, 2, 2048),
+    "decoder.time_embed.linear_1.bias": (2048,),
+    "decoder.time_embed_r.linear_1.bias": (2048,),
+    "detokenizer.embed_tokens.bias": (2048,),
+    "detokenizer.layers.0.input_layernorm.weight": (2048,),
+    "detokenizer.norm.weight": (2048,),
+    "detokenizer.proj_out.bias": (64,),
+    "detokenizer.special_tokens": (1, 5, 2048),
+    "encoder.lyric_encoder.embed_tokens.bias": (2048,),
+    "encoder.text_projector.weight": (2048, 1024),
+    "encoder.timbre_encoder.embed_tokens.bias": (2048,),
+    "null_condition_emb": (1, 1, 2048),
+    "tokenizer.attention_pooler.embed_tokens.bias": (2048,),
+    "tokenizer.audio_acoustic_proj.bias": (2048,),
+    "tokenizer.quantizer.project_in.bias": (6,),
+}
+
+
+def _shaped(path, shapes):
+    header = {name: {"dtype": "BF16", "shape": list(shape), "data_offsets": [0, 0]}
+              for name, shape in shapes.items()}
+    raw = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00" * 16)
+    return path
+
+
+def test_the_official_acestep_15_checkpoint_is_music_15(tmp_path):
+    info = _music(_shaped(tmp_path / "model.safetensors", ACESTEP_15_OFFICIAL))
+    assert info is not None and info.kind == "music"
+    assert info.detail == {"acestep": "1.5"}
+
+
+def test_a_registered_acestep_15_safetensors_is_listed_with_what_runs_instead(tmp_path):
+    p = _shaped(tmp_path / "model.safetensors", ACESTEP_15_OFFICIAL)
+    reg = {"acestep-v15-turbo-st": {"path": str(p), "model_type": "diffusion-unet"}}
+    out = native_models.unsupported_music(reg)
+    assert out == [{"name": "acestep-v15-turbo-st", "file": "model.safetensors",
+                    "reason": native_models.ACESTEP_15_SAFETENSORS_REASON}]
+    reason = out[0]["reason"]
+    assert "GGUF parts" in reason and "localm setup-music" in reason
+    assert "ComfyUI may run" in reason
+    assert native_models.music_options(reg)["dit"] == []

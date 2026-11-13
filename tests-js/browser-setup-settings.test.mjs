@@ -128,7 +128,8 @@ test("a ready system engine names the browser it will use", async () => {
     ...READY, engine: "system", system_browsers: ["Brave", "Google Chrome"] } });
   await until(() => box(win) && /will use/.test(status(win)), "the status");
 
-  assert.equal(status(win), "localm will use Brave, found on this computer.");
+  assert.equal(status(win),
+    "localm will use the first of these that starts, found on this computer: Brave, Google Chrome.");
   assert.equal(buttons(win).length, 0);
 });
 

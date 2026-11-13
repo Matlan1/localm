@@ -27,6 +27,13 @@ _spec = importlib.util.spec_from_file_location("report_issue_url_under_test", _M
 ri = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ri)
 
+
+@pytest.fixture(autouse=True)
+def _network_access_ask(monkeypatch):
+    """Network access reads as ask; test_report_issue_net_mode.py covers off,
+    allow and an unreadable setting."""
+    monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+
 REJECTED = ["file:///etc/passwd", "ftp://x/", "file://C:/Windows/win.ini",
             "gopher://x/1", "data:text/plain,hi", "javascript:alert(1)",
             "not-a-url", "", "https://", "https:///nohost"]

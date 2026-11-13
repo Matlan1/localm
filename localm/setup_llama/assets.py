@@ -129,12 +129,14 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     if backend == "cuda" and arch == "arm64" and cuda_line not in _ARM64_CUDA_LINES:
         raise _no_build_in_release(tag, backend, plat, arch)
     assets = _sl._release_assets(tag)
-    for a in assets:
-        name = str(a.get("name", "")).lower()
-        if (any(m in name for m in matchers) and "cudart" not in name
-                and _asset_arch_ok(name, arch)
-                and a.get("browser_download_url")):
-            return a["browser_download_url"], _sl._asset_sha256(a), tag
+    # Matchers in their declared order, as in the offline fallback below.
+    for m in matchers:
+        for a in assets:
+            name = str(a.get("name", "")).lower()
+            if (m in name and "cudart" not in name
+                    and _asset_arch_ok(name, arch)
+                    and a.get("browser_download_url")):
+                return a["browser_download_url"], _sl._asset_sha256(a), tag
 
     # Fallback: the release listing was unavailable, so the asset name has to
     # come from somewhere else.

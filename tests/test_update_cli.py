@@ -33,8 +33,9 @@ def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkey
         "current": "0.1.4", "latest": "nightly", "newer": False, "comparable": False,
         "notes": "", "asset": None})
     r = CliRunner().invoke(main, ["update", "--check"])
-    assert "Could not tell" in r.output
-    assert "up to date" not in r.output
+    out = " ".join(r.output.split())
+    assert "Could not tell" in out
+    assert "localm is up to date" not in out
 
 
 def test_update_check_blocked_by_net_policy(monkeypatch):

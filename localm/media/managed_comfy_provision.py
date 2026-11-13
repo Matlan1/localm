@@ -734,9 +734,13 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
 
         # 5) Models via S1's extra_model_paths.yaml: the user's models dir + localm's
         #    managed models dir, ComfyUI-native, no copy.
-        mc.write_extra_model_paths(cfg)
+        path_problems: list = []
+        mc.write_extra_model_paths(cfg, path_problems)
         _say("Wrote extra_model_paths.yaml (your models + localm's managed models).",
             phase="models")
+        for problem in path_problems:
+            _say(f"WARNING: {problem}; the model locations it names are not shared "
+                 "with localm's ComfyUI.", phase="models")
 
         # 6) Provenance marker, load-bearing for step 7 below -
         #    is_managed_comfy_installed() requires this file too.
@@ -762,6 +766,9 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         if patch_failures:
             msg += (f" {len(patch_failures)} localm patch(es) did not apply; the "
                     "workflow they fix (e.g. ACE-Step music) may not work.")
+        if path_problems:
+            msg += (" The model locations in your ComfyUI's own extra_model_paths.yaml "
+                    f"are not shared: {'; '.join(path_problems)}.")
         return ProvisionResult(
             ok=True, status="copied", managed_root=root, commit=stack.commit,
             installed_packages=n_pkgs, custom_nodes_copied=n_nodes, log="\n".join(log),

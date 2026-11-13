@@ -438,6 +438,14 @@ def prefill_progress_status(done: int, total: int) -> StatusText:
     return StatusText(f"Processing prompt... ({done} of {total} tokens)",
                       "processing_progress", args)
 
+
+def prefill_layers_status(done: int, total: int) -> StatusText:
+    """The status for a prompt that has passed *done* of the model's *total*
+    decoder layers."""
+    args = {"done": str(done), "total": str(total)}
+    return StatusText(f"Processing prompt... (layer {done} of {total})",
+                      "processing_layers", args)
+
 # Emitted by the SSE route while it summarises older messages to fit the
 # context window, before the reply starts.
 COMPACTING_STATUS = "Compacting conversation..."
@@ -488,6 +496,7 @@ STATUS_ARGS_BY_CODE: dict[str, tuple[str, ...]] = {
     "loading_beside": ("model", "resident"),
     "loading_routed": ("model", "current", "needs"),
     "processing_progress": ("done", "total"),
+    "processing_layers": ("done", "total"),
 }
 
 

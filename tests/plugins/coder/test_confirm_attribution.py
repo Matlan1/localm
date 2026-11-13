@@ -340,13 +340,14 @@ def test_a_timed_out_child_confirmation_says_which_child_it_was(tmp_path, monkey
     session = _gui_session(tmp_path)
     try:
         assert session._confirm(_write_call(), agent="child3") is False
-        infos = [e["text"] for e in session.history if e.get("type") == "info"]
-        assert any("child3" in t and "timed out" in t for t in infos)
-
-        assert session._confirm(_write_call()) is False
-        assert any(t == "Confirmation for write_file timed out - rejected."
-                   for t in [e["text"] for e in session.history
-                             if e.get("type") == "info"])
+        requests = [e for e in session.history if e.get("type") == "confirm_request"]
+        resolved = [e for e in session.history if e.get("type") == "confirm_resolved"]
+        assert requests[-1]["agent"] == "child3"
+        assert resolved[-1]["confirm_id"] == requests[-1]["confirm_id"]
+        assert resolved[-1]["timed_out"] is True
+        # The card states the timeout; no second line repeats it.
+        assert not [e for e in session.history if e.get("type") == "info"
+                    and "timed out" in str(e.get("text", ""))]
     finally:
         session.close()
 

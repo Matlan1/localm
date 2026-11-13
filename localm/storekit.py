@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from localm import procid, sysprog
 
@@ -236,12 +236,16 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     *retrying* selects the final replace: False (default) is a bare
     ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
     backoff (up to ~1 s) over a transient Windows sharing violation, such as a
-    concurrent reader's open handle. Pass True only when the caller serializes
-    every writer of *path* across processes (a cross-process lock held for the
-    whole write or read-modify-write). The callers that pass True are
-    ``auth.set_api_key`` (auth.key), ``auth._save_keystore`` (auth.json) and
-    ``model_source_credentials._write_all`` (model_source_credentials.json);
-    every other caller uses the bare replace.
+    concurrent reader's open handle. Pass True only when no other process
+    writes *path* at the same time: a cross-process lock held for the whole
+    write or read-modify-write, or a file only one process ever writes. Every
+    caller passes True: ``auth.set_api_key`` (auth.key),
+    ``auth._save_keystore`` (auth.json), ``model_source_credentials._write_all``,
+    ``sessions._save`` and ``issue_tracker.record_filed`` under the file's
+    cross-process lock; ``instances._write_entry`` and the job manager's
+    activity store, whose files only their own process writes; the owner-KDF
+    writer while it holds its cross-process lock (False when that lock could not
+    be taken). See test_every_private_store_write_rides_out_a_reader.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -274,9 +278,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
-    With *retrying* False the replace is a bare ``os.replace``; some of those
-    callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run on the asyncio event loop.
+    Some callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run on the asyncio event loop, where a retry sleeps on the
+    loop while another handle holds *path*.
 
     ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
     TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
@@ -358,9 +362,11 @@ def _is_transient_permission_error(e: OSError) -> bool:
     return getattr(e, "winerror", None) in (5, 32, None)
 
 
-def replace_atomic(src: Path, dst: Path) -> None:
+def replace_atomic(src: Path, dst: Path, *,
+                   on_retry: Optional[Callable[[int, OSError], None]] = None) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
-    sharing violation.
+    sharing violation. *on_retry*, when given, is called with the number of
+    the refused attempt (from 1) and its error before each retry.
 
     os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
     when another handle has *dst* open at that instant: a second localm process
@@ -379,6 +385,8 @@ def replace_atomic(src: Path, dst: Path) -> None:
         except PermissionError as e:
             if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
+            if on_retry is not None:
+                on_retry(attempt + 1, e)
             _transient_backoff(attempt)
 
 

@@ -1158,8 +1158,8 @@ class ModelRunner:
                     f"Model load timed out after {timeout:.0f}s - the "
                     f"worker process may be hung ({native_fault_hint()}). The "
                     "server stayed up and the load was aborted; retry, or "
-                    "raise gguf_load_timeout_s if this model genuinely "
-                    "needs longer to load."
+                    "raise 'GGUF load timeout (s)' in Settings > Model if this "
+                    "model genuinely needs longer to load."
                 )
         kind = result[0]
         if kind == "ok":

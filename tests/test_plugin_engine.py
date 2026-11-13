@@ -426,15 +426,16 @@ def test_uninstall_reports_degraded_result_when_rmtree_fails(env, caplog, monkey
 
 
 # ---------------------------------------------------------------------------
-#  _delete_plugin_data: data_subdir is taken verbatim from a (possibly
-#  third-party) manifest. It must NEVER let rmtree escape the data dir via
-#  traversal ('../models'), an absolute path, or '.' (the home root itself).
+#  data_subdir comes from a (possibly third-party) manifest. parse_spec accepts
+#  one folder name only; _delete_plugin_data confines rmtree to the plugin's own
+#  root: the data dir for a store install, plugin-data/<name> for a third-party
+#  one, never the data dir itself.
 # ---------------------------------------------------------------------------
 
 def _mgr_with_data_subdir(tmp_path, monkeypatch, data_subdir):
-    """Build a discovered manager whose plugin 'evil' declares *data_subdir*,
-    with LOCALM_HOME pinned to a subdir of tmp_path so siblings can be
-    created safely outside the data dir."""
+    """Build a discovered manager whose third-party plugin 'evil' declares
+    *data_subdir*, with LOCALM_HOME pinned to a subdir of tmp_path so siblings
+    can be created safely outside the data dir."""
     from localm.plugins.engine import PluginManager
     home = tmp_path / "home"
     home.mkdir()
@@ -447,33 +448,82 @@ def _mgr_with_data_subdir(tmp_path, monkeypatch, data_subdir):
     return mgr, home
 
 
-def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch):
-    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "../victim")
+@pytest.mark.parametrize("bad", ["../victim", ".", "..", "a/b", "a\\\\b", "/abs",
+                                 "C:victim", ".hidden", "sp ace"])
+def test_parse_spec_refuses_a_data_subdir_that_is_not_one_folder_name(tmp_path, bad):
+    from localm.plugins.engine import parse_spec
+    pdir = _make_plugin(tmp_path, "evil", _ping("evil"),
+                        toml_extra=f"data_subdir = '{bad}'\n")
+    with pytest.raises(ValueError, match="data_subdir must be one folder name"):
+        parse_spec(pdir)
+
+
+def test_parse_spec_refuses_a_data_subdir_that_is_not_a_string(tmp_path):
+    from localm.plugins.engine import parse_spec
+    pdir = _make_plugin(tmp_path, "evil", _ping("evil"), toml_extra="data_subdir = 5\n")
+    with pytest.raises(ValueError, match="data_subdir"):
+        parse_spec(pdir)
+
+
+@pytest.mark.parametrize("builtin", [False, True])
+def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch, builtin):
+    from localm.plugins.engine import PluginManager, PluginSpec
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
     victim = tmp_path / "victim"
     victim.mkdir()
     (victim / "keep.txt").write_text("important", encoding="utf-8")
+    mgr = PluginManager(FastAPI(), external_root=home / "plugins", builtin_root=None)
+    escape = "../victim" if builtin else "../../../victim"
+    spec = PluginSpec(name="evil", data_subdir=escape, builtin=builtin)
     # A refused delete is a FAILURE, not a silent no-op: the caller (uninstall())
     # must be able to tell "nothing needed deleting" apart from "deletion was
     # refused for safety".
-    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    assert mgr._delete_plugin_data(spec) is False
     assert victim.exists() and (victim / "keep.txt").exists()
 
 
 def test_delete_data_rejects_dot_root(tmp_path, monkeypatch):
-    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, ".")
-    (home / "models").mkdir()
+    from localm.plugins.engine import PluginManager, PluginSpec
+    home = tmp_path / "home"
+    (home / "models").mkdir(parents=True)
     (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
-    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    mgr = PluginManager(FastAPI(), external_root=home / "plugins", builtin_root=None)
+    assert mgr._delete_plugin_data(PluginSpec(name="evil", data_subdir=".",
+                                              builtin=True)) is False
     assert home.exists() and (home / "models" / "big.gguf").exists()
 
 
 def test_delete_data_deletes_legit_subdir(tmp_path, monkeypatch):
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
     assert mgr._delete_plugin_data(mgr._specs["evil"]) is True
     assert not target.exists()
+
+
+def test_third_party_delete_data_never_reaches_a_kernel_folder(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "models")
+    (home / "models").mkdir()
+    (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
+    own = home / "plugin-data" / "evil" / "models"
+    own.mkdir(parents=True)
+    (own / "cache.bin").write_text("x", encoding="utf-8")
+    assert mgr.uninstall("evil", delete_data=True) is True
+    assert (home / "models" / "big.gguf").read_text(encoding="utf-8") == "data"
+    assert not own.exists()
+
+
+def test_plugin_data_dir_keeps_a_store_plugins_folder_at_the_top(tmp_path):
+    from localm.plugins.engine import PluginSpec, plugin_data_dir
+    assert plugin_data_dir(PluginSpec(name="rag", data_subdir="rag", builtin=True),
+                           tmp_path) == tmp_path / "rag"
+    assert plugin_data_dir(PluginSpec(name="x", data_subdir="d"), tmp_path) == (
+        tmp_path / "plugin-data" / "x" / "d")
+    assert plugin_data_dir(PluginSpec(name="x"), tmp_path) is None
 
 
 def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
@@ -483,8 +533,8 @@ def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
     import shutil
     from pathlib import Path
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
 
     real_rmtree = shutil.rmtree
@@ -515,8 +565,8 @@ def test_uninstall_delete_data_reports_degraded_result_on_failure(tmp_path, monk
     installed_dir = home / "plugins" / "evil"
     assert installed_dir.is_dir()
 
-    target = home / "evil_data"
-    target.mkdir()
+    target = home / "plugin-data" / "evil" / "evil_data"
+    target.mkdir(parents=True)
     (target / "cache.bin").write_text("x", encoding="utf-8")
 
     real_rmtree = shutil.rmtree
@@ -689,11 +739,23 @@ def test_protected_plugin_cannot_be_disabled(env, monkeypatch):
     monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
+    store = env / "store"
+    _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(FastAPI(), external_root=plugins, store_root=store)
+    mgr.install("core")
+    with pytest.raises(ValueError, match="protected"):
+        mgr.disable("core")
+
+
+def test_a_protected_flag_on_a_third_party_plugin_is_ignored(env, monkeypatch):
+    monkeypatch.setattr("localm.plugins.catalog.protected", lambda: frozenset({"core"}))
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
     mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
     mgr.install("core")
-    with pytest.raises(ValueError):
-        mgr.disable("core")
+    mgr.disable("core")
+    assert "core" not in mgr._loaded
 
 
 def test_enable_unknown_raises(env):
@@ -1926,3 +1988,230 @@ def test_a_complete_install_is_still_reported_as_installed(env):
     with pytest.raises(ValueError, match="already installed"):
         mgr.set_installed_from_dir(src)
     mgr.set_installed_from_dir(src, force=True)
+
+
+def _link_dir(link, target):
+    import os
+    import sys
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_delete_data_refuses_a_plugin_data_root_linked_out_of_the_data_dir(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
+    outside = tmp_path / "outside"
+    (outside / "evil_data").mkdir(parents=True)
+    (outside / "evil_data" / "keep.txt").write_text("important", encoding="utf-8")
+    (home / "plugin-data").mkdir()
+    _link_dir(home / "plugin-data" / "evil", outside)
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    assert (outside / "evil_data" / "keep.txt").read_text(encoding="utf-8") == "important"
+
+
+_TAB_PLUGIN = '''
+from localm.plugins.contract import PluginSettingField, Surface
+
+def register(host):
+    host.register_tab(Surface(tab_id="tabby", label="Tabby", icon="star",
+                              group="tools", settings_group="Tabby settings",
+                              assets_dir="static", client_entry="tab.js"))
+    host.add_settings([PluginSettingField(key="x", widget="toggle", label="X",
+                                          default=False)])
+
+def unregister():
+    pass
+'''
+
+
+def test_a_registered_tab_shows_in_the_plugin_listing_and_is_served(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    pdir = _make_plugin(plugins, "tabby", _TAB_PLUGIN)
+    (pdir / "static").mkdir()
+    (pdir / "static" / "tab.js").write_text("export function register() {}\n",
+                                            encoding="utf-8")
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("tabby")
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tabby")
+    assert (entry["tab"], entry["label"], entry["icon"], entry["group"],
+            entry["client_entry"], entry["assets_base"]) == (
+        "tabby", "Tabby", "star", "tools", "tab.js", "/plugins/tabby")
+    assert [s["label"] for s in mgr.get_all_plugin_settings()] == ["Tabby settings"]
+    with TestClient(app) as c:
+        assert c.get("/plugins/tabby/tab.js").status_code == 200
+    mgr.disable("tabby")
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tabby")
+    assert (entry["tab"], entry["client_entry"], entry["assets_base"]) == ("", "", "")
+
+
+def test_register_tab_rejects_anything_but_a_surface(env):
+    from localm.plugins.engine import PluginHost, PluginSpec
+    host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
+    with pytest.raises(TypeError, match="Surface"):
+        host.register_tab({"tab_id": "x"})
+
+
+def _install_with_old_data(env, *, new_exists):
+    from localm.plugins.engine import PluginManager
+    old = env / "olddata"
+    old.mkdir()
+    (old / "notes.txt").write_text("keep", encoding="utf-8")
+    if new_exists:
+        (env / "plugin-data" / "legacy" / "olddata").mkdir(parents=True)
+    plugins = env / "plugins"
+    _make_plugin(plugins, "legacy", _ping("legacy"),
+                 toml_extra='data_subdir = "olddata"\n')
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.install("legacy")
+    return old
+
+
+def test_an_old_third_party_data_folder_is_warned_about_and_left_in_place(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        old = _install_with_old_data(env, new_exists=False)
+    hits = [r.getMessage() for r in caplog.records if "left in place" in r.getMessage()]
+    new = env / "plugin-data" / "legacy" / "olddata"
+    assert len(hits) == 1 and str(old) in hits[0] and str(new) in hits[0]
+    assert (old / "notes.txt").read_text(encoding="utf-8") == "keep"
+    assert not new.exists()
+
+
+def test_no_old_data_warning_once_the_new_folder_exists(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        _install_with_old_data(env, new_exists=True)
+    assert not [r for r in caplog.records if "left in place" in r.getMessage()]
+
+
+def test_host_data_dir_is_the_plugins_own_folder_and_is_created(env):
+    from localm.plugins.engine import PluginHost, PluginSpec
+    third = PluginHost(FastAPI(), object(), PluginSpec(name="tp", data_subdir="store"))
+    assert third.data_dir() == (env / "plugin-data" / "tp" / "store").resolve()
+    assert third.data_dir().is_dir()
+    first = PluginHost(FastAPI(), object(),
+                       PluginSpec(name="rag", data_subdir="rag", builtin=True))
+    assert first.data_dir() == (env / "rag").resolve()
+    with pytest.raises(ValueError, match="declares no data_subdir"):
+        PluginHost(FastAPI(), object(), PluginSpec(name="none")).data_dir()
+
+
+def _legacy_with_old_and_new_data(env):
+    old = env / "olddata"
+    old.mkdir()
+    (old / "notes.txt").write_text("keep", encoding="utf-8")
+    new = env / "plugin-data" / "legacy" / "olddata"
+    new.mkdir(parents=True)
+    (new / "cache.bin").write_text("x", encoding="utf-8")
+    src = _make_plugin(env / "src", "legacy", _ping("legacy"),
+                       toml_extra='data_subdir = "olddata"\n')
+    return src, old, new
+
+
+def test_delete_data_reports_an_older_data_folder_as_left_in_place(env):
+    from localm.plugins.engine import PluginManager
+    src, old, new = _legacy_with_old_and_new_data(env)
+    mgr = PluginManager(None)
+    mgr.set_installed_from_dir(src)
+    assert tuple(mgr.uninstall_report("legacy", delete_data=True)) == (True, old)
+    assert (old / "notes.txt").read_text(encoding="utf-8") == "keep"
+    assert not new.exists()
+
+
+def test_the_http_uninstall_names_the_folder_left_in_place(env):
+    from localm.plugins.engine import attach_engine
+    src, old, new = _legacy_with_old_and_new_data(env)
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        assert c.post("/api/plugins/install-external",
+                      json={"source": str(src)}).status_code == 200
+        r = c.post("/api/plugins/legacy/uninstall?delete_data=true")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["left_in_place"] == str(old)
+    assert "left in place, not removed" in body["detail"]
+    assert (old / "notes.txt").exists() and not new.exists()
+
+
+def test_the_mcp_uninstall_names_the_folder_left_in_place(env):
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.mcpserver.tools import plugin_admin
+    src, old, new = _legacy_with_old_and_new_data(env)
+    PluginManager(None).set_installed_from_dir(src)
+    out = plugin_admin.build()["uninstall_plugin"]["handler"](
+        {"plugin": "legacy", "delete_data": True})
+    text = str(out)
+    assert str(old) in text or str(old).replace("\\", "\\\\") in text
+    assert "left in place, not removed" in text
+    assert (old / "notes.txt").exists() and not new.exists()
+
+
+def test_two_uninstalls_each_report_their_own_old_folder(env):
+    import threading
+
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(None)
+    olds = {}
+    for name in ("one", "two"):
+        old = env / f"{name}_data"
+        old.mkdir()
+        olds[name] = old
+        mgr.set_installed_from_dir(_make_plugin(
+            env / "src", name, _ping(name), toml_extra=f'data_subdir = "{name}_data"\n'))
+    got = {}
+    start = threading.Barrier(2)
+
+    def run(name):
+        start.wait()
+        got[name] = mgr.uninstall_report(name, delete_data=True).left_in_place
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in olds]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert got == olds
+
+
+_TAB_SWAP_PLUGIN = """
+from localm.plugins.contract import Surface
+
+HOST = []
+
+def register(host):
+    HOST.append(host)
+
+def unregister():
+    pass
+"""
+
+
+def test_a_later_register_tab_serves_its_own_assets_and_an_unloaded_host_mounts_nothing(env):
+
+    from localm.plugins.contract import Surface
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    pdir = _make_plugin(plugins, "swap", _TAB_SWAP_PLUGIN,
+                        toml_extra='[surface]\nassets_dir = "a"\nclient_entry = "a.js"\n')
+    for folder, fname in (("a", "a.js"), ("b", "b.js")):
+        (pdir / folder).mkdir()
+        (pdir / folder / fname).write_text("export {}\n", encoding="utf-8")
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("swap")
+    host = mgr._loaded["swap"][2]
+    host.register_tab(Surface(assets_dir="b", client_entry="b.js"))
+    with TestClient(app) as c:
+        assert c.get("/plugins/swap/b.js").status_code == 200
+        assert c.get("/plugins/swap/a.js").status_code == 404
+    mgr.disable("swap")
+    routes_after_disable = len(app.router.routes)
+    host.register_tab(Surface(assets_dir="a", client_entry="a.js"))
+    assert len(app.router.routes) == routes_after_disable
+    with TestClient(app) as c:
+        assert c.get("/plugins/swap/a.js").status_code == 404

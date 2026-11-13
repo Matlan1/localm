@@ -228,7 +228,7 @@ docker run -d --gpus all -v localm-data:/data -p 8642:8642 ghcr.io/matlan1/local
 
 Pick the tag by GPU generation: `cuda` for every architecture before Blackwell,
 `cuda13` for Blackwell (RTX 50-series, B100/B200). The host driver must support the
-image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.4 or newer for `cuda13`
+image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.5 or newer for `cuda13`
 (`nvidia-smi` prints the version the driver supports).
 
 The image cannot be tested against a GPU while it is built, so the runtime is checked

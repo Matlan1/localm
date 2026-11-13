@@ -91,13 +91,19 @@ time.
 
 ## Models are shared, never copied
 
-localm does not duplicate your models. On setup it writes an
-`extra_model_paths.yaml` into the managed ComfyUI that points at both a
-localm-managed models folder (`<data dir>/comfyui-models`) and, when localm knows
-your ComfyUI folder, your existing `<comfy_workdir>/models`. This is ComfyUI's
-native model-sharing mechanism: no copy, no symlink, no re-download, no admin
-rights. The generated file has a header showing how to add more model sources by
-hand.
+localm does not duplicate your models. It writes an `extra_model_paths.yaml`
+into the managed ComfyUI that points at a localm-managed models folder
+(`<data dir>/comfyui-models`), your existing `<comfy_workdir>/models` when localm
+knows your ComfyUI folder, and the folder of every model you registered with
+localm (`localm add` or the Models page) that a ComfyUI loader can use: diffusion
+models, checkpoints, text encoders, VAEs, LoRAs, upscalers, ControlNets and
+embeddings, each under its ComfyUI type. This is ComfyUI's native model-sharing
+mechanism: no copy, no symlink, no re-download, no admin rights.
+
+localm rewrites the file before every start of the managed ComfyUI, so a model
+registered since the last start is picked up on the next one; a model registered
+while it runs needs a restart (`localm comfy restart`), and a generation says so.
+A section you add to the file by hand is kept when localm rewrites it.
 
 A CivitAI pull (`localm pull civitai:<versionId>`, or the Models page's
 CivitAI search) lands directly in one of these same folders -

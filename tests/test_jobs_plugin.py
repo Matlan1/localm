@@ -195,6 +195,7 @@ def test_results_newest_first(home):
 def test_result_dir_confined_to_jobs_dir(home):
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
+    store.add(_make_job(id="../../etc/evil"))
     # A crafted, traversal-shaped job id is sanitised; nothing escapes the root.
     rid = store.record_result("../../etc/evil", {"status": "ok", "output": "x",
                                                  "started": 0.0, "finished": 0.0})
