@@ -290,10 +290,11 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         fn=tool_kill_shell_job,
         description=(
             "Stop a background job and its whole process tree, and report its "
-            "final state and output."
+            "final state and output. A background sub-agent's job id stops that "
+            "sub-agent: it runs no further tool call and ends after its current reply."
         ),
         params={
-            "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
+            "job_id": {"type": "string", "description": "Job id from run_shell_background or spawn_agent_background", "required": True},
         },
         destructive=True,
     ),
