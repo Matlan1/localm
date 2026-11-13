@@ -429,6 +429,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .cmdk-item { padding: 10px 16px; cursor: pointer; font-size: 14px; color: var(--text); }
 .cmdk-item:hover { background: var(--accent-soft); }
 .cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
+.cmdk-item.cmdk-empty, .cmdk-item.cmdk-empty:hover { background: none; color: var(--text-dim); cursor: default; }
 
 /* Settings: performance sliders + VRAM estimate */
 #sec-performance input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }

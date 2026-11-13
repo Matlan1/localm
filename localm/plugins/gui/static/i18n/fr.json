@@ -259,6 +259,7 @@
   "cmdk.exportConversation": "Exporter la conversation",
   "cmdk.goTo": "Aller à {view}",
   "cmdk.manageKeys": "Gérer les clés et appareils",
+  "cmdk.noMatch": "Aucune commande ne correspond",
   "cmdk.placeholder": "Tapez une commande…  (↑↓ pour naviguer · Entrée pour exécuter · Échap pour fermer)",
   "cmdk.toggleTheme": "Basculer le thème clair/sombre",
   "coder.attach.noImages": "le Coder ne peut pas recevoir d'images. Collez plutôt le texte, ou joignez l'image dans Chat avec un modèle de vision",
