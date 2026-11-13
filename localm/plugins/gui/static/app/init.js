@@ -324,7 +324,11 @@ export function showReconnectOverlay(mode = "reconnecting") {
       panel.appendChild(el("div", "reconnect-msg", t("reconnect.unreachable")));
       const reset = el("button", "reconnect-reset", t("reconnect.reset"));
       reset.type = "button";
-      reset.onclick = () => resetClientState(note, reset);
+      reset.onclick = async () => {
+        reset.disabled = true;
+        try { await resetClientState(note, reset); }
+        finally { reset.disabled = false; }
+      };
       panel.appendChild(reset);
     }
     panel.appendChild(note);
@@ -473,20 +477,25 @@ export const PLUGIN_BOOT_PROBES = Object.freeze([
   Object.freeze({ plugin: "coder", run: reattachSessions }),
 ]);
 
+// The pluginState array before any /api/capabilities answer; an answer replaces it.
+const _pluginStateUnanswered = pluginState;
+
 /** True when the /api/capabilities answer lists plugin *name* as installed and
  *  enabled for this key. False before that answer arrives and when it failed. */
 export function pluginActive(name) {
   return pluginState.some((p) => p && p.name === name && p.active === true);
 }
 
-/** Wait for the first /api/capabilities answer, then run each probe's *run* for
- *  an active plugin and its *absent* for any other. Resolves when every started
- *  read has settled; never rejects. */
+/** Wait for the first /api/capabilities load, then run each probe's *run* for
+ *  an active plugin and its *absent* for any other. When that load got no
+ *  answer, every probe's *run* runs. Resolves when every started read has
+ *  settled; never rejects. */
 export async function runPluginProbes(probes = PLUGIN_BOOT_PROBES) {
   await capsReady;
+  const answered = pluginState !== _pluginStateUnanswered;
   const started = [];
   for (const probe of probes) {
-    if (pluginActive(probe.plugin)) started.push(probe.run());
+    if (!answered || pluginActive(probe.plugin)) started.push(probe.run());
     else if (probe.absent) probe.absent();
   }
   await Promise.allSettled(started);

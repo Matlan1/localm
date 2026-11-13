@@ -66,6 +66,25 @@ test("page load reads each active plugin's route once", async () => {
   }
 });
 
+test("a capabilities read that gets no answer runs every plugin read instead of guessing absent", async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u === "/api/capabilities") return json({ detail: "boom" }, 500);
+    if (u.startsWith("/api/models")) return json({ models: [], active: "" });
+    if (u === "/api/voice/status") return json({ available: true });
+    if (u === "/api/rag/collections") return json({ collections: [] });
+    if (u === "/api/coder/sessions") return json({ sessions: [] });
+    return json({});
+  };
+  const { window } = loadApp({ fetchImpl });
+  await tick();
+  for (const u of PLUGIN_URLS) assert.equal(urls.filter((x) => x === u).length, 1, `${u} read once`);
+  const mic = window.document.getElementById("chat-mic");
+  assert.ok(!mic.classList.contains("unavailable"), "the mic is not greyed as not installed");
+});
+
 // Function bodies of *file*, keyed by the declared name.
 function functionBodies(file) {
   const src = readFileSync(join(APP, file), "utf-8").replace(/\r/g, "");

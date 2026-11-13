@@ -18,7 +18,8 @@ function fetchFor(responses) {
       call++;
       return r;
     }
-    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    const body = u === "/api/capabilities" ? { plugins: [{ name: "voice", active: true }] } : {};
+    return { ok: true, status: 200, json: async () => body, text: async () => "" };
   };
 }
 
