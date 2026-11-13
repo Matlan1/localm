@@ -7,10 +7,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
-from localm.inference.http_server import require_scope
+from localm.inference.http_server import caller_is_operator, require_scope
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 
@@ -28,6 +28,17 @@ def _total_ram() -> int:
     except Exception as e:
         logger.warning("could not read the installed RAM, psutil failed: %r", e)
         return 0
+
+
+def _hf_credential(request: Request) -> dict:
+    """Keyword arguments for the HF helpers: none for the owner (the saved token
+    is sent), ``token=""`` for any other caller (nothing is sent)."""
+    return {} if caller_is_operator(request) else {"token": ""}
+
+
+def _civitai_credential(request: Request) -> dict:
+    """As :func:`_hf_credential`, for the CivitAI helpers' ``api_key``."""
+    return {} if caller_is_operator(request) else {"api_key": ""}
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -73,7 +84,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         return vram, vram.get("total")
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf",
+    async def discover_search(request: Request, q: str = "", limit: int = 20,
+                               formats: str = "gguf",
                                types: str = "", source: str = "hf",
                                nsfw: bool = False):
         # `source` picks the provider; everything else keeps its existing meaning
@@ -85,7 +97,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             wanted_types = [t.strip() for t in types.split(",") if t.strip()]
             data = await _run_discover(
                 lambda: civitai_search(q, limit=limit,
-                                        types=wanted_types or None, nsfw=nsfw))
+                                        types=wanted_types or None, nsfw=nsfw,
+                                        **_civitai_credential(request)))
             return {"query": q, "source": "civitai", "results": data["items"],
                     "next_cursor": data.get("next_cursor")}
         # `formats` is a CSV of {gguf, hf} and `types` a CSV of MODEL_TYPES, both from
@@ -98,7 +111,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         wanted_types = [t.strip().lower() for t in types.split(",") if t.strip()]
         model_types = wanted_types or None
         results = await _run_discover(
-            lambda: hf_search(q, limit=limit, formats=wanted, model_types=model_types))
+            lambda: hf_search(q, limit=limit, formats=wanted, model_types=model_types,
+                              **_hf_credential(request)))
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata); GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown,
@@ -114,16 +128,17 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "hf_backend_available": hf_backend_available()}
 
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_files(repo: str, source: str = "hf",
+    async def discover_files(request: Request, repo: str, source: str = "hf",
                               legacy_formats: bool = False):
         # For source=civitai, `repo` is a CivitAI model VERSION id, not a repo.
         if source == "civitai":
             from localm.model_manager.sources import civitai_list_files
             files = await _run_discover(
-                lambda: civitai_list_files(repo, include_legacy_formats=legacy_formats))
+                lambda: civitai_list_files(repo, include_legacy_formats=legacy_formats,
+                                           **_civitai_credential(request)))
             return {"repo": repo.strip(), "source": "civitai", "files": files}
         from localm.discover import fit_label, hf_gguf_files
-        files = await _run_discover(lambda: hf_gguf_files(repo))
+        files = await _run_discover(lambda: hf_gguf_files(repo, **_hf_credential(request)))
         vram, total = await _vram_total()
         models = []
         mmprojs = []

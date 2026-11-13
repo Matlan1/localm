@@ -25,7 +25,12 @@ def headers(monkeypatch):
 
     def fake(url, **kw):
         seen.append(kw.get("extra_headers"))
-        body = b'{"items": [], "metadata": {}, "files": []}' if "civitai" in url else b"[]"
+        if "civitai" in url:
+            body = b'{"items": [], "metadata": {}, "files": []}'
+        elif "/tree/" in url:
+            body = b'[{"type": "file", "path": "m-Q4_K_M.gguf", "size": 1}]'
+        else:
+            body = b"[]"
         return url, "application/json", body
 
     monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
@@ -91,3 +96,55 @@ def test_the_mcp_search_tools_send_the_saved_token(headers):
     tools["search_models"]["handler"]({"query": "qwen"})
     tools["list_model_files"]["handler"]({"repo": "org/repo"})
     assert headers and all(h == _HF for h in headers)
+
+
+@pytest.fixture
+def gui_client(tmp_path, monkeypatch):
+    """The GUI app on a throwaway home with an owner key."""
+    from pathlib import Path
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import localm.config as cfg
+    from localm.plugins.engine import attach_engine
+    from localm.plugins.gui.web import attach_gui
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(discover, "vram_info",
+                        lambda *a, **k: ({}, discover.GPU_PROBE_OK) if k.get("return_status") else {})
+    app = FastAPI()
+    attach_engine(app)
+    attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=lambda name: None,
+               active_model=lambda: "model-a")
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.mark.parametrize("path", [
+    "/api/discover/search?q=qwen",
+    "/api/discover/files?repo=org/repo",
+    "/api/discover/search?q=x&source=civitai",
+    "/api/discover/files?repo=135867&source=civitai",
+])
+def test_the_gui_routes_send_the_saved_credentials_for_the_owner_only(
+        headers, gui_client, path):
+    from localm import auth, scopes
+    _save()
+    reader = auth.create_key("reader", [scopes.MODELS_READ])["key"]
+    want = _CIV if "civitai" in path else _HF
+
+    owner = gui_client.get(path, headers={"Authorization": "Bearer ownersecret"})
+    assert owner.status_code == 200, owner.text
+    assert headers and all(h == want for h in headers)
+
+    headers.clear()
+    other = gui_client.get(path, headers={"Authorization": f"Bearer {reader}"})
+    assert other.status_code == 200, other.text
+    assert headers and all(h is None for h in headers)
