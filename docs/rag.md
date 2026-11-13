@@ -78,7 +78,7 @@ GUI and the API, key and credential files (private keys, certificates,
 keystores, `.env` files, `.netrc` and the like) are refused too. A Windows
 drive mapped to a network share (`net use Z:
 \\host\share`) is treated as an ordinary local folder unless you turn off
-**Settings > Security > "Allow network drives as filesystem locations"**.
+**Settings > Security > Allow network drives as filesystem locations**.
 The localm data directory (it holds your API key and
 registry) is NOT specially excluded from that confinement - if it falls within
 an allowed folder, its contents are indexable like any other file, since the

@@ -808,3 +808,25 @@ def test_load_config_and_the_settings_schema_read_keep_diagnostics_as_a_bool(
     assert cfg.load_config()["keep_diagnostics"] is want
     fields = [f for f in schema_json(cfg.load_config()) if f["key"] == "keep_diagnostics"]
     assert fields and fields[0]["default"] is want
+
+
+@pytest.mark.parametrize("raw", [False, None, 0, "", " Off ", "FALSE", "No", "0"])
+def test_a_recognised_off_value_is_read_as_off_without_a_report(monkeypatch, capsys, raw):
+    monkeypatch.setattr(cfg, "_warned_bad_keep_diagnostics", set())
+    assert cfg.coerce_keep_diagnostics(raw) is False
+    assert capsys.readouterr().err == ""
+
+
+def test_an_integer_one_is_read_as_off_and_reported(monkeypatch, capsys):
+    monkeypatch.setattr(cfg, "_warned_bad_keep_diagnostics", set())
+    assert cfg.coerce_keep_diagnostics(1) is False
+    assert "keep_diagnostics=1," in capsys.readouterr().err
+
+
+def test_the_keep_diagnostics_report_reads_as_one_sentence(monkeypatch, capsys):
+    monkeypatch.setattr(cfg, "_warned_bad_keep_diagnostics", set())
+    assert cfg.coerce_keep_diagnostics("maybe") is False
+    assert capsys.readouterr().err == (
+        "[localm] config.json has keep_diagnostics='maybe', which is not "
+        "true or false; treating it as false (diagnostics stay off in "
+        "privacy mode).\n")

@@ -56,8 +56,9 @@ from typing import Optional
 from localm import __version__
 from localm.debuglog import logger
 
-NET_MODES = ("off", "ask", "allow")
-NET_MODE_ENV_VAR = "LOCALM_NET_MODE"
+from localm.config import NET_MODE_ENV_VAR, NET_MODES  # noqa: F401  (re-exported)
+from localm.config import NET_OFF_REMEDY as OFF_REMEDY  # noqa: F401  (re-exported)
+from localm.config import net_off_refusal as off_refusal
 
 _DEFAULT_TIMEOUT = 15
 _DEFAULT_TOTAL_TIMEOUT = 45
@@ -70,14 +71,10 @@ _USER_AGENT = (f"Mozilla/5.0 (compatible; localm/{__version__}; "
 
 class NetworkPolicyError(Exception):
     """A request was refused by the network policy. The message says why
-    and how to change the policy - safe to show to the model, and to a CLI
-    user (it names a CLI command).
+    and how to change the policy, naming both the Settings field and the CLI
+    command, so it can be shown as is on every surface (GUI, CLI, model).
 
-    *off* is True specifically for the net_mode=off refusal. A caller that
-    surfaces this to a browser (a GUI/API route, never the model) has no CLI
-    to run and should build its own remedy instead of showing this message's
-    CLI-flavored one, the same way DiscoverError.off is used in
-    localm/plugins/gui/routes/models/discovery.py's _run_discover."""
+    *off* is True specifically for the net_mode=off refusal."""
 
     def __init__(self, message: str, *, off: bool = False):
         super().__init__(message)
@@ -89,31 +86,10 @@ class NetworkPolicyError(Exception):
 # ---------------------------------------------------------------------------
 
 def network_mode() -> str:
-    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
-
-    A config-read failure resolves to "off", not "ask", and logs a warning.
-    That covers both a load that raises and a config.json (with its .bak) that
-    is present but cannot be read, which load_config_checked reports as
-    read_ok False. An unset or unrecognised config value resolves to "ask"."""
-    env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
-    if env in NET_MODES:
-        return env
-    try:
-        from localm.config import load_config_checked
-        cfg, read_ok = load_config_checked()
-    except Exception as exc:
-        logger.warning("netpolicy: could not load config (%s); resolving "
-                       "net_mode to 'off' (fail-safe) so an unreadable config "
-                       "cannot silently re-enable network access", exc)
-        return "off"
-    if not read_ok:
-        logger.warning("netpolicy: config.json is present but unreadable; "
-                       "resolving net_mode to 'off' (fail-safe) so an "
-                       "unreadable config cannot silently re-enable network "
-                       "access")
-        return "off"
-    mode = str(cfg.get("net_mode", "ask")).strip().lower()
-    return mode if mode in NET_MODES else "ask"
+    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask"; an
+    unreadable config resolves to "off". See :func:`localm.config.network_mode`."""
+    from localm import config
+    return config.network_mode()
 
 
 def downloads_allowed_when_off() -> bool:
@@ -436,9 +412,7 @@ def check_url(url: str, *, allow_when_off: bool = False,
         mode = "ask"
     if mode == "off" and not (
             allow_when_off and bool(cfg.get("net_allow_model_downloads", False))):
-        raise NetworkPolicyError(
-            "Network access is disabled (net_mode=off). Enable it with:  "
-            "localm config net_mode ask", off=True)
+        raise NetworkPolicyError(off_refusal(), off=True)
 
     host = check_url_shape(url)
 
@@ -450,7 +424,8 @@ def check_url(url: str, *, allow_when_off: bool = False,
     allow = _domain_list(cfg.get("net_allow"))
     if allow and not any(_host_matches(host, p) for p in allow):
         raise NetworkPolicyError(
-            f"'{host}' is not on the allow list (net_allow). Add it with:  "
+            f"'{host}' is not on the allow list (net_allow). Add it in "
+            f"Settings > Server & network > Allowed domains, or run: "
             f"localm config net_allow "
             f"\"{', '.join(allow + [host])}\"")
 

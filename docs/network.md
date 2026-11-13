@@ -270,7 +270,11 @@ coding agent's shell access, so you can grant one without the other.
   on its own, without the per-hop check or the DNS-rebinding pin.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
-  subject to the domain lists.
+  subject to the domain lists. With `net_mode` set to `off` it is refused before
+  any connection opens, as are the issue list (`localm issues`) and the update
+  download (the update check and download follow "Check for updates even when
+  network access is off" instead). The standalone `report-issue` scripts, which
+  run without localm, do not read `net_mode`.
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
   guards instead: a configured `comfy_api_url` (or a media plugin's own
   `comfy.api_url`, the model scan included) that targets a link-local or
