@@ -489,11 +489,8 @@ async def download_browser(request: Request):
                                   provision.is_chromium_installed):
         return {"status": "already_installed"}
     if not provision.download_allowed():
-        raise HTTPException(
-            409, "Network access is disabled (net_mode=off), which blocks even "
-                 "an explicitly requested download. Set net_mode to ask or "
-                 "allow, or turn on \"Allow model downloads while network "
-                 "access is off\", first.")
+        from localm.config import net_off_download_refusal
+        raise HTTPException(409, net_off_download_refusal("the browser was not downloaded"))
     global _download
     owner = principal_id(request)
 

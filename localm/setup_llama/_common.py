@@ -28,10 +28,10 @@ def _require_network_allowed() -> None:
     is False. Reads the policy only; performs no network or DNS access."""
     from localm import netpolicy
     if not _net_allowed():
+        from localm.config import net_off_download_refusal
         raise netpolicy.NetworkPolicyError(
-            "setup-llama downloads the llama.cpp runtime, and network access is "
-            "disabled (net_mode=off). Enable it with:  localm config net_mode ask  "
-            "or provision from a local build:  localm setup-llama --from <build-dir>",
+            net_off_download_refusal("the llama.cpp runtime was not downloaded")
+            + " Or provision from a local build: localm setup-llama --from <build-dir>",
             off=True)
 
 
