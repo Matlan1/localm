@@ -390,6 +390,13 @@ export function activateSession(id) {
     if (prev) stopInlineBrowserStream(prev);
   }
   const s = coder.sessions.get(id);
+  // Attached files belong to the session they were attached in.
+  if (previousId !== id) {
+    const prev = previousId ? coder.sessions.get(previousId) : null;
+    if (prev) prev.docs = coder.docs;
+    coder.docs = (s && s.docs) || (prev ? [] : coder.docs);
+    if ($("coder-attach-chips")) renderCoderAttachChips();
+  }
   if (s) {
     $("coder-cwd").textContent = s.info.cwd;
     setCoderState(s.busy ? "working" : "idle");
@@ -591,6 +598,7 @@ export function flushAssistantBlock(s) {
     const row = s.liveBody.closest(".msg-row");
     if (row) row.remove();
   }
+  if (s.liveText && s.liveText.trim()) s.lastAssistantText = s.liveText;
   s.liveBody = null;
   s.liveText = "";
   s.liveReasoning = "";
@@ -633,11 +641,12 @@ export function todoHint(items) {
 }
 
 /** Remove and return the pending tool card a result belongs to: the card with
- *  the same call id when the event carries one, else the oldest pending card. */
+ *  the same call id when the event carries one (undefined when no card has
+ *  it), else the oldest pending card. */
 export function takePendingCard(s, callId) {
   if (callId) {
     const at = s.pendingCards.findIndex(c => c.dataset && c.dataset.callId === callId);
-    if (at >= 0) return s.pendingCards.splice(at, 1)[0];
+    return at >= 0 ? s.pendingCards.splice(at, 1)[0] : undefined;
   }
   return s.pendingCards.shift();
 }
@@ -852,9 +861,17 @@ export function handleCoderEvent(s, ev) {
           ? t("coder.tool.duration", { duration: ev.duration_s.toFixed(1) }) : "";
         state.textContent = (ev.summary || t(ev.ok ? "coder.tool.ok" : "coder.tool.failed")) + took;
         state.className = "state job-state " + (ev.ok ? "st-ok" : "st-error");
-        if (ev.output && !card.querySelector(".body .diff")) {
-          card.querySelector(".body").textContent = ev.output;
+        const body = card.querySelector(".body");
+        if (ev.output && !body.querySelector(".diff")) {
+          body.textContent = ev.output;
+        } else if (ev.output) {
+          body.appendChild(el("pre", "tool-output", ev.output));
         }
+      } else if (ev.call_id && ev.summary !== "rejected by user") {
+        // A result for a call that never got a card (stopped or cancelled
+        // before it ran): a line of its own, never another tool's card.
+        flushAssistantBlock(s);
+        feedAppend(s, el("div", "feed-info", `${ev.tool}: ${ev.summary || ""}`));
       }
       break;
     }
@@ -932,9 +949,15 @@ export function handleCoderEvent(s, ev) {
       const verifyNote = ev.verify_state === "inconclusive"
         ? t("coder.final.notVerified") : "";
       let finalLine = t(ev.ok ? "coder.final.taskFinished" : "coder.final.taskEnded") + verifyNote +
-        t("coder.final.turnsTokens", { turns: ev.turns, tokens: ev.total_tokens });
+        tn("coder.final.turnsTokens", ev.turns, { turns: ev.turns, tokens: ev.total_tokens });
       if (ev.changed_files?.length) {
         finalLine += tn("coder.final.filesChanged", ev.changed_files.length);
+      }
+      // A run that ended without finishing says why when the reason was not
+      // already shown as the model's reply (for example "[max_turns=5 reached]").
+      const reason = (ev.text || "").trim();
+      if (!ev.ok && reason && reason !== (s.lastAssistantText || "").trim()) {
+        feedAppend(s, el("div", "feed-info", reason));
       }
       feedAppend(s, el("div", "feed-final", finalLine));
       break;
@@ -951,6 +974,7 @@ export function handleCoderEvent(s, ev) {
       s.busy = false;
       stopInlineBrowserStream(s);
       s.closed = true;
+      _sessionEndedElsewhere(s);
       break;
     }
   }
@@ -962,7 +986,12 @@ export async function streamSession(s, replay) {
       const r = await fetch(
         `/api/coder/sessions/${s.info.id}/events${replay ? "?replay=true" : ""}`,
         { headers: authHeaders() });
-      if (r.status === 404) { stopInlineBrowserStream(s); s.closed = true; break; }
+      if (r.status === 404) {
+        stopInlineBrowserStream(s);
+        s.closed = true;
+        _sessionEndedElsewhere(s);
+        break;
+      }
       if (!r.ok) throw new Error(r.statusText);
       replay = false;   // only the first connection replays
       await readSSE(r, (payload) => {
@@ -979,12 +1008,19 @@ export async function streamSession(s, replay) {
 
 /* session lifecycle */
 
+/** The setup form's first model option: the loaded model, or "none loaded". */
+function _activeModelLabel() {
+  return modelCache.active
+    ? t("coder.setup.activeModelOption", { name: modelCache.active })
+    : t("coder.setup.noActiveModelOption");
+}
+
 export function populateSetupModels() {
   const sel = $("setup-model");
   sel.innerHTML = "";
   const current = document.createElement("option");
   current.value = "";
-  current.textContent = t("coder.setup.activeModelOption", { name: modelCache.active || "?" });
+  current.textContent = _activeModelLabel();
   sel.appendChild(current);
   for (const m of modelCache.models || []) {
     if (m.active) continue;
@@ -1076,10 +1112,18 @@ async function _confirmModelLoad(detail) {
   return ok ? { force: true } : null;
 }
 
-// The server's error text, whether detail is a string or a {detail} object.
-function _detailText(data) {
+// The server's error text, whether detail is a string, a {detail} object, or
+// a validation list of {loc, msg} entries (each named by its field).
+export function _detailText(data) {
   const d = data && data.detail;
   if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    return d.map((item) => {
+      if (!item || typeof item.msg !== "string") return "";
+      const loc = Array.isArray(item.loc) ? item.loc.filter((p) => p !== "body") : [];
+      return loc.length ? `${loc.join(".")}: ${item.msg}` : item.msg;
+    }).filter(Boolean).join("; ");
+  }
   return d && typeof d.detail === "string" ? d.detail : "";
 }
 
@@ -1227,9 +1271,15 @@ export async function startCoderSession(opts = {}) {
     // An option the server could not honour is SAID, not silently swallowed -
     // otherwise a ticked box and an ignored one look identical. The server
     // decides; this only relays.
-    for (const note of info.notes || []) toast(note, true);
+    // A note is information about a session that started: a plain toast, and
+    // a line in the session's feed so it stays readable.
+    const started = coder.sessions.get(info.id);
+    for (const note of info.notes || []) {
+      toast(note);
+      if (started) feedAppend(started, el("div", "feed-info", note));
+    }
     if (info.resumed) toast(t("coder.session.resumedToast"));
-    else if (resume && !info.notes?.length) toast(t("coder.session.noSavedResume"));
+    else if (resume) toast(t("coder.session.noSavedResume"));
     refreshModels();
   } catch (e) {
     toast(t("coder.session.startFailed") + e.message, true);
@@ -1321,6 +1371,8 @@ export function renderCoderAttachChips() {
 }
 
 const CODER_IMAGE_SUFFIX = /\.(png|jpe?g|gif|webp)$/i;
+// The most text one attachment adds to a task; the server's own cap.
+const CODER_ATTACH_MAX_CHARS = 200000;
 
 export async function attachCoderDocument(file) {
   if ((file.type || "").startsWith("image/") || CODER_IMAGE_SUFFIX.test(file.name)) {
@@ -1334,7 +1386,8 @@ export async function attachCoderDocument(file) {
   });
   const r = await fetch("/api/chat/extract", {
     method: "POST", headers: authHeaders(),
-    body: JSON.stringify({ filename: file.name, content_b64: b64 }),
+    body: JSON.stringify({ filename: file.name, content_b64: b64,
+                           max_chars: CODER_ATTACH_MAX_CHARS }),
   });
   const data = await r.json();
   if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -1409,17 +1462,35 @@ export async function endCoderSession() {
 // End ONE named session. endCoderSession() always means the active one.
 export async function closeCoderSession(s) {
   if (!s) return;
+  s.ending = true;
   try {
     await fetch(`/api/coder/sessions/${s.info.id}`, {
       method: "DELETE", headers: authHeaders() });
   } catch { /* server may already be gone */ }
+  dropCoderSession(s);
+}
+
+/** Remove *s* from this page (picker, rail, feed) without asking the server,
+ *  and activate the most recent remaining session. */
+export function dropCoderSession(s) {
   stopInlineBrowserStream(s);
   s.closed = true;
   s.feedEl.remove();
+  if (!coder.sessions.has(s.info.id)) return;
   coder.sessions.delete(s.info.id);
-  const remaining = [...coder.sessions.keys()];
-  coder.activeId = remaining[remaining.length - 1] || null;
+  if (coder.activeId === s.info.id || !coder.sessions.has(coder.activeId)) {
+    const remaining = [...coder.sessions.keys()];
+    coder.activeId = remaining[remaining.length - 1] || null;
+  }
   activateSession(coder.activeId);
+}
+
+/** A session that ended somewhere else (another tab, the API, the server):
+ *  said once, then removed from this page. */
+function _sessionEndedElsewhere(s) {
+  if (s.ending || !coder.sessions.has(s.info.id)) return;
+  toast(t("coder.session.endedElsewhere", { label: sessionLabel(s.info) }));
+  dropCoderSession(s);
 }
 
 /* coder bar buttons */
@@ -1537,40 +1608,56 @@ $("coder-send").onclick = sendCoderTask;
 $("coder-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendCoderTask));
 $("coder-input").addEventListener("input", (e) => autoGrow(e.target));
 
-$("coder-stop").onclick = async () => {
+/** POST to one of the active session's action routes. Returns
+ *  ``{ s, r, data }``, or null (after a toast) when there is no session or
+ *  the server could not be reached. */
+async function _sessionAction(action) {
   const s = activeSession();
-  if (!s) return;
-  await fetch(`/api/coder/sessions/${s.info.id}/stop`, {
-    method: "POST", headers: authHeaders() });
-  toast(t("coder.session.stopRequested"));
+  if (!s) return null;
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/${action}`, {
+      method: "POST", headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    return { s, r, data };
+  } catch (e) {
+    toast(t("coder.session.requestFailed") + e.message, true);
+    return null;
+  }
+}
+
+$("coder-stop").onclick = async () => {
+  const res = await _sessionAction("stop");
+  if (!res) return;
+  if (res.r.ok) toast(t("coder.session.stopRequested"));
+  else toast(_detailText(res.data) || res.r.statusText, true);
 };
 $("coder-end").onclick = endCoderSession;
 
 $("coder-undo").onclick = async () => {
-  const s = activeSession();
-  if (!s) return;
-  const r = await fetch(`/api/coder/sessions/${s.info.id}/undo`, {
-    method: "POST", headers: authHeaders() });
-  const data = await r.json();
+  const res = await _sessionAction("undo");
+  if (!res) return;
+  const { s, r, data } = res;
   if (r.ok) {
     toast(data.summary);
     feedAppend(s, el("div", "feed-info", data.summary));
+  } else if (r.status === 409) {
+    toast(t(s.busy ? "coder.undo.busy" : "coder.undo.nothing"), true);
   } else {
-    toast(data.detail || t("coder.undo.nothing"), true);
+    toast(_detailText(data) || r.statusText, true);
   }
 };
 
 $("coder-compact").onclick = async () => {
-  const s = activeSession();
-  if (!s) return;
-  const r = await fetch(`/api/coder/sessions/${s.info.id}/compact`, {
-    method: "POST", headers: authHeaders() });
-  const data = await r.json();
+  const res = await _sessionAction("compact");
+  if (!res) return;
+  const { s, r, data } = res;
   if (r.ok) {
     toast(t("coder.compact.done"));
     feedAppend(s, el("div", "feed-info", t("coder.compact.feedNote")));
+  } else if (r.status === 409) {
+    toast(t(s.busy ? "coder.compact.busy" : "coder.compact.nothing"), true);
   } else {
-    toast(data.detail || t("coder.compact.nothing"), true);
+    toast(_detailText(data) || r.statusText, true);
   }
 };
 
@@ -1580,7 +1667,7 @@ function repaintCoderI18n() {
   renderSessionSelect();
   const activeOption = $("setup-model")?.options[0];
   if (activeOption && activeOption.value === "") {
-    activeOption.textContent = t("coder.setup.activeModelOption", { name: modelCache.active || "?" });
+    activeOption.textContent = _activeModelLabel();
   }
   const node = $("coder-state");
   setCoderState(node.dataset.stateKey || "");
@@ -2017,7 +2104,7 @@ export async function openHooksModal() {
           forget.disabled = true;
           try {
             await episodeOp("POST", "/api/coder/hooks/forget", cwd);
-            toast(t("coder.hooks.forgottenToast"));
+            toast(t(mcp ? "coder.hooks.forgottenToastMcp" : "coder.hooks.forgottenToast"));
             openHooksModal();
           } catch (e) {
             toast(t("coder.hooks.forgetFailed") + e.message, true);
@@ -2080,10 +2167,19 @@ $("coder-export").onclick = () => openModal(t("coder.export.modalTitle"), (body)
 $("coder-log").onclick = async () => {
   const s = activeSession();
   if (!s) return;
-  const r = await fetch(`/api/coder/sessions/${s.info.id}/log`, {
-    headers: authHeaders() });
-  const data = await r.json();
-  if (!r.ok) { toast(data.detail || t("coder.log.noLogAvailable"), true); return; }
+  let r, data;
+  try {
+    r = await fetch(`/api/coder/sessions/${s.info.id}/log`, { headers: authHeaders() });
+    data = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast(t("coder.session.requestFailed") + e.message, true);
+    return;
+  }
+  if (r.status === 404 && s.info.mode) {
+    toast(t(s.info.mode === "privacy" ? "coder.log.privacyMode" : "coder.log.missing"), true);
+    return;
+  }
+  if (!r.ok) { toast(_detailText(data) || t("coder.log.noLogAvailable"), true); return; }
   showAuditModal(t("coder.log.modalTitle", { label: sessionLabel(s.info) }), data);
 };
 
@@ -2102,7 +2198,7 @@ export async function openSessionHistory() {
       return;
     }
     if (!data.enabled) {
-      body.appendChild(el("div", "sub", t("coder.history.privacyNote")));
+      body.appendChild(el("div", "sub", t("coder.history.privacyDefaultNote")));
     }
     if (!data.logs.length) {
       body.appendChild(emptyState("book", t("coder.history.emptyTitle"),
@@ -2425,6 +2521,11 @@ export function openSessionControls() {
       } catch (e) { toast(t("coder.controls.redetectFailed") + e.message, true); }
       finally { vAuto.disabled = false; }
     };
+    if (info.restricted) {
+      vIn.disabled = true;
+      vSet.disabled = true;
+      vAuto.disabled = true;
+    }
     vRow.appendChild(vIn);
     vRow.appendChild(vSet);
     vRow.appendChild(vAuto);
@@ -2457,6 +2558,7 @@ export function openSessionControls() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         s.info = d;
         $("coder-cwd").textContent = d.cwd;
+        renderSessionSelect();
         toast(t("coder.controls.cwdSetToast") + d.cwd);
       } catch (e) { toast(t("coder.controls.cwdSetFailed") + e.message, true); }
       finally { cdBtn.disabled = false; }
@@ -2626,9 +2728,8 @@ export async function openBackgroundModal() {
     section(t("coder.bg.runningHeading"), running, "sub");
     section(t("coder.bg.finishedHeading"), done, "sub");
 
-    // What the bounded table discarded. A lost sub-agent result is a real,
-    // unrecoverable loss; an aged-out shell job is housekeeping and is still
-    // pollable by id, so the two are not rendered with the same alarm.
+    // What the bounded table discarded: lost sub-agent results as a warning,
+    // aged-out finished jobs (no longer checkable by id) as a note.
     const dropped = data.dropped || {};
     if (dropped.agent) {
       body.appendChild(el("div", "modal-warn", tn("coder.bg.droppedAgent", dropped.agent)));

@@ -3,9 +3,9 @@
 """Decide whether a pull request may merge, as the `merge-policy` job in
 .github/workflows/ci.yml: the one check that sums up the others.
 
-The job runs on every pull_request once python-pr-gate, lint, gui-tests,
-test, mutation-scope and mutation-test have finished, whatever their
-results, and passes only when:
+The job runs on every pull_request once python-pr-gate, python-pr-gate-windows,
+lint, gui-tests, test, mutation-scope and mutation-test have finished,
+whatever their results, and passes only when:
 
   - lint and mutation-scope succeeded, and no needed job failed or was
     cancelled;
@@ -13,15 +13,15 @@ results, and passes only when:
     (``--mutation-modules``, a JSON list of module stems): a change that
     touches a mutation-tested module never merges without that module's
     result. With no shard selected a skipped mutation-test is neutral;
-  - without the `full-ci` label: python-pr-gate succeeded and the change is
-    not a release (VERSION is unchanged);
+  - without the `full-ci` label: python-pr-gate and python-pr-gate-windows
+    succeeded and the change is not a release (VERSION is unchanged);
   - with the `full-ci` label: the test matrix and gui-tests succeeded.
 
 The two-platform matrix runs at release, not on an ordinary pull request: a
 release PR (one that changes VERSION) without the label fails with the label
-named, every other PR merges on python-pr-gate, lint and mutation-scope
-alone. A skipped, failed or missing result never reads as a
-pass.
+named, every other PR merges on python-pr-gate, python-pr-gate-windows, lint
+and mutation-scope alone. A skipped, failed or missing result never reads as
+a pass.
 
 The summary also lists the matrix categories the change touches (CATEGORIES
 below: the trust boundary, the plugin engine, inference/workers/the native
@@ -29,7 +29,8 @@ binding, packaging and installers, the CI workflows and gates) for the
 release run to know what it covers; none of them blocks a merge.
 
     python scripts/merge_policy.py --full-ci false \
-        --result python-pr-gate=success --result lint=success \
+        --result python-pr-gate=success --result python-pr-gate-windows=success \
+        --result lint=success \
         --result gui-tests=skipped --result test=skipped \
         --result mutation-scope=success --result mutation-test=skipped         [--mutation-modules '["auth"]'] [--files ...]
 
@@ -58,10 +59,10 @@ import affected_tests  # noqa: E402
 import run_affected_tests  # noqa: E402
 
 LABEL = "full-ci"
-JOBS = ("python-pr-gate", "lint", "gui-tests", "test", "mutation-scope", "mutation-test")
+JOBS = ("python-pr-gate", "python-pr-gate-windows", "lint", "gui-tests", "test", "mutation-scope", "mutation-test")
 ALWAYS_REQUIRED = ("lint", "mutation-scope")
 LABELLED_REQUIRED = ("test", "gui-tests")
-UNLABELLED_REQUIRED = ("python-pr-gate",)
+UNLABELLED_REQUIRED = ("python-pr-gate", "python-pr-gate-windows")
 RELEASE = "release"
 
 # Category -> patterns. `**` matches across directories, `*` and `?` within

@@ -5,9 +5,9 @@
 
 "use strict";
 
-import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, dismissErrorToast, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
-import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
+import { bindReloadToggle, createGallery, createJobFollower, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField } from "../app/native-workflows.js";
 import { hideStop, showStop } from "./images.js";
@@ -16,6 +16,8 @@ import { modelOverrides } from "./workflow.js";
 /* ================================================================ */
 /*  Music library                                                    */
 /* ================================================================ */
+
+const musicJobs = createJobFollower();
 
 const musicGallery = createGallery({
   slug: "music",
@@ -32,10 +34,11 @@ const musicGallery = createGallery({
   beforeRefresh: () => {
     refreshMusicBackend();
     refreshReloadToggle("music", "music-reload-llm");
+    musicJobs.adopt("music", (jobId) => runMusicJob(async () => jobId));
   },
 
   buildPreview: musicPreview,
-  buildDetailPreview: playerDetail("audio", "track"),
+  buildDetailPreview: playerDetail("audio", "music.mediaWhat"),
   caption: (item) => item.name,
 
   reuse: (item) => {
@@ -46,6 +49,7 @@ const musicGallery = createGallery({
     $("music-seed").value = m.seed ?? "";
     $("music-steps").value = m.steps ?? "";
     $("music-cfg").value = m.cfg ?? "";
+    if ($("music-shift")) $("music-shift").value = m.shift ?? "";
     // Most of these fields live behind this page's Advanced fold; open it when
     // they are filled.
     revealFilledAdvanced($("view-music"));
@@ -153,11 +157,20 @@ export async function refreshMusicBackend() {
 $("music-generate").onclick = async () => {
   const tags = $("music-tags").value.trim();
   if (!tags) { toast(t("music.enterTags"), true); return; }
+  dismissErrorToast(t("music.enterTags"));
   const body = { tags };
   const lyrics = $("music-lyrics").value.trim();
   if (lyrics) body.lyrics = lyrics;
-  const duration = Number($("music-duration").value);
-  if (duration > 0) body.duration_seconds = duration;
+  const durationEl = $("music-duration");
+  const durationRaw = durationEl.value.trim();
+  const duration = Number(durationRaw);
+  const minDuration = Number(durationEl.min) || 1, maxDuration = Number(durationEl.max) || 3600;
+  if (durationRaw === "" || !Number.isFinite(duration) || duration < minDuration || duration > maxDuration) {
+    toast(t("music.durationRange", { min: minDuration, max: maxDuration }), true);
+    return;
+  }
+  dismissErrorToast(t("music.durationRange", { min: minDuration, max: maxDuration }));
+  body.duration_seconds = duration;
   for (const [field, id] of [["seed", "music-seed"], ["steps", "music-steps"],
                              ["cfg", "music-cfg"]]) {
     const v = $(id).value.trim();
@@ -180,24 +193,34 @@ $("music-generate").onclick = async () => {
     const shift = nwfNumber("music-shift");
     if (shift !== null) body.shift = shift;
   }
+  await musicJobs.run(() => runMusicJob(async (log) => {
+    const proceed = await checkModelsBeforeGenerate("music", log,
+      native ? nativeChoice : { model_overrides: modelOverrides.music });
+    if (!proceed) return null;
+    const r = await fetch("/api/music", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    return data.job_id;
+  }));
+};
 
+/* Run one music job on this page: *start(log)* resolves to the job id to
+   follow (null when nothing was started); its log lines and the track fill
+   the page, and the end status is toasted. */
+async function runMusicJob(start) {
   $("music-generate").disabled = true;
   const log = $("music-log");
   log.style.display = "block";
   log.textContent = "";
   $("music-result").replaceChildren();
   try {
-    const proceed = await checkModelsBeforeGenerate("music", log,
-      native ? nativeChoice : { model_overrides: modelOverrides.music });
-    if (!proceed) return;
-    const r = await fetch("/api/music", {
-      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-    showStop("music-stop", data.job_id);
+    const jobId = await start(log);
+    if (!jobId) return;
+    showStop("music-stop", jobId);
     const missing = createMissingModelOffer(log);
-    const end = await streamJob(data.job_id, (line) => {
+    const end = await streamJob(jobId, (line) => {
       if (!missing.show(line)) return;
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -222,4 +245,4 @@ $("music-generate").onclick = async () => {
     $("music-generate").disabled = false;
     hideStop("music-stop");
   }
-};
+}

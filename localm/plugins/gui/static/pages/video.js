@@ -5,9 +5,9 @@
 
 "use strict";
 
-import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, dismissErrorToast, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
-import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
+import { bindReloadToggle, createGallery, createJobFollower, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { hideStop, showStop } from "./images.js";
@@ -16,6 +16,8 @@ import { modelOverrides } from "./workflow.js";
 /* ================================================================ */
 /*  Video library                                                    */
 /* ================================================================ */
+
+const videoJobs = createJobFollower();
 
 const videoGallery = createGallery({
   slug: "video",
@@ -31,15 +33,16 @@ const videoGallery = createGallery({
   beforeRefresh: () => {
     refreshVideoBackend();
     refreshReloadToggle("video", "video-reload-llm");
+    videoJobs.adopt("video", (jobId) => runVideoJob(async () => jobId));
   },
 
   buildPreview: videoPreview,
-  buildDetailPreview: playerDetail("video", "clip"),
+  buildDetailPreview: playerDetail("video", "video.mediaWhat"),
   caption: (item) => (item.meta?.prompt
     ? item.meta.prompt.slice(0, 60)
     : `${item.name} · ${(item.size_bytes / MIB).toFixed(1)} MB`),
 
-  reuse: (item) => {
+  reuse: async (item) => {
     const m = item.meta || {};
     $("video-prompt").value = m.prompt || "";
     $("video-negative").value = m.negative_prompt || "";
@@ -51,8 +54,12 @@ const videoGallery = createGallery({
     $("video-seed").value = m.seed ?? "";
     $("video-steps").value = m.steps ?? "";
     $("video-cfg").value = m.cfg ?? "";
+    if ($("video-flow-shift")) $("video-flow-shift").value = m.flow_shift ?? "";
     if (m.backend === "native") {
-      videoModelPicker.setModels({ model: m.model, ...(m.components || {}) });
+      // A clip made with the recommended set names the set, not a registered
+      // model; that leaves the picker on its default (the recommended set).
+      const model = m.model ? await videoModelPicker.matchModel(m.model) : "";
+      videoModelPicker.setModels({ ...(m.components || {}), model });
       videoModelPicker.setLoras(m.loras || []);
       videoGen.set(m);
     }
@@ -177,6 +184,7 @@ export async function refreshVideoBackend() {
 $("video-generate").onclick = async () => {
   const promptText = $("video-prompt").value.trim();
   if (!promptText) { toast(t("video.enterPrompt"), true); return; }
+  dismissErrorToast(t("video.enterPrompt"));
   const body = { prompt: promptText };
   const negative = $("video-negative").value.trim();
   if (negative) body.negative_prompt = negative;
@@ -206,7 +214,25 @@ $("video-generate").onclick = async () => {
     const shift = nwfNumber("video-flow-shift");
     if (shift !== null) body.flow_shift = shift;
   }
+  await videoJobs.run(() => runVideoJob(async (log) => {
+    const proceed = await checkModelsBeforeGenerate("video", log,
+      { model_overrides: native ? undefined : modelOverrides.video,
+        native_models: nativeChoice.native_models });
+    if (!proceed) return null;
+    if (native) refreshVideoBackend();
+    const r = await fetch("/api/video", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    return data.job_id;
+  }));
+};
 
+/* Run one video job on this page: *start(log)* resolves to the job id to
+   follow (null when nothing was started); its log lines, live preview and
+   result fill the page, and the end status is toasted. */
+async function runVideoJob(start) {
   $("video-generate").disabled = true;
   videoLivePreview.clear();
   const log = $("video-log");
@@ -214,19 +240,11 @@ $("video-generate").onclick = async () => {
   log.textContent = "";
   $("video-result").replaceChildren();
   try {
-    const proceed = await checkModelsBeforeGenerate("video", log,
-      { model_overrides: native ? undefined : modelOverrides.video,
-        native_models: nativeChoice.native_models });
-    if (!proceed) return;
-    if (native) refreshVideoBackend();
-    const r = await fetch("/api/video", {
-      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-    showStop("video-stop", data.job_id);
+    const jobId = await start(log);
+    if (!jobId) return;
+    showStop("video-stop", jobId);
     const missing = createMissingModelOffer(log);
-    const end = await streamJob(data.job_id, (line) => {
+    const end = await streamJob(jobId, (line) => {
       if (!missing.show(line)) return;
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -253,4 +271,4 @@ $("video-generate").onclick = async () => {
     videoLivePreview.clear();
     hideStop("video-stop");
   }
-};
+}
