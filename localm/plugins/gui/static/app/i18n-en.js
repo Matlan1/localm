@@ -1120,17 +1120,16 @@ export const I18N_EN = {
   "plugins.error.noSuchPlugin": "no such plugin",
   "plugins.error.notAllowed": "not allowed in the current state",
   "plugins.external": "External plugins",
-  "plugins.external.empty.hint": "Install one from the catalog above to add capabilities.",
+  "plugins.external.empty.hint": "Install one by entering its folder above.",
   "plugins.external.empty.text": "No external plugins installed",
-  "plugins.externalIntro":
-    "A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it into the plugins folder of this installation. It can add a CLI command and export tools to the coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.",
+  "plugins.externalIntro": "A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it into the plugins folder of this installation. It can add server routes and pages and export tools to the coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.",
   "plugins.firstParty": "First-party plugins",
   "plugins.install": "Install",
   "plugins.installDependencies": "Install dependencies",
   "plugins.installFailed": "Install failed",
+  "plugins.installFailedMsg": "Install failed: {message}",
   "plugins.installRequirements": "Install requirements",
-  "plugins.installedRestartHint":
-    "Installed '{name}' {version} - restart localm gui to load its command",
+  "plugins.installedRestartHint": "Installed '{name}' {version}",
   "plugins.intro":
     "LocaLM is a model loader plus a plugin engine. Only chat is active out of the box; install the others as you need them. Enabling or disabling a plugin takes effect instantly - no restart, no model reload.",
   "plugins.loadFailed": "Could not load plugins",
@@ -1147,6 +1146,7 @@ export const I18N_EN = {
   "plugins.missingRequires": "requires {requires} (missing: {missing})",
   "plugins.pill.active": "active",
   "plugins.pill.available": "available",
+  "plugins.pill.failed": "failed to load",
   "plugins.pill.installedOff": "installed (off)",
   "plugins.pill.protected": "protected",
   "plugins.refresh": "Refresh",
@@ -1155,6 +1155,7 @@ export const I18N_EN = {
   "plugins.removeConfirm.body": "Its folder in the data directory's plugins/ is deleted.",
   "plugins.removeConfirm.title": "Remove plugin '{name}'?",
   "plugins.removeFailed": "Remove failed",
+  "plugins.removeFailedMsg": "Could not remove {name}: {message}",
   "plugins.removed": "Removed '{name}'",
   "plugins.sourcePlaceholder": "path to a plugin folder",
   "plugins.summary.active": "{active}/{total} plugins active",
@@ -3422,9 +3423,7 @@ export const I18N_EN = {
   "browser.setup.downloading": "Downloading the browser...",
   "browser.setup.heading": "Browser setup",
   "browser.setup.openPlugins": "Open the Plugins page",
-  "browser.setup.playwrightMissing":
-    "The browser automation extra is not installed. Install it with:  " +
-    "pip install \"localm[browser]\"",
+  "browser.setup.playwrightMissing": "The browser automation extra is not installed. Install it with Install dependencies on the browser plugin's row of the Plugins page.",
   "browser.setup.pluginDisabled":
     "The browser plugin is installed but turned off. Turn it on on the " +
     "Plugins page to let the model drive a web browser.",
