@@ -141,7 +141,9 @@ def register(app: FastAPI, ctx) -> None:
                 _dbg.warning("first key: the owner key was not seeded: %s", e)
                 created = {**created, "owner_key_created": False, "warnings": [
                     *created.get("warnings", []),
-                    f"No owner session was set up for this browser: {e}."]}
+                    "No owner session was set up for this browser: the owner "
+                    "key could not be checked or written. The new key was "
+                    "created."]}
             else:
                 created = {**created, "owner_key_created": owner_created}
         if owner is not None:

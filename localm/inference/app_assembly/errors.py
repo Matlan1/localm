@@ -26,7 +26,10 @@ def read_slow_response(method: str, path: str, exc) -> JSONResponse:  # noqa: AN
     _dbg.info("%s %s refused: %s", method, _ONE_LINE_RE.sub(" ", path), exc)
     return JSONResponse(
         status_code=503,
-        content={"detail": f"localm's settings are not readable right now: {exc}"},
+        content={"detail": "localm's settings are not readable right now: "
+                           f"reading {_ONE_LINE_RE.sub(' ', str(exc.name))} is "
+                           "taking too long (a busy disk?). Nothing was read; "
+                           "try again in a moment."},
         headers={"Retry-After": str(exc.retry_after_s)})
 
 
