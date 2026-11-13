@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 from contextlib import contextmanager
 from datetime import datetime, UTC
 from pathlib import Path
@@ -226,9 +227,21 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     # The entry carries the per-instance attach token, so it is restricted the
     # same Windows-aware way as auth.key. atomic_write_private restricts the temp
     # file before the rename and creates it at 0600.
-    from localm.config import atomic_write_private
-    atomic_write_private(path, json.dumps(entry, indent=2))
+    _write_entry(path, entry)
     return path
+
+
+#: Serialises every write of an entry or hold marker in this process.
+_ENTRY_WRITE_LOCK = threading.Lock()
+
+
+def _write_entry(path: Path, entry: dict) -> None:
+    """Write *entry* to *path* owner-only and atomically. Only the process an
+    entry belongs to writes it, and _ENTRY_WRITE_LOCK serialises those writes,
+    so the replace rides out another process reading the file."""
+    from localm.config import atomic_write_private
+    with _ENTRY_WRITE_LOCK:
+        atomic_write_private(path, json.dumps(entry, indent=2), retrying=True)
 
 
 def hold_marker_path(home: Path, instance_id: str) -> Path:
@@ -252,8 +265,7 @@ def register_hold_marker(home: Path, *, instance_id: str, port: int,
         "token": token,
     }
     path = hold_marker_path(home, instance_id)
-    from localm.config import atomic_write_private
-    atomic_write_private(path, json.dumps(entry, indent=2))
+    _write_entry(path, entry)
     return path
 
 
@@ -319,8 +331,7 @@ def restore_own(entry: Optional[dict]) -> None:
         return
     path = Path(entry["_path"])
     body = {k: v for k, v in entry.items() if k != "_path"}
-    from localm.config import atomic_write_private
-    atomic_write_private(path, json.dumps(body, indent=2))
+    _write_entry(path, body)
     _OWN_PATHS[entry["instance_id"]] = path
 
 
@@ -342,8 +353,7 @@ def set_mode(home: Path, instance_id: str, mode: str) -> bool:
     try:
         # Same token-bearing file as register_instance above; same treatment,
         # including the create-at-0600 that closes the POSIX window.
-        from localm.config import atomic_write_private
-        atomic_write_private(path, json.dumps(entry, indent=2))
+        _write_entry(path, entry)
         return True
     except OSError:
         return False

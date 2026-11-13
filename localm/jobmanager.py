@@ -549,13 +549,13 @@ class _ActivityStore:
                 pass          # POSIX only; the file ACL is set below
             payload = {"version": _ACTIVITY_VERSION, "pid": self._pid,
                        "operations": rows}
-            # Writes owner-only from the moment the bytes first exist, on Windows
-            # as well as POSIX. Its FIXED "<name>.tmp" temp name requires the
-            # destination path to stay unique per (process, store), with
-            # _STORE_LOCK serialising every writer in this process.
+            # Writes owner-only from the moment the bytes first exist. Only this
+            # process writes its own record path, and _STORE_LOCK serialises
+            # those writes, so the replace rides out a reader's open handle.
             from localm.config import atomic_write_private
             atomic_write_private(
-                self.path, json.dumps(payload, indent=2, ensure_ascii=False))
+                self.path, json.dumps(payload, indent=2, ensure_ascii=False),
+                retrying=True)
             return True
         except Exception as e:
             try:
