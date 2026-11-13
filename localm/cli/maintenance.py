@@ -17,9 +17,9 @@ def _wire_plugin_cli_entries() -> None:
     """Wire each first-party plugin's CLI Click group from its manifest's
     ``cli`` entry point (PluginManager.cli_entries()), so shipping a new
     first-party plugin with a CLI surface needs a manifest line, not a new
-    block here. A plugin's optional pip extras gate it via ImportError. It is
-    NOT gated on `plugin install`/enabled state, so e.g. `localm coder` stays
-    reachable regardless of that toggle.
+    block here. A plugin's module that cannot be imported leaves its verb
+    unwired. Wiring is not gated on `plugin install`/enabled state; a wired
+    command such as `localm coder` checks that state itself when it runs.
 
     The Click command/group's OWN declared name (e.g. jobs/cli.py's
     ``@click.group(name="job")``) is used as-is, not the plugin's catalog
@@ -29,6 +29,7 @@ def _wire_plugin_cli_entries() -> None:
     from ..plugins.engine import PluginManager
     mgr = PluginManager(None)
     wired = set()
+    failed: dict = {}
     for name, entry in mgr.cli_entries():
         mod_name, _, attr = entry.partition(":")
         attr = attr or "main"
@@ -47,16 +48,18 @@ def _wire_plugin_cli_entries() -> None:
             # logger.debug() is dropped at the call.
             defer_log(logging.DEBUG, "plugin CLI %r not wired (import failed): %s",
                       name, e)
+            failed[name] = f"{type(e).__name__}: {e}"
     if "coder" not in wired:
+        coder_why = failed.get("coder", "its command module was not found")
+
         @main.command("coder", context_settings={"ignore_unknown_options": True})
         def _coder_stub(**_):
-            """Offline AI coding agent (run: pip install "localm[coder]" to enable)."""
+            """Offline AI coding agent (its module could not be loaded)."""
+            from rich.markup import escape
             console.print(
-                '[yellow]The coder plugin could not be loaded.[/yellow]\n'
-                'Install its dependencies with:  [bold]pip install "localm[coder]"[/bold]\n'
-                '  or (editable):  [bold]pip install -e ".[coder]"[/bold]\n'
-                'then activate it with:  [bold]localm plugin install coder[/bold]'
-            )
+                f"[yellow]The coder plugin could not be loaded:[/yellow] {escape(coder_why)}\n"
+                "Repair the install with:  [bold]localm update --repair[/bold]")
+            sys.exit(1)
 
 
 _wire_plugin_cli_entries()
@@ -634,6 +637,10 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     from localm.bugreport import LocalmError
     from rich.markup import escape
 
+    if to_version is not None and not to_version.strip():
+        console.print("[yellow]--to needs a version, for example --to 0.3.3 "
+                      "(localm update --list shows them).[/yellow]")
+        sys.exit(2)
     if sum(map(bool, (do_rollback, list_only, to_version, check_only, do_repair))) > 1:
         console.print("[yellow]Use only one of --check, --rollback, --list, --to and "
                       "--repair.[/yellow]")
