@@ -1190,10 +1190,10 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
     # exempted explicit downloads via net_allow_model_downloads.
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():
-        console.print(
-            "[red]Network access is disabled (net_mode=off).[/red] A model pull "
-            "needs the network; enable it with: localm config net_mode ask - or "
-            "allow just downloads: localm config net_allow_model_downloads true")
+        from localm.config import net_off_download_refusal
+        from localm.console import markup_safe
+        console.print("[red]" + markup_safe(net_off_download_refusal(
+            "nothing was pulled")) + "[/red]")
         return False
 
     # civitai:<versionId> or civitai:<versionId>:<fileId>: a distinct provider,
