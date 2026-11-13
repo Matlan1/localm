@@ -32,11 +32,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
     MAX_LORAS, LoraChoice, check_generation_extras, check_request,
 )
+from localm.plugins.media_config import media_session_is_private
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.jobmanager import frame_event
@@ -158,7 +160,6 @@ async def video(req: VideoRequest, request: Request):
 
     @media_handover_job
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
@@ -264,7 +265,7 @@ async def video(req: VideoRequest, request: Request):
             if _backend.supports(s, "SUPPORTS_JOB_OPTIONS"):
                 kwargs["on_preview"] = lambda p: job.push(frame_event(p))
                 kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
-            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            is_privacy = media_session_is_private()
             # privacy mode forces deletion of ComfyUI's own output copy: no traces
             # left anywhere, regardless of the configured delete_outputs preference.
             delete_outputs = bool(s.get("delete_outputs")) or is_privacy
@@ -293,7 +294,8 @@ async def video(req: VideoRequest, request: Request):
             job.mark_outcome("done" if ok else "failed")
         return ok
 
-    job = jobs.start_fn("video", _generate, result_path=out_path.name,
+    job = jobs.start_fn("video", carry_request_privacy(_generate),
+                        result_path=out_path.name,
                         owner=owner)
     return {"job_id": job.id}
 

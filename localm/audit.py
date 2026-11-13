@@ -346,8 +346,9 @@ def diagnostics_allowed() -> bool:
 
     True in the log and full session modes, and in privacy mode only when the
     user opted into keeping diagnostics (config ``keep_diagnostics`` or the
-    ``LOCALM_KEEP_DIAGNOSTICS`` env). False when the mode or the config cannot
-    be resolved. Never raises.
+    ``LOCALM_KEEP_DIAGNOSTICS`` env). Without that opt-in it is also False
+    inside a :func:`request_privacy` block. False when the mode or the config
+    cannot be resolved. Never raises.
     """
     try:
         from localm.config import keep_diagnostics_enabled
@@ -355,6 +356,8 @@ def diagnostics_allowed() -> bool:
             return True
     except Exception:
         pass
+    if request_is_privacy():
+        return False
     try:
         return effective_mode("server") != SessionMode.PRIVACY
     except Exception:

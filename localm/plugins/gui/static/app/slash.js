@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEvent, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
-import { $, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, authHeaders, autoGrow, checkModelsBeforeGenerate, createMissingModelOffer, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, refuseWithoutModel, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
@@ -61,7 +61,7 @@ export async function runImagineInChat(promptText) {
       return;
     }
     const r = await fetch("/api/imagine", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();
@@ -159,7 +159,7 @@ export async function runMusicInChat(tags) {
       return;
     }
     const r = await fetch("/api/music", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ tags }),
     });
     const data = await r.json();
@@ -206,7 +206,7 @@ export async function runVideoInChat(promptText) {
       return;
     }
     const r = await fetch("/api/video", {
-      method: "POST", headers: authHeaders(),
+      method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await r.json();

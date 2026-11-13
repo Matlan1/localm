@@ -33,9 +33,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from localm.inference.http_server import path_formatter, principal_id
+from localm.audit import carry_request_privacy
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import check_request
+from localm.plugins.media_config import media_session_is_private
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
@@ -148,7 +150,6 @@ async def music(req: MusicRequest, request: Request):
 
     @media_handover_job
     def _generate(job):
-        from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         # See test_comfy_media_routes_offloaded.
@@ -157,7 +158,7 @@ async def music(req: MusicRequest, request: Request):
         # Privacy mode forces no on-disk traces: it suppresses the sidecar AND
         # forces ComfyUI's own output copy to be deleted, regardless of the
         # opt-in delete_outputs setting.
-        is_privacy = effective_mode("server") == SessionMode.PRIVACY
+        is_privacy = media_session_is_private()
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
@@ -276,7 +277,8 @@ async def music(req: MusicRequest, request: Request):
             job.mark_outcome("done" if ok else "failed")
         return ok
 
-    job = jobs.start_fn("music", _generate, result_path=out_path.name,
+    job = jobs.start_fn("music", carry_request_privacy(_generate),
+                        result_path=out_path.name,
                         owner=owner)
     return {"job_id": job.id}
 

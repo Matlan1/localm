@@ -308,6 +308,16 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
                            free_vram=free_vram, generate=generate)
 
 
+def media_session_is_private() -> bool:
+    """True when generated media must leave no traces: the server's session
+    mode is privacy or cannot be resolved, or the work runs inside an
+    ``audit.request_privacy`` block (a caller whose own session mode is
+    privacy, carried into a job thread by ``audit.carry_request_privacy``).
+    Never raises."""
+    from localm.audit import automatic_write_allowed, request_is_privacy
+    return request_is_privacy() or not automatic_write_allowed("server")
+
+
 def generate_media(backend, s: dict, prompt: str, out_path: Path, *,
                    on_progress=None, before_generate=None,
                    **kwargs) -> tuple[bool, str, Path]:
