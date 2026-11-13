@@ -534,3 +534,28 @@ def test_an_older_card_with_a_driver_on_the_previous_13x_toolkit_keeps_cuda_12()
                          cuda_capability=f"{major}.{minor - 1}", compute_capability="8.9")
     assert info.cuda_line == "cuda-12" and info.driver_ok is True
     assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True, None)
+
+
+def test_the_update_reprovision_of_a_blackwell_cuda_install_tries_cuda_on_a_same_major_driver():
+    major, minor = sl._MIN_DRIVER_CUDA["cuda-13"]
+    info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="580.00",
+                         cuda_capability=f"{major}.{minor - 1}", compute_capability="12.0")
+    assert info.driver_ok is False
+    assert sl._cuda_setup_dialogue(info, assume_yes=True, same_major_ok=True) == (
+        "cuda", True, None)
+
+
+def test_same_major_ok_never_hands_an_older_major_driver_the_13x_build(monkeypatch):
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
+    info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="560.00",
+                         cuda_capability="12.8", compute_capability="12.0")
+    backend, cudart, reason = sl._cuda_setup_dialogue(info, assume_yes=True, same_major_ok=True)
+    assert (backend, cudart) == ("vulkan", False) and "cuda-13" in reason
+
+
+def test_only_a_reprovision_that_keeps_the_choice_allows_a_same_major_driver():
+    import inspect
+
+    from localm.setup_llama import cli
+    src = inspect.getsource(cli._provision_release)
+    assert "same_major_ok=keep_choice" in src

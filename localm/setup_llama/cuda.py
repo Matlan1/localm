@@ -477,7 +477,7 @@ def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool, explicit: bool = 
 
 
 def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
-                         explicit: bool = True) -> tuple:
+                         explicit: bool = True, same_major_ok: bool = False) -> tuple:
     """Given the preflight, walk the user through making CUDA land. Returns
     ``(backend_to_provision, fetch_cudart_bundle, reason)``. *reason* is None
     when the user's CUDA choice is followed or the user switched to another
@@ -491,6 +491,9 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
         and install vulkan only when the user agrees (always with --yes); the
         CUDA choice is kept. Declining exits 1 with nothing changed. When
         *explicit* is False (auto picked cuda), vulkan is used without asking.
+      * driver too old but of the line's own CUDA major, with *same_major_ok*
+        (re-provisioning an install that keeps its choice, as an update does)
+        -> CUDA is installed and the load test decides.
       * no NVIDIA detected, hardware unknown -> confirm-continue (No switches
         to vulkan). With --yes, CUDA is attempted and the load test decides.
       * no NVIDIA detected, but *det* (the SAME hwdetect.Detection
@@ -534,6 +537,13 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
     # Driver too old: the one thing we cannot fetch for the user.
     if info.present and info.cuda_capability and not info.driver_ok:
         need = _MIN_DRIVER_CUDA[info.cuda_line]
+        have = _ver_tuple(info.cuda_capability)
+        if same_major_ok and have and have[0] == need[0]:
+            console.print(f"  [yellow]![/yellow] NVIDIA driver {info.driver_version} supports "
+                          f"CUDA {info.cuda_capability}; the {info.cuda_line} build targets CUDA "
+                          f"{need[0]}.{need[1]}. Installing it; the load test decides whether "
+                          "it runs on this driver.")
+            return "cuda", True, None
         return _keep_choice_and_use_vulkan(
             f"NVIDIA driver {info.driver_version} supports CUDA {info.cuda_capability}, "
             f"but the {info.cuda_line} build needs CUDA {need[0]}.{need[1]} or newer. "
