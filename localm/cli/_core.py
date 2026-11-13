@@ -345,8 +345,12 @@ class _GracefulGroup(click.Group):
             raise SystemExit(1) from e
         except Exception as e:
             from localm.inference.backends.base import ModelRefusedError
-            if isinstance(e, ModelRefusedError):
+            from localm.storekit import ConfigLockTimeout, ConfigUnreadable
+            if isinstance(e, (ModelRefusedError, ConfigUnreadable)):
                 raise click.ClickException(str(e)) from e
+            if isinstance(e, ConfigLockTimeout):
+                raise click.ClickException(
+                    f"{e} - nothing was written; try again.") from e
             self._report_failure(ctx, e)
             raise SystemExit(1) from e
 
