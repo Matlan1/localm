@@ -223,8 +223,10 @@ for (const startPath of ["/root", ""]) {
       const u = String(url);
       if (u.includes("/api/fs/dirs")) {
         dirCalls.push(u);
-        return Promise.resolve({ ok: false, status: 403, statusText: "Forbidden",
-          json: async () => ({ detail: "Key lacks host filesystem access" }), text: async () => "" });
+        // Answers on a later task; after 50 calls it never answers.
+        if (dirCalls.length > 50) return new Promise(() => {});
+        return new Promise((r) => setTimeout(() => r({ ok: false, status: 403, statusText: "Forbidden",
+          json: async () => ({ detail: "Key lacks host filesystem access" }), text: async () => "" }), 0));
       }
       return fetchImpl(url);
     };
