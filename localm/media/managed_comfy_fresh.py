@@ -67,40 +67,23 @@ COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 # --------------------------------------------------------------------------- #
 #  torch per hardware (decision 4): ONE testable map                          #
 # --------------------------------------------------------------------------- #
-# AMD gfx103X (RDNA2 / RX 6000) has no public PyTorch ROCm wheel on Windows, so
-# localm runs on AMD's own repo build - the SAME wheels the [gpu] extra in
-# pyproject.toml pins. A fresh ComfyUI venv needs the identical stack. Keep these in
-# sync with pyproject's [gpu] extra; there is no runtime import of pyproject, so
-# this is its ComfyUI-venv mirror.
-#
-# torchaudio is pinned here too. ComfyUI's own requirements.txt lists
-# torch/torchvision/torchaudio UNPINNED, and _install_fresh's later ComfyUI
-# requirements step runs plain `pip install -r requirements.txt` with no
-# --extra-index-url, so torch and torchvision stay satisfied by the ROCm build
-# above while an unpinned torchaudio would resolve from PyPI's default index to a
-# build whose compiled C extension does not match this ROCm torch's ABI, disabling
-# every audio-dependent ComfyUI node. Pinning the matching ROCm build here makes
-# the later bare torchaudio requirement already-satisfied.
-_AMD_GFX103X_ROCM_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_TORCH = ("torch==2.11.0+rocm7.13.0", "torchvision==0.26.0+rocm7.13.0",
-                      "torchaudio==2.11.0+rocm7.13.0")
-_AMD_GFX103X_ROCM_SDK = ("rocm", "rocm-sdk-core", "rocm-sdk-libraries-gfx103x-all")
+# AMD on Windows: torch, torchvision, torchaudio and the rocm-sdk packages come from
+# hwdetect's per-family pins and index (the gfx103X set is the one the [gpu] extra
+# pins). torchaudio is pinned so ComfyUI's unpinned torchaudio requirement is
+# already satisfied by the matching ROCm build.
 
 
 @dataclass(frozen=True)
 class ComfyTorchSpec:
     """The PyTorch install spec for a fresh ComfyUI venv on THIS hardware.
-    ``packages`` are pip requirement strings; ``index_url`` is the primary wheel
-    index (None = PyPI); ``extra_index_url`` an additional PEP 503 index (the AMD
-    gfx103X ROCm repo, so torch resolves there and everything else from PyPI);
-    ``find_links`` a flat (non-PEP-503) wheel listing pip can only reach via
-    --find-links, never --index-url/--extra-index-url (AMD's official Windows
-    ROCm preview repo - see hwdetect.amd_rocm_win_find_links). ``note`` carries
-    an honest reason when the pick is a degraded fallback."""
+    ``packages`` are pip requirement strings; ``index_url`` is the wheel index
+    (None = PyPI; AMD's ROCm index for the GPU family on Windows, which also
+    serves torch's dependencies, so nothing comes from PyPI); ``find_links`` a
+    flat (non-PEP-503) wheel listing pip can only reach via --find-links.
+    ``note`` carries an honest reason when the pick is a degraded fallback."""
     variant: str
     packages: tuple
     index_url: Optional[str] = None
-    extra_index_url: Optional[str] = None
     find_links: Optional[str] = None
     note: str = ""
 
@@ -139,14 +122,11 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
             return ComfyTorchSpec("rocm", ("torch", "torchvision"),
                                   index_url=hwdetect.pytorch_index_url("rocm-linux"))
         fam = hwdetect.amd_gfx_family(det.gpu_names)
-        if fam == "gfx103x":
+        if fam in ("gfx103x", "gfx110x", "gfx120x"):
             return ComfyTorchSpec(
-                "rocm", _AMD_GFX103X_TORCH + _AMD_GFX103X_ROCM_SDK,
-                extra_index_url=_AMD_GFX103X_ROCM_INDEX)
-        if fam in ("gfx110x", "gfx120x"):
-            torch, torchvision, torchaudio = hwdetect.amd_rocm_win_torch_packages()
-            return ComfyTorchSpec("rocm", (torch, torchvision, torchaudio),
-                                  find_links=hwdetect.amd_rocm_win_find_links())
+                "rocm", hwdetect.amd_rocm_win_torch_packages()
+                + hwdetect.amd_rocm_win_sdk_packages(fam),
+                index_url=hwdetect.amd_rocm_win_index(fam))
         return _cpu_spec(
             note=("no verified ROCm torch wheel for this AMD GPU on Windows; using "
                   "CPU torch so ComfyUI still runs (on CPU) - add a GPU torch by hand "
@@ -171,12 +151,10 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
 
 def comfy_torch_install_args(spec: ComfyTorchSpec) -> list:
     """The pip arguments (after ``pip install``) for *spec*: the package specs, then
-    --index-url / --extra-index-url / --find-links as set."""
+    --index-url / --find-links as set."""
     args = list(spec.packages)
     if spec.index_url:
         args += ["--index-url", spec.index_url]
-    if spec.extra_index_url:
-        args += ["--extra-index-url", spec.extra_index_url]
     if spec.find_links:
         args += ["--find-links", spec.find_links]
     return args

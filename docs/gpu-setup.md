@@ -469,12 +469,15 @@ uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 # cannot find them).
 uv pip install -p .venv -e ".[gpu]"
 
-# AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels
-# (public preview). This repo is a flat wheel listing rather than a pip/uv
-# package index, so it needs --find-links with exact pinned versions, never
-# --torch-backend/--index-url:
-uv pip install -p .venv torch==2.9.1+rocm7.2.1 torchvision==0.24.1+rocm7.2.1 \
-    --find-links https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/
+# AMD on Windows, RX 7000 (RDNA3, gfx110X) - AMD's Windows ROCm wheels:
+uv pip install -p .venv torch==2.11.0+rocm7.13.0 torchvision==0.26.0+rocm7.13.0 \
+    rocm==7.13.0 rocm-sdk-core==7.13.0 rocm-sdk-libraries-gfx110x-all==7.13.0 \
+    --index-url https://repo.amd.com/rocm/whl/gfx110X-all/ --no-config
+
+# AMD on Windows, RX 9000 (RDNA4, gfx120X) - AMD's Windows ROCm wheels:
+uv pip install -p .venv torch==2.11.0+rocm7.13.0 torchvision==0.26.0+rocm7.13.0 \
+    rocm==7.13.0 rocm-sdk-core==7.13.0 rocm-sdk-libraries-gfx120x-all==7.13.0 \
+    --index-url https://repo.amd.com/rocm/whl/gfx120X-all/ --no-config
 
 # CPU (any machine):
 uv pip install -p .venv torch torchvision --torch-backend=cpu
