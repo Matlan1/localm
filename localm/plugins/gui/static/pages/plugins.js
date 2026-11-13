@@ -23,6 +23,20 @@ export let _catalogStaggerMs = 24;
 // Mirrors the auto_install_plugin_deps setting from the last /api/plugins fetch.
 export let _autoInstallDeps = true;
 
+/** The name a plugin is shown by: its label, followed by its plugin name
+ *  (the one the CLI and the docs use) when the two differ, e.g. "Knowledge (rag)". */
+export function pluginTitle(p) {
+  const label = (p && p.label) || "";
+  const name = (p && p.name) || "";
+  if (!label) return name;
+  return label.toLowerCase() === name.toLowerCase() ? label : `${label} (${name})`;
+}
+
+/** True when a plugin is installed and enabled but did not load. */
+export function pluginFailed(p) {
+  return !!(p && p.installed && p.enabled && p.error && !p.loaded);
+}
+
 /** A "sub" line reporting a plugin load error, prefixed with the warning icon. */
 function pluginErrorLine(name, err) {
   const line = el("div", "sub");
@@ -44,15 +58,18 @@ export function _catalogRow(p) {
   const nameLine = el("span", "cell-line");
   nameTd.appendChild(nameLine);
   nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
-  nameLine.appendChild(el("span", "name", p.label || p.name));
+  nameLine.appendChild(el("span", "name", pluginTitle(p)));
   tr.appendChild(nameTd);
-  const status = p.protected ? t("plugins.pill.protected")
+  const failed = pluginFailed(p);
+  const status = failed ? t("plugins.pill.failed")
+    : p.protected ? t("plugins.pill.protected")
     : p.active ? t("plugins.pill.active")
     : p.installed ? t("plugins.pill.installedOff")
     : t("plugins.pill.available");
-  // State renders as a .job-state pill: protected -> on, active -> st-ok,
-  // installed-but-off -> st-pending, available -> the base pill.
-  const statusCls = p.protected ? "on" : p.active ? "st-ok" : p.installed ? "st-pending" : "";
+  // State renders as a .job-state pill: failed -> st-failed, protected -> on,
+  // active -> st-ok, installed-but-off -> st-pending, available -> the base pill.
+  const statusCls = failed ? "st-failed" : p.protected ? "on" : p.active ? "st-ok"
+    : p.installed ? "st-pending" : "";
   const statusTd = el("td", "shrink-cell");
   statusTd.appendChild(el("span", ("job-state " + statusCls).trim(), status));
   tr.appendChild(statusTd);
@@ -72,17 +89,18 @@ export function _catalogRow(p) {
   }
   tr.appendChild(descTd);
   const actions = el("td", "actions-cell");
+  const title = pluginTitle(p);
   if (!p.protected) {
     if (!p.installed) {
-      actions.appendChild(_catalogBtn("install", p.name, "primary", t("plugins.install")));
+      actions.appendChild(_catalogBtn("install", p.name, "primary", t("plugins.install"), title));
     } else {
       actions.appendChild(p.enabled
-        ? _catalogBtn("disable", p.name, "", t("plugins.disable"))
-        : _catalogBtn("enable", p.name, "primary", t("plugins.enable")));
+        ? _catalogBtn("disable", p.name, "", t("plugins.disable"), title)
+        : _catalogBtn("enable", p.name, "primary", t("plugins.enable"), title));
       // Re-copy this builtin from the bundled store. Only builtins refresh
       // from the store; a third-party install is never a target.
-      if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", t("plugins.refresh")));
-      actions.appendChild(_catalogBtn("uninstall", p.name, "danger", t("plugins.uninstall")));
+      if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", t("plugins.refresh"), title));
+      actions.appendChild(_catalogBtn("uninstall", p.name, "danger", t("plugins.uninstall"), title));
     }
   }
   // One-click install of any missing requirements.
@@ -99,7 +117,7 @@ export function _catalogRow(p) {
     const dep = el("button", "btn-primary", t("plugins.installDependencies"));
     dep.style.marginLeft = "6px";
     dep.dataset.depsfor = p.name;
-    dep.onclick = () => installPluginDeps(p.name);
+    dep.onclick = () => whileBusy(dep, t("plugins.working.install"), () => installPluginDeps(p.name));
     actions.appendChild(dep);
   }
   tr.appendChild(actions);
@@ -126,7 +144,12 @@ export async function renderCatalogPlugins() {
   if (myToken !== _catalogRenderToken) return;   // superseded while fetching
   loading.remove();
   _autoInstallDeps = data.auto_install_plugin_deps !== false;
-  const plugins = (data.plugins || []).filter((p) => p.builtin);
+  // Protected (chat) first, then installed, then available; each group in the
+  // order of the names shown.
+  const plugins = (data.plugins || []).filter((p) => p.builtin)
+    .sort((a, b) => (Number(!!b.protected) - Number(!!a.protected))
+      || (Number(!!b.installed) - Number(!!a.installed))
+      || pluginTitle(a).localeCompare(pluginTitle(b)));
 
   // A status line naming what is loading and what loaded.
   const status = el("div", "sub catalog-status");
@@ -153,7 +176,7 @@ export async function renderCatalogPlugins() {
   }
   if (myToken !== _catalogRenderToken) return;
 
-  const active = plugins.filter((p) => p.active).length;
+  const active = plugins.filter((p) => p.active && !pluginFailed(p)).length;
   const failed = plugins.filter((p) => p.error).length;
   status.textContent =
     t("plugins.summary.active", { active, total: plugins.length })
@@ -169,10 +192,10 @@ export async function renderCatalogPlugins() {
   }
 }
 
-export function _catalogBtn(action, name, cls, label) {
+export function _catalogBtn(action, name, cls, label, title = name) {
   const b = el("button", cls, label);
   b.style.marginLeft = "6px";
-  b.onclick = () => pluginCatalogAction(action, name, b);
+  b.onclick = () => pluginCatalogAction(action, name, b, title);
   return b;
 }
 
@@ -218,8 +241,13 @@ export async function installPluginDeps(name, opts = {}) {
     return;
   }
   if (r.status === 403) {
+    // The server's reason: a network bind (install on the host) or a key that
+    // lacks the plugins:admin scope.
+    const refused = await r.json().catch(() => ({}));
     if (!opts.silent) {
-      toast(t("plugins.deps.onHostToast", { name }), true);
+      toast(refused.detail
+        ? t("plugins.deps.refusedToast", { detail: refused.detail })
+        : t("plugins.deps.onHostToast", { name }), true);
     }
     return;
   }
@@ -281,7 +309,7 @@ export async function _maybeAutoInstallDeps(name) {
   } catch { /* best-effort */ }
 }
 
-export function pluginCatalogAction(action, name, btn = null) {
+export function pluginCatalogAction(action, name, btn = null, title = name) {
   const run = () => whileBusy(btn, t("plugins.working." + action), async () => {
     try {
       const r = await fetch(`/api/plugins/${encodeURIComponent(name)}/${action}`,
@@ -291,12 +319,12 @@ export function pluginCatalogAction(action, name, btn = null) {
         const msg = d.detail || (r.status === 404 ? t("plugins.error.noSuchPlugin")
                    : r.status === 409 ? t("plugins.error.notAllowed")
                    : t("plugins.error.failed"));
-        toast(`${action} ${name}: ${msg}`, true);
+        toast(`${action} ${title}: ${msg}`, true);
         return;
       }
-      toast(`${name}: ${d.status || action}`);
+      toast(`${title}: ${d.status || action}`);
     } catch (e) {
-      toast(`${action} failed: ${e.message}`, true);
+      toast(`${action} ${title} failed: ${e.message}`, true);
       return;
     }
     // Re-derive from one place: the catalog table and the slash-hint cache.
@@ -309,11 +337,11 @@ export function pluginCatalogAction(action, name, btn = null) {
     if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
   });
   if (action === "uninstall") {
-    confirmDanger(t("plugins.uninstallConfirm.title", { name }),
+    confirmDanger(t("plugins.uninstallConfirm.title", { name: title }),
       t("plugins.uninstallConfirm.body"), t("plugins.uninstall"), run);
-  } else {
-    run();
+    return Promise.resolve();
   }
+  return run();
 }
 
 /* External (third-party) plugins, from the same engine API as the catalog
@@ -345,7 +373,7 @@ export async function refreshPluginsPage() {
       const table = el("table", "data-table");
       const thead = el("thead");
       const hr = el("tr");
-      for (const h of [t("plugins.col.name"), t("plugins.col.version"),
+      for (const h of [t("plugins.col.name"), t("plugins.col.status"), t("plugins.col.version"),
                        t("plugins.col.description"), t("plugins.col.tools"), ""])
         hr.appendChild(el("th", "", h));
       thead.appendChild(hr);
@@ -357,24 +385,42 @@ export async function refreshPluginsPage() {
         const nameLine = el("span", "cell-line");
         nameTd.appendChild(nameLine);
         nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
-        nameLine.appendChild(el("span", "name", p.name));
+        nameLine.appendChild(el("span", "name", pluginTitle(p)));
         tr.appendChild(nameTd);
+        const failed = pluginFailed(p);
+        const stateTd = el("td", "shrink-cell");
+        stateTd.appendChild(el("span",
+          "job-state " + (failed ? "st-failed" : p.active ? "st-ok" : "st-pending"),
+          failed ? t("plugins.pill.failed") : p.active ? t("plugins.pill.active")
+            : t("plugins.pill.installedOff")));
+        tr.appendChild(stateTd);
         tr.appendChild(el("td", "mono shrink-cell", p.version));
         tr.appendChild(el("td", "grow-cell", pluginDescription(p)));
         tr.appendChild(el("td", "mono",
           (p.tool_exports || []).length ? p.tool_exports.join(", ") : ""));
         const actions = el("td", "actions-cell");
+        const toggleAction = p.enabled ? "disable" : "enable";
+        const toggle = el("button", p.enabled ? "" : "primary",
+          t(p.enabled ? "plugins.disable" : "plugins.enable"));
+        toggle.onclick = () => pluginCatalogAction(toggleAction, p.name, toggle, pluginTitle(p))
+          .then(() => refreshPluginsPage());
+        actions.appendChild(toggle);
         const rm = el("button", "danger", t("plugins.removeButton"));
+        rm.style.marginLeft = "6px";
         rm.onclick = () => {
-          confirmDanger(t("plugins.removeConfirm.title", { name: p.name }),
+          confirmDanger(t("plugins.removeConfirm.title", { name: pluginTitle(p) }),
             t("plugins.removeConfirm.body"),
             t("plugins.remove"), () => whileBusy(rm, t("plugins.working.remove"), async () => {
-              const rr = await fetch(
-                `/api/plugins/${encodeURIComponent(p.name)}/uninstall`,
-                { method: "POST", headers: authHeaders() });
-              const dd = await rr.json().catch(() => ({}));
-              if (rr.ok) { toast(t("plugins.removed", { name: p.name })); refreshPluginsPage(); }
-              else toast(dd.detail || t("plugins.removeFailed"), true);
+              try {
+                const rr = await fetch(
+                  `/api/plugins/${encodeURIComponent(p.name)}/uninstall`,
+                  { method: "POST", headers: authHeaders() });
+                const dd = await rr.json().catch(() => ({}));
+                if (rr.ok) { toast(t("plugins.removed", { name: pluginTitle(p) })); refreshPluginsPage(); }
+                else toast(dd.detail || t("plugins.removeFailed"), true);
+              } catch (e) {
+                toast(t("plugins.removeFailedMsg", { name: pluginTitle(p), message: e.message }), true);
+              }
             }));
         };
         actions.appendChild(rm);
@@ -397,17 +443,21 @@ $("plugin-install").onclick = async () => {
   const source = $("plugin-source").value.trim();
   if (!source) { toast(t("plugins.enterSourcePath"), true); return; }
   await whileBusy($("plugin-install"), t("plugins.working.install"), async () => {
-    const r = await fetch("/api/plugins/install-external", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ source }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (r.ok) {
-      toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
-      $("plugin-source").value = "";
-      refreshPluginsPage();
-    } else {
-      toast(data.detail || t("plugins.installFailed"), true);
+    try {
+      const r = await fetch("/api/plugins/install-external", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ source }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
+        $("plugin-source").value = "";
+        refreshPluginsPage();
+      } else {
+        toast(data.detail || t("plugins.installFailed"), true);
+      }
+    } catch (e) {
+      toast(t("plugins.installFailedMsg", { message: e.message }), true);
     }
   });
 };
