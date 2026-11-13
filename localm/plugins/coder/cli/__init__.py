@@ -13,15 +13,21 @@ localm/cli/maintenance.py), ``_run_goal_loop`` / ``_goal_task_wrap`` /
 back from this package at call time (``import localm.plugins.coder.cli as _cli;
 _cli.<name>``), so a patch is seen."""
 
-# Patched + re-exported helper from backends (callers read it live via _cli).
-from ..backends.http import make_localm_backend  # noqa: F401
+from ...._venvguard import require_venv
 
-from .goal import (  # noqa: F401
+# Runs before the first third-party import. See
+# test_localcoder_without_its_dependencies_shows_the_venv_message.
+require_venv()
+
+# Patched + re-exported helper from backends (callers read it live via _cli).
+from ..backends.http import make_localm_backend  # noqa: F401,E402
+
+from .goal import (  # noqa: F401,E402
     _goal_feedback, _goal_task_wrap, _run_goal_loop, _run_verify,
 )
-from .estimate import _run_estimate  # noqa: F401
-from .repl import _handle_command, _repl, _setup_readline  # noqa: F401
-from ._main import (  # noqa: F401
+from .estimate import _run_estimate  # noqa: F401,E402
+from .repl import _handle_command, _repl, _setup_readline  # noqa: F401,E402
+from ._main import (  # noqa: F401,E402
     main, console_main, _complete_model, _warn_sensitive_changes,
 )
 
