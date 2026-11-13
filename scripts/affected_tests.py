@@ -149,6 +149,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_no_unguarded_json_parse.py": (_LOCALM_PY, "walks the AST of every localm .py for unguarded JSON parses"),
     "tests/test_owner_predicate_single_owner.py": (_LOCALM_PY, "walks the AST of every localm .py for inline owner checks"),
     "tests/test_no_bare_secret_chmod.py": (_LOCALM_PY, "walks the AST of every localm .py for chmod 0o600 calls"),
+    "tests/test_private_write_survives_a_reader.py": (
+        _LOCALM_PY, "walks the AST of every localm .py for owner-only store writes"),
     "tests/test_no_untracked_authorization_header_writes.py": (
         _LOCALM_PY, "walks the AST of every localm .py for Authorization header writes"),
     "tests/test_hwdetect_recommended_is_legacy.py": (_LOCALM_PY, "walks the AST of every localm .py for .recommended reads"),
