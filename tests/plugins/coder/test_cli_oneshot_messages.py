@@ -6,6 +6,7 @@ id, --estimate, --ci colours, a disabled plugin, and a reply another model gave.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,12 +51,11 @@ def proj(home, tmp_path, monkeypatch):
     monkeypatch.setattr(_main, "run_single_task", MagicMock())
     monkeypatch.setattr(_main, "finish_agent", lambda a: None)
     monkeypatch.setattr(_main, "_repl", MagicMock())
-    p.agent = agent
-    return p
+    return SimpleNamespace(path=p, agent=agent)
 
 
 def _invoke(proj, *args):
-    return CliRunner().invoke(_main.main, ["-m", "stub-model", "--cwd", str(proj), *args])
+    return CliRunner().invoke(_main.main, ["-m", "stub-model", "--cwd", str(proj.path), *args])
 
 
 class TestAOneShotThatCannotReachOrIsRefused:
