@@ -410,13 +410,15 @@ export function attachSlashMenu(textarea, commands, execute) {
   });
 }
 
-/** Intercept "/cmd arg" on submit. Returns true when handled (not for the model). */
+/** Intercept "/cmd arg" on submit. Returns true when handled (not for the model).
+ *  The "needs the X plugin" hint is given only to the chat composer
+ *  (*execute* is execChatCommand), for the command an alias stands for. */
 export function handleSlashSubmit(text, execute) {
   if (!text.startsWith("/")) return false;
   const space = text.indexOf(" ");
   const cmd = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
   const arg = space === -1 ? "" : text.slice(space + 1).trim();
-  const hint = pluginSuggestion(cmd);   // known plugin, just not active yet
+  const hint = execute === execChatCommand ? pluginSuggestion(CHAT_ALIASES[cmd] || cmd) : null;
   if (hint) { toast(hint, true); return true; }
   if (!execute(cmd, arg)) {
     toast(t("slash.unknownCommand", { cmd }), true);

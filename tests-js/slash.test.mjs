@@ -204,6 +204,29 @@ test("an alias (/imagine) is refused like its command while a reply streams", as
   assert.equal(toastText(window), "Wait for the current reply to finish");
 });
 
+test("an alias of an inactive plugin's command gets the plugin hint in the chat", () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl });
+  runScript(window, `pluginCommands.map = { "generate-image": { plugin: "image", active: false } };
+    pluginCommands.suggest = true;`);
+  window.handleSlashSubmit("/imagine a cat", window.execChatCommand);
+  assert.equal(toastText(window),
+    "/generate-image needs the image plugin - install or enable it on the Plugins page.");
+  assert.equal(calls.filter((u) => u.includes("/api/imagine")).length, 0, "nothing was posted");
+});
+
+test("the coder composer gets no chat plugin hint", () => {
+  const { window } = loadApp();
+  runScript(window, `pluginCommands.map = { "remember": { plugin: "memory", active: false } };
+    pluginCommands.suggest = true;`);
+  window.handleSlashSubmit("/remember x", (c, a) => window.execCoderCommand(c, a));
+  assert.equal(toastText(window), "Unknown command: /remember");
+});
+
 test("a name that is not a chat command is still reported unknown while a reply streams", () => {
   const { window } = loadApp();
   runScript(window, "chat.busy = true;");
