@@ -583,13 +583,14 @@ def test_doctor_names_a_build_you_supplied_instead_of_calling_it_old(
 def test_doctor_says_a_pin_does_not_apply_to_amd_rocm(monkeypatch, tmp_path, capsys, home):
     from localm.cli.doctor import _check_runtime_build
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
-    sl._record_provisioned_backend(tmp_path, "amd-rocm", build="b1363-cpu-b12086")
+    from localm.setup_llama.pins import _ROCM_BUILD
+    sl._record_provisioned_backend(tmp_path, "amd-rocm", build=_ROCM_BUILD)
     sl.set_pinned_tag("b12086")
 
     _check_runtime_build(lambda: tmp_path)
 
     out = " ".join(capsys.readouterr().out.split())
-    assert "but b1363-cpu-b12086 is installed" not in out
+    assert f"but {_ROCM_BUILD} is installed" not in out
     assert "the pin does not apply to the amd-rocm backend" in out
 
 
