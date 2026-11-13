@@ -1725,6 +1725,8 @@ def load_config_checked() -> tuple:
     # `true` reads as "on" for the route, the schema, the CLI and the bug report
     # alike.
     _normalize_remote_image_mode(cfg)
+    if "keep_diagnostics" in cfg:
+        cfg["keep_diagnostics"] = coerce_keep_diagnostics(cfg["keep_diagnostics"])
     return cfg, read_ok
 
 
@@ -1748,23 +1750,12 @@ def remote_image_mode(cfg: Optional[dict] = None) -> str:
     return mode if mode is not None else REMOTE_IMAGE_OFF
 
 
-def keep_diagnostics_enabled() -> bool:
-    """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
-    the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
-    ``--keep-diagnostics`` flag, a per-run override) OR the persistent
-    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
-    launcher and the in-app toggle both take effect. The config value counts as
-    on only when it is ``true`` or one of the strings ``1``, ``true``, ``on``,
-    ``yes`` (any case, surrounding spaces ignored). Every other value counts as
-    off; one that is not false, null, 0 or one of the strings ``0``, ``false``,
-    ``off``, ``no`` or empty is also reported once on stderr. Never raises."""
-    if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
-            _KEEP_DIAGNOSTICS_ON):
-        return True
-    try:
-        raw = load_config().get("keep_diagnostics")
-    except Exception:
-        return False
+def coerce_keep_diagnostics(raw) -> bool:
+    """*raw* (a stored ``keep_diagnostics`` value) as a bool: True only for
+    ``True`` or one of the strings ``1``, ``true``, ``on``, ``yes`` (any case,
+    surrounding spaces ignored). Every other value is False; one that is not
+    False, None, 0 or one of the strings ``0``, ``false``, ``off``, ``no`` or
+    empty is also reported once per process on stderr."""
     if raw is True:
         return True
     if isinstance(raw, str) and raw.strip().lower() in _KEEP_DIAGNOSTICS_ON:
@@ -1779,6 +1770,22 @@ def keep_diagnostics_enabled() -> bool:
               "true or false; treating it as false (diagnostics stay off in "
               "privacy mode).", file=sys.stderr)
     return False
+
+
+def keep_diagnostics_enabled() -> bool:
+    """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
+    the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
+    ``--keep-diagnostics`` flag, a per-run override) OR the persistent
+    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
+    launcher and the in-app toggle both take effect. The config value is read
+    through :func:`coerce_keep_diagnostics`. Never raises."""
+    if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
+            _KEEP_DIAGNOSTICS_ON):
+        return True
+    try:
+        return coerce_keep_diagnostics(load_config().get("keep_diagnostics"))
+    except Exception:
+        return False
 
 
 def _user_delta(cfg: dict) -> dict:

@@ -793,3 +793,18 @@ def test_privacy_mode_with_a_string_false_keeps_diagnostics_off(cfg_home, monkey
     monkeypatch.delenv("LOCALM_MODE", raising=False)
     cfg.update_config(lambda c: c.update(keep_diagnostics="false", mode="privacy"))
     assert diagnostics_allowed() is False
+
+
+@pytest.mark.parametrize("stored, want", [("false", False), ("garbage", False), (1, False),
+                                          ("yes", True), (True, True)])
+def test_load_config_and_the_settings_schema_read_keep_diagnostics_as_a_bool(
+        cfg_home, monkeypatch, stored, want):
+    """The settings page renders the schema value, so it must show what is in force."""
+    from localm.settings_schema import schema_json
+    monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+    raw = json.loads(cfg.CONFIG_FILE.read_text(encoding="utf-8")) if cfg.CONFIG_FILE.exists() else {}
+    raw["keep_diagnostics"] = stored
+    cfg.CONFIG_FILE.write_text(json.dumps(raw), encoding="utf-8")
+    assert cfg.load_config()["keep_diagnostics"] is want
+    fields = [f for f in schema_json(cfg.load_config()) if f["key"] == "keep_diagnostics"]
+    assert fields and fields[0]["default"] is want
