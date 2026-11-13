@@ -87,18 +87,17 @@ def test_every_failure_symbol_goes_through_line():
 def test_a_broken_library_with_a_visible_card_still_gets_a_gpu_verdict(capsys):
     doctor_mod._check_gpu_verdict(lambda: None, False, True)
 
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())
     assert "GPU: not used for GGUF models until the llama.cpp library above is fixed" in out
     assert "the card listed above is there" in out
 
 
-def test_a_broken_library_with_no_card_is_not_called_cpu_mode(capsys):
+def test_no_library_and_no_card_keeps_the_cpu_only_verdict(capsys):
     doctor_mod._check_gpu_verdict(lambda: None, False, False)
 
     out = capsys.readouterr().out
-    assert "GPU: not used for GGUF models" in out
-    assert "CPU mode only" not in out
-    assert "the card listed above" not in out
+    assert "CPU mode only" in out
+    assert "GPU: not used for GGUF models" not in out
 
 
 def test_an_adapter_probe_that_did_not_run_is_reported(monkeypatch, capsys):
@@ -107,7 +106,7 @@ def test_an_adapter_probe_that_did_not_run_is_reported(monkeypatch, capsys):
 
     doctor_mod._check_adapter_probe()
 
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())
     assert "graphics adapters could not be listed" in out
     assert "the display-adapter enumeration did not run" in out
 

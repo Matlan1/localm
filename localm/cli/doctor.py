@@ -569,14 +569,12 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
                       "a statement about your hardware[/dim]")
         return
 
-    # (2c) No healthy llama.cpp library: nothing runs GGUF inference, on the GPU
-    #      or the CPU, whatever smi/torch saw.
-    if not lib_healthy:
+    # (2c) A card smi/torch can see, but no healthy llama.cpp library to use it.
+    if not lib_healthy and smi_or_torch_gpu:
         console.print(f"  {_WARN_SYM}  GPU: not used for GGUF models until the llama.cpp "
                       "library above is fixed")
-        if smi_or_torch_gpu:
-            console.print("       [dim]the card listed above is there; the runtime that "
-                          "would use it is missing or broken[/dim]")
+        console.print("       [dim]the card listed above is there; the runtime that "
+                      "would use it is missing or broken[/dim]")
         return
 
     # (3) No trustworthy runtime signal. A GPU seen by smi/torch is positive
