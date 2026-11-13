@@ -86,7 +86,7 @@ QUESTIONS: tuple = (
     Question("data-folder", "1", (("1", "portable"), ("2", "custom"))),
     Question("custom-path-confirm", "y", variants=(CONSOLE,)),
     Question("window-mode", "1", (("1", "browser"), ("2", "app-window"))),
-    Question("gpu-use", "y", variants=(CONSOLE,)),
+    Question("gpu-use", "y"),
     Question("backend", "1"),
     Question("own-build-dir", ""),
     Question("runtime-failed", "y"),
@@ -95,7 +95,7 @@ QUESTIONS: tuple = (
     Question("global-command", "n"),
     Question("plugins", ",".join(RECOMMENDED_PLUGINS)),
     Question("plugin-deps", "y"),
-    Question("report-problem", "y", variants=(CONSOLE,)),
+    Question("report-problem", "y"),
 )
 
 _BY_ID = {q.id: q for q in QUESTIONS}

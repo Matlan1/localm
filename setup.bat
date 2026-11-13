@@ -54,6 +54,7 @@ set "HAVEINSTALL=0"
 if exist ".localm-install.json" set "HAVEINSTALL=1"
 if exist ".venv\.localm-venv" set "HAVEINSTALL=1"
 if "%HAVEINSTALL%"=="0" goto fresh_install
+:ask_existing
 echo  LocaLM is already set up in this folder. What would you like to do?
 echo    [1] Install again / repair - your chats, settings and models are kept
 echo    [2] Uninstall              - remove LocaLM from this computer
@@ -63,6 +64,7 @@ call :flush
 rem SETUP-Q: existing-install
 set /p "EXPICK=  Pick 1, 2 or 3 [1]: "
 if not defined EXPICK set "EXPICK=1"
+call :check_pick EXPICK 3 || goto ask_existing
 if "%EXPICK%"=="2" goto uninstall
 if not "%EXPICK%"=="3" goto fresh_install
 echo  Nothing changed.
@@ -155,14 +157,16 @@ rem  other uv project. --python-preference only-managed forces the contained
 rem  download instead of reusing a system Python.
 call :jr begin portable-choice
 echo.
+:ask_store
 echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
-echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
+echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile; a new install adds it to your user PATH)
 set "STOREPICK="
 call :flush
 rem SETUP-Q: tooling-store
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
+call :check_pick STOREPICK 2 || goto ask_store
 set "CONTAINED=0"
 set "PYPREF="
 set "UVDIR="
@@ -270,6 +274,7 @@ set "PATH=%UVDIRS%;%PATH%"
 rem  UV_INSTALL_DIR itself is prepended fresh from !CD! here rather than
 rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
 if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;!PATH!"
+if "%CONTAINED%"=="1" if not exist ".uv\uv.exe" goto uv_portable_missing
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 
@@ -279,6 +284,28 @@ echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat ag
 echo      or install uv manually first, then re-run setup.bat:
 call :uv_manual_hint
 call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
+echo.
+pause
+exit /b 1
+
+:check_pick
+rem  check_pick VAR LAST: exit 0 when VAR holds a number from 1 to LAST, else print
+rem  a note and exit 1.
+set "PICKV=!%~1!"
+set "PICKOK="
+for /l %%i in (1,1,%~2) do if "!PICKV!"=="%%i" set "PICKOK=1"
+if defined PICKOK exit /b 0
+echo  [^^!] Type a number from 1 to %~2.
+exit /b 1
+
+:uv_portable_missing
+call :jr abandon %UVSTEP%
+echo.
+echo  [^^!] uv was not installed under .\.uv, so Portable cannot go on (another uv on
+echo      PATH is not used: Portable keeps uv itself inside this folder).
+echo      Run setup.bat again, or install uv manually and pick Shared:
+call :uv_manual_hint
+call :offer_report "localm setup could not install uv" "setup.bat ran Astral's installer for Portable but .uv\uv.exe was not there afterwards."
 echo.
 pause
 exit /b 1
@@ -528,6 +555,7 @@ call :flush
 rem SETUP-Q: data-offline
 set /p "MISSPICK=  Pick 1 or 2 [1]: "
 if not defined MISSPICK set "MISSPICK=1"
+call :check_pick MISSPICK 2 || goto data_folder_unavailable
 if "%MISSPICK%"=="2" goto choose_data_folder
 echo.
 echo  Setup stopped. Connect the data folder, then run setup again.
@@ -547,6 +575,7 @@ call :flush
 rem SETUP-Q: data-folder
 set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
+call :check_pick DATAPICK 2 || goto choose_data_folder
 rem  Single-line `if ... call` into goto/label subroutines (defined at the end):
 rem  a `call` plus nested if/else INSIDE an `if (...)` block trips cmd.exe's
 rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
@@ -568,6 +597,7 @@ rem  "browser"). Leaving that key at its "auto" default here is deliberate:
 rem  once the extra IS installed, "auto" already means "use it", so setup
 rem  needs no config.json write of its own.
 echo.
+:ask_window
 echo  Open localm's GUI as its own app window, or in your browser?
 echo    [1] Browser    - opens in your default browser (no extra install)
 echo    [2] App window - its own window, no browser tab (installs localm[desktop])
@@ -576,6 +606,7 @@ call :flush
 rem SETUP-Q: window-mode
 set /p "WPICK=  Pick 1 or 2 [1]: "
 if not defined WPICK set "WPICK=1"
+call :check_pick WPICK 2 || goto ask_window
 rem  The pip extras come from localm.setup_spec, the list every setup variant installs.
 set "XWIN="
 if "%WPICK%"=="2" set "XWIN=app-window"
@@ -685,6 +716,7 @@ if exist "%STMP%\localm_menu.txt" for /f "usebackq tokens=1,2,*" %%a in ("%STMP%
 del "%STMP%\localm_menu.txt" 2>nul
 set "BACKEND="
 if not defined BMAX goto backend_menu_missing
+:ask_backend
 echo  Native inference runtime ^(llama.cpp^) - press Enter to accept the recommendation:
 for /l %%i in (1,1,!BMAX!) do if defined BKEY_%%i echo    [%%i] !BLBL_%%i!
 echo    ^(your pick is load-tested; a failure offers Vulkan, never a silent swap^)
@@ -693,6 +725,7 @@ call :flush
 rem SETUP-Q: backend
 set /p "BSEL=  Pick 1-!BMAX! [1]: "
 if not defined BSEL set "BSEL=1"
+call :check_pick BSEL !BMAX! || goto ask_backend
 set "BNUM=1"
 for /f "delims=0123456789" %%x in ("!BSEL!") do set "BNUM=0"
 if "!BNUM!"=="1" if defined BKEY_%BSEL% set "BACKEND=!BKEY_%BSEL%!"
@@ -769,6 +802,8 @@ if /i "%BACKEND%"=="own" (
         )
     ) else (
         echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<!SLB!^>
+        set "RUNTIME_OK=0"
+        set "PFHINT=.venv\Scripts\localm setup-llama --backend <!SLB!>"
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
@@ -795,6 +830,7 @@ call :step_done launcher || exit /b 99
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
+:ask_shortcut
 echo  Create a desktop shortcut?
 echo    [1] LocaLM launcher - choose GUI / chat / server / coder each time you start
 echo    [2] Straight to the GUI - skips that menu, opens %WINMODE%
@@ -806,6 +842,7 @@ rem SETUP-Q: shortcut
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
 if /i "%SCPICK:~0,1%"=="Y" set "SCPICK=1" & echo  ^(y taken as [1]^)
+call :check_pick SCPICK 3 || goto ask_shortcut
 set "SCPATH="
 set "SCSTEP="
 if "%SCPICK%"=="1" call :intend_shortcut
@@ -1171,11 +1208,6 @@ goto :eof
 if defined HBFLAG type nul > "%HBFLAG%" 2>nul
 goto :eof
 
-rem ===========================================================================
-rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
-rem  failure via the standalone reporter (report-issue.bat), which works even
-rem  though setup did not finish (it needs no working install). Returns so the
-rem  CALLER still exits non-zero with its original error - reporting never masks the
 :venv_resume
 echo.
 echo  The previous setup stopped while creating .venv; recreating it.
@@ -1312,7 +1344,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $Host.UI.RawUI.Flu
 goto :eof
 
 rem ===========================================================================
-rem  failure ("we do not hide problems"). No-op if the reporter is missing.
+rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
+rem  failure via the standalone reporter (report-issue.bat), which works even
+rem  though setup did not finish (it needs no working install). Returns so the
+rem  CALLER still exits non-zero with its original error; reporting never masks the
+rem  failure. No-op if the reporter is missing.
 rem ===========================================================================
 :offer_report
 if not exist "%~dp0report-issue.bat" goto :eof

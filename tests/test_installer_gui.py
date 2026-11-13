@@ -432,6 +432,7 @@ def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
                         lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
     monkeypatch.setattr(gui, "torch_spec_for", lambda b: (spec, ""))
     monkeypatch.setattr(gui, "_query", lambda args: "queried")
+    monkeypatch.setattr(gui, "_query_lines", lambda args: [])
     for step in gui.build_steps(plan):
         try:
             step.run(lambda s: None)
@@ -592,6 +593,58 @@ class TestInstallParity:
         assert ".[hf,audio]" in hf_install[0]
         assert not any(part.startswith("transformers[") for part in hf_install[0]), (
             f"an inline transformers[ specifier is back: {hf_install[0]}")
+
+
+class TestGlobalCommandConflict:
+    """With another `localm` on PATH the window asks which one runs, as setup.bat
+    and setup.sh do, and passes the answer to globalcmd."""
+
+    def _install(self, gui, monkeypatch, conflict_lines, answer):
+        asked = []
+
+        def fake_ask(question):
+            asked.append(question)
+            return answer
+        monkeypatch.setattr(gui, "ASK", fake_ask)
+        ran = []
+
+        def fake_run(cmd, emit, plan, **kw):
+            ran.append([str(c) for c in cmd])
+            return 0
+        monkeypatch.setattr(gui, "_run", fake_run)
+        monkeypatch.setattr(gui, "_query", lambda args: "queried")
+        monkeypatch.setattr(gui, "_query_lines", lambda args: list(conflict_lines))
+        monkeypatch.setattr(gui, "_record_now", lambda emit, **f: None)
+        logged = []
+        step = [s for s in gui.build_steps(gui.Plan(add_to_path=True, backend="own"))
+                if s.label.startswith("Adding 'localm' to your PATH")][0]
+        step.run(logged.append)
+        installs = [c for c in ran if "localm.globalcmd" in c and "install" in c]
+        return asked, installs, logged
+
+    def test_the_answer_is_passed_and_nothing_is_kept_without_asking(self, gui, monkeypatch):
+        asked, installs, _ = self._install(gui, monkeypatch, ["/usr/bin/localm"], "priority")
+        assert len(asked) == 1 and asked[0]["kind"] == "choose"
+        assert [c[0] for c in asked[0]["choices"]] == ["priority", "keep", "skip"]
+        assert "/usr/bin/localm" in asked[0]["text"]
+        assert len(installs) == 1
+        assert installs[0][-2:] == ["--choice", "priority"] and "--yes" not in installs[0]
+
+    def test_a_command_on_the_machine_path_is_never_offered_priority(self, gui, monkeypatch):
+        asked, installs, _ = self._install(
+            gui, monkeypatch, ["C:/Tools/localm.exe", "system-path"], "priority")
+        assert [c[0] for c in asked[0]["choices"]] == ["keep", "skip"]
+        assert installs[0][-2:] == ["--choice", "keep"]
+
+    def test_neither_adds_nothing_and_is_not_a_failure(self, gui, monkeypatch):
+        _, installs, logged = self._install(gui, monkeypatch, ["/usr/bin/localm"], "skip")
+        assert installs == []
+        assert any("Nothing added" in line for line in logged)
+
+    def test_without_another_command_nothing_is_asked(self, gui, monkeypatch):
+        asked, installs, _ = self._install(gui, monkeypatch, [], "priority")
+        assert asked == []
+        assert "--yes" in installs[0] and "--choice" not in installs[0]
 
 
 class TestGlobalCommandExitCodes:
@@ -973,6 +1026,34 @@ class TestWizard:
         assert wizard.index == 1, "advanced with no data folder chosen"
         assert "folder" in wizard.status.cget("text")
 
+    @pytest.mark.parametrize("which, says", [
+        ("relative", "is not a full path"),
+        ("install folder", "cannot be the data folder"),
+        ("a file", "is a file, not a folder"),
+    ])
+    def test_an_unsafe_custom_data_folder_is_refused_on_its_page(
+            self, wizard, gui, tmp_path, which, says):
+        plain = tmp_path.parent / f"{tmp_path.name}-plain.txt"
+        plain.write_text("x", encoding="utf-8")
+        path = {"relative": "some/data",
+                "install folder": str(gui.ROOT),
+                "a file": str(plain)}[which]
+        wizard.next_page()
+        wizard.portable_var.set(False)
+        wizard.path_var.set(path)
+        wizard.next_page()
+        assert wizard.index == 1, f"advanced with {which} as the data folder"
+        assert says in wizard.status.cget("text")
+
+    def test_a_safe_custom_data_folder_goes_on_and_writes_nothing(self, wizard, tmp_path):
+        target = tmp_path.parent / f"{tmp_path.name}-elsewhere" / "data"
+        wizard.next_page()
+        wizard.portable_var.set(False)
+        wizard.path_var.set(str(target))
+        wizard.next_page()
+        assert wizard.index == 2
+        assert not target.exists()
+
     def test_typing_a_data_folder_selects_the_custom_option(self, wizard):
         wizard.next_page()
         assert wizard.pages[wizard.index][0] == "Where things live"
@@ -1257,6 +1338,23 @@ class TestUninstallFromTheWindow:
         assert answer.told == []
         with pytest.raises(tk.TclError):
             root.winfo_exists()
+
+    def test_the_window_cannot_be_closed_while_the_install_runs(self, gui, installed):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        root = build_tk_root(tk.Tk)
+        root.withdraw()
+        answer = _Answer()
+        wizard = gui.Wizard(root, tk, ttk, filedialog, messagebox=answer)
+        try:
+            wizard.install_running = True
+            root.tk.call(root.protocol("WM_DELETE_WINDOW"))
+            assert root.winfo_exists()
+            assert len(answer.told) == 1 and "Setup is still running" in answer.told[0]
+            wizard._finish(None)
+            assert wizard.install_running is False
+        finally:
+            root.destroy()
 
 
 def test_a_repair_says_when_the_data_folder_in_use_is_unavailable(gui, installed, tmp_path):
@@ -1850,3 +1948,70 @@ class TestLauncherStorePreset:
             assert wizard.current_plan().portable_store is False
         finally:
             root.destroy()
+
+
+def test_cpu_only_selects_the_cpu_runtime_and_gpu_brings_the_recommendation_back(
+        gui, monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    monkeypatch.setattr(gui, "detect_recommendation", lambda: ("nvidia", "cuda"))
+    root = build_tk_root(tk.Tk)
+    root.withdraw()
+    try:
+        wizard = gui.Wizard(root, tk, ttk, filedialog)
+        assert wizard.gpu_var.get() is True and wizard.current_plan().backend == "cuda"
+        wizard.gpu_var.set(False)
+        wizard._on_gpu_toggled()
+        assert wizard.current_plan().backend == "cpu"
+        wizard.gpu_var.set(True)
+        wizard._on_gpu_toggled()
+        assert wizard.current_plan().backend == "cuda"
+    finally:
+        root.destroy()
+
+
+class TestReportProblem:
+    """The window offers a bug report when setup could not finish, as the console
+    installers do; nothing is sent without a second yes."""
+
+    def _reporter(self, gui):
+        script = gui.ROOT / "scripts" / "report_issue.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("import sys\nprint('REPORTER', ' '.join(sys.argv[1:]))\n",
+                          encoding="utf-8")
+
+    def test_yes_then_send_runs_the_reporter_twice(self, gui):
+        self._reporter(gui)
+        asked, logged = [], []
+
+        def confirm(text, default):
+            asked.append((text, default))
+            return True
+        code = gui.report_problem("setup broke", "uv exited 2", confirm, logged.append)
+        assert code == 0
+        assert asked[0] == ("Report this problem to the maintainer (no GitHub account "
+                            "needed)?", gui.spec.default_yes("report-problem"))
+        assert "Send it to the maintainer now?" in asked[1][0]
+        runs = [line for line in logged if line.startswith("REPORTER")]
+        assert runs == ["REPORTER --summary setup broke --detail uv exited 2",
+                        "REPORTER --summary setup broke --detail uv exited 2 --yes"]
+
+    def test_saved_but_not_sent_without_the_second_yes(self, gui):
+        self._reporter(gui)
+        answers = iter([True, False])
+        logged = []
+        gui.report_problem("s", "d", lambda t, d: next(answers), logged.append)
+        assert [line for line in logged if "--yes" in line] == []
+        assert len([line for line in logged if line.startswith("REPORTER")]) == 1
+
+    def test_no_runs_nothing(self, gui):
+        self._reporter(gui)
+        logged = []
+        assert gui.report_problem("s", "d", lambda t, d: False, logged.append) is None
+        assert logged == []
+
+    def test_without_the_reporter_nothing_is_asked(self, gui):
+        asked = []
+        assert gui.report_problem("s", "d", lambda t, d: asked.append(t) or True,
+                                  lambda s: None) is None
+        assert asked == []

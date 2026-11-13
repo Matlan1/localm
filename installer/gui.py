@@ -134,6 +134,19 @@ def ask_yes(qid: str, text: str) -> bool:
 
 IS_WINDOWS = sys.platform == "win32"
 
+#: What the app window needs on Linux, as setup.sh says it.
+LINUX_APP_WINDOW_NOTE = ("On Linux the app window needs a couple of small base Qt/X11 "
+                         "runtime libraries (e.g. libxcb-cursor0) that are commonly already "
+                         "present on a desktop install. If the window fails to open, "
+                         "localm gui still works - just via the browser.")
+
+#: The global-command option, naming what it changes on this platform.
+GLOBAL_COMMAND_TEXT = ("Make 'localm' runnable from any terminal (adds .\\bin to your "
+                       "user PATH)" if IS_WINDOWS else
+                       "Make 'localm' runnable from any terminal (symlink into "
+                       "~/.local/bin, which is added to your shell startup files when it "
+                       "is not on PATH)")
+
 
 def venv_bin(root: Path) -> Path:
     return root / ".venv" / ("Scripts" if IS_WINDOWS else "bin")
@@ -427,15 +440,41 @@ def _answer(proc, payload: str, emit: Callable[[str], None]) -> None:
         emit(f"[!] could not send the answer: {e}")
 
 
-def _query(args: list[str]) -> str:
-    """The first line the installed localm prints for *args*, or empty."""
+def _query_lines(args: list[str]) -> list[str]:
+    """The lines the installed localm prints for *args*, or an empty list."""
     try:
         out = subprocess.run([str(venv_python(ROOT)), *args], cwd=str(ROOT),
                              capture_output=True, text=True, timeout=60)
-        lines = (out.stdout or "").strip().splitlines()
-        return lines[0] if lines else ""
+        return (out.stdout or "").strip().splitlines()
     except Exception:
-        return ""
+        return []
+
+
+def _query(args: list[str]) -> str:
+    """The first line the installed localm prints for *args*, or empty."""
+    lines = _query_lines(args)
+    return lines[0] if lines else ""
+
+
+def global_command_choice() -> Optional[str]:
+    """When another ``localm`` command is on PATH (``localm.globalcmd conflict``),
+    ask which one should run, as setup.bat and setup.sh do, and return the
+    answer: ``priority``, ``keep`` or ``skip`` (``priority`` is not offered when
+    the other command is on the machine PATH). None when there is no other
+    command."""
+    lines = _query_lines(["-m", "localm.globalcmd", "conflict", "--root", "."])
+    if not lines:
+        return None
+    other = lines[0]
+    choices = [["keep", "Keep the existing one - add this install behind it"],
+               ["skip", "Neither - do not touch my PATH"]]
+    if "system-path" not in lines[1:]:
+        choices.insert(0, ["priority", f"This install ({ROOT})"])
+    pick = ask({"kind": "choose", "id": "global-command-conflict",
+                "text": (f"A different 'localm' command already exists:\n{other}\n\n"
+                         "Which one should run when you type 'localm'?"),
+                "choices": choices, "default": "keep"}).strip()
+    return pick if pick in [c[0] for c in choices] else "keep"
 
 
 def _record_now(emit: Callable[[str], None], **fields) -> None:
@@ -662,6 +701,45 @@ def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None
     raise StopSetup(f"stopped after the runtime failed. Retry with: {retry}")
 
 
+def report_problem(summary: str, detail: str, confirm: Callable[[str, bool], bool],
+                   emit: Callable[[str], None]) -> Optional[int]:
+    """Offer to file a bug report for a setup that could not finish, as the
+    console installers do: on yes, scripts/report_issue.py (stdlib only) builds
+    the report and saves it without sending, its output goes to *emit*, and a
+    second question sends it. *confirm(text, default)* asks a yes/no question.
+    Returns the reporter's last exit code, or None when nothing ran (no reporter,
+    or the person declined)."""
+    script = ROOT / "scripts" / "report_issue.py"
+    if not script.is_file():
+        return None
+    # SETUP-Q: report-problem
+    if not confirm("Report this problem to the maintainer (no GitHub account needed)?",
+                   spec.default_yes("report-problem")):
+        return None
+
+    def reporter(*extra: str) -> int:
+        try:
+            out = subprocess.run([sys.executable, str(script), "--summary", summary,
+                                  "--detail", detail, *extra], cwd=str(ROOT),
+                                 capture_output=True, text=True, timeout=180,
+                                 stdin=subprocess.DEVNULL,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError) as e:
+            emit(f"[!] the problem reporter could not run: {e}")
+            return 1
+        for line in (out.stdout or "").splitlines() + (out.stderr or "").splitlines():
+            emit(line)
+        return out.returncode
+
+    code = reporter()
+    if code != 0:
+        return code
+    if not confirm("The report above was saved on this computer. Send it to the "
+                   "maintainer now?", True):
+        return code
+    return reporter("--yes")
+
+
 def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     """What the window runs: the install, preceded by the contained-uv step when
     the Portable choice needs it."""
@@ -819,8 +897,9 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                           fatal=False, key="native-runtime"))
     else:
         def skip_runtime(emit):
-            emit("Skipped. Provision later:  "
-                 f'"{localm_exe}" setup-llama --backend <{spec.backend_hint()}>')
+            later = f'"{localm_exe}" setup-llama --backend <{spec.backend_hint()}>'
+            emit(f"Skipped. Provision later:  {later}")
+            raise StepFailed(f"no model can load until the runtime is provisioned: {later}")
         steps.append(Step("Skipping the inference runtime download", skip_runtime,
                           fatal=False))
 
@@ -847,10 +926,15 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
 
     if plan.add_to_path:
         def global_cmd(emit):
+            choice = global_command_choice()
+            if choice == "skip":
+                emit("Nothing added: your existing 'localm' is untouched, and this "
+                     "install is still usable through its own folder.")
+                return
             journal(emit, "intend", "command", str(intended_command_path()))
-            # --yes: a conflict prompt has no console to answer it here.
+            answer = ["--choice", choice] if choice else ["--yes"]
             code = _run([str(venv_python(ROOT)), "-m", "localm.globalcmd",
-                         "install", "--root", ".", "--yes"], emit, plan,
+                         "install", "--root", ".", *answer], emit, plan,
                         allow_fail=True)
             # 20 = the command was created and its directory was already on
             # PATH. Only 0 also changed PATH.
@@ -1270,6 +1354,7 @@ class Wizard:
         self.plugin_rows = plugin_choices()
         self.index = 0
         self.installing = False
+        self.install_running = False
         self.existing = existing_install(ROOT) if existing is None else bool(existing)
         self.mode = "choose" if self.existing else "install"
         self.exit_code = 0
@@ -1285,6 +1370,8 @@ class Wizard:
 
         # SETUP-Q: backend
         self.backend_var = tk.StringVar(value=self.recommended)
+        # SETUP-Q: gpu-use
+        self.gpu_var = tk.BooleanVar(value=spec.default_yes("gpu-use"))
         # SETUP-Q: data-folder
         self.portable_var = tk.BooleanVar(
             value=spec.default_choice("data-folder") == "portable")
@@ -1360,6 +1447,11 @@ class Wizard:
         self._heading(page, f"Install {APP_NAME}",
                       f"{detected}. Every answer has a sensible default, so you "
                       "can click through this.")
+        if self.recommended != "cpu":
+            ttk.Checkbutton(page, text=f"Use GPU acceleration ({self.vendor or 'GPU'}) - "
+                                       "clear for CPU only",
+                            variable=self.gpu_var,
+                            command=self._on_gpu_toggled).pack(anchor="w", pady=(0, 8))
         ttk.Label(page, text="Which inference runtime should LocaLM use?",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         for key, desc in backend_choices(self.recommended):
@@ -1373,6 +1465,14 @@ class Wizard:
         ttk.Entry(row, textvariable=self.own_dir_var, width=26).pack(side="left", padx=6)
         ttk.Button(row, text="Browse...", command=self._browse_build).pack(side="left")
         row.pack(anchor="w", pady=(6, 0), padx=(22, 0))
+
+    def _on_gpu_toggled(self) -> None:
+        """CPU only selects the cpu runtime; GPU again selects the recommendation
+        when cpu was selected."""
+        if not self.gpu_var.get():
+            self.backend_var.set("cpu")
+        elif self.backend_var.get() == "cpu":
+            self.backend_var.set(self.recommended)
 
     def _build_location_page(self):
         ttk = self.ttk
@@ -1445,7 +1545,10 @@ class Wizard:
         ttk.Checkbutton(page, text="Open LocaLM in its own app window instead of "
                                    "a browser tab",
                         variable=self.appwin_var).pack(anchor="w")
-        ttk.Checkbutton(page, text="Make 'localm' runnable from any terminal",
+        if sys.platform.startswith("linux"):
+            ttk.Label(page, text=LINUX_APP_WINDOW_NOTE, style="Dim.TLabel",
+                      wraplength=520).pack(anchor="w", padx=(22, 0))
+        ttk.Checkbutton(page, text=GLOBAL_COMMAND_TEXT,
                         variable=self.path_cmd_var).pack(anchor="w")
         if sys.platform == "darwin":
             ttk.Label(page, text="macOS gets no shortcut: start LocaLM with "
@@ -1516,7 +1619,7 @@ class Wizard:
         ttk = self.ttk
         footer = ttk.Frame(self.container)
         footer.pack(fill="x", side="bottom", pady=(12, 0))
-        self.status = ttk.Label(footer, text="")
+        self.status = ttk.Label(footer, text="", wraplength=480, justify="left")
         self.status.pack(side="left")
         self.action = ttk.Button(footer, text="Next", command=self.next_page)
         self.action.pack(side="right")
@@ -1577,6 +1680,11 @@ class Wizard:
                     == os.path.normcase(self.missing_data)
                     and not os.path.isdir(self.missing_data)):
                 return "That data folder is not available: connect it, or choose another."
+            if not self.portable_var.get():
+                try:
+                    install_manifest().check_data_dir(ROOT, self.path_var.get())
+                except ValueError as e:
+                    return str(e)
         return ""
 
     def next_page(self) -> None:
@@ -1650,6 +1758,7 @@ class Wizard:
     def start_install(self) -> None:
         plan = self.current_plan()
         self.installing = True
+        self.install_running = True
         self._show(len(self.pages) - 1)
         self.step_label.pack(anchor="w")
         self.bar.pack(fill="x", pady=(8, 10))
@@ -1668,6 +1777,20 @@ class Wizard:
 
     def _emit(self, text: str) -> None:
         self.lines.put(("log", text))
+
+    def _log_line(self, text: str) -> None:
+        """Append *text* to the install log (window thread only)."""
+        self.log.configure(state="normal")
+        self.log.insert("end", str(text) + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _confirm(self, text: str, default: bool) -> bool:
+        """A yes/no dialog; *default* when the window has no dialogs."""
+        if self.messagebox is None:
+            return default
+        return bool(self.messagebox.askyesno(f"{APP_NAME} Setup", text,
+                                             default="yes" if default else "no"))
 
     def _ask_from_worker(self, question: dict) -> str:
         """ASK for the install thread: hands *question* to the window thread and
@@ -1759,6 +1882,14 @@ class Wizard:
         self.root.after(80, self._pump)
 
     def _on_close(self) -> None:
+        if self.install_running:
+            if self.messagebox is not None:
+                self.messagebox.showinfo(
+                    f"{APP_NAME} Setup",
+                    "Setup is still running. Close this window when it has "
+                    "finished; stopping it now would leave this folder half "
+                    "installed.")
+            return
         if self.installing and self.mode == "uninstalling":
             if self.messagebox is not None:
                 self.messagebox.showinfo(
@@ -1816,7 +1947,7 @@ class Wizard:
             self.step_label.configure(text="Uninstall could not finish.")
             self.status.configure(text=(rep.get("error") or
                                         f"See above. Close any {APP_NAME} window "
-                                        "and try again.")[:90])
+                                        "and try again."))
             return
         pending = (ROOT / ".localm-uninstall-pending").is_file()
         partial = rep.get("exit") == 2
@@ -1837,6 +1968,7 @@ class Wizard:
                      "closes." if pending else "Done.")
 
     def _finish(self, error: Optional[str]) -> None:
+        self.install_running = False
         self.bar.configure(value=self.bar["maximum"])
         if error is None:
             self.step_label.configure(text=f"{APP_NAME} is installed.")
@@ -1848,14 +1980,17 @@ class Wizard:
             self.step_label.configure(
                 text=f"{APP_NAME} is installed, but some optional steps did "
                      "not finish.")
-            self.status.configure(text=detail[:90])
+            self.status.configure(text=detail)
             self.action.configure(text=f"Start {APP_NAME}", state="normal",
                                   command=self._launch)
         else:
             self.step_label.configure(text="Setup could not finish.")
-            self.status.configure(text=str(error)[:90])
+            self.status.configure(text=str(error))
             self.action.configure(text="Close", state="normal",
                                   command=self.root.destroy)
+            if self.messagebox is not None:
+                report_problem("localm setup could not finish", str(error),
+                               self._confirm, self._log_line)
 
     def _launch(self) -> None:
         exe = venv_bin(ROOT) / ("localm.exe" if IS_WINDOWS else "localm")

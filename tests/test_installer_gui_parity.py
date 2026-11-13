@@ -238,9 +238,12 @@ class TestRuntime:
 
     def test_no_build_folder_skips_and_says_how_to_provision_later(self, gui):
         logged = []
-        _step(gui, gui.Plan(backend="own"),
-              "Skipping the inference runtime download").run(logged.append)
+        step = _step(gui, gui.Plan(backend="own"), "Skipping the inference runtime download")
+        assert step.fatal is False
+        with pytest.raises(gui.StepFailed) as ei:
+            step.run(logged.append)
         assert "setup-llama --backend <" in logged[0]
+        assert str(ei.value).startswith("no model can load until the runtime is provisioned:")
         assert not any("setup-llama" in s.label for s in gui.build_steps(gui.Plan(backend="own")))
 
     def test_setup_llama_runs_without_yes_and_answers_in_the_window(

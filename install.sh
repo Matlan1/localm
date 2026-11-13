@@ -5,8 +5,9 @@
 #    curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
 #
 #  uv (the Python toolchain localm uses) is installed by setup.sh itself, inside
-#  the clone for the default Portable choice, so nothing is written to your home
-#  folder or shell startup files unless you pick Shared.
+#  the clone (the default Portable choice), so nothing is written to your shell
+#  startup files. On Linux, setup also adds an application menu entry
+#  (~/.local/share/applications/localm.desktop); the uninstaller removes it.
 #
 #  Override the destination or repo:
 #    LOCALM_DIR=~/apps/localm  LOCALM_REPO=https://github.com/you/localm.git  \

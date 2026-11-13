@@ -101,13 +101,17 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
     exit 1
 fi
 
+while : ; do
 echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local; a new install adds ~/.local/bin to your shell startup files)"
 STOREPICK=""
 # SETUP-Q: tooling-store
 read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
 STOREPICK="${STOREPICK:-1}"
+case "$STOREPICK" in 1|2) break ;; esac
+echo "  [!] Type a number from 1 to 2."
+done
 UVEXE=""
 unset LOCALM_GUI_UV_INSTALLED
 if [ "$STOREPICK" = 1 ]; then
@@ -174,7 +178,12 @@ if [ "$rc" = 42 ] || [ "$rc" = 43 ]; then
     echo "  Removing the last LocaLM folders ..."
     frc=0
     bash ./setup.sh --finish-uninstall || frc=$?
-    if [ "$frc" != 0 ]; then exit "$frc"; fi
+    if [ "$frc" != 0 ]; then
+        echo
+        echo "  [!] Some LocaLM folders could not be removed - close any LocaLM window"
+        echo "      and delete them by hand, or run  ./setup.sh --finish-uninstall  again."
+        exit 1
+    fi
 fi
 if [ "$rc" = 43 ] || [ "$rc" = 44 ]; then
     echo
@@ -183,6 +192,8 @@ if [ "$rc" = 43 ] || [ "$rc" = 44 ]; then
     exit 2
 fi
 if [ "$rc" = 42 ]; then
+    echo
+    echo "  LocaLM was uninstalled."
     exit 0
 fi
 if [ "$rc" = 45 ]; then
@@ -193,7 +204,7 @@ if [ "$rc" = 45 ]; then
 fi
 if [ "$rc" != 0 ]; then
     echo
-    echo "  [!] The setup window could not run."
+    echo "  [!] The setup window could not run (exit $rc)."
     echo "      Use the console installer instead:  ./setup.sh"
-    exit 1
+    exit "$rc"
 fi

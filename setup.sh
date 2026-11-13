@@ -52,6 +52,22 @@ ask() {  # ask PROMPT DEFAULT  ->  echoes the answer (the default in --yes mode)
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
+ask_pick() {  # ask_pick PROMPT DEFAULT LAST [y]  ->  echoes a menu number from 1 to LAST
+  # Asks again, with a note on stderr, until the answer is a number the menu lists.
+  # With a fourth argument "y", an answer starting with y or Y is taken as 1.
+  local prompt="$1" def="$2" last="$3" yes1="${4:-}" ans
+  while : ; do
+    ans="$(ask "$prompt" "$def")"
+    if [ "$yes1" = y ]; then
+      case "$ans" in [Yy]*) printf '  (y taken as [1])\n' >&2; echo 1; return ;; esac
+    fi
+    case "$ans" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$ans" -ge 1 ] && [ "$ans" -le "$last" ]; then echo "$ans"; return; fi ;;
+    esac
+    printf '  [!] Type a number from 1 to %s.\n' "$last" >&2
+  done
+}
 uv_manual_hint() {  # the manual uv-install command; used from two call sites below
   say "      install uv with your package manager, or download it from https://github.com/astral-sh/uv/releases"
 }
@@ -317,7 +333,7 @@ if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]
   say "    [2] Uninstall              - remove LocaLM from this computer"
   say "    [3] Cancel"
   # SETUP-Q: existing-install
-  expick="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
+  expick="$(ask_pick "  Pick 1, 2 or 3 [1]: " 1 3)"
   case "$expick" in
     2) rc=0; do_uninstall || rc=$?; exit "$rc" ;;
     3) say "  Nothing changed."; exit 0 ;;
@@ -452,9 +468,9 @@ step_begin portable-choice
 say ""
 say "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-say "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+say "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local; a new install adds ~/.local/bin to your shell startup files)"
 # SETUP-Q: tooling-store
-spick="$(ask "  Pick 1 or 2 [1]: " 1)"
+spick="$(ask_pick "  Pick 1 or 2 [1]: " 1 2)"
 CONTAINED=0; PYPREF=""; UVDIR=""
 if [ "$spick" = 1 ]; then
   CONTAINED=1
@@ -548,13 +564,25 @@ if [ "$uv_present" != 1 ]; then
   # The installer script and everything Astral's installer downloads (TMPDIR)
   # stay in ./.localm-setup-tmp, which is removed again when it is empty.
   UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
-  if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
+  UV_REFUSED=0
+  if ! mkdir -p "$UVTMP/tmp"; then
+    say "  [!] Could not create a temporary folder in ./.localm-setup-tmp for the uv installer."
+    UV_REFUSED=1
+  elif fetch_uv_installer "$UVTMP/uv-installer.sh"; then
     TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
-    jr abandon "$UVSTEP"
+    UV_REFUSED=1
   fi
   rm -rf "$UVTMP"
   rmdir ./.localm-setup-tmp 2>/dev/null || true
+  if [ "$UV_REFUSED" = 1 ]; then
+    jr abandon "$UVSTEP"
+    say ""
+    say "  uv was not installed. Install it yourself, then re-run setup.sh:"
+    uv_manual_hint
+    offer_report "localm setup could not install uv" "setup.sh refused the uv installer: it could not be downloaded or did not match its pinned checksum."
+    exit 1
+  fi
   # uv lands in UV_INSTALL_DIR when that was set above, else in ~/.local/bin
   # (older builds used ~/.cargo/bin); the installer edits a shell profile, not
   # this running shell, so add where it landed to PATH for the rest of setup.
@@ -565,6 +593,15 @@ if [ "$uv_present" != 1 ]; then
     export PATH="$UV_INSTALL_DIR:$PATH"
   else
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  fi
+  if [ "$CONTAINED" = 1 ] && [ ! -x ./.uv/uv ]; then
+    say ""
+    say "  [!] uv was not installed under ./.uv, so Portable cannot go on (another uv on"
+    say "      PATH is not used: Portable keeps uv itself inside this folder)."
+    say "      Run setup.sh again, or install uv manually and pick Shared:"
+    uv_manual_hint
+    offer_report "localm setup could not install uv" "setup.sh ran Astral's installer for Portable but ./.uv/uv was not there afterwards."
+    exit 1
   fi
   if ! command -v uv >/dev/null 2>&1; then
     say ""
@@ -744,7 +781,7 @@ elif [ "$cur_rc" = 3 ] && [ -n "$cur" ]; then
   say "    [1] Stop setup - connect it, then run setup again"
   say "    [2] Choose a different data folder now"
   # SETUP-Q: data-offline
-  mpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+  mpick="$(ask_pick "  Pick 1 or 2 [1]: " 1 2)"
   if [ "$mpick" != 2 ]; then
     say ""
     say "  Setup stopped. Connect the data folder, then run setup again."
@@ -757,7 +794,7 @@ say "  Where should localm keep its data (models, config, logs, images)?"
 say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
 say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
 # SETUP-Q: data-folder
-dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+dpick="$(ask_pick "  Pick 1 or 2 [1]: " 1 2)"
 if [ "$dpick" = 2 ]; then
   # Custom path: ask, then confirm (re-ask until confirmed, or until prepare-data
   # accepts it). In --yes mode there is no prompt, so an unconfirmed path is never
@@ -807,7 +844,7 @@ say "  Open localm's GUI as its own app window, or in your browser?"
 say "    [1] Browser    - opens in your default browser (no extra install)"
 say "    [2] App window - its own window, no browser tab (installs localm[desktop])"
 # SETUP-Q: window-mode
-wpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+wpick="$(ask_pick "  Pick 1 or 2 [1]: " 1 2)"
 # WINMODE is that answer in words, for the menu entry question below.
 WINMODE="in your browser"
 XWIN=""
@@ -984,7 +1021,7 @@ else
   say "     cause, or continue setup and provision a runtime later - never a"
   say "     silent swap to a different backend)"
   # SETUP-Q: backend
-  bpick="$(ask "  Pick 1-$_last [1]: " 1)"
+  bpick="$(ask_pick "  Pick 1-$_last [1]: " 1 "$_last")"
   while IFS=$'\t' read -r _n _k _l; do
     if [ -n "$_n" ] && [ "$_n" = "$bpick" ]; then BACKEND="$_k"; fi
   done <<< "$BACKEND_MENU"
@@ -1007,10 +1044,12 @@ elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
     .venv/bin/localm setup-llama --from "$buildpath" --force || handle_provision_failure \
-      ".venv/bin/localm setup-llama --from <dir> --force" \
+      ".venv/bin/localm setup-llama --from \"$buildpath\" --force" \
       "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
+    RUNTIME_OK=0
+    RETRY_HINT=".venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
   SL_YES=""
@@ -1098,10 +1137,7 @@ if [ "$IS_MACOS" != 1 ]; then
   say "    [2] Straight to the GUI - skips that menu, opens $WINMODE"
   say "    [3] No menu entry"
   # SETUP-Q: shortcut
-  mk="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
-  case "$mk" in
-    [Yy]*) mk=1; say "  (y taken as [1])" ;;
-  esac
+  mk="$(ask_pick "  Pick 1, 2 or 3 [1]: " 1 3 y)"
 fi
 case "$mk" in
   skip) ;;
@@ -1145,7 +1181,7 @@ esac
 # .venv/bin/localm.
 PATH_DIR=""; CMD_SHIM=""; PATH_MOD=""
 # SETUP-Q: global-command
-gmk="$(ask "  Make 'localm' runnable from any terminal? (symlink into ~/.local/bin) [y/N]: " N)"
+gmk="$(ask "  Make 'localm' runnable from any terminal? (symlink into ~/.local/bin, which is added to your shell startup files when it is not on PATH) [y/N]: " N)"
 case "$gmk" in
   [Yy]*)
     # globalcmd exit code: 0 = installed + PATH modified; 20 = installed but PATH
@@ -1171,8 +1207,8 @@ say ""
 # this is just a section divider - do not repeat that line here.
 say "  Optional features (plugins):"
 if [ "$LOCALM_BIN_OK" = 1 ] && [ "$YES" = 1 ]; then
-  # --yes takes the picker's own default, the recommended set.
-  .venv/bin/localm plugin setup --defaults \
+  # --yes takes the picker's own default, the recommended set, with its dependencies.
+  .venv/bin/localm plugin setup --defaults --with-deps \
     || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 elif [ "$LOCALM_BIN_OK" = 1 ]; then
   # SETUP-Q: plugins

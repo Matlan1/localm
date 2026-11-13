@@ -63,11 +63,11 @@ def _is_prompt(name: str, line: str) -> bool:
         return False
     if name.endswith(".bat"):
         return bool(re.search(r"\bset /p\b", s, re.I))
-    if s.startswith(("ask()", "ask() {")):
+    if s.startswith(("ask()", "ask() {", "ask_pick()")):
         return False
     if 'read -r -p "$prompt"' in s:
         return False
-    return bool(re.search(r'\bask "', s)) or "read -r -p" in s
+    return bool(re.search(r'\bask(?:_pick)? "', s)) or "read -r -p" in s
 
 
 def _prompts(name: str) -> list:
@@ -114,7 +114,7 @@ def _shown_default(prompt: str) -> str:
 def _sh_ask_default(prompt: str):
     """The default argument of a setup.sh ask() call, lowercased; None when the
     line is not an ask() call."""
-    m = re.search(r'\bask "(?:[^"\\]|\\.)*"\s+("?)([^"\s)]*)\1\s*\)', prompt)
+    m = re.search(r'\bask(?:_pick)? "(?:[^"\\]|\\.)*"\s+("?)([^"\s)]*)\1[\s)]', prompt)
     return None if m is None else m.group(2).lower()
 
 
@@ -343,6 +343,7 @@ def test_the_window_starts_on_the_spec_defaults(tmp_path, monkeypatch):
     assert set(plan.plugins) == set(spec.question("plugins").default.split(","))
     assert w.choice_var.get() == spec.default_choice("existing-install")
     assert w.purge_var.get() is spec.default_yes("uninstall-data")
+    assert w.gpu_var.get() is spec.default_yes("gpu-use")
 
 
 # The Wizard variable that answers each spec question the window asks.
@@ -353,6 +354,7 @@ WINDOW_CONTROLS = {
     "data-folder": ("portable_var", "path_var"),
     "window-mode": ("appwin_var",),
     "backend": ("backend_var",),
+    "gpu-use": ("gpu_var",),
     "own-build-dir": ("own_dir_var",),
     "shortcut": ("shortcut_var",),
     "global-command": ("path_cmd_var",),
@@ -361,7 +363,7 @@ WINDOW_CONTROLS = {
 }
 # Window questions asked by a dialog or a step, not by a control on a page.
 WINDOW_DIALOGS = {"uninstall-confirm", "venv-lockers", "venv-retry", "runtime-failed",
-                  "keep-data", "data-offline", "running-localm"}
+                  "keep-data", "data-offline", "running-localm", "report-problem"}
 # Questions the launcher asks before the window opens.
 LAUNCHER_QUESTIONS = {"tooling-store", "uv-install"}
 
@@ -401,6 +403,8 @@ def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):
         root.destroy()
     expected = {a for qid, attrs in WINDOW_CONTROLS.items() for a in attrs
                 if sys.platform in spec.question(qid).platforms}
+    if w.recommended == "cpu":
+        expected.discard("gpu_var")
     assert bound == expected, (sorted(bound - expected), sorted(expected - bound))
 
 

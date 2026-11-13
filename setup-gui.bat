@@ -26,13 +26,15 @@ rem  and LOCALM_GUI_UV_INSTALLED=1 when uv was installed at its per-user locatio
 rem  by this run. Portable uses only .\.uv\uv.exe, installing it there when it is
 rem  missing. Shared uses the uv on PATH, never .\.uv, and installs uv at its
 rem  normal per-user location when there is none.
+:ask_store
 echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
-echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
+echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile; a new install adds it to your user PATH)
 set "STOREPICK="
 rem SETUP-Q: tooling-store
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
+if not "%STOREPICK%"=="1" if not "%STOREPICK%"=="2" echo  [!] Type a number from 1 to 2.& goto ask_store
 set "UVEXE="
 set "LOCALM_GUI_UV_INSTALLED="
 if "%STOREPICK%"=="1" goto portable_uv
