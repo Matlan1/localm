@@ -99,6 +99,8 @@ While a streaming reply is being prepared, localm reports what it is doing in
 chunks whose `delta` carries `status` (English text) and `status_code` (a
 stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
+`processing_progress` (a long prompt is still being read; its delta also carries
+`status_args` with `done` and `total`, the prompt tokens read so far and in all),
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
 `audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
