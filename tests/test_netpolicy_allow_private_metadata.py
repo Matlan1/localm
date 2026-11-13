@@ -61,6 +61,13 @@ def test_check_url_permits_a_name_that_resolves_to_a_lan_address(monkeypatch):
     check_url("http://nas.example/")
 
 
+def test_check_url_permits_a_name_with_a_link_local_and_a_lan_address(monkeypatch):
+    set_config(monkeypatch, _ON)
+    _resolves_to(monkeypatch, "fe80::1", "192.168.1.20")
+    check_url("http://nas.local:8080/")
+    assert netpolicy._resolve_pinned_all("nas.local") == ["192.168.1.20"]
+
+
 def test_pinned_resolve_refuses_a_rebind_to_metadata(monkeypatch):
     set_config(monkeypatch, _ON)
     _resolves_to(monkeypatch, "169.254.169.254")

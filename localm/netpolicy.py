@@ -431,12 +431,38 @@ def check_url(url: str, *, allow_when_off: bool = False,
             f"\"{', '.join(allow + [host])}\"")
 
     if cfg.get("net_allow_private", False):
-        if is_link_local_host(host):
+        if _only_link_local(host):
             raise NetworkPolicyError(_link_local_refusal(host))
     elif search_backend and is_search_backend_origin(url, cfg):
         _check_search_backend_address(host)
     else:
         _check_public_address(host)
+
+
+def _only_link_local(host: str) -> bool:
+    """True when *host* is a link-local or cloud-metadata address
+    (:func:`is_link_local_or_metadata_ip`, every numeric IPv4 spelling
+    included), or resolves only to such addresses. A host with at least one
+    other address, or one that does not resolve, gives False: the pinned
+    connection (:func:`_resolve_pinned_all`) dials only its other addresses."""
+    lit = _literal_ipv4(host)
+    if lit is not None:
+        return lit.is_link_local
+    try:
+        return is_link_local_or_metadata_ip(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, ValueError, OSError):
+        return False
+    found = []
+    for info in infos:
+        try:
+            found.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return bool(found) and all(is_link_local_or_metadata_ip(ip) for ip in found)
 
 
 def _link_local_refusal(host: str, ip=None) -> str:

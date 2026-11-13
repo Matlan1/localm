@@ -423,8 +423,11 @@ this section states the security properties and, more importantly, their edges.
   address rather than the name. It classifies by ADDRESS TYPE, so a service
   reachable on a globally-routable address is not "internal" to this guard.
   Setting `net_allow_private` true narrows both the pre-flight check and the
-  pin-time re-check, for every request, to link-local and cloud-metadata
-  addresses (in any embedded IPv6 form), which stay refused. The one narrower
+  pin-time re-check, for every request, to link-local addresses (`169.254.0.0/16`,
+  which holds the common cloud metadata address `169.254.169.254`, and
+  `fe80::/10`) and the `fd00:ec2::/32` metadata range, in any embedded IPv6
+  form, which stay refused; a name that also resolves to another address is
+  dialled on that address only. The one narrower
   exception is the search backend: when the configured `net_search_url` names
   a local host (an IP address, `localhost`, a dotless name or a local-network
   suffix), the SearXNG search reaches a loopback or private address on exactly
