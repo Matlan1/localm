@@ -627,7 +627,13 @@ class TestEvictionEdges:
         kept.load()
         assert kept.loaded is True
         late = Engine(str(_exl2_dir(tmp_path)))
-        mgr.disable("fakeexl")
+        real_load = late._backend.load
+
+        def load_while_the_plugin_is_disabled():
+            mgr.disable("fakeexl")
+            real_load()
+
+        late._backend.load = load_while_the_plugin_is_disabled
         with pytest.raises(RuntimeError, match="was disabled while it loaded"):
             late.load()
         assert late.loaded is False

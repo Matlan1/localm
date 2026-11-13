@@ -17,6 +17,14 @@ from localm.plugins.mcpserver.server import (
 
 
 @pytest.fixture(autouse=True)
+
+def _uninstall_degraded():
+    from localm.plugins.engine import UninstallResult
+    return UninstallResult(False, None)
+
+
+_UNINSTALL_DEGRADED = _uninstall_degraded()
+
 def _first_party_plugins_available(monkeypatch):
     """Every first-party plugin counts as installed and enabled, so code that
     reaches one through ``localm.plugins.lookup`` runs in this file's tests."""
@@ -2087,7 +2095,9 @@ class TestNewToolCalls:
 
     def test_uninstall_plugin(self):
         server, _ = _server()
-        with patch("localm.plugins.engine.PluginManager.uninstall") as mock_uninstall:
+        from localm.plugins.engine import UninstallResult
+        with patch("localm.plugins.engine.PluginManager.uninstall_report",
+                   return_value=UninstallResult(True, None)) as mock_uninstall:
             resp = _req(server, "tools/call",
                         {"name": "uninstall_plugin", "arguments": {"plugin": "coder", "delete_data": True}})
         assert resp["result"]["isError"] is False
@@ -2101,7 +2111,8 @@ class TestNewToolCalls:
         # "successfully uninstalled" there reports a step that did not complete.
         server, _ = _server()
         with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
-             patch("localm.plugins.engine.PluginManager.uninstall", return_value=False) as mock_uninstall:
+             patch("localm.plugins.engine.PluginManager.uninstall_report",
+                   return_value=_UNINSTALL_DEGRADED) as mock_uninstall:
             resp = _req(server, "tools/call",
                         {"name": "uninstall_plugin", "arguments": {"plugin": "coder"}})
         assert resp["result"]["isError"] is True
@@ -2122,7 +2133,8 @@ class TestNewToolCalls:
         # staying silent about it or falsely claiming it is gone.
         server, _ = _server()
         with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
-             patch("localm.plugins.engine.PluginManager.uninstall", return_value=False) as mock_uninstall:
+             patch("localm.plugins.engine.PluginManager.uninstall_report",
+                   return_value=_UNINSTALL_DEGRADED) as mock_uninstall:
             resp = _req(server, "tools/call",
                         {"name": "uninstall_plugin",
                          "arguments": {"plugin": "coder", "delete_data": True}})

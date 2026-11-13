@@ -442,8 +442,8 @@ def test_a_restarted_sampler_does_not_serve_the_reading_from_before_it_stopped()
 
 def test_every_direct_backend_load_in_engine_is_followed_by_a_kick():
     """Engine.load() kicks in its finally block. The two other places that load
-    the backend (the embed path and the chat reload) call it directly and so
-    need a kick of their own."""
+    the backend (the embed path and the chat reload) call it through
+    ``_load_backend`` directly and so need a kick of their own."""
     import ast
     import inspect
 
@@ -454,14 +454,16 @@ def test_every_direct_backend_load_in_engine_is_followed_by_a_kick():
 
     def is_backend_load(node):
         return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                and ast.unparse(node.value.func) == "self._backend.load")
+                and ast.unparse(node.value.func) in ("self._backend.load",
+                                                       "self._load_backend"))
 
     def is_kick(node):
         return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
                 and ast.unparse(node.value.func) == "_livefeed.kick")
 
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef) or fn.name == "_load_locked":
+        if not isinstance(fn, ast.FunctionDef) or fn.name in ("_load_locked",
+                                                               "_load_backend"):
             continue
         for node in ast.walk(fn):
             for field in ("body", "orelse", "finalbody"):

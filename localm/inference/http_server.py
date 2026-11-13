@@ -994,7 +994,7 @@ async def _switch_engine_leased(name: str, make_engine, lease: _SwitchLease, *,
             if healing is not None:
                 healing.unloading = False
             backend_plugin = getattr(new_engine, "backend_plugin", None)
-            if backend_plugin is not None:
+            if isinstance(backend_plugin, str) and backend_plugin:
                 from localm.inference import backend_registry
                 if not backend_registry.has_plugin(backend_plugin):
                     await loop.run_in_executor(None, new_engine.unload)
