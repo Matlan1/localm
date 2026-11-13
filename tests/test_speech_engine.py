@@ -7,6 +7,7 @@ import ast
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +100,52 @@ class TestResidency:
         with caplog.at_level(logging.INFO, logger="localm"):
             speech.synthesize(m, "hi")
             speech.synthesize(m, "hi")
+        ready = [r.getMessage() for r in caplog.records
+                 if r.getMessage().startswith("speech model ready")]
+        assert ready == ["speech model ready: a (24000 Hz, projector on CPU)"]
+
+    def test_a_racing_second_load_reuses_the_engine_and_logs_nothing(
+            self, engines, home, caplog, monkeypatch):
+        import threading
+        from localm.inference import load_lease
+        m = _model(home, "a")
+        second_in = threading.Event()
+        entered = []
+        real_acquire = load_lease.acquire
+
+        def acquire(*a, **k):
+            entered.append(threading.current_thread().name)
+            if len(entered) == 2:
+                second_in.set()
+            return real_acquire(*a, **k)
+
+        def choose(model, n_ctx):
+            if threading.current_thread().name == "first":
+                assert second_in.wait(10), "the second load never passed the reuse check"
+            return 0, None
+
+        monkeypatch.setattr(load_lease, "acquire", acquire)
+        monkeypatch.setattr(speech, "_choose_gpu_layers", choose)
+        got, errors = {}, []
+
+        def load(name):
+            try:
+                got[name] = speech.get_engine(m)
+            except Exception as e:
+                errors.append(e)
+
+        first = threading.Thread(target=load, args=("first",), name="first")
+        with caplog.at_level(logging.INFO, logger="localm"):
+            first.start()
+            while not entered:
+                time.sleep(0.01)
+            second = threading.Thread(target=load, args=("second",), name="second")
+            second.start()
+            first.join(20)
+            second.join(20)
+        assert errors == [] and not first.is_alive() and not second.is_alive()
+        assert entered == ["first", "second"]
+        assert got["first"] is got["second"] and _FakeEngine.loads == ["a"]
         ready = [r.getMessage() for r in caplog.records
                  if r.getMessage().startswith("speech model ready")]
         assert ready == ["speech model ready: a (24000 Hz, projector on CPU)"]
