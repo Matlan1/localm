@@ -422,8 +422,9 @@ this section states the security properties and, more importantly, their edges.
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service
   reachable on a globally-routable address is not "internal" to this guard.
-  Setting `net_allow_private` true removes both the pre-flight check and the
-  pin-time re-check, not just the former, for every request. The one narrower
+  Setting `net_allow_private` true narrows both the pre-flight check and the
+  pin-time re-check, for every request, to link-local and cloud-metadata
+  addresses (in any embedded IPv6 form), which stay refused. The one narrower
   exception is the search backend: when the configured `net_search_url` names
   a local host (an IP address, `localhost`, a dotless name or a local-network
   suffix), the SearXNG search reaches a loopback or private address on exactly
