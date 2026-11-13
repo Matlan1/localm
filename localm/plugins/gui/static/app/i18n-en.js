@@ -65,6 +65,7 @@ export const I18N_EN = {
   "common.image.notShown": "Image not shown",
   "common.image.notShownWithAlt": "Image not shown ({alt})",
   "common.imageConsent.allow": "Show images from this site",
+  "common.imageConsent.askAgain": "Ask again",
   "common.imageConsent.body":
     "A reply wants to show an image from {origin}. Loading it tells that site someone is reading this reply, and the address itself can carry information out. This machine makes the request, not your browser.",
   "common.imageConsent.decline": "Do not load",
@@ -78,6 +79,7 @@ export const I18N_EN = {
   "common.imageProxy.failed": "This localm could not fetch it (HTTP {status}).",
   "common.imageProxy.refused": "This localm refused to fetch it.",
   "common.imageProxy.unreachable": "This localm could not reach it.",
+  "common.imageProxy.cancelled": "The question about {origin} was closed without an answer, so nothing was loaded.",
   "common.modal.cancel": "Cancel",
   "common.modal.ok": "OK",
   "common.modelDownload.bodyNoSize":
@@ -111,6 +113,10 @@ export const I18N_EN = {
   "common.modelDownload.bodyNativeNoSize": "Generating needs '{filename}', which isn't downloaded yet.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
+  "common.modelDownload.paused": "Download paused: {filename}. The data saved so far is kept; downloading it again continues from there.",
+  "common.modelDownload.interrupted": "Download interrupted: {filename}. The connection to localm was lost; the download may still be running.",
+  "common.modelDownload.endedFailed": "Download failed: {filename}",
+  "common.modelDownload.missingNoSource": "'{filename}' is missing and the workflow gives no download source for it. Add the file with the Add a model card on the Models page, then try again.",
   "common.modelDownload.notNow": "Not now",
   "common.modelDownload.preflightUnavailable":
     "Could not check for missing {kind} models before generating - the check will run again when you press Generate.",
