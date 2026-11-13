@@ -113,8 +113,7 @@ async function comfyModelPicker(media) {
     return wrap;
   }
   if (!data.reachable) {
-    wrap.appendChild(el("div", "sub", data.message
-      || t("workflow.comfyUnreachable")));
+    wrap.appendChild(el("div", "sub", t("workflow.comfyUnreachable")));
     // Show what the workflow needs and what is registered on this machine,
     // from localm's own registry.
     appendRegistryFallback(wrap, data);
@@ -236,7 +235,9 @@ export function workflowRow(media, name, label, active, deletable) {
   if (deletable) {
     const del = el("button", "btn-secondary btn-danger workflow-del", t("workflow.delete"));
     del.type = "button";
-    del.title = t("workflow.deleteTitle");
+    // The workflow in use cannot be deleted; another one is selected first.
+    del.disabled = !!active;
+    del.title = active ? t("workflow.deleteActiveTitle") : t("workflow.deleteTitle");
     del.onclick = () => deleteWorkflow(media, name);
     row.appendChild(del);
   }

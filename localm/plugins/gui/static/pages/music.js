@@ -7,7 +7,7 @@
 
 import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, dismissErrorToast, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
-import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
+import { bindReloadToggle, createGallery, createJobFollower, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField } from "../app/native-workflows.js";
 import { hideStop, showStop } from "./images.js";
@@ -16,6 +16,8 @@ import { modelOverrides } from "./workflow.js";
 /* ================================================================ */
 /*  Music library                                                    */
 /* ================================================================ */
+
+const musicJobs = createJobFollower();
 
 const musicGallery = createGallery({
   slug: "music",
@@ -32,6 +34,7 @@ const musicGallery = createGallery({
   beforeRefresh: () => {
     refreshMusicBackend();
     refreshReloadToggle("music", "music-reload-llm");
+    musicJobs.adopt("music", (jobId) => runMusicJob(async () => jobId));
   },
 
   buildPreview: musicPreview,
@@ -190,24 +193,34 @@ $("music-generate").onclick = async () => {
     const shift = nwfNumber("music-shift");
     if (shift !== null) body.shift = shift;
   }
+  await musicJobs.run(() => runMusicJob(async (log) => {
+    const proceed = await checkModelsBeforeGenerate("music", log,
+      native ? nativeChoice : { model_overrides: modelOverrides.music });
+    if (!proceed) return null;
+    const r = await fetch("/api/music", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    return data.job_id;
+  }));
+};
 
+/* Run one music job on this page: *start(log)* resolves to the job id to
+   follow (null when nothing was started); its log lines and the track fill
+   the page, and the end status is toasted. */
+async function runMusicJob(start) {
   $("music-generate").disabled = true;
   const log = $("music-log");
   log.style.display = "block";
   log.textContent = "";
   $("music-result").replaceChildren();
   try {
-    const proceed = await checkModelsBeforeGenerate("music", log,
-      native ? nativeChoice : { model_overrides: modelOverrides.music });
-    if (!proceed) return;
-    const r = await fetch("/api/music", {
-      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-    showStop("music-stop", data.job_id);
+    const jobId = await start(log);
+    if (!jobId) return;
+    showStop("music-stop", jobId);
     const missing = createMissingModelOffer(log);
-    const end = await streamJob(data.job_id, (line) => {
+    const end = await streamJob(jobId, (line) => {
       if (!missing.show(line)) return;
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -232,4 +245,4 @@ $("music-generate").onclick = async () => {
     $("music-generate").disabled = false;
     hideStop("music-stop");
   }
-};
+}

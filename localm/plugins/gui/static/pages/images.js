@@ -10,7 +10,7 @@ import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, dismissErrorToast, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { createImageInputs } from "../app/image-inputs.js";
-import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
+import { bindReloadToggle, createGallery, createJobFollower, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { showView } from "../app/tabs.js";
@@ -19,6 +19,8 @@ import { modelOverrides } from "./workflow.js";
 /* ================================================================ */
 /*  Image library                                                    */
 /* ================================================================ */
+
+const imageJobs = createJobFollower();
 
 const imageGallery = createGallery({
   slug: "imagine",
@@ -104,6 +106,7 @@ const imageGallery = createGallery({
   beforeRefresh: () => {
     refreshImageBackend().then(() => { if (imageBackend.active !== "native") refreshLoraPicker(); });
     refreshReloadToggle("image", "img-reload-llm");
+    imageJobs.adopt("imagine", followAdoptedImageJob);
   },
 });
 
@@ -281,6 +284,11 @@ export async function refreshImageBackend() {
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
   }
+  const cfg = $("img-cfg");
+  if (cfg) {
+    cfg.dataset.i18nPlaceholder = native ? "images.cfgPlaceholderNative" : "images.cfgPlaceholder";
+    cfg.placeholder = t(cfg.dataset.i18nPlaceholder);
+  }
   for (const node of document.querySelectorAll(
     "#view-images .img-native-only, #view-images .img-native-gen, #view-images .img-native-extra")) {
     node.hidden = !native;
@@ -367,6 +375,10 @@ async function followImageJob(jobId, log) {
 
 async function runImageUpscale(name, upscaler) {
   if (!upscaler) { toast(t("images.upscaleNone"), true); return; }
+  await imageJobs.run(() => upscaleImage(name, upscaler));
+}
+
+async function upscaleImage(name, upscaler) {
   $("img-generate").disabled = true;
   const log = $("img-log");
   log.style.display = "block";
@@ -433,6 +445,10 @@ $("img-generate").onclick = async () => {
     body.clip_skip = num("img-clip-skip");
     Object.assign(body, imageGen.body(), imageInputs.body());
   }
+  await imageJobs.run(() => generateImage(body, native, loraName, nativeChoice));
+};
+
+async function generateImage(body, native, loraName, nativeChoice) {
   $("img-generate").disabled = true;
   imageLivePreview.clear();
   const log = $("img-log");
@@ -460,7 +476,28 @@ $("img-generate").onclick = async () => {
     imageLivePreview.clear();
     hideStop("img-stop");
   }
-};
+}
+
+/* Follow an image job this page did not start (one from the chat's
+   /generate-image), into the same log and result area. */
+async function followAdoptedImageJob(jobId) {
+  $("img-generate").disabled = true;
+  const log = $("img-log");
+  log.style.display = "block";
+  log.textContent = "";
+  $("img-result").replaceChildren();
+  try {
+    const end = await followImageJob(jobId, log);
+    if (end.status === "done") toast(t("images.generatedToast"));
+    else toast(t("images.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
+  } catch (e) {
+    toast(t("images.generationFailed", { message: e.message }), true);
+  } finally {
+    $("img-generate").disabled = false;
+    imageLivePreview.clear();
+    hideStop("img-stop");
+  }
+}
 
 /* ================================================================ */
 /*  Prompt helpers: enhance, import parameters from an image         */

@@ -500,6 +500,43 @@ export function playerDetail(tag, whatKey) {
   };
 }
 
+/* ---- a running job started elsewhere (the chat's /generate-* commands) ---- */
+
+/** The newest running job of *kind* ("imagine", "music", "video") that this
+ *  caller may see, from GET /api/activity, or null when there is none or the
+ *  list cannot be read. */
+export async function runningJobOf(kind) {
+  try {
+    const r = await fetch("/api/activity", { headers: authHeaders() });
+    if (!r.ok) return null;
+    const ops = ((await r.json()) || {}).operations || [];
+    const running = ops.filter((o) => o && o.kind === kind && o.status === "running" && o.id);
+    running.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    return running[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** A page's one followed job. `run(work)` marks the page busy for *work* (an
+ *  async function) and returns its result; `adopt(kind, follow)` follows the
+ *  newest running job of *kind* through `follow(jobId)` when the page follows
+ *  none, so a job started from the chat shows on its page too. */
+export function createJobFollower() {
+  let busy = false;
+  async function run(work) {
+    busy = true;
+    try { return await work(); } finally { busy = false; }
+  }
+  async function adopt(kind, follow) {
+    if (busy) return;
+    const job = await runningJobOf(kind);
+    if (!job || busy) return;
+    await run(() => follow(job.id));
+  }
+  return { run, adopt, get busy() { return busy; } };
+}
+
 /* ---- per-plugin "reload chat model after generating" toggle ------------- */
 
 /* POST /v1/media/config/<plugin> {"reload_after": bool} writes the per-plugin
