@@ -62,8 +62,8 @@ def test_missing_configured_file_is_not_replaced_by_default_order(tmp_path, monk
 
 def test_localcoder_folder_file_still_needs_trust(tmp_path, monkeypatch):
     _trust(monkeypatch, True)
-    root = _project(tmp_path, ".localcoder/other.md")
-    (root / ".localcoder" / "other.md").write_text("x", encoding="utf-8")
+    root = _project(tmp_path, ".localcoder/memory.md")
+    (root / ".localcoder" / "memory.md").write_text("x", encoding="utf-8")
     assert find_injected_memory_file(root) is not None
     _trust(monkeypatch, False)
     assert find_injected_memory_file(root) is None
@@ -195,7 +195,8 @@ def test_repository_and_coder_config_files_are_refused(tmp_path, monkeypatch, va
     root = _project(tmp_path, value)
     target = root / value
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("[core]", encoding="utf-8")
+    if not target.exists():
+        target.write_text("[core]", encoding="utf-8")
     assert find_memory_file(root) is None
     assert load_memory(root) == ""
     assert "configuration file" in memory_warning(root)
