@@ -150,10 +150,6 @@ class Reader(threading.Thread):
             if not self.stop.is_set():
                 self.dropped = e
 
-    def __repr__(self):
-        return (f"<Reader alive={self.is_alive()} status={self.status!r} "
-                f"dropped={self.dropped!r} first_lines={[ln for _, ln in self.lines[:3]]!r}>")
-
     def frames(self, kind):
         out = []
         for at, line in list(self.lines):
@@ -412,8 +408,7 @@ def test_a_stream_ends_when_its_key_is_revoked(app, server, monkeypatch):
     r = Reader(server.url, _hdr(made["key"]))
     r.start()
     try:
-        assert r.wait_for(lambda: r.frames("stats")), (
-            r.status, r.dropped, [line for _, line in r.lines[:3]])
+        assert r.wait_for(lambda: r.frames("stats"))
         assert auth.revoke_key(made["id"]) is True
         r.join(timeout=5)
         assert not r.is_alive(), "the stream stayed open after its key was revoked"
