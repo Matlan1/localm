@@ -6949,7 +6949,7 @@ def _status_of_line(line: str) -> Optional[str]:
     try:
         choices = json.loads(line[len("data: "):]).get("choices") or []
         delta = ((choices[0] or {}).get("delta") or {}) if choices else {}
-    except (ValueError, AttributeError, TypeError):
+    except (ValueError, AttributeError, TypeError, RecursionError):
         return None
     status = delta.get("status")
     return status if isinstance(status, str) and status else None
