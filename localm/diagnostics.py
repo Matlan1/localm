@@ -54,6 +54,7 @@ import multiprocessing as mp
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 # Status vocabulary, shared by findings, checks and the aggregate verdict.
@@ -288,12 +289,50 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     ``find_binary_dir`` is injected rather than imported so ``doctor`` can pass
     the accessor it resolved from ``localm.cli`` at call time (which is what
     tests monkeypatch); the default is the real one.
+
+    When ``LLAMA_CPP_LIB`` is set and supplies the library, that folder is the
+    one checked, since it is the one localm loads. When it is set but does not
+    supply the library, the result carries a warning finding saying it is
+    ignored, and its status and summary stay those of the library that is used.
     """
     if find_binary_dir is None:
         from localm.config import find_binary_dir as _fbd
         find_binary_dir = _fbd
     label = _LIB_LABEL
     binary_dir = find_binary_dir()
+    override = _llama_cpp_lib_override()
+    if override and override[0] is not None:
+        binary_dir = override[0]
+    override_findings = ([Finding(WARN, override[1])]
+                         if override and override[0] is None else [])
+    result = _check_lib_in(binary_dir, label)
+    if not override_findings:
+        return result
+    return _result("llama_lib", label, override_findings + list(result.findings),
+                   summary=result.summary, status=result.status)
+
+
+def _llama_cpp_lib_override():
+    """``(folder, None)`` when ``LLAMA_CPP_LIB`` supplies the llama library
+    (the folder localm loads it from), ``(None, text)`` when it is set but is
+    ignored, *text* saying so, or None when it is not set. Never raises."""
+    explicit = os.environ.get("LLAMA_CPP_LIB")
+    if not explicit:
+        return None
+    try:
+        from localm.setup_llama import runtime_in_use
+        use = runtime_in_use()
+    except Exception as e:  # noqa: BLE001 - reported as the reason below.
+        return None, (f"LLAMA_CPP_LIB={explicit} could not be checked ({e}); "
+                      "the folder shown below may not be the one localm loads")
+    if use.get("source") == "LLAMA_CPP_LIB" and use.get("dir"):
+        return Path(use["dir"]), None
+    return None, (f"LLAMA_CPP_LIB={explicit} does not hold the llama library; it is "
+                  "ignored and the runtime below is used")
+
+
+def _check_lib_in(binary_dir, label) -> CheckResult:
+    """``check_llama_lib`` for the folder *binary_dir* (None: not found)."""
     if not binary_dir:
         return _result("llama_lib", label, [Finding(
             FAIL, "llama binary dir not found - GGUF backend unavailable")])

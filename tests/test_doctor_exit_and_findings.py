@@ -121,6 +121,72 @@ def test_an_adapter_probe_that_answered_prints_nothing(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def _lib_dir(tmp_path, name, data):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "llama.dll").write_bytes(data)
+    return d
+
+
+def test_an_empty_library_from_llama_cpp_lib_is_a_failure(tmp_path, monkeypatch):
+    import localm.setup_llama as sl
+    good = _lib_dir(tmp_path, "provisioned", b"x" * (diagnostics.TINY_LIB_BYTES + 1))
+    bad = _lib_dir(tmp_path, "override", b"")
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(bad))
+    monkeypatch.setattr(sl, "runtime_in_use", lambda: {
+        "dir": str(bad), "source": "LLAMA_CPP_LIB", "backend": None})
+
+    result = diagnostics.check_llama_lib(lambda: good)
+
+    assert result.status == diagnostics.FAIL, result
+    assert str(bad) in result.findings[0].text
+    assert not result.healthy
+
+
+def test_an_ignored_llama_cpp_lib_is_a_warning_beside_the_used_library(tmp_path,
+                                                                        monkeypatch):
+    import localm.setup_llama as sl
+    good = _lib_dir(tmp_path, "provisioned", b"x" * (diagnostics.TINY_LIB_BYTES + 1))
+    monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "missing"))
+    monkeypatch.setattr(sl, "runtime_in_use", lambda: {
+        "dir": str(good), "source": "provisioned", "backend": "cpu"})
+
+    result = diagnostics.check_llama_lib(lambda: good)
+
+    texts = [f.text for f in result.findings]
+    assert result.status == diagnostics.OK, result
+    assert result.healthy
+    assert result.findings[0].status == diagnostics.WARN
+    assert "is ignored" in texts[0]
+    assert any(str(good) in t for t in texts[1:]), texts
+
+
+def test_a_gpu_backend_verdict_says_a_gpu_is_in_use(monkeypatch, capsys):
+    monkeypatch.setattr(doctor_mod, "_provisioned_backend_name", lambda _f: "vulkan")
+    monkeypatch.setattr(doctor_mod, "_probe_gpu_devices", lambda: None)
+    assert doctor_mod._check_gpu_verdict(lambda: None, True, False) is True
+    assert "used for inference" in capsys.readouterr().out
+    monkeypatch.setattr(doctor_mod, "_provisioned_backend_name", lambda _f: "cpu")
+    assert doctor_mod._check_gpu_verdict(lambda: None, True, False) is False
+
+
+def _doctor_adapter_calls(cli_runner, monkeypatch, gpu_in_use):
+    _quiet_checks(monkeypatch)
+    calls = []
+    monkeypatch.setattr(doctor_mod, "_check_gpu_verdict", lambda *a, **k: gpu_in_use)
+    monkeypatch.setattr(doctor_mod, "_check_adapter_probe", lambda: calls.append(1))
+    assert cli_runner.invoke(cli.doctor, []).exit_code == 0
+    return calls
+
+
+def test_a_proven_gpu_skips_the_adapter_probe_line(cli_runner, monkeypatch):
+    assert _doctor_adapter_calls(cli_runner, monkeypatch, True) == []
+
+
+def test_no_proven_gpu_runs_the_adapter_probe_line(cli_runner, monkeypatch):
+    assert _doctor_adapter_calls(cli_runner, monkeypatch, False) == [1]
+
+
 def test_a_set_fault_switch_turns_the_worker_spawn_check_into_a_warning(monkeypatch):
     monkeypatch.setenv("LOCALM_GGUF_FAULT_FOR_TEST", "crash")
 

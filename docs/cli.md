@@ -1293,6 +1293,8 @@ localm stop <id>                         # stop one instance by id (or an id pre
 localm stop --all                        # stop every running localm instance
 ```
 
+`localm doctor` exits with code 1 when any line is a failure (a red cross) and with code 0 otherwise; warnings alone leave it at 0, so a script can run `localm doctor` and test its exit code.
+
 `--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
 `localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).

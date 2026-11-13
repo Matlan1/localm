@@ -476,7 +476,7 @@ def _probe_gpu_devices() -> Optional[dict]:
     return _run_probe_subprocess(_GPU_PROBE_CODE, "GPU_PROBE:")
 
 
-def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> None:
+def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> bool:
     """Report GPU capability from what localm will ACTUALLY use for inference,
     not from nvidia-smi / rocm-smi / torch alone, which miss the Vulkan, Metal
     and bundled-ROCm paths.
@@ -493,7 +493,10 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     reported as its own verdict between (2) and (3).
 
     "CPU mode only" is emitted only for a genuine cpu build, a runtime that
-    loads with no GPU device, or a truly indeterminate no-signal case."""
+    loads with no GPU device, or a truly indeterminate no-signal case.
+
+    Returns True when the verdict is a GPU used for inference (a GPU device in
+    the loaded runtime, or a trusted GPU backend marker), else False."""
     from rich.markup import escape
 
     backend = _provisioned_backend_name(find_binary_dir)
@@ -532,9 +535,9 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
             # names), same risk class as nvidia-smi/rocm-smi output.
             console.print(f"  {_OK_SYM}  GPU: {', '.join(escape(g) for g in gpu)}"
                           f"{tag} - used for inference")
-        else:
-            console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
-        return
+            return True
+        console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
+        return False
 
     # (2) No device registry (older build) or the probe could not enumerate:
     #     trust the provisioned backend NAME, but only when the runtime is not
@@ -546,11 +549,11 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     if marker_trustworthy and backend in _GPU_BACKENDS:
         console.print(f"  {_OK_SYM}  GPU: '{escape(backend)}' backend provisioned "
                       "- used for inference")
-        return
+        return True
     if marker_trustworthy and backend == "cpu":
         console.print(f"  {_WARN_SYM}  GPU: 'cpu' backend provisioned - CPU mode only")
         console.print("       [dim]run 'localm setup-llama --backend vulkan' to enable GPU[/dim]")
-        return
+        return False
 
     # (2b) The probe RAN AND FAILED: not "no GPU" but "could not find out", and
     #      the runtime being unable to load is itself the fault to report. This
@@ -567,7 +570,7 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
         # about a runtime that will not load.
         console.print("       [dim]the runtime is installed but did not load, so this is not "
                       "a statement about your hardware[/dim]")
-        return
+        return False
 
     # (2c) A card smi/torch can see, but no healthy llama.cpp library to use it.
     if not lib_healthy and smi_or_torch_gpu:
@@ -575,16 +578,17 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
                       "library above is fixed")
         console.print("       [dim]the card listed above is there; the runtime that "
                       "would use it is missing or broken[/dim]")
-        return
+        return False
 
     # (3) No trustworthy runtime signal. A GPU seen by smi/torch is positive
     #     proof (already printed by those checks); their silence is NOT proof
     #     of CPU-only, so the line is hedged.
     if smi_or_torch_gpu:
-        return
+        return False
     console.print(f"  {_WARN_SYM}  No GPU detected (nvidia-smi / rocm-smi / torch) - CPU mode only")
     console.print("       [dim]those miss Vulkan/Metal/bundled-ROCm GPUs; run "
                   "'localm setup-llama' to provision one[/dim]")
+    return False
 
 
 def _check_adapter_probe() -> None:
@@ -956,8 +960,10 @@ def doctor():
     # verdict is derived from what localm will actually load.
     gpu_found = _check_gpu_driver()
     torch_gpu_found = _check_vram_torch()
-    _check_gpu_verdict(find_binary_dir, lib_healthy, gpu_found or torch_gpu_found)
-    _check_adapter_probe()
+    gpu_in_use = _check_gpu_verdict(find_binary_dir, lib_healthy,
+                                    gpu_found or torch_gpu_found)
+    if not gpu_in_use:
+        _check_adapter_probe()
     modules = _check_packages()
     _check_hf_backend_usable(modules.get("torch"), modules.get("transformers"))
     _check_plugin_deps()
