@@ -467,6 +467,14 @@ _AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"
 _AMD_ROCM_WIN_TORCHVISION = "torchvision==0.24.1+rocm7.2.1"
 _AMD_ROCM_WIN_TORCHAUDIO = "torchaudio==2.9.1+rocm7.2.1"
 
+# AMD's Windows ROCm wheels for RX 6000 (gfx103X), a PEP 503 index. The `gpu`
+# extra in pyproject.toml pins the same three versions; scripts/bump_amd_wheels_pin.py
+# moves both. See test_every_amd_windows_torch_pin_matches_hwdetect.
+_AMD_GFX103X_WIN_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
+_AMD_GFX103X_WIN_TORCH = "torch==2.11.0+rocm7.13.0"
+_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"
+_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"
+
 # Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
 # capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
 # lower bound covering both.
@@ -530,6 +538,18 @@ def amd_rocm_win_torch_packages() -> tuple[str, str, str]:
     build published at amd_rocm_win_find_links(), so this project and a fresh
     ComfyUI venv both pin the same wheels rather than drifting apart."""
     return (_AMD_ROCM_WIN_TORCH, _AMD_ROCM_WIN_TORCHVISION, _AMD_ROCM_WIN_TORCHAUDIO)
+
+
+def amd_gfx103x_win_torch_packages() -> tuple[str, str, str]:
+    """(torch, torchvision, torchaudio) pinned requirement strings for AMD's
+    Windows ROCm wheels for RX 6000 (gfx103X), published at
+    amd_gfx103x_win_index()."""
+    return (_AMD_GFX103X_WIN_TORCH, _AMD_GFX103X_WIN_TORCHVISION, _AMD_GFX103X_WIN_TORCHAUDIO)
+
+
+def amd_gfx103x_win_index() -> str:
+    """The PEP 503 index URL of AMD's Windows ROCm wheels for RX 6000 (gfx103X)."""
+    return _AMD_GFX103X_WIN_INDEX
 
 
 def amd_rocm_win_find_links() -> str:

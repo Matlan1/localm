@@ -81,9 +81,6 @@ COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 # build whose compiled C extension does not match this ROCm torch's ABI, disabling
 # every audio-dependent ComfyUI node. Pinning the matching ROCm build here makes
 # the later bare torchaudio requirement already-satisfied.
-_AMD_GFX103X_ROCM_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_TORCH = ("torch==2.11.0+rocm7.13.0", "torchvision==0.26.0+rocm7.13.0",
-                      "torchaudio==2.11.0+rocm7.13.0")
 _AMD_GFX103X_ROCM_SDK = ("rocm", "rocm-sdk-core", "rocm-sdk-libraries-gfx103x-all")
 
 
@@ -141,8 +138,8 @@ def comfy_torch_spec(det=None) -> ComfyTorchSpec:
         fam = hwdetect.amd_gfx_family(det.gpu_names)
         if fam == "gfx103x":
             return ComfyTorchSpec(
-                "rocm", _AMD_GFX103X_TORCH + _AMD_GFX103X_ROCM_SDK,
-                extra_index_url=_AMD_GFX103X_ROCM_INDEX)
+                "rocm", hwdetect.amd_gfx103x_win_torch_packages() + _AMD_GFX103X_ROCM_SDK,
+                extra_index_url=hwdetect.amd_gfx103x_win_index())
         if fam in ("gfx110x", "gfx120x"):
             torch, torchvision, torchaudio = hwdetect.amd_rocm_win_torch_packages()
             return ComfyTorchSpec("rocm", (torch, torchvision, torchaudio),
