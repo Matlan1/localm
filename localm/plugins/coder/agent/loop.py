@@ -605,6 +605,7 @@ class _LoopMixin:
 
         # Set by Agent (core.py).
         parent: Any
+        backend: Any
         @property
         def stop_pending(self) -> bool: ...
 
