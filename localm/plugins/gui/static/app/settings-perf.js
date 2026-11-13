@@ -2609,10 +2609,12 @@ export function parseRoutingHeader(resp) {
 /** Milliseconds between two redraws of a streaming reply. */
 const LIVE_RENDER_MS = 50;
 
-/** After a refusal under model autoswitch "ask": a button under the chat that
- *  selects offer.suggest and sends the conversation again. Returns the row, or null when there is no
- *  chat to show it in. The row is not saved with the chat; a later re-render
- *  or another send removes it. */
+/** After a refusal that names a model the server did not switch to on its
+ *  own: a button under the chat that selects offer.suggest and sends the
+ *  conversation again, with offer.reason (why the server did not switch) shown
+ *  beside it when present. Returns the row, or null when there is no chat to
+ *  show it in. The row is not saved with the chat; a later re-render or
+ *  another send removes it. */
 function showMediaOffer(conv, offer) {
   const box = $("chat-messages");
   if (!box) return null;
@@ -2632,6 +2634,9 @@ function showMediaOffer(conv, offer) {
     runCompletion(conv);
   };
   row.appendChild(btn);
+  if (offer.reason) {
+    row.appendChild(el("div", "media-offer-why", t("chat.routed.askReason", { reason: offer.reason })));
+  }
   box.appendChild(row);
   box.scrollTop = box.scrollHeight;
   return row;
@@ -2653,6 +2658,7 @@ export function parseRoutingData(data) {
         ? Object.keys(data.gaps).filter((g) => !unmet.includes(g)) : [],
       unmet,
       ...(typeof data.suggested === "string" && data.suggested ? { suggested: data.suggested } : {}),
+      ...(typeof data.ask_reason === "string" && data.ask_reason ? { askReason: data.ask_reason } : {}),
       ...(typeof data.note === "string" && data.note ? { note: data.note } : {}),
       ...(data.placement && typeof data.placement === "object"
         && Number.isFinite(data.placement.gpu_layers) && Number.isFinite(data.placement.total_layers)
@@ -3038,7 +3044,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // localm/inference/backends/base.py, and by neither of the route's other
       // grammar 400s) - retry this turn unconstrained, and stop asking for the
       // rest of this page's session.
-      if (e.status === 400 && body.grammar_lazy && String(e.detail).includes("would be ignored")) {
+      if (e.status === 400 && body.grammar_lazy && !e.refusal
+          && String(e.detail).includes("would be ignored")) {
         chat.toolGrammarUnsupported = true;
         delete body.grammar;
         delete body.grammar_lazy;
@@ -3080,7 +3087,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         : markNotSent(conv, "input_audio");
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { suggest };
+        mediaOffer = { suggest, reason: e.routing.askReason || "" };
         toast(t("chat.audio.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3115,7 +3122,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const n = markRefusedBy(conv, "image_url", modelName);
       saveConversations(conv);
       if (suggest && n) {
-        mediaOffer = { suggest };
+        mediaOffer = { suggest, reason: e.routing.askReason || "" };
         toast(t("chat.vision.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
         toast(n
@@ -3129,6 +3136,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + localizeServerNotes(e.message) + "]*");
       toast(t("chat.requestFailed", { message: e.message }), true);
+      const suggest = !pinnedModel && e.routing && e.routing.suggested;
+      if (suggest) mediaOffer = { suggest, reason: e.routing.askReason || "" };
     }
   } finally {
     signal.removeEventListener("abort", forwardAbort);
@@ -3173,7 +3182,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         ...(routing.placement ? { placement: routing.placement } : {}) }
     : (routing && !routing.pinned && routing.suggested
       ? { from: routing.requested || modelName, suggest: routing.suggested,
-          gaps: [...routing.gaps, ...routing.unmet] }
+          gaps: [...routing.gaps, ...routing.unmet],
+          ...(routing.askReason ? { askReason: routing.askReason } : {}) }
       : (routing && !routing.pinned && routing.note
         ? { fallback: routing.note, gaps: [] } : null));
   if (aborted) {
@@ -3220,6 +3230,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // received this failed turn - calling it here would silently wipe the
       // only visible trace of the error the moment the toast auto-dismisses.
       // Leave the rendered error bubble in place instead.
+      if (mediaOffer) outcome.liveRow = showMediaOffer(conv, mediaOffer);
       return outcome;
     }
     if (!finishReason) {
