@@ -23,6 +23,24 @@ def test_torch_pins_names_each_installed_torch_package_exactly_in_order():
     assert hwdetect.torch_pins({}) == []
 
 
+def test_torch_pins_reads_this_interpreters_distributions(monkeypatch):
+    from importlib import metadata
+    versions = {"torch": "2.11.0+cu126", "torchaudio": "2.11.0+cu126"}
+
+    def version(name):
+        if name not in versions:
+            raise metadata.PackageNotFoundError(name)
+        return versions[name]
+    monkeypatch.setattr(metadata, "version", version)
+    assert hwdetect.torch_pins() == ["torch==2.11.0+cu126", "torchaudio==2.11.0+cu126"]
+
+    def unreadable(name):
+        raise ValueError("bad METADATA")
+    monkeypatch.setattr(metadata, "version", unreadable)
+    with pytest.raises(ValueError):
+        hwdetect.torch_pins()
+
+
 def test_torch_pins_writes_the_constraints_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hwdetect, "torch_pins", lambda installed=None: ["torch==2.11.0+cu126"])
     out = tmp_path / "pins.txt"
@@ -37,15 +55,17 @@ def test_torch_pins_writes_the_constraints_file(tmp_path, monkeypatch, capsys):
     assert hwdetect.main(["torch-pins", "--out"]) == 2
 
 
-def _second_step(text: str, extras: str) -> tuple:
-    """(the line before, the line of) the install of *extras* in a setup script."""
-    lines = [ln.strip() for ln in text.splitlines()]
-    hits = [i for i, ln in enumerate(lines)
-            if ln.startswith("uv pip install") and f'-e ".[{extras}]"' in ln]
-    assert len(hits) == 1, hits
-    i = hits[0]
-    before = next(lines[j] for j in range(i - 1, -1, -1) if lines[j])
-    return before, lines[i]
+def _logical_lines(text: str) -> list:
+    """The lines of a setup script, with shell continuation lines joined."""
+    out, cur = [], ""
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln.endswith("\\"):
+            cur += ln[:-1].strip() + " "
+            continue
+        out.append(cur + ln)
+        cur = ""
+    return out
 
 
 @pytest.mark.parametrize("script, python, pins", [
@@ -55,9 +75,14 @@ def _second_step(text: str, extras: str) -> tuple:
 def test_every_console_setup_holds_the_hf_install_to_the_installed_torch(script, python,
                                                                          pins):
     assert pins.strip('"').replace("\\", "/") == hwdetect.TORCH_PINS_FILE
-    before, line = _second_step((ROOT / script).read_text(encoding="utf-8"), "hf,audio")
-    assert before == f"{python} -m localm.hwdetect torch-pins --out {pins}", before
-    assert f" -c {pins}" in line, line
+    text = (ROOT / script).read_text(encoding="utf-8")
+    lines = (_logical_lines(text) if script.endswith(".sh")
+             else [ln.strip() for ln in text.splitlines()])
+    hits = [ln for ln in lines if 'uv pip install -p .venv -e ".[hf,audio]"' in ln]
+    assert len(hits) == 1, hits
+    step = (f"{python} -m localm.hwdetect torch-pins --out {pins} && "
+            f'uv pip install -p .venv -e ".[hf,audio]" -c {pins} ||')
+    assert hits[0].startswith(step), hits[0]
 
 
 def test_the_gui_installer_names_the_same_pins_file():

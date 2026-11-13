@@ -1045,8 +1045,8 @@ if [ -n "$TORCHSPEC" ]; then
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
-  .venv/bin/python -m localm.hwdetect torch-pins --out .venv/localm-torch-pins.txt
-  uv pip install -p .venv -e ".[hf,audio]" -c .venv/localm-torch-pins.txt \
+  .venv/bin/python -m localm.hwdetect torch-pins --out .venv/localm-torch-pins.txt \
+    && uv pip install -p .venv -e ".[hf,audio]" -c .venv/localm-torch-pins.txt \
     || say "  [!] transformers install failed. GGUF chat still works. (see docs/gpu-setup.md)"
 else
   say ""

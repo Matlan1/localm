@@ -593,15 +593,16 @@ TORCH_PINS_FILE = ".venv/localm-torch-pins.txt"
 def torch_pins(installed: dict | None = None) -> list:
     """``name==version`` for each of :data:`TORCH_PIN_PACKAGES` installed, in that
     order: from *installed* (canonical name -> version) when given, else from
-    this interpreter's distributions. Never raises; a package whose version
-    cannot be read is left out."""
+    this interpreter's distributions, where a package that is not installed is
+    left out and a distribution that cannot be read raises what
+    ``importlib.metadata`` raises."""
     if installed is None:
         from importlib import metadata
         installed = {}
         for name in TORCH_PIN_PACKAGES:
             try:
                 installed[name] = metadata.version(name)
-            except Exception:
+            except metadata.PackageNotFoundError:
                 continue
     return [f"{name}=={installed[name]}" for name in TORCH_PIN_PACKAGES
             if isinstance(installed.get(name), str) and installed[name]]
