@@ -2168,6 +2168,11 @@ def config_cmd(key, value):
         refusal = require_auth_refusal()
         if refusal:
             raise click.ClickException(refusal)
+    if str(validated.get("embedding_model") or "").strip():
+        from localm.inference.embedder import embedding_model_refusal
+        refusal = embedding_model_refusal(str(validated["embedding_model"]))
+        if refusal:
+            raise click.ClickException(refusal)
     # update_config() is the atomic read-modify-write helper; a bare
     # load_config()/save_config() pair has an unlocked window where a
     # concurrent config write can be silently lost.

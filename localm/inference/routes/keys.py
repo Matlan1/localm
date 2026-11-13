@@ -132,20 +132,28 @@ def register(app: FastAPI, ctx) -> None:
         # persistent owner key and hand THIS browser an owner session cookie
         # (future `localm gui` loads re-establish it; web.py). Loopback plus
         # open-mode only.
+        owner = None
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
-            existing_owner = auth.get_api_key()
-            owner = existing_owner or auth.regenerate_key()
-            created = {**created, "owner_key_created": existing_owner is None}
+            try:
+                owner, owner_created = auth.ensure_owner_key()
+            except ConfigUnreadable as e:
+                created = {**created, "owner_key_created": False, "warnings": [
+                    *created.get("warnings", []),
+                    f"No owner session was set up for this browser: {e}."]}
+            else:
+                created = {**created, "owner_key_created": owner_created}
+        if owner is not None:
             # An OPAQUE owner session (id in the cookie, never the key), so this
             # browser keeps full access across a later key roll.
             from localm import sessions
             # owner_key_minted: see sessions.create. _is_owner_key re-compares
             # against the live value, so a seed that did not take reports False.
             from fastapi.concurrency import run_in_threadpool
+            seeded: str = owner
             sid = await run_in_threadpool(
                 lambda: sessions.create(scopes={scopes.ADMIN},
-                                        key_hash=auth._hash_key(owner), fs_access="host",
-                                        owner_key_minted=auth._is_owner_key(owner)))
+                                        key_hash=auth._hash_key(seeded), fs_access="host",
+                                        owner_key_minted=auth._is_owner_key(seeded)))
             secure = request.url.scheme == "https"
             response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",

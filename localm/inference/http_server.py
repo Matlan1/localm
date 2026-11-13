@@ -6615,6 +6615,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
     security.add_host_header_guard(app)
+    errors.add_config_read_slow_answer(app)
     transport.add_transport_middleware(app)
     metrics_assembly.add_metrics(app)        # only when enabled
     diagnostics.add_request_logging(app)     # outermost; debug mode only

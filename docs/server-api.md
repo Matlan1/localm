@@ -387,6 +387,11 @@ leaves the server (a model that fails to load names its file, which would
 otherwise carry the account name and install layout to the caller). The reason,
 the file name and any line number are kept - the text is redacted, not muted.
 
+Any route can also answer `503` with a `Retry-After` header when the disk is
+so busy that localm's own settings (`config.json` or the model registry) could
+not be read within two seconds and no read at most two seconds old is kept to
+answer from. Nothing was done, and trying again in a moment is safe.
+
 An error that is neither of those - a genuine defect in the server - is a `500`
 with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
 server log rather than to the client.
@@ -1012,7 +1017,8 @@ the full merged config; a non-owner caller gets neither the owner-only keys nor
 their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
 file, not in `config.json`, and are written last, so an error leaves them
 unchanged. A new `embedding_model` that names a registered model of another type
-(a chat model, for example) or a reranker is refused with a 400; one that names no
+(a chat model, for example), a GGUF file whose header marks it as another type,
+or a reranker is refused with a 400; one that names no
 known key, registered model or file yet is saved, and the answer carries
 `warnings`, a list of sentences saying so. A change to `embedding_model` that would leave an existing
 collection's vectors unusable is not applied by the first request: it answers 200
@@ -1379,7 +1385,7 @@ and `vector_dim`.
 | `GET /api/rag/rerank` | Whether Knowledge results are reranked. Returns `{"enabled", "installed", "model", "candidates", "note"}`: the `rag_rerank` setting, the registered reranker names, the reranker a query would use (null when none), how many hits it would see, and why a wanted rerank cannot run. Never loads a model. |
 | `GET /api/rag/embedding` | Current embedding-model config and availability: `{"model", "default", "internal", "installed", "dim", "error", "gpu_fallback_reason", "status", "can_download"}`, with `status` one of `ready`, `not_installed` and `unknown`. Never loads a model; 504 if the embedder state cannot be read. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
 | `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, for when it is not on disk yet (it is fetched automatically on first use under `net_mode: ask` and `allow`, so this is mainly for a fetch that failed, or `net_mode: off` with `net_allow_model_downloads` on). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` refuses it with a 409 unless `net_allow_model_downloads` is on. Returns `{"job_id", "model"}`, or `{"status": "already_installed", "model"}` when the model is on disk; 403 without `config:write`, 409 when the configured model is not one of the internal downloadable ones. See [network.md](network.md). |
-| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key (403 otherwise, for the dry run too); an empty `model` is a 400, and a second setup while one is running is a 409. |
+| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key (403 otherwise, for the dry run too); an empty `model`, and a model that cannot be the embedding model (the same refusal as `PATCH /v1/config`), are a 400, and a second setup while one is running is a 409. |
 
 ## Memory endpoints (memory plugin)
 

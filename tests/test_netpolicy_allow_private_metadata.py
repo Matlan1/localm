@@ -30,6 +30,10 @@ def _resolves_to(monkeypatch, *addresses):
     "http://[fe80::1]/",
     "http://[fd00:ec2::254]/",
     "http://[::ffff:169.254.169.254]/",
+    "http://100.100.100.200/latest/meta-data/",
+    "http://1684301000/",
+    "http://[::ffff:100.100.100.200]/",
+    "http://[64:ff9b::6464:64c8]/",
 ])
 def test_check_url_refuses_link_local_literals_with_private_allowed(monkeypatch, url):
     set_config(monkeypatch, _ON)
@@ -41,7 +45,7 @@ def test_check_url_refuses_link_local_literals_with_private_allowed(monkeypatch,
 
 @pytest.mark.parametrize("url", [
     "http://127.0.0.1:3000/", "http://192.168.1.5/", "http://10.0.0.2:8080/x",
-    "http://[::1]:9000/",
+    "http://[::1]:9000/", "http://100.100.100.100/", "http://100.101.102.103:8080/",
 ])
 def test_check_url_permits_loopback_and_private_with_private_allowed(monkeypatch, url):
     set_config(monkeypatch, _ON)
@@ -53,6 +57,21 @@ def test_check_url_refuses_a_name_that_resolves_to_metadata(monkeypatch):
     _resolves_to(monkeypatch, "169.254.169.254")
     with pytest.raises(NetworkPolicyError, match="even with net_allow_private on"):
         check_url("http://metadata.example/latest/")
+
+
+def test_a_name_that_resolves_to_the_alibaba_metadata_address_is_refused(monkeypatch):
+    set_config(monkeypatch, _ON)
+    _resolves_to(monkeypatch, "100.100.100.200")
+    with pytest.raises(NetworkPolicyError, match="even with net_allow_private on"):
+        check_url("http://metadata.example/latest/")
+    with pytest.raises(NetworkPolicyError):
+        netpolicy._resolve_pinned_all("metadata.example")
+
+
+def test_the_link_local_host_check_flags_the_alibaba_metadata_address():
+    assert netpolicy.is_link_local_host("100.100.100.200")
+    assert netpolicy.is_link_local_host("::ffff:100.100.100.200")
+    assert not netpolicy.is_link_local_host("100.100.100.100")
 
 
 def test_check_url_permits_a_name_that_resolves_to_a_lan_address(monkeypatch):

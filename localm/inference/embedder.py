@@ -346,12 +346,15 @@ def embedding_model_refusal(spec: str) -> str:
 
     Accepted: a KNOWN_EMBEDDING_MODELS key, a registered model whose recorded
     type is ``embedding`` or ``unknown`` (or that records no type) and is not a
-    reranker, and a
-    local GGUF file that is not a reranker. Refused: a reranker (see
-    :func:`reranker_as_embedding_model`), a registered model of another recorded
-    type, and a UNC/device path or URL. A name that names nothing yet is not
-    refused here (see :func:`embedding_model_unresolved`). Reads the registry
-    and may stat *spec* and read a GGUF header; run it off the event loop."""
+    reranker, and a local file that is not a reranker and whose own GGUF header
+    types it ``embedding`` (or cannot be read as GGUF metadata). Refused: a
+    reranker (see :func:`reranker_as_embedding_model`), a registered model of
+    another recorded type, a local GGUF file whose header types it as another
+    model type (a chat model among them), and a UNC/device path or URL. A name
+    that names nothing yet is not refused here (see
+    :func:`embedding_model_unresolved`). Every writer of the ``embedding_model``
+    setting calls this before it writes. Reads the registry and may stat *spec*
+    and read a GGUF header; run it off the event loop."""
     spec = (spec or "").strip()
     if not spec or spec in KNOWN_EMBEDDING_MODELS:
         return ""
@@ -371,6 +374,13 @@ def embedding_model_refusal(spec: str) -> str:
     path = Path(spec).expanduser()
     if not path.is_file():
         return ""
+    from localm.model_manager.registry import gguf_file_model_type
+    kind = gguf_file_model_type(path)
+    if kind is not None and kind not in ("embedding", "unknown"):
+        return (f"'{path.name}' is not an embedding model: its GGUF header marks "
+                f"it as a {kind} model. Choose an embedding model, or if it is "
+                "one, register it with 'localm add <path>' and run "
+                "'localm set-type <name> embedding' first.")
     return reranker_as_embedding_model(spec)
 
 

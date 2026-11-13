@@ -657,6 +657,15 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     return "unknown", {}
 
 
+def gguf_file_model_type(path: Path) -> Optional[str]:
+    """The model type ``localm add`` gives the GGUF file at *path*, read from
+    the file's own header (see ``_detect_local_model_type``); None when its
+    header cannot be read as GGUF metadata."""
+    if not _gguf_metadata_probe(Path(path)):
+        return None
+    return _detect_local_model_type(Path(path), is_gguf=True, is_hf=False)[0]
+
+
 
 
 
