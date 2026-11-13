@@ -96,7 +96,10 @@ def _localm_reads(d, monkeypatch):
         return "unknown"
     monkeypatch.setattr(config, "CONFIG_FILE", d / "config.json")
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    _cfg, ok = config.load_config_checked()
+    try:
+        _cfg, ok = config.load_config_checked()
+    except Exception:
+        return "unknown"
     return config.network_mode() if ok else "unknown"
 
 

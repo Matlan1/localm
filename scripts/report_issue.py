@@ -99,6 +99,22 @@ def localm_home() -> Path:
     return REPO_ROOT / "home"
 
 
+#: The deepest JSON nesting a settings file may have and still be read.
+MAX_JSON_DEPTH = 512
+
+
+def _nesting_depth(value) -> int:
+    """How deeply *value* nests lists and objects (a scalar is 0)."""
+    deepest = 0
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (list, dict)):
+            deepest = max(deepest, depth)
+            stack.extend((v, depth + 1) for v in (item.values() if isinstance(item, dict) else item))
+    return deepest
+
+
 def network_mode() -> tuple:
     """``(mode, why)``: *mode* is ``off``, ``ask`` or ``allow`` as localm reads it
     (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
@@ -123,6 +139,8 @@ def network_mode() -> tuple:
             cfg = json.load(f)
     except (ValueError, OSError, RecursionError) as e:
         return None, f"{path} could not be read ({e.__class__.__name__})"
+    if _nesting_depth(cfg) > MAX_JSON_DEPTH:
+        return None, f"{path} could not be read (nested too deeply)"
     mode = str(cfg.get("net_mode", "ask")).strip().lower() if isinstance(cfg, dict) else "ask"
     return (mode if mode in NET_MODES else "ask"), ""
 
