@@ -8,6 +8,8 @@ from the http_server module global and the session-scoped audit mode from ctx.
 
 from __future__ import annotations
 
+import os
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
@@ -97,6 +99,13 @@ def register(app: FastAPI, ctx) -> None:
         cfg["effective_chat_mode"] = (effective_mode("chat").value if owner
                                       else cfg["effective_mode"])
         cfg["effective_coder_mode"] = effective_mode("coder").value
+        # The network access mode in force: LOCALM_NET_MODE in the server's
+        # environment sets it over the stored net_mode.
+        from localm import netpolicy
+        cfg["effective_net_mode"] = netpolicy.network_mode()
+        cfg["net_mode_from_env"] = (
+            os.environ.get(netpolicy.NET_MODE_ENV_VAR, "").strip().lower()
+            in netpolicy.NET_MODES)
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
@@ -149,6 +158,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
+                    "effective_net_mode", "net_mode_from_env",
                     "effective_ctx_max", "effective_ctx_model",
                     "effective_ctx_model_key", "instance_id",
                     "instance_port"}
@@ -172,8 +182,9 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key: it widens a trust boundary (which host "
-                    "folders the server may read, its network reach, or which "
-                    "browser origins may call it).")
+                    "folders the server may read, its network reach, which "
+                    "browser origins may call it, or which programs and model "
+                    "code it may run).")
         # `plugins` / `plugins_enabled` are plugin STATE, not settings, and
         # validate_update has no schema for their contents - it stores them
         # verbatim. Their own write surfaces (/v1/tts/config,
@@ -212,13 +223,14 @@ def register(app: FastAPI, ctx) -> None:
         # than a report naming collections. Gated on an actual value change and on
         # there being collections at risk, so an ordinary settings save needs no
         # extra confirm round trip.
-        # A reranker is refused as the embedding model, confirmed or not.
+        # An embedding model that cannot be one (a reranker, another model type,
+        # a name that names nothing) is refused, confirmed or not.
         if "embedding_model" in body and str(body["embedding_model"] or "").strip():
-            from localm.inference.embedder import reranker_as_embedding_model
-            reranker_why = await run_in_threadpool(
-                reranker_as_embedding_model, str(body["embedding_model"]).strip())
-            if reranker_why:
-                raise HTTPException(400, reranker_why)
+            from localm.inference.embedder import embedding_model_refusal
+            embed_why = await run_in_threadpool(
+                embedding_model_refusal, str(body["embedding_model"]).strip())
+            if embed_why:
+                raise HTTPException(400, embed_why)
         if "embedding_model" in body and not confirm:
             from localm.config import load_config
             new_model = str(body["embedding_model"]).strip()

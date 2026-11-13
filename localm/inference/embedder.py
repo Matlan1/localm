@@ -340,6 +340,40 @@ def reranker_as_embedding_model(spec: str) -> str:
     return ""
 
 
+def embedding_model_refusal(spec: str) -> str:
+    """Why *spec* cannot be the ``embedding_model`` setting; an empty string
+    when it can.
+
+    Accepted: a KNOWN_EMBEDDING_MODELS key, a registered model whose recorded
+    type is ``embedding`` (or that records no type) and is not a reranker, and a
+    local GGUF file that is not a reranker. Refused: a reranker (see
+    :func:`reranker_as_embedding_model`), a registered model of another recorded
+    type, a UNC/device path or URL, and a name that is none of the accepted
+    shapes. Reads the registry and may stat *spec* and read a GGUF header; run it
+    off the event loop."""
+    spec = (spec or "").strip()
+    if not spec or spec in KNOWN_EMBEDDING_MODELS:
+        return ""
+    from localm.config import load_registry
+    from localm.model_manager import has_recorded_model_type
+    entry = load_registry().get(spec)
+    if isinstance(entry, dict):
+        kind = entry.get("model_type")
+        if has_recorded_model_type(entry) and kind != "embedding":
+            return (f"'{spec}' is registered as a {kind} model, not an embedding "
+                    "model. Choose an embedding model, or if it is one, run "
+                    f"'localm set-type {spec} embedding' first.")
+        return reranker_as_embedding_model(spec)
+    bad = _nonlocal_spec_reason(spec)
+    if bad:
+        return f"'{spec}' cannot be the embedding model: {bad}."
+    path = Path(spec).expanduser()
+    if not path.is_file():
+        return (f"'{spec}' names no registered model, no GGUF file and no known "
+                f"embedding model ({', '.join(sorted(KNOWN_EMBEDDING_MODELS))}).")
+    return reranker_as_embedding_model(spec)
+
+
 def _set_resolve_outcome(spec: str, reason: Optional[str]) -> None:
     """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never
     assigned directly anywhere else in this module below this point. Every
