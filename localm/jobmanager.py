@@ -397,16 +397,35 @@ def _job_failure_cause(job: Job, err: Optional[BaseException]) -> str:
 
 
 def log_job_end(job: Job, err: Optional[BaseException] = None) -> None:
-    """Log the end of an in-thread (``start_fn``) job to the ``localm`` logger:
-    a WARNING naming the job id, kind and cause (``_job_failure_cause``) when
-    its status is ``failed``, a DEBUG line with the id, kind and status
-    otherwise. *err* is the exception the job's callback raised, or None."""
-    from localm.debuglog import logger
-    if job.status == "failed":
+    """Log the end of an in-thread (``start_fn``) job to the ``localm`` logger.
+    *err* is the exception the job's callback raised, or None.
+
+    Any status but ``failed``: a DEBUG line with the job id, kind and status.
+
+    ``failed``: a WARNING with the job id and kind. Its cause
+    (``_job_failure_cause``) is the exception message or a line the job
+    pushed, and can hold content: a prompt or reply echoed in a line, a file,
+    folder, model or collection name, a URL or page title, a server's error
+    text. So the cause is written only while ``debuglog.debug_content_enabled()``
+    is True. Otherwise the WARNING carries the exception's type name, when the
+    job raised, and says the cause was withheld: "in privacy mode" with the
+    debug log on, "without a debug log" with it off."""
+    from localm import debuglog
+    logger = debuglog.logger
+    if job.status != "failed":
+        logger.debug("job %s (%s) %s", job.id, job.kind, job.status)
+        return
+    if debuglog.debug_content_enabled():
         logger.warning("job %s (%s) failed: %s", job.id, job.kind,
                        _job_failure_cause(job, err))
+        return
+    why = ("cause withheld in privacy mode" if debuglog.debug_enabled()
+           else "cause withheld without a debug log")
+    if err is not None and job._outcome != "done":
+        logger.warning("job %s (%s) failed: %s (%s)", job.id, job.kind,
+                       type(err).__name__, why)
     else:
-        logger.debug("job %s (%s) %s", job.id, job.kind, job.status)
+        logger.warning("job %s (%s) failed (%s)", job.id, job.kind, why)
 
 
 class _HostAnnouncer:
