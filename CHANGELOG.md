@@ -25,6 +25,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A settings Save with the server unreachable says so.** It showed nothing at all; it now shows "Save failed" with the reason.
 - **A reply full of `**` or `__` no longer freezes the chat.** About 40 KB of repeated emphasis marks next to other text froze the chat for tens of seconds while it rendered. Such a reply now renders at once, with the marks shown as text, and a streaming reply is redrawn at most every 50 ms instead of on every received piece.
 - **The delete-outputs setting now applies to every way of generating media.** With `comfy_delete_outputs` (or a media plugin's own delete-outputs setting) on, the chat REPL's `/generate-image`, `/generate-music` and `/generate-video`, the `localm image`, `localm music` and `localm video` commands, the coder's image tool and the MCP `generate_image` tool kept ComfyUI's own copy of the file (which records the prompt) and its history entry outside privacy mode. They now remove them as the GUI does.
+- **Throwaway bullet A.** Merge driver check; never merged to master.
 
 ### Added
 - **A supported-models page.** `docs/models.md` lists every model kind localm runs: formats, the GGUF language model architectures of the bundled llama.cpp, Transformers, EXL2 and EXL3, embeddings and rerankers, speech, image, video and music, and the kinds localm recognises but does not run yet.
