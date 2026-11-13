@@ -247,6 +247,11 @@ def torch_spec_for(backend: str) -> tuple:
     return ((out.stdout or "").strip() or None), ""
 
 
+# The constraints file the step after the PyTorch install uses (relative to ROOT;
+# localm.hwdetect.TORCH_PINS_FILE).
+TORCH_PINS_FILE = ".venv/localm-torch-pins.txt"
+
+
 @dataclass
 class Plan:
     """Every decision the installer needs, all collected before any work runs."""
@@ -851,12 +856,13 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             codes = [_run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"),
                           emit, plan, allow_fail=True)]
         else:
-            codes = [
-                _run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
-                     emit, plan, allow_fail=True),
-                _run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]"),
-                     emit, plan, allow_fail=True),
-            ]
+            codes = [_run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
+                          emit, plan, allow_fail=True)]
+            codes.append(_run([str(venv_python(ROOT)), "-m", "localm.hwdetect", "torch-pins",
+                               "--out", TORCH_PINS_FILE], emit, plan, allow_fail=True))
+            codes.append(_run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]",
+                                      "-c", TORCH_PINS_FILE),
+                              emit, plan, allow_fail=True))
         if any(codes):
             raise StepFailed("the PyTorch stack did not install; GGUF chat still "
                              "works, models that need PyTorch will not")

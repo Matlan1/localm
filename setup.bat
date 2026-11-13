@@ -768,7 +768,7 @@ if not defined TORCHSPEC (
 ) else (
     echo  Installing PyTorch + transformers ...
     uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
-    uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    .venv\Scripts\python -m localm.hwdetect torch-pins --out ".venv\localm-torch-pins.txt" && uv pip install -p .venv -e ".[hf,audio]" -c ".venv\localm-torch-pins.txt" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
 call :step_done torch || exit /b 99
 
