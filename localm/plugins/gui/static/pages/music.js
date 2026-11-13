@@ -35,7 +35,7 @@ const musicGallery = createGallery({
   },
 
   buildPreview: musicPreview,
-  buildDetailPreview: playerDetail("audio", "track"),
+  buildDetailPreview: playerDetail("audio", "music.mediaWhat"),
   caption: (item) => item.name,
 
   reuse: (item) => {

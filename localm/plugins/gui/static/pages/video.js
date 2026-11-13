@@ -34,7 +34,7 @@ const videoGallery = createGallery({
   },
 
   buildPreview: videoPreview,
-  buildDetailPreview: playerDetail("video", "clip"),
+  buildDetailPreview: playerDetail("video", "video.mediaWhat"),
   caption: (item) => (item.meta?.prompt
     ? item.meta.prompt.slice(0, 60)
     : `${item.name} · ${(item.size_bytes / MIB).toFixed(1)} MB`),

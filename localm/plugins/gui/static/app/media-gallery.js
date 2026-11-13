@@ -225,7 +225,7 @@ export function createGallery(cfg) {
         catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
       }
       lsSetScoped(cfg.moveDestKey, dest);
-      toast(t("mediaGallery.movedCount", { moved, plural: t(`${cfg.itemKey}.other`) })
+      toast(t("mediaGallery.movedCount", { moved, plural: tn(cfg.itemKey, moved) })
         + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
       state.selected.clear();
       refresh();
@@ -240,7 +240,7 @@ export function createGallery(cfg) {
             try { await apiDelete(name); deleted++; }
             catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
           }
-          toast(t("mediaGallery.deletedCount", { deleted, plural: t(`${cfg.itemKey}.other`) })
+          toast(t("mediaGallery.deletedCount", { deleted, plural: tn(cfg.itemKey, deleted) })
             + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
           state.selected.clear();
           refresh();
@@ -311,14 +311,19 @@ export function createGallery(cfg) {
         const dest = await pickDirectory(
           t("mediaGallery.moveSingleTitle", { noun: tn(cfg.itemKey, 1) }),
           localStorage.getItem(cfg.moveDestKey) || "");
-        if (!dest) return;
+        // pickDirectory() reuses the shared #modal, so a cancel or a failure
+        // re-opens this detail view.
+        if (!dest) { showDetail(item); return; }
         try {
           const path = await apiMove(item.name, dest);
           lsSetScoped(cfg.moveDestKey, dest);
           toast(t("mediaGallery.movedTo", { path }));
           closeModal();
           refresh();
-        } catch (e) { toast(t("mediaGallery.moveFailed", { message: e.message }), true); }
+        } catch (e) {
+          toast(t("mediaGallery.moveFailed", { message: e.message }), true);
+          showDetail(item);
+        }
       };
       actions.appendChild(move);
 
@@ -434,7 +439,7 @@ export function musicPreview(item, ctx) {
       _cardURLs.add(url);
       player.className = "audio-inline";
       player.onclick = (ev) => ev.stopPropagation();
-      reportMediaLoadFailure(player, "the track", stop);
+      reportMediaLoadFailure(player, t("music.mediaWhat"), stop);
       player.src = url;
       wrap.appendChild(player);
       play.replaceChildren(iconEl("stop", "btn-ic"));
@@ -474,9 +479,12 @@ export function releaseDetailURL() {
   _cardURLs.clear();
 }
 
-/** Modal preview for a playable medium: a real, controllable player. */
-export function playerDetail(tag, what) {
+/** Modal preview for a playable medium: a real, controllable player.
+ *  *whatKey* is the catalog key of the medium's noun with its article
+ *  ("the track"), read each time the detail opens. */
+export function playerDetail(tag, whatKey) {
   return (item, body, ctx) => {
+    const what = t(whatKey);
     const player = document.createElement(tag);
     player.controls = true;
     player.style.width = "100%";
