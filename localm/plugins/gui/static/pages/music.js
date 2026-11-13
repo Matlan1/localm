@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, dismissErrorToast, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
@@ -46,6 +46,7 @@ const musicGallery = createGallery({
     $("music-seed").value = m.seed ?? "";
     $("music-steps").value = m.steps ?? "";
     $("music-cfg").value = m.cfg ?? "";
+    if ($("music-shift")) $("music-shift").value = m.shift ?? "";
     // Most of these fields live behind this page's Advanced fold; open it when
     // they are filled.
     revealFilledAdvanced($("view-music"));
@@ -153,11 +154,20 @@ export async function refreshMusicBackend() {
 $("music-generate").onclick = async () => {
   const tags = $("music-tags").value.trim();
   if (!tags) { toast(t("music.enterTags"), true); return; }
+  dismissErrorToast(t("music.enterTags"));
   const body = { tags };
   const lyrics = $("music-lyrics").value.trim();
   if (lyrics) body.lyrics = lyrics;
-  const duration = Number($("music-duration").value);
-  if (duration > 0) body.duration_seconds = duration;
+  const durationEl = $("music-duration");
+  const durationRaw = durationEl.value.trim();
+  const duration = Number(durationRaw);
+  const minDuration = Number(durationEl.min) || 1, maxDuration = Number(durationEl.max) || 3600;
+  if (durationRaw === "" || !Number.isFinite(duration) || duration < minDuration || duration > maxDuration) {
+    toast(t("music.durationRange", { min: minDuration, max: maxDuration }), true);
+    return;
+  }
+  dismissErrorToast(t("music.durationRange", { min: minDuration, max: maxDuration }));
+  body.duration_seconds = duration;
   for (const [field, id] of [["seed", "music-seed"], ["steps", "music-steps"],
                              ["cfg", "music-cfg"]]) {
     const v = $(id).value.trim();

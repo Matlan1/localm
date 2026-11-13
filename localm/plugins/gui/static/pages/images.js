@@ -7,7 +7,7 @@
 "use strict";
 
 import { chat, renderAttachChips } from "../app/chat.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, dismissErrorToast, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
@@ -38,7 +38,10 @@ const imageGallery = createGallery({
     const img = document.createElement("img");
     img.style.maxWidth = "100%";
     img.style.borderRadius = "8px";
-    ctx.fileURL(item.name, img, "load").then((url) => (img.src = url));
+    const unavailable = (why) => img.replaceWith(el("div", "sub", why));
+    img.addEventListener("error", () => unavailable(t("mediaGallery.previewUnavailable")));
+    ctx.fileURL(item.name, img, "load").then((url) => (img.src = url))
+      .catch(() => unavailable(t("mediaGallery.imageLoadFailed")));
     body.appendChild(img);
   },
 
@@ -211,10 +214,16 @@ function buildUpscaleAction(item, ctx) {
   row.append(sel, btn);
   (async () => {
     let list = [];
+    let listed = false;
     try {
       const r = await fetch("/api/imagine/native-models", { headers: authHeaders() });
-      if (r.ok) list = (await r.json()).upscalers || [];
+      if (r.ok) { list = (await r.json()).upscalers || []; listed = true; }
     } catch { /* offline: the button stays disabled */ }
+    if (!listed) {
+      sel.hidden = true;
+      btn.title = t("images.upscaleListFailed");
+      return;
+    }
     for (const u of list) {
       const o = document.createElement("option");
       o.value = u.name;
@@ -251,6 +260,7 @@ export async function refreshImageBackend() {
     } else if (imageBackend.active === "comfy") {
       text = t("images.backendComfy");
     }
+    if (data.warning) text = text ? `${text} ${data.warning}` : data.warning;
     note.textContent = text;
     note.hidden = !text;
   }
@@ -331,7 +341,7 @@ function addResultImage(name, shown) {
   $("img-result").appendChild(img);
   fetchImageURL(`/api/imagine/file/${encodeURIComponent(name)}`)
     .then((url) => { img.src = url; })
-    .catch((e) => toast(t("images.generationFailed", { message: e.message }), true));
+    .catch((e) => toast(t("images.resultLoadFailed", { name, message: e.message }), true));
 }
 
 /* Follow image job *jobId*: log lines into *log*, each saved image into the
@@ -383,6 +393,7 @@ async function runImageUpscale(name, upscaler) {
 $("img-generate").onclick = async () => {
   const promptText = $("img-prompt").value.trim();
   if (!promptText) { toast(t("images.enterPrompt"), true); return; }
+  dismissErrorToast(t("images.enterPrompt"));
   const num = (id) => {
     const v = $(id).value.trim();
     return v === "" ? null : Number(v);
@@ -516,8 +527,9 @@ export async function applyImportedParams(result) {
       }
       imageModelPicker.setLoras(kept);
     }
-  } else if (p.model || (p.loras && p.loras.length)) {
-    skipped.push("model", "LoRA");
+  } else {
+    if (p.model) skipped.push("model");
+    if (p.loras && p.loras.length) skipped.push("LoRA");
   }
   revealFilledAdvanced($("view-images"));
   return skipped;
