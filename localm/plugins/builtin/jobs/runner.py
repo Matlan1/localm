@@ -2,8 +2,9 @@
 """Execute a single job and return a result record.
 
 ``run_job(job, *, engine=None)`` runs the job's prompt and returns a dict:
-    {status: "ok"|"error", output: str, error: str|None,
+    {status: "ok"|"error"|"skipped", output: str, error: str|None,
      started: float, finished: float}
+("skipped": the run had nothing to do, e.g. a memory job in privacy mode.)
 
 It NEVER raises - any failure is caught and reported as an ``error`` result, so
 a scheduler tick can safely run many jobs in a row.
@@ -29,9 +30,10 @@ the chat path writes no trace of its own.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from localm.debuglog import logger
 from localm.plugins.builtin.jobs.store import TASK_KIND_SCOPES, Job, JobStore
@@ -52,6 +54,124 @@ _SHELL_DOWNGRADE_REASON = (
     "key - simply rolled since this job was created)")
 
 
+class _Skipped(Exception):
+    """A run that deliberately did nothing; its message is the run's output."""
+
+
+class _LiveRun:
+    """A run in progress whose creating key can be revoked: set ``revoked`` and
+    stop its coder agent, if any, when that key stops being valid."""
+
+    def __init__(self, job: Job) -> None:
+        self.job = job
+        self.revoked: Optional[str] = None
+        self.agent: Optional[Any] = None
+
+    def revoke(self, why: str) -> None:
+        if self.revoked is None:
+            self.revoked = why
+            logger.warning("jobs: job %s is being stopped: %s", self.job.id, why)
+        cancel = getattr(self.agent, "cancel", None)
+        if callable(cancel):
+            cancel(why)
+
+
+# Runs of jobs created by a revocable key, keyed by thread id. The revoke
+# listener and the key watch read it; run_job adds and removes its own entry.
+_LIVE_RUNS: dict[int, _LiveRun] = {}
+_LIVE_RUNS_LOCK = threading.Lock()
+_KEY_WATCH_INTERVAL_S = 5.0
+_key_watch_running = False
+
+_REVOKED_DURING_RUN = ("the key that created this job was revoked, expired or lost "
+                       "the scope for this job while the job ran")
+
+
+def _revoke_live_runs(key_hash: Optional[str]) -> None:
+    """Revoke listener (``auth.add_revoke_listener``): stop every live run whose
+    job was created by the keystore key with sha256 *key_hash*, or by any keystore
+    key when *key_hash* is None."""
+    with _LIVE_RUNS_LOCK:
+        runs = [r for r in _LIVE_RUNS.values()
+                if key_hash is None or r.job.owner == key_hash]
+    for r in runs:
+        r.revoke(_REVOKED_DURING_RUN)
+
+
+def _watch_live_run_keys() -> None:
+    """Every ``_KEY_WATCH_INTERVAL_S`` seconds, re-check the creating key of each
+    live run (``_creator_refusal``), so a revoke by another process, an expiry or
+    a narrowed scope also stops the run. A tick on which the keystore cannot be
+    read stops nothing and logs a warning. Exits when no live run is left."""
+    global _key_watch_running
+    from localm import auth
+    while True:
+        time.sleep(_KEY_WATCH_INTERVAL_S)
+        with _LIVE_RUNS_LOCK:
+            runs = list(_LIVE_RUNS.values())
+            if not runs:
+                _key_watch_running = False
+                return
+        for r in runs:
+            try:
+                if r.revoked is not None:
+                    continue
+                if auth.key_hash_live_checked(r.job.owner) is None:
+                    logger.warning("jobs: could not read the keystore to re-check the "
+                                   "key of running job %s; it keeps running until "
+                                   "the next check", r.job.id)
+                    continue
+                if _creator_refusal(r.job):
+                    r.revoke(_REVOKED_DURING_RUN)
+            except Exception as e:
+                logger.warning("jobs: the key re-check of running job %s failed: %s",
+                               r.job.id, e)
+
+
+def _register_live_run(job: Job) -> Optional[_LiveRun]:
+    """Track *job*'s run for revocation when a revocable key created it; None for
+    an owner or open-mode job."""
+    global _key_watch_running
+    if _created_by_owner(job):
+        return None
+    run = _LiveRun(job)
+    start = False
+    with _LIVE_RUNS_LOCK:
+        _LIVE_RUNS[threading.get_ident()] = run
+        if not _key_watch_running:
+            _key_watch_running = start = True
+    if start:
+        try:
+            threading.Thread(target=_watch_live_run_keys, name="jobs-key-watch",
+                             daemon=True).start()
+        except RuntimeError as e:
+            with _LIVE_RUNS_LOCK:
+                _key_watch_running = False
+            logger.warning("jobs: the key watch for running jobs could not start (%s); "
+                           "only a revoke in this process stops a running job", e)
+    return run
+
+
+def _raise_if_revoked() -> None:
+    """Raise PermissionError when the run on this thread was revoked."""
+    live = _current_live_run()
+    if live is not None and live.revoked is not None:
+        raise PermissionError(f"{live.revoked}, so it was stopped")
+
+
+def _current_live_run() -> Optional[_LiveRun]:
+    with _LIVE_RUNS_LOCK:
+        return _LIVE_RUNS.get(threading.get_ident())
+
+
+def _install_revoke_listener() -> None:
+    from localm import auth
+    auth.add_revoke_listener(_revoke_live_runs)
+
+
+_install_revoke_listener()
+
+
 def run_job(job: Job, *, engine=None) -> dict:
     """Run *job* and return a result record. Dispatches on task_kind and never
     raises.
@@ -65,11 +185,13 @@ def run_job(job: Job, *, engine=None) -> dict:
     started = time.time()
     owned_engine = None
     routing_notes: list[str] = []
+    live = None
     try:
         refusal = _creator_refusal(job)
         if refusal:
             logger.warning("jobs: job %s was not run: %s", job.id, refusal)
             raise PermissionError(refusal)
+        live = _register_live_run(job)
         eng = engine
         if job.task_kind in ("chat", "memory"):
             served = _served_engine(job, engine, notes=routing_notes)
@@ -94,6 +216,8 @@ def run_job(job: Job, *, engine=None) -> dict:
             output = _run_rag(job)
         else:
             raise ValueError(f"unknown task_kind: {job.task_kind!r}")
+        if live is not None and live.revoked is not None:
+            raise PermissionError(f"{live.revoked}, so its output was discarded")
         record = {
             "status": "ok",
             "output": output,
@@ -109,7 +233,20 @@ def run_job(job: Job, *, engine=None) -> dict:
         if routing_notes:
             record["routing"] = "; ".join(routing_notes)
         return record
+    except _Skipped as e:
+        return {
+            "status": "skipped",
+            "output": str(e),
+            "error": None,
+            "prompt": job.prompt,
+            "task_kind": job.task_kind,
+            "model": job.model,
+            "started": started,
+            "finished": time.time(),
+        }
     except Exception as e:
+        if live is not None and live.revoked is not None and not isinstance(e, PermissionError):
+            e = PermissionError(f"{live.revoked}, so it was stopped ({type(e).__name__}: {e})")
         return {
             "status": "error",
             "output": "",
@@ -121,6 +258,10 @@ def run_job(job: Job, *, engine=None) -> dict:
             "finished": time.time(),
         }
     finally:
+        if live is not None:
+            with _LIVE_RUNS_LOCK:
+                if _LIVE_RUNS.get(threading.get_ident()) is live:
+                    del _LIVE_RUNS[threading.get_ident()]
         if owned_engine is not None:
             _unload_engine(owned_engine)
 
@@ -211,7 +352,7 @@ def _run_chat(job: Job, *, engine=None) -> str:
     # rounds), not per-round.
     from localm.inference.http_server import driving_engine
     with driving_engine(eng):
-        return webtool.run_chat_with_web(eng, job.prompt)
+        return webtool.run_chat_with_web(eng, job.prompt, check=_raise_if_revoked)
 
 
 # Longest a job waits for the server to load the model it runs on.
@@ -483,6 +624,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
     from localm.textnorm import strip_think
 
     def complete(prompt: str) -> str:
+        _raise_if_revoked()
         raw = background_complete(eng, prompt, yield_to_foreground=True).strip()
         # strip_think: memory must never ingest the reasoning channel.
         return strip_think(raw).strip()
@@ -498,7 +640,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
         return ("memory synthesis stopped: a chat request was waiting for the model. "
                 "It will run again at the next scheduled time.")
     if result.get("status") == "skipped":
-        return f"memory synthesis skipped ({result.get('reason')})"
+        raise _Skipped(f"memory synthesis skipped ({result.get('reason')})")
     if result.get("status") == "error":
         raise RuntimeError("memory synthesis failed: "
                            + memory._model_failed_detail(result))
@@ -604,11 +746,16 @@ def _run_rag(job: Job) -> str:
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
     lines: list = []
+
+    def _progress(t, **_) -> None:
+        _raise_if_revoked()
+        lines.append(t)
+
     try:
         result = coll.resync(embed_fn=embed_fn,
                              policy=indexing_policy(key_roots=key_roots),
                              model_name=model_name,
-                             on_progress=lambda t, **_: lines.append(t))
+                             on_progress=_progress)
     except CollectionLockedError as e:
         # Another localm process (or a hand-run `localm rag add|resync`) holds this
         # collection. The scheduled tick waits a bounded time and then stands down,
@@ -934,6 +1081,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
     )
     from localm.plugins.coder.runner import unattended_network_setting
     agent.unattended_network = unattended_network_setting()
+    live = _current_live_run()
+    if live is not None:
+        live.agent = agent
+        if live.revoked is not None:
+            agent.cancel(live.revoked)
     try:
         out = (agent.run_task(job.prompt) or "").strip()
         notes = []
@@ -943,7 +1095,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
                          f"run_shell. Trigger a manual run or any edit as the "
                          f"owner to repair it automatically, or re-create it "
                          f"with a live key.")
-        if cwd_confined and requested:
+        if cwd_confined and requested and Path(requested).expanduser() != cwd:
             # Reported the same way as the note above. The requested path is echoed
             # back only in this job's own result, to the job's owner, never onto a
             # shared surface.

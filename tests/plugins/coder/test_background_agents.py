@@ -33,6 +33,7 @@ from localm.plugins.coder.tools.agents import (
     tool_spawn_agent,
     tool_spawn_agent_background,
 )
+from localm.plugins.coder.tools.shell import tool_kill_shell_job
 
 
 class _StubBackend:
@@ -954,64 +955,78 @@ def test_background_agent_tools_are_registered_with_a_scope_decision():
 # --------------------------------------------------------------------------- #
 
 class TestLateWriteCannotFlipATerminalJob:
-    """The AgentJob half of the abandoned-child invariant.
+    """Killing a background sub-agent: the job stays running until the child
+    has returned, then ends ``killed`` with the child's result kept, and the
+    model's polling surface never reports a stopped child as finished."""
 
-    ``_watch`` and ``kill`` both re-check ``state != "running"`` while holding
-    the job lock before calling ``_finish``, and the worker publishes
-    ``_outcome`` under that same lock. A background sub-agent cannot be
-    preempted: its worker genuinely outlives the terminal verdict, so the window
-    is real on this path.
-    """
-
-    def _hung_job(self, monkeypatch, release: threading.Event):
-        """A registered agent job whose child blocks until *release*."""
+    def _hung_job(self, monkeypatch, release: threading.Event, *,
+                  cooperative: bool = False):
+        """A registered agent job whose child blocks until *release*; with
+        *cooperative*, its ``cancel`` releases it."""
         from localm.plugins.coder import background as bg
 
-        # Shorten the kill's two grace periods (3s each by default).
+        # Shorten the kill's grace period (3s by default).
         monkeypatch.setattr(bg, "_KILL_GRACE", 0.15)
 
         class _HungChild:
             turns = 3
             last_run_ok = True
+            cancelled_with = None
 
             def run_task(self, task):
                 assert release.wait(timeout=30), "driver never released the child"
                 return "I finished long after you gave up on me"
 
+        if cooperative:
+            def cancel(self, reason="cancelled"):
+                type(self).cancelled_with = reason
+                release.set()
+            _HungChild.cancel = cancel
+
         return get_registry().submit(
             lambda: bg.AgentJob(_HungChild(), "task", label="late"), kind="agent")
+
+    def test_a_cooperative_child_is_stopped_and_its_result_kept(
+            self, tmp_path, monkeypatch):
+        release = threading.Event()
+        job = self._hung_job(monkeypatch, release, cooperative=True)
+        try:
+            outcome = job.kill()
+            assert outcome == "killed", outcome
+            assert job.state == "killed"
+            assert job._child.cancelled_with
+            assert job.result is not None and "long after" in job.result["summary"]
+            res = tool_kill_shell_job(tmp_path, job.id)
+            assert res.ok, res.output
+            res = tool_check_agent_job(tmp_path, job.id)
+            assert "was stopped (kill_shell_job) after 3 turn(s)" in res.output, res.output
+        finally:
+            release.set()
 
     def test_a_child_finishing_after_the_kill_cannot_report_finished(
             self, tmp_path, monkeypatch):
         release = threading.Event()
         job = self._hung_job(monkeypatch, release)
         try:
-            # The parent gives up on it: a terminal verdict is recorded.
+            # The child does not return within the grace: the job says so and
+            # stays running instead of claiming a failed kill.
             outcome = job.kill()
-            assert job.state != "running", f"kill left the job {job.state}"
-            terminal_state, terminal_error = job.state, job.error
+            assert outcome.startswith("stop requested"), outcome
+            assert job.state == "running"
+            assert job.error is None
 
-            # NOW the abandoned child finishes and its worker publishes.
+            # NOW the child finishes and its worker publishes.
             release.set()
-            deadline = time.time() + 20
-            while job._outcome is None and time.time() < deadline:
-                time.sleep(0.02)
-            assert job._outcome is not None, "the child never published"
-            # Give the watcher every chance to act on that publication.
-            time.sleep(0.3)
+            _wait_done(job)
+            assert job.state == "killed", job.state
+            assert job.result is not None and "long after" in job.result["summary"]
 
-            # The terminal record must be exactly what it was.
-            assert job.state == terminal_state, (
-                f"a late write moved the job from {terminal_state} to {job.state}")
-            assert job.error == terminal_error
-            assert outcome  # kill said something
-
-            # And the model's own polling surface must not read as a success.
+            # The model's own polling surface must not read as a success.
             res = tool_check_agent_job(tmp_path, job.id)
             assert "finished in" not in res.output, (
                 "check_agent_job reported a killed sub-agent as finished:\n"
                 + res.output)
-            assert "FAILED" in res.output, res.output
+            assert "was stopped" in res.output, res.output
         finally:
             release.set()
 

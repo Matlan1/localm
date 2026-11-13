@@ -260,7 +260,8 @@ def _is_privacy(mode) -> bool:
         return True
 
 
-def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = False):
+def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = False,
+                       warn=None):
     """Build the Reviewer for an Agent, or None when review is off / not allowed.
 
     Config (global config.py):
@@ -285,8 +286,12 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
     on-demand review request (e.g. the REPL's ``/review`` command). Every other
     gate below - restricted session, privacy-mode network fallback - still
     applies regardless of *force*.
+
+    *warn* receives every fallback warning (default: ``display.print_warning``).
     """
-    from .display import print_warning
+    if warn is None:
+        from .display import print_warning as warn
+    print_warning = warn
     try:
         from localm.config import load_config
         cfg = load_config()

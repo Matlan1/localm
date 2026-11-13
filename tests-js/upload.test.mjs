@@ -48,13 +48,16 @@ test("R37: refreshUploadsList renders one li per uploaded file (safe textContent
   assert.ok(items[1].textContent.includes("<img src=x>.png"), "hostile name shown literally");
 });
 
-test("R37: clicking a row's Remove button DELETEs that file then refreshes", async () => {
+test("R37: a row's Remove button, once confirmed, DELETEs that file then refreshes", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(calls, [{ name: "gone.bin", bytes: 4 }]) });
   await window.refreshUploadsList();
   const delBtn = window.document.querySelector("#upload-list .upload-del");
   assert.ok(delBtn, "each row has a Remove button");
   delBtn.click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!calls.some((c) => c.method === "DELETE"), "nothing is deleted before the confirmation");
+  window.document.querySelector("#modal-body button.btn-danger").click();
   await new Promise((r) => setTimeout(r, 0));
   const del = calls.find((c) => c.method === "DELETE" && c.url === "/api/uploads/gone.bin");
   assert.ok(del, "Remove issues DELETE /api/uploads/gone.bin");
@@ -131,7 +134,7 @@ test("S2: selecting files updates the selected-files label; a successful upload 
   Object.defineProperty(input, "files", { value: files, configurable: true });
   input.dispatchEvent(new window.Event("change", { bubbles: true }));
 
-  assert.match(label.textContent, /2 file\(s\) selected/, "shows how many files were chosen");
+  assert.match(label.textContent, /^2 files selected/, "shows how many files were chosen");
   assert.match(label.textContent, /one\.txt/, "names the first file");
   assert.match(label.textContent, /two\.txt/, "names the second file");
 

@@ -612,7 +612,7 @@ def test_hooks_routes_are_owner_only_and_refuse_unc(tmp_path, monkeypatch):
         scoped = auth.create_key("phone", ["coder"])
         sh = {"Authorization": "Bearer %s" % scoped["key"]}
         seen = client.get("/api/coder/hooks", headers=sh, params={"cwd": str(proj)}).json()
-        assert seen == {"configured": False, "cwd": None}
+        assert seen == {"configured": False, "cwd": None, "authorized": False}
         assert client.post("/api/coder/hooks/trust", headers=sh,
                            json={"cwd": str(proj), "digest": digest}).status_code == 404
         assert client.post("/api/coder/hooks/forget", headers=sh,

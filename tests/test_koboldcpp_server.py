@@ -747,3 +747,100 @@ def test_prepare_refuses_a_non_ascii_model_path_before_installing_the_runtime(mo
                         lambda *a, **k: pytest.fail("the runtime was installed first"))
     with pytest.raises(music.ModelError, match="short"):
         music.prepare({}, "vulkan")
+
+
+def test_a_crash_on_every_backend_marks_none_of_them(two_backends):
+    """A crash that every backend repeats (a broken model file) is not the GPU
+    backend's fault: nothing is remembered, so the next job tries the GPU again."""
+    for backend in ("cuda", "vulkan", "cpu"):
+        two_backends[backend] = "crash"
+    with pytest.raises(music.NativeMusicError):
+        music.generate_wav({}, "auto", REQUEST, plan=False)
+    for backend in ("cuda", "vulkan", "cpu"):
+        assert runtime.backend_failed(backend) is None
+    assert music.backend_order("auto")[0] == "cuda"
+
+
+# --------------------------------------------------------------------------- #
+#  The main GPU setting picks the GPU KoboldCpp starts on                      #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("backend,main_gpu,expected", [
+    ("cuda", None, None),             # setting unset: KoboldCpp picks
+    ("cuda", 0, 0),                   # one GPU
+    ("cuda", 1, 1),                   # second of two GPUs
+    ("cuda", 4, None),                # past the ids --usecuda accepts
+    ("vulkan", 1, 1),                 # a Vulkan build
+    ("vulkan", 7, 7),
+    ("cpu", 1, None),
+    ("cuda", -1, None),
+    ("cuda", True, None),
+    ("vulkan", "1", None),
+])
+def test_device_for_maps_the_main_gpu_setting(backend, main_gpu, expected):
+    assert server.device_for(backend, main_gpu) == expected
+
+
+@pytest.mark.parametrize("backend,device,tail", [
+    ("cuda", None, ["--usecuda"]),
+    ("cuda", 0, ["--usecuda", "0"]),
+    ("cuda", 1, ["--usecuda", "1"]),
+    ("vulkan", None, ["--usevulkan"]),
+    ("vulkan", 1, ["--usevulkan", "1"]),
+    ("cpu", None, ["--usecpu"]),
+])
+def test_build_argv_names_the_chosen_gpu(backend, device, tail):
+    key = server.ServerKey("launcher", backend, MODELS, device=device)
+    argv = server.build_argv(key, 5123)
+    assert argv[-len(tail):] == tail
+
+
+def test_a_job_starts_koboldcpp_on_the_configured_main_gpu(two_backends, monkeypatch):
+    import localm.config as cfgmod
+    monkeypatch.setattr(cfgmod, "load_config", lambda: {"main_gpu_index": 1})
+    keys = []
+    real_build = server.build_argv
+
+    def build(key, port):
+        keys.append(key)
+        return real_build(key, port)
+    monkeypatch.setattr(server, "build_argv", build)
+    music.generate_wav({}, "cuda", REQUEST, plan=False)
+    assert keys and keys[-1].device == 1
+    argv = server.build_argv(keys[-1], 1)
+    assert argv[argv.index("--usecuda") + 1] == "1"
+
+
+def test_another_main_gpu_starts_a_fresh_server():
+    a = server.ServerKey("launcher", "cuda", MODELS, device=0)
+    b = server.ServerKey("launcher", "cuda", MODELS, device=1)
+    assert a != b
+
+
+class _StandIn:
+    """The parts of ``server._Server`` that stopping uses; *survives* keeps it
+    running after its stop."""
+
+    def __init__(self, survives: bool):
+        from types import SimpleNamespace
+        self.mp = SimpleNamespace(pid=4242)
+        self.survives = survives
+        self.running = True
+
+    def alive(self):
+        return self.mp is not None and self.running
+
+    def stop(self):
+        self.mp = None
+        self.running = self.survives
+
+
+@pytest.mark.parametrize("stop", ["stop_if_idle", "stop"])
+def test_a_server_still_running_after_its_stop_is_not_reported_stopped(monkeypatch, stop):
+    stubborn = _StandIn(survives=True)
+    monkeypatch.setattr(server, "_server", stubborn)
+    assert getattr(server, stop)() is False
+    assert server.running_pid() == 4242
+    monkeypatch.setattr(server, "_server", _StandIn(survives=False))
+    assert getattr(server, stop)() is True
+    assert server.running_pid() is None and server._server is None

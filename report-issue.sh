@@ -7,6 +7,9 @@
 #  GitHub login), showing you exactly what will be sent and asking you to confirm
 #  first. It runs the self-contained reporter on any Python it can find (so a
 #  broken venv still reports fine), and falls back to curl if there is no Python.
+#  With localm's Network access off (LOCALM_NET_MODE, or net_mode in the data dir's
+#  config.json) nothing is sent; when that setting cannot be read you are asked
+#  before anything is sent.
 #
 #  Optional args (used by setup.sh's failure paths) pass straight through:
 #    --summary "..."  --detail "..."  --log <path>  --yes
@@ -143,13 +146,72 @@ echo "  ----- this is exactly what will be sent -----"
 echo "  title: $summary"
 echo "  body:  $body"
 echo "  ---------------------------------------------"
-printf '  Send this to the maintainer now? [Y/n]: '
-if ! IFS= read -r ans; then
-  echo ""
-  echo "  Not sent. Email ${email} if you change your mind."
-  exit 0
+# A copy of localm.config.NET_OFF_REMEDY. See test_the_reporters_copy_the_net_off_remedy.
+net_off_remedy="Turn it on in Settings > Server & network > Network access, or run: localm config net_mode ask"
+
+# ri_net_mode prints "<mode><TAB><why>": mode is off, ask or allow as localm reads
+# it (LOCALM_NET_MODE, else net_mode in the data dir's config.json, or its .bak when
+# config.json is absent; an unset or unknown value, or a file that is not a JSON
+# object, means ask), or unknown when neither file exists, or one is present and
+# cannot be read the way localm reads it (strict UTF-8 JSON), where localm itself
+# turns network access off. The data dir is LOCALM_HOME, else (in a clone) the
+# first line of localm-home.cfg, else ./home.
+ri_net_mode() {
+  local env_mode home cfg
+  env_mode="$(printf '%s' "${LOCALM_NET_MODE:-}" | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$env_mode" in off|ask|allow) printf '%s\t\n' "$env_mode"; return 0 ;; esac
+  home="$(printf '%s' "${LOCALM_HOME:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [ -z "$home" ] && [ -f pyproject.toml ] && [ -f localm-home.cfg ]; then
+    home="$(perl -ne 'if ($. == 1) { s/\A\xEF\xBB\xBF// } s/^\s+|\s+$//g; if (length) { print; exit }' localm-home.cfg 2>/dev/null)"
+  fi
+  [ -n "$home" ] || home="$PWD/home"
+  case "$home" in "~"|"~/"*) home="${HOME}${home#\~}" ;; esac
+  cfg="$home/config.json"
+  if [ ! -f "$cfg" ] && [ ! -f "$cfg.bak" ]; then
+    printf 'unknown\t%s does not exist\n' "$cfg"; return 0
+  fi
+  [ -f "$cfg" ] || cfg="$cfg.bak"
+  perl -MJSON::PP -e '
+    my $p = shift;
+    open(my $fh, "<:raw", $p) or do { print "unknown\t$p could not be read\n"; exit 0 };
+    local $/; my $raw = <$fh>; close $fh;
+    my $cfg = eval { JSON::PP->new->utf8->allow_nonref->decode($raw) };
+    if ($@) { print "unknown\t$p could not be read (not valid JSON)\n"; exit 0 }
+    my $m = (ref $cfg eq "HASH" && defined $cfg->{net_mode}) ? lc("$cfg->{net_mode}") : "ask";
+    $m =~ s/^\s+|\s+$//g;
+    print((($m eq "off" || $m eq "ask" || $m eq "allow") ? $m : "ask") . "\t\n");
+  ' "$cfg" 2>/dev/null || printf 'unknown\t%s could not be read (perl JSON::PP is missing)\n' "$cfg"
+}
+
+tab="$(printf '\t')"
+net_read="$(ri_net_mode)"
+net_mode="${net_read%%"$tab"*}"
+net_why="${net_read#*"$tab"}"
+
+if [ -n "$url" ] && [ "$net_mode" = "off" ]; then
+  echo "  Network access is off (net_mode=off), so the report was not sent. ${net_off_remedy}."
+  echo "  Email ${email} if you prefer."
+  exit 1
 fi
-case "$ans" in [Nn]*) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;; esac
+if [ -n "$url" ] && [ "$net_mode" = "unknown" ]; then
+  echo "  localm's Network access setting could not be read: ${net_why}. Sending connects to the bug-report server."
+  printf '  Send it anyway? [y/N]: '
+  if ! IFS= read -r ans; then ans=""; echo ""; fi
+  ans="$(printf '%s' "$ans" | tr -d '\r[:space:]')"
+  case "$ans" in
+    [Yy]|[Yy][Ee][Ss]) ;;
+    *) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;;
+  esac
+else
+  printf '  Send this to the maintainer now? [Y/n]: '
+  if ! IFS= read -r ans; then
+    echo ""
+    echo "  Not sent. Email ${email} if you change your mind."
+    exit 0
+  fi
+  case "$ans" in [Nn]*) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;; esac
+fi
 
 if [ -z "$url" ]; then
   echo "  No bug-report endpoint is configured. Email ${email}."

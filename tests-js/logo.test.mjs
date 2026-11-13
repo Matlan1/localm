@@ -47,6 +47,14 @@ test("the picker renders one tile per style, default first and active", () => {
   assert.equal(active.dataset.style, "local-m");
 });
 
+test("every tile has its own tooltip, naming the blue part", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const titles = [...window.document.querySelectorAll("#logo-style-picker .logo-tile")].map((t) => t.title);
+  assert.equal(new Set(titles).size, titles.length, titles.join(" | "));
+  assert.equal(titles[0], 'Use the LocaLM wordmark, with "M" in blue');
+  assert.equal(titles[1], 'Use the LocaLM wordmark, with "LM" in blue');
+});
+
 test("clicking a tile applies live, caches locally, and PATCHes the shared config", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: goodFetch({ calls }) });

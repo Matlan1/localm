@@ -309,6 +309,7 @@ export const I18N_EN = {
   "chat.status.loadingBeside": "Loading '{model}' beside {resident}, which could not be unloaded: not enough GPU memory is free, so part of it will run on the CPU (slower)…",
   "chat.status.processing": "Processing prompt…",
   "chat.status.processingProgress": "Processing prompt… ({done} of {total} tokens)",
+  "chat.status.processingLayers": "Processing prompt… (layer {done} of {total})",
   "chat.status.recallingMemory": "Recalling memories…",
   "chat.status.searchingKnowledge": "Searching knowledge base…",
   "chat.status.visionCpuRetry": "GPU vision encode failed; retrying on CPU (this may take longer)…",
@@ -935,8 +936,7 @@ export const I18N_EN = {
   // ---- Knowledge page ----
   "knowledge.addDocs": "add docs",
   "knowledge.addDocs.pickerConfirm": "Add",
-  "knowledge.addDocs.pickerHint":
-    "Folders are indexed recursively. Supported: txt, md, pdf, docx, html, code.",
+  "knowledge.addDocs.pickerHint": "Folders are indexed recursively. Supported: text and code files, pdf, docx, html, notebooks, images (described by a vision model) and archives.",
   "knowledge.addDocs.pickerTitle": "Add documents to '{name}'",
   "knowledge.addRoots.addedIndexing": "Added to your allowed folders. Indexing…\n",
   "knowledge.addRoots.cancelled": "Cancelled - folders not added.\n",
@@ -950,8 +950,7 @@ export const I18N_EN = {
   "knowledge.addRoots.title": "Add to allowed folders?",
   "knowledge.addRoots.updateFailed": "Could not update allowed folders",
   "knowledge.addRoots.updateFailedMsg": "Could not update allowed folders: {message}",
-  "knowledge.badge.reembed.titleReady":
-    "The embedding model is ready, but this collection was indexed before that (or its vector index went stale), so it is BM25/lexical-only until you click 're-embed'.",
+  "knowledge.badge.reembed.titleReady": "This collection has no vectors for the embedding model now set up (it was indexed without one, or its vector index went stale), so it is BM25/lexical-only until you click 're-embed'.",
   "knowledge.badge.reembed.titleStale":
     "This collection's stored vectors were built under a different embedding model than the one currently active, so a query here silently falls back to BM25 until you click 're-embed'.",
   "knowledge.badge.reembedNeeded": "re-embed needed",
@@ -961,7 +960,7 @@ export const I18N_EN = {
   "knowledge.chunksCount.one": "{count} chunk",
   "knowledge.chunksCount.other": "{count} chunks",
   "knowledge.clearConvs.button": "Delete all conversations",
-  "knowledge.clearConvs.confirm.body": "This can't be undone.",
+  "knowledge.clearConvs.confirm.body": "This can't be undone. Not deleted here: the session logs and transcripts the log and full modes keep, coder sessions, and conversations the server stored before privacy mode was turned on.",
   "knowledge.clearConvs.confirm.title": "Delete all saved conversations {where}?",
   "knowledge.clearConvs.failed.one": "{count} conversation could not be deleted from the server store and is still there. The others were deleted.",
   "knowledge.clearConvs.failed.other": "{count} conversations could not be deleted from the server store and are still there. The others were deleted.",
@@ -979,14 +978,14 @@ export const I18N_EN = {
   "knowledge.corrupt.counted": "{count} malformed chunk line(s) in this collection's index.",
   "knowledge.corrupt.generic": "Part of this collection's index is corrupt or malformed on disk.",
   "knowledge.createButton": "Create",
-  "knowledge.createFailed": "Create failed",
   "knowledge.created": "Collection '{name}' created - now add files or folders",
+  "knowledge.createFailedMsg": "Create failed: {message}",
   "knowledge.deleteButton": "delete",
   "knowledge.deleteConfirm.body": "Only the index is removed - your original files are untouched.",
   "knowledge.deleteConfirm.confirm": "Delete",
   "knowledge.deleteConfirm.title": "Delete collection '{name}'?",
-  "knowledge.deleteFailed": "Delete failed",
   "knowledge.deleted": "Deleted {name}",
+  "knowledge.deleteFailedMsg": "Delete failed: {message}",
   "knowledge.docsCount.one": "{count} document",
   "knowledge.docsCount.other": "{count} documents",
   "knowledge.embed.alreadyInstalled": "Already installed.\n",
@@ -994,8 +993,7 @@ export const I18N_EN = {
   "knowledge.embed.download.failed": "Embedding model download did not complete - see the log",
   "knowledge.embed.download.requesting": "Requesting the one-time download…\n",
   "knowledge.embed.downloadFailedMsg": "Download failed: {message}",
-  "knowledge.embed.downloadHint":
-    "One-time download of the configured model, blocked so far by the network policy. Changes no settings.",
+  "knowledge.embed.downloadHint": "One-time download of the configured model. Changes no settings.",
   "knowledge.embed.downloadModelNow": "Download model now",
   "knowledge.embed.downloadNow": "Download '{model}' now",
   "knowledge.embed.label.bgeSmall": "Internal - bge-small-en-v1.5 (recommended, ~24 MB)",
@@ -1021,10 +1019,12 @@ export const I18N_EN = {
   "knowledge.rerank.status.off": "Reranking is off. Results are returned as searched.",
   "knowledge.rerank.status.on": "Reranking the best {n} matches with {model}.",
   "knowledge.rerank.status.unusable": "Reranking cannot run: {note}",
-  "knowledge.rerank.status.noneInstalled":
-    "No reranker model is installed, so results are returned as searched. " +
-    "Install one with: {command}",
+  "knowledge.rerank.status.noneInstalled": "No reranker model is installed, so results are returned as searched. Download one with the button, or run: {command}",
   "knowledge.rerank.saveFailed": "Could not save the reranking setting: {message}",
+  "knowledge.rerank.downloadFailed": "Reranker download failed: {message}",
+  "knowledge.rerank.downloadStatus": "Reranker download {status}",
+  "knowledge.rerank.downloaded": "Reranker model downloaded",
+  "knowledge.rerank.download": "Download the reranker",
   "knowledge.rerank.skipped": "Knowledge results were not reranked: {note}",
   "knowledge.embed.status.lastError": "  Last error: {error}",
   "knowledge.embed.status.notSetUp":
@@ -1033,6 +1033,7 @@ export const I18N_EN = {
     "Ready: {model} ({dim}-dim) - semantic search is on for new indexing. Existing collections may need \"re-embed\" below.",
   "knowledge.embed.status.readyNoDim":
     "Ready: {model} is installed - semantic search is on for new indexing. Existing collections may need \"re-embed\" below.",
+  "knowledge.embed.status.readyLastFailed": "Installed: {model}, but its last use failed, so semantic search may not work. Pick a model below and click \"Set up / apply\", or fix the cause shown after this line.",
   "knowledge.embed.status.unknown":
     "The embedding model is set to a file chosen by the owner. Its status is not shown for this key, and only the owner can change it.",
   "knowledge.embed.statusLoadFailed": "Could not load embedding status: {message}",
@@ -1062,17 +1063,17 @@ export const I18N_EN = {
   "knowledge.info.empty.hint": "Use add docs above to index a file or folder.",
   "knowledge.info.empty.title": "No documents yet",
   "knowledge.info.fileMissing": "file missing",
-  "knowledge.info.loadFailed": "Load failed",
   "knowledge.info.missingDocs.one":
     "{count} document is no longer on disk. It is still indexed and searchable, flagged rather than deleted, so nothing is lost if that was temporary. Remove one below when you are sure.",
   "knowledge.info.missingDocs.other":
     "{count} documents are no longer on disk. They are still indexed and searchable, flagged rather than deleted, so nothing is lost if that was temporary. Remove one below when you are sure.",
   "knowledge.info.repairButton": "Repair",
   "knowledge.info.title": "Collection - {name}",
+  "knowledge.info.loadFailedMsg": "Could not load the collection: {message}",
   "knowledge.info.vectorDegrade": "Semantic search fell back to BM25: {reason}",
   "knowledge.infoButton": "info",
   "knowledge.intro":
-    "Index folders or files into collections, then pick a collection in the chat parameters drawer - replies get grounded in the most relevant excerpts, with citations. Retrieval is BM25 (always works offline); when an embedding model is set up, semantic (vector) search is blended in. Collections live in the localm data directory under <code>rag/</code>.",
+    "Index folders or files into collections, then pick a collection in the chat parameters drawer - replies get grounded in the most relevant excerpts; the excerpts used are listed under the reply as its sources. Retrieval is BM25 (always works offline); when an embedding model is set up, semantic (vector) search is blended in. Collections live in the localm data directory under <code>rag/</code>.",
   "knowledge.itemsCount": "{count} items",
   "knowledge.loadFailed": "Could not load collections: {message}",
   "knowledge.name.placeholder": "name (spaces & emoji ok)",
@@ -1091,8 +1092,8 @@ export const I18N_EN = {
   "knowledge.reembedConfirm.confirm": "Re-embed",
   "knowledge.reembedConfirm.title": "Re-embed '{name}'?",
   "knowledge.removeButton": "remove",
-  "knowledge.removeFailed": "Remove failed",
   "knowledge.removed": "Removed",
+  "knowledge.removeFailedMsg": "Remove failed: {message}",
   "knowledge.repair.failedMsg": "Repair failed: {message}",
   "knowledge.repair.finished": "Repair finished",
   "knowledge.repair.log.start": "Repairing '{name}'…\n",
@@ -1114,6 +1115,7 @@ export const I18N_EN = {
   "knowledge.search.searching": "searching…",
   "knowledge.search.title": "Search - {name}",
   "knowledge.searchButton": "search",
+  "knowledge.search.rerankScore": "rerank {rerank} (search {score})",
   "knowledge.title": "Knowledge",
   "knowledge.upload.failedMsg": "Upload failed: {message}",
   "knowledge.upload.fileReadErrorReason": "could not read {filename}",
@@ -1305,7 +1307,7 @@ export const I18N_EN = {
   "models.disc.placeholder.civitai": "search CivitAI - empty shows the most downloaded",
   "models.disc.placeholder.hf": "search HuggingFace - empty shows the most downloaded",
   "models.disc.pullButton": "pull",
-  "models.disc.pullFileHint": "Review the alias, then click Pull to start the download",
+  "models.disc.pullFileHint": "Review the alias, then click Add to start the download",
   "models.disc.searchButton": "Search",
   "models.disc.searchFailed": "Search failed: {message}",
   "models.disc.searchingCivitai": "searching CivitAI…",
@@ -1325,12 +1327,14 @@ export const I18N_EN = {
   "models.disc.type.vae": "VAEs",
   "models.empty.hint": "Pull a model above, or search HuggingFace to add your first one.",
   "models.empty.text": "No models yet",
+  "models.empty.tabHint": "Your other models are in the All tab. Add one of this type above.",
+  "models.empty.tabText": "No {type} models",
   "models.fit.fits": "fits your VRAM",
   "models.fit.tight": "tight fit",
   "models.fit.tooBig": "needs partial CPU offload",
   "models.fit.exceedsMemory": "Larger than your video memory and RAM together: it reads from disk, so replies are very slow. A GGUF of this model may fit better.",
   "models.fmt.gguf": "GGUF",
-  "models.fmt.hf": "HF",
+  "models.fmt.hf": "Safetensors",
   "models.importComfy.allAlreadyRegistered": "All {count} found model(s) are already registered.",
   "models.importComfy.alreadyRegisteredSkipped": "{count} already registered (skipped).",
   "models.importComfy.browseButton": "Browse…",
@@ -1378,6 +1382,8 @@ export const I18N_EN = {
   "models.otherHiddenNote.other":
     "{count} models of a type with no tab of its own are not listed here - see the Other tab, or tick \"show other types here\".",
   "models.pull.addButton": "Add",
+  "models.pull.browseNoHost": "Browse picks a folder on the server's disk, which this sign-in cannot read. Type the path instead.",
+  "models.pull.badReply": "The server's answer to the download request could not be read. Try again; if it repeats, see the server log.",
   "models.pull.browseButton": "Browse…",
   "models.pull.browseDialogTitle": "Pick a folder that holds the model(s)",
   "models.pull.browseTitle": "Pick a folder on this machine that holds the model(s)",
@@ -1468,8 +1474,7 @@ export const I18N_EN = {
   "models.pull.store.copy": "Copy into library",
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
-  "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into ~/.localm/models.",
+  "models.pull.storeTitle": "Only applies to a local folder/file path - a HuggingFace or URL download always lands in the models folder of this instance's data folder, and a CivitAI download goes into your ComfyUI's model folders when a ComfyUI is set up, otherwise into that models folder.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
@@ -1478,7 +1483,7 @@ export const I18N_EN = {
   "models.relocate.title": "Point this entry at the file's new location",
   "models.relocate.working": "Checking…",
   "models.relocate.toast": "Relocated '{name}'",
-  "models.bundledCodeNote": "This model ships its own code, which did not run because 'Allow model-bundled custom code' is off; localm used transformers' own support for it instead. That may be why this failed. If you trust the model's source, try turning that setting on (localm config hf_trust_remote_code true).",
+  "models.bundledCodeNote": "This model ships its own code, which did not run because 'Allow model-bundled custom code' is off; localm used transformers' own support for it instead. That may be why this failed. If you trust the model's source, try turning that setting on (Settings > Model, or `localm config hf_trust_remote_code true`).",
   "models.bundledCodeAlwaysNote": "This model ships its own code, which localm does not run for this kind of model; it uses transformers' own support for it instead. That may be why this failed.",
   "models.ownCodeOff": "own code off",
   "models.ownCodeOffHint": "This model ships its own code, which does not run: it uses transformers' own support. If it fails, the failure message says what to try.",
@@ -1509,8 +1514,7 @@ export const I18N_EN = {
   "models.scan.button": "Re-scan ComfyUI folder",
   "models.scan.completeFallback": "Scan complete.",
   "models.scan.disconnectedStatus": "connection lost - it may still be running",
-  "models.scan.disconnectedToast":
-    "Lost connection to the scan - it may still be running in the background. Check the Models list in a moment.",
+  "models.scan.disconnectedToast": "Lost connection to the scan. If the server is still running, the scan goes on there; check the Models list in a moment.",
   "models.scan.emptyButRan": "Scan complete. No new ComfyUI models found.",
   "models.scan.failedException": "Scan failed: {message}",
   "models.scan.failedFallback": "Scan failed",
@@ -1575,7 +1579,7 @@ export const I18N_EN = {
   "models.partOf": "part of {model}",
   "models.typeHint.decision": "Decision model (answers typed questions with probabilities, not a chat model)",
   "models.typeHint.planner": "Planner (language model used by music models)",
-  "models.typeHint.textEncoder": "Text encoder (used by image and video models)",
+  "models.typeHint.textEncoder": "Text encoder (used by image, video and music models)",
   "models.typeHint.vocoder": "Vocoder (turns music latents into audio)",
   "models.typeSelect.ariaLabel": "Model type for {name}",
   "models.typeSelect.notSet": "not set",
@@ -1584,6 +1588,7 @@ export const I18N_EN = {
   "models.unload.confirmLabel": "Unload anyway",
   "models.unload.confirmTitle": "Model in use",
   "models.unload.failed": "Unload failed",
+  "models.unload.failedMsg": "Unload failed: {message}",
   "models.unload.inUse": "'{name}' is still in use and stays loaded. Try again when it is idle.",
   "models.unload.title":
     "Release this model from GPU/CPU memory (it reloads automatically on the next chat request)",
@@ -1637,7 +1642,6 @@ export const I18N_EN = {
   // ---- Settings > schema-driven fields (settings_schema.py CORE_FIELDS) ----
   "settings.field.inheritOption": "(inherit)",
   "settings.field.defaultPlaceholder": "default ({value})",
-  "settings.field.secretPlaceholder": "unchanged",
   "settings.field.secretConfiguredPlaceholder": "saved (enter new value to replace)",
   "settings.field.secretEnvPlaceholder": "set via environment variable",
   "settings.field.secretNotSetPlaceholder": "not set (optional)",
@@ -1652,10 +1656,11 @@ export const I18N_EN = {
   "settings.field.secretClearButton": "Clear",
   "settings.field.secretUndoButton": "Undo",
   "settings.field.secretClearTitle": "Clear stored secret on save",
+  "settings.field.secretUndoTitle": "Keep the stored secret",
   "settings.field.listPlaceholder": "comma-separated",
   "settings.field.pathlistRowPlaceholder": "folder path",
   "settings.field.browse": "Browse...",
-  "settings.field.pathlistPickTitle": "Pick a folder to allow",
+  "settings.field.pathlistPickTitle": "Pick a folder",
   "settings.field.pathlistRemoveTitle": "Remove this folder",
   "settings.field.pathlistAddButton": "Add folder",
   "settings.field.livePort.knownValue":
@@ -1756,6 +1761,8 @@ export const I18N_EN = {
   "tts.storageBlocked": "This browser blocked storage, so the voice resets on reload",
   "slash.needsPlugin": "/{cmd} needs the {plugin} plugin - install or enable it on the Plugins page.",
   "nav.group.studio": "Studio",
+  "nav.leaveSettings.title": "Unsaved settings",
+  "nav.leaveSettings.leave": "Leave without saving",
   "nav.group.agent": "Agent",
   "memory.age.justNow": "just now",
   "memory.age.minutes": "{count} min ago",
@@ -1942,7 +1949,7 @@ export const I18N_EN = {
   "settings.field.hfLoadTimeoutS.label": "HuggingFace load timeout (s)",
   "settings.field.hfLoadTimeoutS.help": "How long a HuggingFace-format model load may run in its isolated worker before it is treated as hung and cancelled. Raise it only for a huge model on slow storage.",
   "settings.field.hfFirstTokenTimeoutS.label": "HuggingFace first-token timeout (s)",
-  "settings.field.hfFirstTokenTimeoutS.help": "How long a HuggingFace-format model's reply may take to produce its first token before it is treated as hung. It covers reading your whole prompt, so it is generous by default.",
+  "settings.field.hfFirstTokenTimeoutS.help": "How long a HuggingFace-format model's reply may go without progress, before its first token, until it is treated as hung. Each model layer the prompt passes counts as progress.",
   "settings.field.hfEmbedTimeoutS.label": "HuggingFace embed timeout (s)",
   "settings.field.hfEmbedTimeoutS.help": "How long a HuggingFace-format model's embedding or rerank call may run in its isolated worker before it is treated as hung. Raise it if you regularly embed large batches.",
   "settings.field.hfEmbedMaxTexts.label": "HuggingFace embed batch cap (texts)",
@@ -2103,8 +2110,10 @@ export const I18N_EN = {
   "settings.field.ragIndexingMode.help": "Which folders the server may index (`localm rag add` in a terminal is not bound). whitelist = home, the working directory and Allowed folders. blacklist = all but Denied folders. Credentials never.",
   "settings.field.ragAllowedRoots.label": "Allowed folders",
   "settings.field.ragAllowedRoots.help": "Folders that may be indexed in whitelist mode, in addition to your home folder and the working directory. When you pick a folder outside this list, localm offers to add it here and continue.",
+  "settings.field.ragAllowedRoots.pickTitle": "Pick a folder to allow",
   "settings.field.ragDeniedRoots.label": "Denied folders",
   "settings.field.ragDeniedRoots.help": "Folders the server and scheduled jobs never index in blacklist mode (everything else is allowed). Ignored in whitelist mode. `localm rag add` in a terminal is not bound by this.",
+  "settings.field.ragDeniedRoots.pickTitle": "Pick a folder to deny",
   "settings.field.ragClassifyUnknownFiles.label": "Classify unknown files with AI",
   "settings.field.ragClassifyUnknownFiles.help": "Let the local LLM guess the format of a file whose extension it does not recognise, when a chat model is loaded. Off, those files are tagged plain text.",
 
@@ -2263,12 +2272,6 @@ export const I18N_EN = {
   "settings.field.tts.device.help": "webgpu currently produces corrupted, buzzing audio on many GPUs, so auto always uses wasm instead. Pick webgpu only to test whether that has been fixed.",
   "settings.field.tts.dtype.label": "Model precision",
   "settings.field.tts.dtype.help": "auto picks fp32 (clean audio). q8/fp16 download less but sound worse; q8 produced audible cracks on the WASM path.",
-  "settings.field.tts.engine.label": "Engine",
-  "settings.field.tts.engine.help": "Speech engine the plugin uses.",
-  "settings.field.tts.library.label": "Kokoro library path",
-  "settings.field.tts.library.help": "Path to the vendored kokoro-js bundle, relative to the tts plugin's static folder.",
-  "settings.field.tts.wasmPaths.label": "ONNX runtime WASM path",
-  "settings.field.tts.wasmPaths.help": "Folder holding the onnxruntime WASM runtime, relative to the tts plugin's static folder; keep the trailing slash. Blank falls back to the vendored copy that ships with the plugin.",
 
   // ---- Settings > schema-driven section headings (CORE_SECTION_HEADING) ----
   "settings.sectionHeading.engine": "Runtime & GPU",
@@ -2304,11 +2307,9 @@ export const I18N_EN = {
   "settings.sectionHeading.media": "Media",
   "settings.sectionHeading.avatars": "Avatars",
   "settings.sectionHeading.tts": "Text-to-speech",
-  "settings.sectionHeading.ttsPlugin": "Text-to-speech plugin",
   "settings.sectionHeading.pluginSettings": "Plugin settings",
   "settings.voice.setupHead": "Speech model setup",
   "settings.voice.checking": "Checking speech model status...",
-  "settings.voice.download": "Download speech model",
   "settings.voice.inactive": "Speech-to-text plugin is not active.",
   "settings.voice.ready": "Speech model ({model}) is downloaded and ready.",
   "settings.voice.notDownloaded": "Speech model ({model}) is not downloaded yet.",
@@ -2368,7 +2369,8 @@ export const I18N_EN = {
   "settings.tts.downloadNow": "Download voice model now",
   "settings.tts.cacheCheckFailed": "Could not check voice model cache: {message}",
   "settings.tts.downloading": "Downloading voice model...",
-  "settings.tts.needsNetwork": "Voice model download needs network access (Settings -> Server & network) - the TTS plugin has not finished starting up to offer its own confirmation.",
+  "settings.tts.needsNetwork": "The voice model cannot be downloaded: Network access is off and model downloads are not allowed (Settings > Server & network > Outbound access).",
+  "settings.tts.cannotAsk": "Network access is set to ask, but the text-to-speech plugin is not running in this page, so it cannot ask to download the voice model. Reload the page; if this stays, see Settings > System > Recent errors.",
   "settings.tts.modelReady": "Voice model ready in browser",
   "settings.tts.setupFailed": "Voice model setup failed: {message}",
   "settings.tts.savedUnreadable": "Saved, but the server's reply could not be read - reloading the settings to show what is actually stored",
@@ -2639,15 +2641,15 @@ export const I18N_EN = {
   "settings.companion.kindTailscale": "Tailscale",
   "settings.companion.hintCertUntrusted": "This device no longer trusts this server's certificate. Open localm-ca.crt from the server (/localm-ca.crt) and install it, then reload.",
   "settings.companion.hintInstalled": "Running as an installed app.",
-  "settings.companion.hintTrustCert": "To install localm as an app, trust this device's certificate first (the “Install certificate” step above), then reload.",
+  "settings.companion.hintTrustCert": "To install localm as an app, first make this device trust the server's certificate: open /localm-ca.crt from the server, install it, then reload.",
   "settings.companion.hintNoAddress":
     "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone.",
   "settings.companion.hintLoopback":
-    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.",
+    "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server. Once the key is set, `localm gui -H 0.0.0.0` starts it that way too. See docs/phone.md.",
 
   // ---- Settings > Your data ----
   "settings.privacyData.title": "Your data",
-  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone.",
+  "settings.privacyData.help": "Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone. Memory facts, generated images, music and video, coder sessions and logs are not touched. In privacy mode the server's conversation store is closed, so conversations it kept earlier stay until you delete them with chat persistence on.",
 
   // ---- Settings > Diagnostics ----
   "settings.diagnostics.title": "Diagnostics",
@@ -2697,7 +2699,7 @@ export const I18N_EN = {
   // ---- Settings > Other running instances ----
   "settings.instances.title": "Other running instances",
   "settings.instances.help":
-    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install.",
+    "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install. A server of another install is found only on localm's usual ports (8642 to 8741, and 11434).",
   "settings.instances.loading": "Looking for other instances…",
   "settings.instances.emptyTitle": "No other instances running",
   "settings.instances.emptyBody": "Only the server behind this page is running right now.",
@@ -2713,8 +2715,7 @@ export const I18N_EN = {
     "This server belongs to a different LocaLM install, which keeps its own data folder. Stop it from that install's own window, or from the terminal it was started in.",
   "settings.instances.stop": "Stop",
   "settings.instances.stopTitle": "Stop this instance?",
-  "settings.instances.stopBody":
-    "This stops the LocaLM server at {address} (serving {dir}). Its model is unloaded first when possible.",
+  "settings.instances.stopBody": "This stops the LocaLM server at {address} (serving {dir}). Its model is unloaded first when possible. Work in progress there (a download, a generation, a folder being registered) stops with it.",
   "settings.instances.unknownDir": "an unknown directory",
   "settings.instances.stoppedToast": "Stopped {name}",
   "settings.instances.staleToast": "That entry was stale: its server had already exited and pid {pid} now belongs to another program. Removed the entry; nothing was stopped.",
@@ -2767,8 +2768,7 @@ export const I18N_EN = {
   "settings.bug.fileFailed": "Could not file report: {message}",
   "settings.bug.retryingIn": "Rate limited - retrying in {secs}s...",
   "settings.bug.retrying": "Retrying...",
-  "settings.bug.reviewHelp":
-    "This is the whole report as it will be sent, except the closing note about editing it, which is left out. It becomes a public GitHub issue. Nothing has been sent yet.",
+  "settings.bug.reviewHelp": "This is the whole report as it will be sent; the closing note about editing it is removed when it is sent. It becomes a public GitHub issue. Nothing has been sent yet.",
   "settings.bug.previewLabel": "Bug report to send",
   "settings.bug.confirmSendButton": "Send this report",
   "settings.bug.cancelSendButton": "Don't send",
@@ -2805,9 +2805,9 @@ export const I18N_EN = {
   "settings.update.upToDate": "localm is up to date (running {current}).",
   "settings.update.downloading": "Downloading and applying ...",
   "settings.update.updatedRestarting": "Updated to {version}. Restarting ...",
-  "settings.update.updatedSetup": "Updated to {version}. Re-run setup.bat to finish.",
+  "settings.update.updatedSetup": "Updated to {version}. Run setup again (setup.bat on Windows, setup.sh on Linux and macOS) to finish.",
   "settings.update.updatedPlain": "Updated to {version}.",
-  "settings.update.failedRolledBack": "Update failed (rolled back): {error}",
+  "settings.update.failedRolledBack": "Update not installed: {error}. localm is as it was before the update.",
   "settings.update.nothingToApply": "Nothing to apply.",
   "settings.update.applyFailed": "Update failed: {message}",
   "settings.update.versionsButton": "Choose a version",
@@ -2890,7 +2890,7 @@ export const I18N_EN = {
   // ---- Settings > Updates > Inference runtime ----
   "settings.runtime.subHead": "Inference runtime",
   "settings.runtime.help":
-    "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. You always start it - it never re-provisions on its own. A build that fails to load on this machine is never kept: setup-llama walks back to an older one that does.",
+    "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. When localm starts with a runtime that is not the build this release uses and no build is pinned, it updates the runtime first. A build that fails to load on this machine is not kept.",
   "settings.runtime.backendLabel": "Backend",
   "settings.runtime.optKeepBackend": "Keep the installed backend",
   "settings.runtime.optAuto": "auto - detect this machine's GPU",
@@ -2902,7 +2902,7 @@ export const I18N_EN = {
   "settings.runtime.optMetal": "metal - Apple Silicon",
   "settings.runtime.optAmdRocm": "amd-rocm - AMD RX 6000, self-contained",
   "settings.runtime.backendHelp":
-    "Which prebuilt to install. Changing this re-downloads the runtime; nothing is replaced while a model is loaded, and your pick is never swapped silently if it turns out not to load here.",
+    "Which prebuilt to install. Changing this re-downloads the runtime. On Windows it is refused while a model is loaded; on Linux and macOS a loaded model keeps its build until it is loaded again. Your pick is never swapped silently if it turns out not to load here.",
   "settings.runtime.buildLabel": "Build",
   "settings.runtime.tagPlaceholder": "leave blank to keep the current build",
   "settings.runtime.tagHelp":
@@ -2943,13 +2943,12 @@ export const I18N_EN = {
   "settings.runtime.labelInstallRuntime": "Install runtime",
   "settings.runtime.switchTitle": "Switch the inference runtime",
   "settings.runtime.switchBody":
-    "This replaces the installed {installed} runtime with {target}. It cannot run while a model is loaded, and if the new build does not work here localm says so rather than leaving it installed.",
+    "This replaces the installed {installed} runtime with {target}. On Windows it cannot run while a model is loaded. If the new build does not work here, localm says so and does not keep it.",
   "settings.runtime.switchTargetAuto": "whichever backend localm detects for this machine",
   "settings.runtime.switchTargetNamed": "a {wanted} build",
   "settings.runtime.switchConfirm": "Switch",
   "settings.runtime.rollbackTitle": "Roll back the inference runtime",
-  "settings.runtime.rollbackBody":
-    "This replaces the installed {backend} runtime with the previous build ({previous}) and restarts loading with it.",
+  "settings.runtime.rollbackBody": "This replaces the installed {backend} runtime with the previous build ({previous}). The next model load uses it.",
   "settings.runtime.rollbackConfirm": "Roll back",
 
   // ---- Settings > Issues ----
@@ -2977,7 +2976,6 @@ export const I18N_EN = {
   "settings.logs.exportedToast.one": "Exported {count} log file",
   "settings.logs.exportedToast.other": "Exported {count} log files",
   "settings.logs.none": "No logs found to export.",
-  "settings.logs.noneToast": "No logs to export",
   "settings.logs.failed": "Could not export logs: {message}",
 
   // ---- Settings > Upload files ----
@@ -2989,8 +2987,13 @@ export const I18N_EN = {
   "settings.uploads.emptyTitle": "No uploaded files",
   "settings.uploads.emptyBody": "Files you send here are readable by models and tools.",
   "settings.uploads.remove": "Remove",
-  "settings.uploads.selectedLabel": "{count} file(s) selected: {names}",
   "settings.uploads.removedToast": "Removed {name}",
+  "settings.uploads.removeBody": "The file is deleted from the uploads folder. This can't be undone.",
+  "settings.uploads.removeTitle": "Remove {name}?",
+  "settings.uploads.skippedToast.other": "{count} files were not uploaded: they are empty or their names cannot be saved.",
+  "settings.uploads.skippedToast.one": "{count} file was not uploaded: it is empty or its name cannot be saved.",
+  "settings.uploads.selectedLabel.other": "{count} files selected: {names}",
+  "settings.uploads.selectedLabel.one": "{count} file selected: {names}",
   "settings.uploads.removeFailed": "Could not remove: {message}",
   "settings.uploads.chooseFirst": "Choose a file to upload first",
   "settings.uploads.unnamedDir": "uploads",
@@ -3005,11 +3008,11 @@ export const I18N_EN = {
   "appearance.language.help":
     "The language the interface is shown in. Saved on the server, so it follows this instance to every browser that connects to it. Parts of the app that are not translated yet stay in English.",
   "appearance.language.saveFailed":
-    "Could not save the language on the server - it applies in this browser but may not on other devices.",
+    "Could not save the language on the server - it applies in this browser until the page is reloaded, then the language saved on the server returns.",
   "appearance.logoStyle": "Logo style",
   "appearance.logoStyle.help":
     "How the wordmark is drawn in the sidebar. Saved on the server, so every browser and the desktop launcher use it.",
-  "appearance.logoStyle.tile": "Use the {name} wordmark",
+  "appearance.logoStyle.tile": "Use the {name} wordmark, with \"{blue}\" in blue",
   "appearance.logoStyle.saveFailed": "The logo style could not be saved on the server - it applies in this browser for now, and the saved style returns on the next load.",
   "appearance.showMmproj": "Show vision projector (.mmproj) files in repository search results (this browser only)",
   "appearance.title": "Appearance",
@@ -3430,7 +3433,7 @@ export const I18N_EN = {
   "nativeModels.slot.t5xxl": "T5 text encoder",
   "nativeModels.slot.vae": "VAE",
   "nativeModels.strength": "Strength",
-  "nativeModels.unknownFamily": "The model family cannot be read from this file; choose its text encoders and VAE below if it needs them.",
+  "nativeModels.unknownFamily": "The model family cannot be read from this file; choose its text encoders below if it needs them (a VAE alone is not enough).",
 
   // ---- Browser tab (browser plugin, static/browser.js) ----
   "browser.liveView.inputFailed": "Input did not reach the browser: {detail}",
@@ -3462,7 +3465,7 @@ export const I18N_EN = {
     "The browser plugin is not installed. Install it on the Plugins page to " +
     "let the model drive a web browser.",
   "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
-  "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
+  "browser.setup.readySystem": "localm will use the first of these that starts, found on this computer: {browser}.",
   "browser.setup.switchedToBundled": "Switched to the bundled browser.",
   "browser.setup.systemMissing":
     "No supported browser was found on this computer. localm looked for {names}.",

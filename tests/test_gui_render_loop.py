@@ -56,8 +56,10 @@ def test_apply_active_classes_helper_exists():
 
 
 def test_showview_uses_apply_active_classes():
-    body = _func_body(_all_js(), "showView")
-    assert "_applyActiveClasses(" in body
+    src = _all_js()
+    body = _strip_line_comments(_func_body(src, "showView"))
+    assert "_showViewNow(" in body
+    assert "_applyActiveClasses(" in _strip_line_comments(_func_body(src, "_showViewNow"))
 
 
 def test_reconcile_active_view_does_not_reenter_showview():

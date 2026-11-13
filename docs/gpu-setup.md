@@ -196,7 +196,7 @@ install the CUDA Toolkit** (the driver must support CUDA >= 12.4 for most GPUs;
 `nvidia-smi` prints the version it supports). Setup also
 detects your GPU's own architecture and picks the CUDA asset line it actually
 needs: NVIDIA Blackwell (RTX 50-series and datacenter B100/B200) automatically
-gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.4) -
+gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.5) -
 since the 12.x build has no kernels for Blackwell; every earlier architecture
 stays on the 12.x line. Setup checks your driver against whichever line your
 GPU needs and, if it is too old, says so and installs Vulkan only if you agree

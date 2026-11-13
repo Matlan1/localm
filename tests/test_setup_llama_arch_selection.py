@@ -15,8 +15,10 @@ import pytest
 
 from localm import hwdetect, setup_llama as sl
 from localm.setup_llama import assets as sl_assets
+from localm.setup_llama.pins import _CUDA_TOOLKIT
 
 PIN = sl._PINNED_TAG
+W13 = _CUDA_TOOLKIT["win"]["cuda-13"]
 UPSTREAM = "ggml-org/llama.cpp"
 REAL_NAMES = sorted(n for n in sl._PINNED_FALLBACK_SHA256
                     if n.startswith(f"llama-{PIN}-") or n.startswith("cudart-llama-"))
@@ -143,18 +145,18 @@ def test_an_unpinned_tag_offline_guesses_this_architectures_name(machine):
 # ------------------------------- Windows ---------------------------------- #
 
 def test_the_listing_names_the_arm64_cuda_13_assets_before_the_x64_ones():
-    assert (REAL_NAMES.index(f"llama-{PIN}-bin-win-cuda-13.4-arm64.zip")
-            < REAL_NAMES.index(f"llama-{PIN}-bin-win-cuda-13.4-x64.zip"))
-    assert (REAL_NAMES.index("cudart-llama-bin-win-cuda-13.4-arm64.zip")
-            < REAL_NAMES.index("cudart-llama-bin-win-cuda-13.4-x64.zip"))
+    assert (REAL_NAMES.index(f"llama-{PIN}-bin-win-cuda-{W13}-arm64.zip")
+            < REAL_NAMES.index(f"llama-{PIN}-bin-win-cuda-{W13}-x64.zip"))
+    assert (REAL_NAMES.index(f"cudart-llama-bin-win-cuda-{W13}-arm64.zip")
+            < REAL_NAMES.index(f"cudart-llama-bin-win-cuda-{W13}-x64.zip"))
 
 
 @pytest.mark.parametrize("arch", ["x64", "arm64"])
 def test_windows_cuda_13_pairs_the_build_and_runtime_of_this_architecture(machine, arch):
     machine("win32", arch)
     build, cudart = sl._resolve_cuda_pair(PIN, "cuda-13")
-    assert build["name"] == f"llama-{PIN}-bin-win-cuda-13.4-{arch}.zip"
-    assert cudart["name"] == f"cudart-llama-bin-win-cuda-13.4-{arch}.zip"
+    assert build["name"] == f"llama-{PIN}-bin-win-cuda-{W13}-{arch}.zip"
+    assert cudart["name"] == f"cudart-llama-bin-win-cuda-{W13}-{arch}.zip"
 
 
 def test_windows_x64_cuda_12_pair_is_x64(machine):
@@ -169,7 +171,7 @@ def test_windows_x64_cuda_12_pair_is_x64(machine):
 def test_windows_cuda_13_build_asset_is_this_architectures(machine, listing, arch):
     machine("win32", arch, listing)
     url, _sha, _tag = sl._resolve_backend_asset("cuda", "cuda-13")
-    assert _name(url) == f"llama-{PIN}-bin-win-cuda-13.4-{arch}.zip"
+    assert _name(url) == f"llama-{PIN}-bin-win-cuda-{W13}-{arch}.zip"
 
 
 @pytest.mark.parametrize("backend, expected", [
