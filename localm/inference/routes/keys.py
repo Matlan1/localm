@@ -36,8 +36,9 @@ def register(app: FastAPI, ctx) -> None:
         warning = owner_key_downgrade_warning()
         if warning is not None:
             warning = _hs.path_formatter(request)(warning)
+        open_mode = _hs.caller_auth_state(request) == _hs.CALLER_OPEN
         return {"keys": list_keys(), "is_owner": is_owner, "presets": presets,
-                "owner_key_warning": warning}
+                "owner_key_warning": warning, "open_mode": open_mode}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(request: Request, response: Response, body: dict):
@@ -148,6 +149,7 @@ def register(app: FastAPI, ctx) -> None:
             response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
+            created = {**created, "owner_key_seeded": True}
             # CSRF is derived from the session (client fetches it from
             # GET /api/session); no separate CSRF cookie to set.
         # The plaintext key is returned exactly once - it is never recoverable.
