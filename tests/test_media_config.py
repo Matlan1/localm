@@ -191,6 +191,8 @@ def test_a_failed_plugins_folder_scan_is_not_reported_as_an_inactive_source(monk
 
 def test_active_plugins_raises_when_the_plugins_folder_cannot_be_listed(monkeypatch, tmp_path):
     from pathlib import Path
+
+    import pytest
     from localm.plugins import loader
     monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path)
 
