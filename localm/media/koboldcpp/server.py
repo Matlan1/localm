@@ -475,10 +475,13 @@ def _stop_server() -> bool:
     reporting it), a warning is logged and False is returned. Caller must hold
     ``_lock`` and have checked that a server is recorded."""
     global _server
-    mp = _server.mp
-    _server.stop()
-    _server.mp = mp
-    if mp is not None and _server.alive():
+    srv = _server
+    if srv is None:
+        return True
+    mp = srv.mp
+    srv.stop()
+    srv.mp = mp
+    if mp is not None and srv.alive():
         from localm.debuglog import logger
         logger.warning("koboldcpp music: the server (pid %s) is still running after it "
                        "was stopped", getattr(mp, "pid", None))
