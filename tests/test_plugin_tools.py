@@ -182,7 +182,6 @@ class TestRegisterPluginTools:
             names, _ = register_plugin_tools()
             assert "plugin_issues_tool_echo" in names
             td = coder_tools.TOOL_REGISTRY["plugin_issues_tool_echo"]
-            assert td.destructive is False
             assert td.description.startswith("[plugin:issues]")
             assert "Echo the text" in td.description
             assert td.params["text"]["type"] == "string"
@@ -210,6 +209,16 @@ class TestRegisterPluginTools:
             # tool_danger sets no tool_destructive attr -> default True
             assert coder_tools.TOOL_REGISTRY[
                 "plugin_issues_tool_danger"].destructive is True
+
+    def test_plugin_tool_confirms_like_an_untrusted_mcp_tool(self, tmp_path, monkeypatch):
+        # tool_echo sets tool_destructive = False; the plugin's own label is ignored.
+        self._setup(tmp_path, monkeypatch)
+        with patch.dict(coder_tools.TOOL_REGISTRY, {}, clear=False):
+            register_plugin_tools()
+            for name in ("plugin_issues_tool_echo", "plugin_issues_tool_danger"):
+                td = coder_tools.TOOL_REGISTRY[name]
+                assert (td.destructive, td.executes_project_code, td.confirm_always) == (
+                    True, True, True), name
 
     def test_non_callable_export_warns(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)

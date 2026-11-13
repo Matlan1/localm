@@ -15,13 +15,14 @@ the same contract as a built-in coder tool:
 
 The first positional argument is the working directory (a Path); the rest are
 keyword arguments matching the declared parameter schema. Optional function
-attributes describe the tool to the model and the safety layer:
+attributes describe the tool to the model:
 
     fn.tool_description : str   one-line description (else the docstring's first line)
     fn.tool_params      : dict  {param: {"type", "description", "required"}}
-    fn.tool_destructive : bool  whether it needs confirmation
-                                (default True - external code is treated as
-                                 destructive, the same posture as MCP tools)
+
+Every plugin tool registers with the posture of an untrusted MCP server's tools:
+destructive, runs code beyond file edits, and confirmed on every call, under
+auto_approve too. A ``tool_destructive`` attribute on the function is ignored.
 
 Registered names are namespaced ``plugin_<plugin>_<export>`` so they cannot
 clash with built-in tools or with another plugin's exports. The model learns
@@ -128,14 +129,15 @@ def register_plugin_tools() -> tuple[list[str], list[str]]:
             if not isinstance(params, dict):
                 params = {}
             params = _neutralise_params(params)
-            destructive = bool(getattr(fn, "tool_destructive", True))
 
             register_foreign_tool(
                 reg_name,
                 fn=_make_plugin_tool_fn(fn, reg_name),
                 description=f"[plugin:{manifest.name}] {description}",
                 params=params,
-                destructive=destructive,
+                destructive=True,
+                executes_project_code=True,
+                confirm_always=True,
                 source_label="Plugin",
                 registered=registered,
                 warnings=warnings,
