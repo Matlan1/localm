@@ -2,8 +2,6 @@
 memo handle is not an unsalted hash of the secret."""
 from __future__ import annotations
 
-import hashlib
-
 import pytest
 import requests
 
