@@ -147,6 +147,8 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
         if path:
             logger.info("koboldcpp music: job uses model %s", Path(path).name)
     models = runtime_paths(resolved)
+    from localm.config import load_config
+    main_gpu = load_config().get("main_gpu_index")
     errors: list[str] = []
     crashed: list[tuple[str, str]] = []
     auto = choice.strip().lower() == "auto"
@@ -155,6 +157,7 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
         try:
             data = server.run(rt, backend, models, work_dir(), prepare=plan,
                               request=request, timeout=timeout, lowvram=lowvram,
+                              device=server.device_for(backend, main_gpu),
                               on_progress=say, cancel_check=cancel_check)
         except StartError as e:
             if auto and e.crashed:

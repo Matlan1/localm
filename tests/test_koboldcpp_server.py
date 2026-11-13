@@ -759,3 +759,59 @@ def test_a_crash_on_every_backend_marks_none_of_them(two_backends):
     for backend in ("cuda", "vulkan", "cpu"):
         assert runtime.backend_failed(backend) is None
     assert music.backend_order("auto")[0] == "cuda"
+
+
+# --------------------------------------------------------------------------- #
+#  The main GPU setting picks the GPU KoboldCpp starts on                      #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("backend,main_gpu,expected", [
+    ("cuda", None, None),             # setting unset: KoboldCpp picks
+    ("cuda", 0, 0),                   # one GPU
+    ("cuda", 1, 1),                   # second of two GPUs
+    ("cuda", 4, None),                # past the ids --usecuda accepts
+    ("vulkan", 1, 1),                 # a Vulkan build
+    ("vulkan", 7, 7),
+    ("cpu", 1, None),
+    ("cuda", -1, None),
+    ("cuda", True, None),
+    ("vulkan", "1", None),
+])
+def test_device_for_maps_the_main_gpu_setting(backend, main_gpu, expected):
+    assert server.device_for(backend, main_gpu) == expected
+
+
+@pytest.mark.parametrize("backend,device,tail", [
+    ("cuda", None, ["--usecuda"]),
+    ("cuda", 0, ["--usecuda", "0"]),
+    ("cuda", 1, ["--usecuda", "1"]),
+    ("vulkan", None, ["--usevulkan"]),
+    ("vulkan", 1, ["--usevulkan", "1"]),
+    ("cpu", None, ["--usecpu"]),
+])
+def test_build_argv_names_the_chosen_gpu(backend, device, tail):
+    key = server.ServerKey("launcher", backend, MODELS, device=device)
+    argv = server.build_argv(key, 5123)
+    assert argv[-len(tail):] == tail
+
+
+def test_a_job_starts_koboldcpp_on_the_configured_main_gpu(two_backends, monkeypatch):
+    import localm.config as cfgmod
+    monkeypatch.setattr(cfgmod, "load_config", lambda: {"main_gpu_index": 1})
+    keys = []
+    real_build = server.build_argv
+
+    def build(key, port):
+        keys.append(key)
+        return real_build(key, port)
+    monkeypatch.setattr(server, "build_argv", build)
+    music.generate_wav({}, "cuda", REQUEST, plan=False)
+    assert keys and keys[-1].device == 1
+    argv = server.build_argv(keys[-1], 1)
+    assert argv[argv.index("--usecuda") + 1] == "1"
+
+
+def test_another_main_gpu_starts_a_fresh_server():
+    a = server.ServerKey("launcher", "cuda", MODELS, device=0)
+    b = server.ServerKey("launcher", "cuda", MODELS, device=1)
+    assert a != b

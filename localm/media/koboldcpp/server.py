@@ -93,6 +93,7 @@ class ServerKey:
     backend: str
     models: ModelSet
     lowvram: bool = False
+    device: Optional[int] = None
 
 
 def _free_port() -> int:
@@ -101,9 +102,32 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+# GPU ids KoboldCpp's --usecuda accepts.
+CUDA_DEVICE_IDS = range(4)
+
+
+def device_for(backend: str, main_gpu_index) -> Optional[int]:
+    """The GPU id to start KoboldCpp's *backend* on for the configured
+    ``main_gpu_index``, or None for KoboldCpp's own choice: None for the cpu
+    backend, an unset or invalid index, and a CUDA index KoboldCpp cannot take
+    (it accepts 0 to 3)."""
+    if backend not in ("cuda", "vulkan") or isinstance(main_gpu_index, bool):
+        return None
+    if not isinstance(main_gpu_index, int) or main_gpu_index < 0:
+        return None
+    if backend == "cuda" and main_gpu_index not in CUDA_DEVICE_IDS:
+        from localm.debuglog import logger
+        logger.warning("koboldcpp music: main GPU %d is past the GPUs KoboldCpp's CUDA "
+                       "build can be pointed at (0 to 3); it picks its own", main_gpu_index)
+        return None
+    return main_gpu_index
+
+
 def build_argv(key: ServerKey, port: int) -> list:
     """The launcher command line for *key*: music models only, loopback. The API
-    key is passed in the ``KCPP_PASSWORD`` environment variable, not here."""
+    key is passed in the ``KCPP_PASSWORD`` environment variable, not here.
+    ``key.device`` names the one GPU of the cuda or vulkan backend
+    (``--usecuda <id>`` / ``--usevulkan <id>``); without it KoboldCpp picks."""
     m = key.models
     argv = [key.launcher,
             "--musicembeddings", m.text_encoder,
@@ -114,10 +138,11 @@ def build_argv(key: ServerKey, port: int) -> list:
     argv += ["--host", "127.0.0.1", "--port", str(port), "--skiplauncher", "--quiet"]
     if key.lowvram:
         argv.append("--musiclowvram")
+    device = [] if key.device is None else [str(key.device)]
     if key.backend == "cuda":
-        argv.append("--usecuda")
+        argv += ["--usecuda"] + device
     elif key.backend == "vulkan":
-        argv.append("--usevulkan")
+        argv += ["--usevulkan"] + device
     elif key.backend == "cpu":
         argv.append("--usecpu")
     return argv
@@ -352,6 +377,7 @@ def _acquire(on_progress: Progress, cancel_check: CancelCheck) -> None:
 
 def run(runtime: Runtime, backend: str, models: ModelSet, work_dir: Path, *,
         prepare: bool, request: dict, timeout: float, lowvram: bool = False,
+        device: Optional[int] = None,
         on_progress: Optional[Progress] = None,
         cancel_check: Optional[CancelCheck] = None) -> bytes:
     """Generate one track and return the WAV bytes KoboldCpp produced.
@@ -361,7 +387,8 @@ def run(runtime: Runtime, backend: str, models: ModelSet, work_dir: Path, *,
     ``/api/extra/music/prepare`` with audio-code generation on and caption
     rewriting off; the planned fields (tempo, key, time signature, audio codes)
     are then merged under the caller's own request fields. The planner ends the
-    song itself, so the track can be slightly shorter than ``duration``. Raises
+    song itself, so the track can be slightly shorter than ``duration``. *device*
+    is the GPU id the server is started on (``device_for``). Raises
     :class:`StartError` when the server cannot start, :class:`ServerError` for
     any other failure, or :class:`Cancelled`."""
     global _server, _last_used
@@ -370,7 +397,7 @@ def run(runtime: Runtime, backend: str, models: ModelSet, work_dir: Path, *,
     _acquire(say, cancelled)
     try:
         _cancel_idle_timer()
-        key = ServerKey(str(runtime.launcher), backend, models, lowvram)
+        key = ServerKey(str(runtime.launcher), backend, models, lowvram, device)
         if _server is not None and (_server.key != key or not _server.alive()):
             _server.stop()
             _server = None
