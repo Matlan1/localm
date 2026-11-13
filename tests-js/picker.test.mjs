@@ -216,6 +216,30 @@ test("issue #1220: navigate always asks the server for hidden entries", async ()
   }
 });
 
+for (const startPath of ["/root", ""]) {
+  test(`a listing that keeps failing is asked for a bounded number of times (start ${JSON.stringify(startPath)})`, async () => {
+    const dirCalls = [];
+    const refusing = (url) => {
+      const u = String(url);
+      if (u.includes("/api/fs/dirs")) {
+        dirCalls.push(u);
+        return Promise.resolve({ ok: false, status: 403, statusText: "Forbidden",
+          json: async () => ({ detail: "Key lacks host filesystem access" }), text: async () => "" });
+      }
+      return fetchImpl(url);
+    };
+    const { window: win } = loadApp({ fetchImpl: refusing });
+    start(win, `{ mode: "dir", startPath: ${JSON.stringify(startPath)} }`);
+    await ticks(40);
+    assert.equal(dirCalls.length, startPath ? 2 : 1,
+      `the start folder, then the drive list once, and no more: ${dirCalls.join(" ")}`);
+    assert.match(win.document.getElementById("toast").textContent, /Key lacks host filesystem access/);
+    cancelBtn(win).click();
+    await ticks();
+    assert.equal(win.__res, null);
+  });
+}
+
 test("dismissing the modal resolves null", async () => {
   const { window: win } = loadApp({ fetchImpl });
   start(win, `{ mode: "dir", startPath: "/root" }`);
