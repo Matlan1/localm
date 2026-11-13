@@ -208,7 +208,13 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
     fields.apply(res.params || {});
     applied = res.name;
     pending = res.missing.length ? { id, missing: res.missing } : null;
-    for (const n of res.notes || []) toast(n);
+    const notes = res.notes || [];
+    const box = log();
+    if (notes.length && box) {
+      box.style.display = "block";
+      box.textContent += notes.map((n) => n + "\n").join("");
+      box.scrollTop = box.scrollHeight;
+    }
     toast(pending ? t("nativeWorkflows.appliedMissing", { name: res.name, count: res.missing.length })
       : t("nativeWorkflows.appliedToast", { name: res.name }), !!pending);
     render(document.getElementById(mountId));
@@ -285,6 +291,7 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
       method: "POST", headers: authHeaders(), body: JSON.stringify({ name: name.trim() }),
     }));
     list = data.workflows || list;
+    toast(t("nativeWorkflows.renamed", { name: name.trim() }));
     render(document.getElementById(mountId));
   }
 
@@ -296,6 +303,7 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
     list = data.workflows || [];
     if (pending && pending.id === w.id) pending = null;
     remember(list.length ? list[0].id : null);
+    toast(t("nativeWorkflows.deleted", { name: w.name }));
     render(document.getElementById(mountId));
   }
 

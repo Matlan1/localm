@@ -174,8 +174,36 @@ export function sectionTopGroup(sec) {
 // honest without any per-save bookkeeping.
 export const _dirtySettings = new Set();
 export function markSettingDirty(input) { _dirtySettings.add(input); }
+
+/** Schema controls by their dirty anchor node. A marked node found here counts
+ *  as dirty only while its control's value differs from the value it shows as
+ *  saved. */
+const _controlByNode = new WeakMap();
+
+/** True when two read() results are the same setting value: blank, null and
+ *  undefined compare equal; arrays compare by content. */
+export function sameSettingValue(a, b) {
+  const norm = (v) => (v === undefined || v === null || v === "" ? null : v);
+  return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+}
+
+/** True when a control's current value differs from the value it was drawn
+ *  with, or last saved with. A secret compares strictly, so "" (clear it)
+ *  differs from nothing entered. A control without a recorded `shown` value
+ *  counts as changed whenever it has a value. */
+export function settingControlChanged(ctrl) {
+  const cur = ctrl.read();
+  if (!("shown" in ctrl)) return cur !== undefined;
+  if (ctrl.field && ctrl.field.widget === "secret") return cur !== ctrl.shown;
+  return !sameSettingValue(cur, ctrl.shown);
+}
+
 export function settingsDirty() {
-  for (const n of _dirtySettings) if (n.isConnected) return true;
+  for (const n of _dirtySettings) {
+    if (!n.isConnected) continue;
+    const ctrl = _controlByNode.get(n);
+    if (!ctrl || settingControlChanged(ctrl)) return true;
+  }
   return false;
 }
 window.settingsDirty = settingsDirty;
@@ -498,7 +526,9 @@ export function buildSettingControl(field) {
       wrap.appendChild(list);
       wrap.appendChild(add);
       if (field.help) wrap.appendChild(el("div", "sub", fieldCatalogText(field, "help", field.help)));
-      return { field, node: wrap, read, write };
+      const listCtrl = { field, node: wrap, read, write, shown: read() };
+      _controlByNode.set(list, listCtrl);
+      return listCtrl;
     }
     case "textarea": {   // free-form multi-line (e.g. the default system prompt)
       input = document.createElement("textarea");
@@ -674,7 +704,9 @@ export function buildSettingControl(field) {
     actRow.appendChild(btn);
     wrap.appendChild(actRow);
   }
-  return { field, node: wrap, read, write };
+  const ctrl = { field, node: wrap, read, write, shown: read() };
+  _controlByNode.set(input, ctrl);
+  return ctrl;
 }
 
 // Fetch the server-rendered key QR (owner-scope) and show the "Pair a phone"
@@ -1557,17 +1589,25 @@ export function savedToastKey(updates) {
   return "settings.toast.saved";
 }
 
-export async function saveSettingsSection(secId) {
+/** Save the controls of section *secId* (only those inside *within*, when
+ *  given) whose value differs from the value they show as saved. Returns true
+ *  when the server holds the shown values afterwards (saved now, or nothing
+ *  changed), false when nothing was saved. */
+export async function saveSettingsSection(secId, within) {
   const panel = $("settings-sec-" + secId);
   if (!panel) return;
+  const box = within || panel;
   const updates = {};
-  for (const { field, node, read } of _settingsControls) {
-    if (!node || !panel.contains(node)) continue;
-    const value = read();
+  const saved = [];
+  for (const ctrl of _settingsControls) {
+    if (!ctrl.node || !box.contains(ctrl.node)) continue;
+    const value = ctrl.read();
     if (value === undefined) continue;     // untouched secret / blank number
-    updates[field.key] = value;
+    if (!settingControlChanged(ctrl)) continue;
+    updates[ctrl.field.key] = value;
+    saved.push([ctrl, value]);
   }
-  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return false; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return true; }
   // A request that cannot reach the server says so and saves nothing.
   const patch = async (body) => {
     try {
@@ -1600,6 +1640,7 @@ export async function saveSettingsSection(secId) {
     // refetch and at most one re-ask, and reading which key moved would put a
     // security decision behind a diff.
     clearImageProxyCache();
+    for (const [ctrl, value] of saved) ctrl.shown = value;
     refreshSettingsPage();   // re-render to reflect server-normalized values
     // Re-reads the session mode and the other chat values a save can change.
     refreshCtxLimit();
@@ -1738,8 +1779,43 @@ export function buildBrowserSetupBox() {
   return box;
 }
 
+/** Unsaved edits carried across a Settings re-render: "c:<key>" for a core or
+ *  shared control, "m:<plugin>:<key>" for a media plugin box control. */
+const _pendingEdits = new Map();
+
+/** Record every drawn control whose value differs from its saved value. */
+export function collectPendingEdits() {
+  const take = (id, ctrl) => {
+    if (!ctrl.write || !ctrl.node || !ctrl.node.isConnected) return;
+    if (!("shown" in ctrl) || !settingControlChanged(ctrl)) return;
+    _pendingEdits.set(id, ctrl.read());
+  };
+  for (const ctrl of _settingsControls) take("c:" + ctrl.field.key, ctrl);
+  for (const [name, ctrls] of Object.entries(_mediaControls)) {
+    for (const ctrl of ctrls) take(`m:${name}:${ctrl.field.key}`, ctrl);
+  }
+}
+
+/** Put the carried edits back into the freshly drawn controls. */
+export function restorePendingEdits() {
+  const give = (id, ctrl) => {
+    if (!_pendingEdits.has(id) || !ctrl.write) return;
+    ctrl.write(_pendingEdits.get(id));
+    if (ctrl.node) ctrl.node.classList.remove("media-inherited");
+  };
+  for (const ctrl of _settingsControls) give("c:" + ctrl.field.key, ctrl);
+  for (const [name, ctrls] of Object.entries(_mediaControls)) {
+    for (const ctrl of ctrls) give(`m:${name}:${ctrl.field.key}`, ctrl);
+  }
+  _pendingEdits.clear();
+}
+
+/** Redraw the Settings page from the server. Unsaved edits in the drawn
+ *  controls are kept: they are written back into the new controls, which then
+ *  count as unsaved again. */
 export async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
+  collectPendingEdits();
   _dirtySettings.clear();   // R10: a fresh render is a clean baseline
   $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
   const form = $("config-form");
@@ -1987,6 +2063,7 @@ export async function refreshSettingsPage() {
     tailLoading.remove();
   }
 
+  restorePendingEdits();
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
@@ -2164,9 +2241,10 @@ export async function buildMediaSection(form, fields) {
       _settingsControls.push(ctrl);
     }
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary", t("settings.save"));
+    const save = el("button", "btn-primary",
+      t("settings.save.section", { name: t("settings.media.sharedHead") }));
     save.type = "button";
-    save.onclick = () => savingState(save, () => saveSettingsSection("media"));
+    save.onclick = () => savingState(save, () => saveSettingsSection("media", box));
     actions.appendChild(save);
     box.appendChild(actions);
     panel.appendChild(box);
@@ -2190,9 +2268,10 @@ export async function buildMediaSection(form, fields) {
       _settingsControls = _settingsControls.filter(c => c.field.key !== placementField.key);
       _settingsControls.push(ctrl);
       const actions = el("div", "actions");
-      const save = el("button", "btn-primary", t("settings.save"));
+      const save = el("button", "btn-primary",
+        t("settings.save.section", { name: t("settings.media.experimentalHead") }));
       save.type = "button";
-      save.onclick = () => savingState(save, () => saveSettingsSection("media"));
+      save.onclick = () => savingState(save, () => saveSettingsSection("media", box));
       actions.appendChild(save);
       box.appendChild(actions);
     }
@@ -3017,9 +3096,10 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
     const actions = el("div", "actions");
     if (ctrls.length) {
-      const save = el("button", "btn-primary", t("settings.save"));
+      const save = el("button", "btn-primary",
+        t("settings.save.section", { name: t("settings.comfy.ownHead") }));
       save.type = "button";
-      save.onclick = () => savingState(save, () => saveSettingsSection("media"));
+      save.onclick = () => savingState(save, () => saveSettingsSection("media", host));
       actions.appendChild(save);
     }
     // Update: move the managed checkout to the pin localm ships. Long (a re-checkout,
