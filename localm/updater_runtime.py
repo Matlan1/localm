@@ -30,6 +30,10 @@ from localm import _apply_update as au
 PENDING_FILE = "pending-runtime.json"
 STATUS_FILE = "runtime-update.json"
 
+# In the runtime dir: the previous build an update kept because this release's
+# build did not work here (see :func:`kept_runtime`).
+KEPT_RECORD = ".localm-runtime-kept.json"
+
 # Files that carried the runtime pins, newest layout first.
 _RELEASE_TREE_FILES = ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
               "localm/setup_llama.py")
@@ -233,6 +237,13 @@ def plan(staged_root, installed_root) -> dict:
             pins["cuda_have"], pins["cuda"] = cuda
         if _is_current(lib, backend, current, target, pins):
             return out
+        kept = kept_runtime(lib)
+        if (kept is not None and kept["backend"] == backend and kept["target"] == target
+                and kept["kept"] == current):
+            out["note"] = (f"kept the {backend} runtime {current}: this release's {target} did "
+                           f"not work here ({kept['why']}); to try it again: "
+                           f"{_manual_command(backend)}")
+            return out
         out["reprovision"] = True
         if current == target and cuda is not None:
             out["note"] = (f"re-provisions the {backend} runtime {target} to update its CUDA "
@@ -256,6 +267,45 @@ def plan(staged_root, installed_root) -> dict:
         out["note"] = (f"could not compare the installed llama.cpp runtime with this release's "
                        f"pin ({e}); it was left as it is")
         return out
+
+
+def kept_runtime(lib) -> Optional[dict]:
+    """``{"backend", "kept", "target", "why"}`` when an update kept the runtime at
+    *lib* on its previous build ``kept`` because this release's ``target`` did
+    not work here (``why``), else None. Never raises."""
+    try:
+        data = json.loads((Path(lib) / KEPT_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not all(
+            isinstance(data.get(k), str) for k in ("backend", "kept", "target", "why")):
+        return None
+    return {k: data[k] for k in ("backend", "kept", "target", "why")}
+
+
+def _record_kept(lib: Path, backend: str, kept: str, target: str, why: str) -> None:
+    """Record :func:`kept_runtime` for the runtime at *lib*. Raises OSError."""
+    (Path(lib) / KEPT_RECORD).write_text(json.dumps(
+        {"backend": backend, "kept": kept, "target": target, "why": why}), encoding="utf-8")
+
+
+def _runtime_loads(lib: Path, backend: str, sl) -> tuple:
+    """(ok, why) for the runtime at *lib*: it holds the llama library and that
+    library loads through this localm's loader and ABI gate in a child process,
+    registering a GPU device unless *backend* is cpu (the load test setup-llama
+    runs). *sl* is the ``localm.setup_llama`` module."""
+    library = Path(lib) / sl._lib_name()
+    if not library.is_file():
+        return False, f"{library.name} is missing from {lib}"
+    env = dict(os.environ, LLAMA_CPP_LIB=str(library))
+    return (sl._native_loads_ok if backend == "cpu" else sl._native_gpu_loads_ok)(env=env)
+
+
+def failed(status: Optional[dict]) -> bool:
+    """Whether a :func:`finish_pending` *status* leaves the update unable to go on:
+    ``failed`` or ``waiting``. ``kept`` (the previous working runtime was kept)
+    and the other states let it continue."""
+    return status is not None and status.get("state") in ("failed", "waiting")
 
 
 # ------------------------------ who holds it ---------------------------------
@@ -852,9 +902,13 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     - ``"waiting"``: a process that is not this install's (or did not exit)
       holds the runtime files; nothing was changed and the re-provision stays
       pending for the next start;
+    - ``"kept"``: the re-provision did not produce the release's build for the
+      same backend; the previous runtime was put back, it loads, and it stays in
+      use (recorded for :func:`kept_runtime`, so later checks treat it as current
+      for this release), like a build the user pinned;
     - ``"failed"``: the re-provision did not produce the release's build for the
-      same backend; the previous runtime was put back (``error`` says what
-      failed, including a restore that failed).
+      same backend and the previous runtime could not be put back or does not
+      load (``error`` says what failed).
 
     Before replacing anything, this install's own processes that hold the
     runtime are stopped (:func:`stop_own_holders`, which waits up to *wait*
@@ -947,8 +1001,26 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         problem += f"; the runtime is in use by {describe_holders(held_by)}"
         status["holders"] = held_by
     restore_errors = au.restore_runtime(snapshot, lib)
-    kept = ("the previous runtime was put back" if not restore_errors
-            else "putting the previous runtime back FAILED: " + "; ".join(restore_errors))
+    if not restore_errors:
+        loads, why_not = _runtime_loads(lib, backend, sl)
+        if loads:
+            previous = pending.get("from") or "build"
+            try:
+                _record_kept(lib, backend, previous, target, problem)
+            except OSError as e:
+                from localm.debuglog import logger
+                logger.warning("update: could not record the kept %s runtime: %s", backend, e)
+            status.update(state="kept", error=problem,
+                          why=(f"this release's {target} did not work here ({problem}); the "
+                               f"previous {backend} runtime {previous} was kept"),
+                          note=(f"kept the {backend} runtime {previous}: this release's "
+                                f"{target} did not work here ({problem}). To try it again: "
+                                f"{_manual_command(backend)}"))
+            _write_status(status)
+            return status
+        kept = f"the previous runtime was put back but does not load either ({why_not})"
+    else:
+        kept = "putting the previous runtime back FAILED: " + "; ".join(restore_errors)
     status.update(state="failed", error=problem + ("; " + "; ".join(restore_errors)
                                                    if restore_errors else ""),
                   why=f"the {backend} runtime was NOT updated to {target} ({problem}); {kept}",

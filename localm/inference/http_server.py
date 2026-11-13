@@ -6020,7 +6020,7 @@ def _finish_pending_update_steps() -> bool:
     if pending is not None:
         status = updater_runtime.finish_pending(
             say=lambda m: _dbg.info("runtime update during restart: %s", m))
-        if status is not None and status["state"] not in ("updated", "current"):
+        if updater_runtime.failed(status):
             if pending.get("repair"):
                 _dbg.warning("runtime repair during restart: %s", status["note"])
             else:

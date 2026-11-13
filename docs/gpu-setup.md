@@ -82,7 +82,10 @@ localm setup-llama --backend cuda   # switch backend on a machine that already h
 By default you get the newest upstream release localm has confirmed works
 (`default`); an upstream release that turns out broken on your hardware is exactly
 what `--rollback` is for. Both `--tag` and `--rollback` stick, including across
-`localm update`. `localm doctor` shows which build is installed and whether it is
+`localm update`. When an update brings a build that does not load on your machine, the
+update keeps the build you had (as long as that one still loads), finishes everything
+else, and `localm doctor` names the kept build, why, and the command to try the new one
+again. `localm doctor` shows which build is installed and whether it is
 pinned. With no `--backend`, `--tag` and `--rollback` act on the installed backend
 when it is one localm provides; over a build of your own (`--from` or `--url`),
 `--tag` installs the detected backend and `--rollback` is refused. The `amd-rocm`

@@ -1745,8 +1745,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                             root=target, runner=runner, env=_deps_env(target), say=say)
                     except Exception as e:
                         runtime_status = {"state": "failed", "note": str(e)}
-                    if runtime_status is not None and runtime_status["state"] in (
-                            "failed", "waiting"):
+                    if updater_runtime.failed(runtime_status):
                         updater_runtime.clear_pending()
                         updater_components.clear_pending()
                         _roll_back(runtime_status["note"], "the native runtime update failed",
