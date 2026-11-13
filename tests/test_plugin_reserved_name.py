@@ -160,3 +160,31 @@ def test_store_install_keeps_first_party_standing(tmp_path):
     assert (entry["builtin"], entry["protected"]) == (True, True)
     with pytest.raises(ValueError, match="protected"):
         mgr.disable("tts")
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]"])
+def test_an_unreadable_marker_under_a_first_party_name_is_not_first_party(
+        tmp_path, caplog, body):
+    import logging
+
+    from localm.plugins import lookup
+    from localm.plugins.lookup import SOURCE_MARKER, installed_from_store
+    pdir = _write_manifest(tmp_path / "installed" / "tts", "tts",
+                           extra="protected = true\ndefault_enabled = true\n")
+    (pdir / SOURCE_MARKER).write_text(body, encoding="utf-8")
+    lookup._UNREADABLE_MARKERS_WARNED.discard(str(pdir))
+    mgr = _store_manager(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert installed_from_store(pdir) is False
+        spec = mgr.discover()["tts"]
+        mgr.discover()
+    assert (spec.builtin, spec.protected, spec.default_enabled) == (False, False, False)
+    assert mgr._is_protected("tts") is False
+    warned = [r for r in caplog.records if "cannot be read" in r.getMessage()]
+    assert len(warned) == 1 and str(pdir) in warned[0].getMessage()
+
+
+def test_a_folder_without_a_marker_still_counts_as_a_store_install(tmp_path):
+    from localm.plugins.lookup import installed_from_store
+    pdir = _write_manifest(tmp_path / "installed" / "tts", "tts")
+    assert installed_from_store(pdir) is True
