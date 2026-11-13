@@ -482,6 +482,7 @@ def test_preflight_selects_the_line_from_the_newest_gpu(monkeypatch, caps, expec
 
 def test_each_lines_driver_floor_is_the_toolkit_of_its_pinned_windows_build():
     for line, floor in sl._MIN_DRIVER_CUDA.items():
+        assert line == f"cuda-{floor[0]}"
         ver = "%d.%d" % floor
         assert f"llama-{sl._PINNED_TAG}-bin-win-cuda-{ver}-x64.zip" in sl._PINNED_FALLBACK_SHA256
 
