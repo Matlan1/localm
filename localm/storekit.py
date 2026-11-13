@@ -207,8 +207,7 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
                 return False
             r = subprocess.run(
                 [icacls, str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
-                capture_output=True, check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                capture_output=True, check=False)
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable
                 # principal, a non-NTFS volume), so a non-zero exit is reported
