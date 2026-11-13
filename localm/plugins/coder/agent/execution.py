@@ -696,10 +696,8 @@ class _ExecutionMixin:
             from localm.netpolicy import network_mode
             net_mode = network_mode()
             if net_mode == "off":
-                result = ToolResult.error(
-                    "Network access is disabled (net_mode=off). The user can "
-                    "enable it with: localm config net_mode ask"
-                )
+                from localm.config import net_off_refusal
+                result = ToolResult.error(net_off_refusal("this tool did not run"))
                 if interactive:
                     print_tool_error(call.name, result.output)
                 # No duration_s: the tool never ran, which is a different fact from

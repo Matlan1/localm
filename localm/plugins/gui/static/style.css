@@ -2349,6 +2349,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.routed-suggest:hover { color: var(--accent); border-color: var(--accent); }
+.media-offer-why { margin-top: 4px; font-size: 0.85em; color: var(--text-dim); }
 
 /* file/folder picker modal (app/picker.js) - replaces the old .dir-picker-*
    modal list. The .dir-picker-row/-btn rules below are a separate thing (the
