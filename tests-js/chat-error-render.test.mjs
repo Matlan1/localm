@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// A chat send that fails before any token streams renders an error into the
-// live assistant bubble and leaves it on screen.
+// A chat send that fails before any token streams shows the error in the
+// transcript and saves it as a failure note, so it is still shown after a
+// reload.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./harness.mjs";
+import { loadApp, runScript } from "./harness.mjs";
 
 /** A fetch that 400s /v1/chat/completions before any token streams. */
 function earlyFailFetch(detail) {
@@ -27,6 +28,12 @@ function textConv() {
   ] };
 }
 
+function activate(window, conv) {
+  window.__testConv = conv;
+  runScript(window, "chat.conversations = [window.__testConv]; chat.activeId = window.__testConv.id;");
+  return conv;
+}
+
 async function setup(detail) {
   const { window } = loadApp({ fetchImpl: earlyFailFetch(detail) });
   window.maybeCompactConversation = async () => {};
@@ -39,16 +46,16 @@ async function setup(detail) {
 
 test("a zero-content chat failure leaves a visible error, not silently wiped", async () => {
   const { window } = await setup("Model parameter is required and cannot be empty");
-  const conv = textConv();
+  const conv = activate(window, textConv());
 
   await window.runCompletion(conv);
 
   const box = window.document.getElementById("chat-messages");
   assert.match(box.textContent, /error/i,
-    "the rendered error must still be on screen after the send settles, not " +
-    "wiped by an unconditional renderChat() rebuild");
-  assert.equal(conv.messages.length, 1,
-    "no blank assistant turn was persisted for the failed send");
+    "the rendered error must still be on screen after the send settles");
+  assert.equal(conv.messages.length, 2);
+  assert.equal(conv.messages[1].failureNote, true,
+    "the error is saved as a failure note, never as a reply");
 });
 
 test("a long detail is shown parsed, not raw JSON markup or truncated mid-word", async () => {
@@ -60,7 +67,7 @@ test("a long detail is shown parsed, not raw JSON markup or truncated mid-word",
     "config n_gpu_layers_auto true\n    - Let localm auto-size the context:  " +
     "localm config ctx_auto true";
   const { window } = await setup(longDetail);
-  const conv = textConv();
+  const conv = activate(window, textConv());
 
   await window.runCompletion(conv);
 

@@ -34,6 +34,7 @@ Ask questions and have conversations with the model. The model can access docume
 - Streaming responses with markdown and syntax highlighting. Copy buttons on all messages and code blocks.
 - Parameters drawer (click the settings icon) controls temperature and system prompt per conversation, plus web access, memory, and knowledge toggles. Top-p, top-k, repeat penalty, max tokens, seed, and a GBNF grammar box sit behind an **Advanced** fold so the drawer leads with what you actually touch; it opens itself if a persona or a restored setting fills one of those fields in.
 - Search box (in the sidebar) filters chats by title and message content; hover to pin-to-top or move-to-folder. `/pin` and `/folder <name>` do the same from the composer.
+- A message sent while a reply is running, or while the model is still loading, is queued and shown as *Queued* below the chat, and is sent when the reply finishes or the model has loaded. After a stopped or failed reply the queue waits: press Send with an empty box to send it.
 - Branching: regenerating a reply keeps the old one as a variant. Editing a message forks the conversation instead of deleting what followed. A control in the message meta shows which branch you are viewing.
 - A reply containing a self-contained HTML or SVG block gets a canvas button that renders it in a sandboxed frame with no network access and no access to the app; an artifact that tries to load another page in the frame is closed, and Re-render shows it again. On by default; Settings > Model can turn it off entirely or restrict it to owner sessions (see Settings below).
 - Session persistence follows your session mode: `privacy` (default, memory only, vanishes on reload), `log` (saved to `sessions/` in the data directory, survives reloads and server restarts), `full` (log plus markdown transcript). The page you were on is restored after reload (except in privacy mode).
@@ -46,7 +47,7 @@ Ask questions and have conversations with the model. The model can access docume
 - `/persona <name>` - apply a saved persona (system prompt + sampling values).
 - `/clear` - clear this chat.
 - `/compact` - compact old turns to free context.
-- `/export` - download the conversation as markdown.
+- `/export` - download the conversation as markdown: each reply names the model that wrote it, its reasoning is set apart as a quote, and the chat's other branches (edited messages, regenerated replies) follow at the end.
 - `/rename <title>` - rename this chat.
 - `/new` - start a new chat.
 - `/system` - edit the system prompt.

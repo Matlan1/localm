@@ -130,7 +130,7 @@ test("requestWebTool: a provider failure inside the bundle takes the failure pat
   const { window: w } = loadApp({ fetchImpl: impl });
   await assert.rejects(
     w.requestWebTool({ name: "web_search", args: { query: "x" } }),
-    /Search failed: RuntimeError: backend rate-limited/);
+    (e) => e.message === "RuntimeError: backend rate-limited");
 });
 
 test("requestWebTool: fetched page text is stored on the event and fenced at assembly", async () => {
@@ -640,8 +640,8 @@ test("/web: a provider failure is reported as a failed search, not as results", 
     untrusted_fields: ["prompt_text", "search_error"],
   }));
   assert.equal(webMsg.status, "failed");
-  assert.equal(webMsg.error, "Search failed: RuntimeError: backend rate-limited");
-  assert.match(webText, /^\[Web request failed: Search failed: RuntimeError: backend rate-limited\] This lookup returned no information\./);
+  assert.equal(webMsg.error, "RuntimeError: backend rate-limited");
+  assert.match(webText, /^\[Web request failed: RuntimeError: backend rate-limited\] This lookup returned no information\./);
   assert.doesNotMatch(webText, /Answer without the web/,
     "a failed lookup must not invite an answer from the model's own knowledge");
   assert.match(webText, /Do not describe, simulate or guess what it would have found/);

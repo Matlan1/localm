@@ -85,9 +85,11 @@ test("an in-stream refusal is shown once, as an error, and not saved as a reply"
   const detail = "Failed to load the model: weights missing";
   const { window, doc } = setup([refusal(503, detail)]);
   const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  activateConv(window, conv);
   await window.runCompletion(conv);
   const body = doc.getElementById("chat-messages").textContent;
   assert.equal(body.split(detail).length - 1, 1, "the detail appears exactly once");
+  assert.equal(conv.messages[conv.messages.length - 1].failureNote, true, "the error is saved as a failure note");
   assert.match(body, /error: 503/);
 });
 

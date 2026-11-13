@@ -1383,6 +1383,9 @@ export function looksLikeActionAnnouncement(text) {
 /** The grounding states an evidence bundle can carry (web_retrieval). */
 export const GROUNDING_PAGE_BACKED = "page-backed";
 
+/** The error a web lookup stopped by the person's Stop carries. */
+export const WEB_STOPPED_ERROR = "stopped by the user before it returned";
+
 export const WEB_FAILED_INSTRUCTION =
   "This lookup returned no information. Tell the user plainly that it " +
   "failed. Do not describe, simulate or guess what it would have found, and " +
@@ -1430,18 +1433,20 @@ export function toolEventPrompt(ev) {
  *  search status and error, grounding, grounding summary, sources, chunks
  *  and prompt text; fetch_url reads one page and returns page {url, text,
  *  truncated}. Throws on a refused request, a transport failure or a
- *  provider failure reported inside the bundle. */
-export async function requestWebTool(call) {
+ *  provider failure reported inside the bundle (the error's message is the
+ *  bundle's own sentence, with no prefix). *signal*, when given, aborts the
+ *  request (an AbortError is thrown). */
+export async function requestWebTool(call, signal = undefined) {
   const a = call.args || call.arguments || {};
   if (call.name === "web_search") {
     const r = await fetch("/api/web/retrieve", {
       method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ query: a.query || "" }),
+      body: JSON.stringify({ query: a.query || "" }), signal,
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.search_status === "failed") {
-      throw new Error("Search failed: " + (data.search_error || "no results"));
+      throw new Error(data.search_error || "The search found no results.");
     }
     return {
       tool: "search", status: "done", query: a.query || "",
@@ -1458,7 +1463,7 @@ export async function requestWebTool(call) {
   if (call.name === "fetch_url") {
     const r = await fetch("/api/web/fetch", {
       method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ url: a.url || "", max_chars: 6000 }),
+      body: JSON.stringify({ url: a.url || "", max_chars: 6000 }), signal,
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -1502,8 +1507,10 @@ export function webNoteEvent(reason, note) {
  *  edit meanwhile), then complete it with the result or the failure (so the
  *  model can adapt) and save. *extraNote* is stored as the event's note, so
  *  the user/assistant alternation the chat templates expect is unchanged, and
- *  *reason*, when given, as the event's reason. Returns the completed event. */
-export async function runWebCall(conv, call, extraNote = "", reason = "") {
+ *  *reason*, when given, as the event's reason. *signal* (the turn's) stops
+ *  the request: the event then fails with WEB_STOPPED_ERROR and nothing is
+ *  toasted. Returns the completed event. */
+export async function runWebCall(conv, call, extraNote = "", reason = "", signal = undefined) {
   const a = call.args || call.arguments || {};
   const ev = newToolEvent({
     tool: call.name === "fetch_url" ? "fetch" : "search",
@@ -1515,11 +1522,15 @@ export async function runWebCall(conv, call, extraNote = "", reason = "") {
   chat.webCall = ev;
   renderChat();
   try {
-    Object.assign(ev, await requestWebTool(call));
+    Object.assign(ev, await requestWebTool(call, signal));
   } catch (e) {
     ev.status = "failed";
-    ev.error = e.message;
-    toast(t("web.requestFailedToast", { message: e.message }), true);
+    if (e.name === "AbortError" || (signal && signal.aborted)) {
+      ev.error = WEB_STOPPED_ERROR;
+    } else {
+      ev.error = e.message;
+      toast(t("web.requestFailedToast", { message: e.message }), true);
+    }
   } finally {
     chat.webCall = null;
   }
@@ -1582,6 +1593,21 @@ export function blobToB64(blob) {
   });
 }
 
+/** How a download job ended, from streamJob's end event *end* and the last
+ *  line *lastLine* it printed: `{state: "done"}`, `{state: "cancelled"}`, or
+ *  `{state: "failed", reason}` where *reason* is the text of an
+ *  "error: ..." last line, else *fallback* (a last line that is not an error
+ *  line is progress, never a reason). A done job whose last line is an error
+ *  line counts as failed. */
+export function downloadJobOutcome(end, lastLine, fallback) {
+  const line = String(lastLine || "").trim();
+  const errorLine = /^error:/i.test(line);
+  const status = end && end.status;
+  if (status === "done" && !errorLine) return { state: "done" };
+  if (status === "cancelled") return { state: "cancelled" };
+  return { state: "failed", reason: (errorLine && line.replace(/^error:\s*/i, "")) || fallback };
+}
+
 /** One-time "continue anyway" for a Whisper download blocked by net_mode=ask:
  *  the server re-checks the caller's config:write scope and refuses under
  *  net_mode=off; nothing is persisted - net_mode stays as configured for
@@ -1602,10 +1628,9 @@ export async function downloadVoiceModel() {
       toast(t("voice.downloadingToast"));
       let lastLine = "";
       const end = await streamJob(data.job_id, (line) => { lastLine = line; });
-      if (end.status !== "done" || /^error:/i.test(lastLine)) {
-        throw new Error(lastLine.replace(/^error:\s*/i, "")
-                        || t("voice.downloadIncomplete"));
-      }
+      const outcome = downloadJobOutcome(end, lastLine, t("voice.downloadIncomplete"));
+      if (outcome.state === "cancelled") { toast(t("voice.downloadCancelledToast")); return; }
+      if (outcome.state === "failed") throw new Error(outcome.reason);
     }
     toast(t("voice.readyToast"));
   } catch (e) {
@@ -1628,20 +1653,19 @@ export async function toggleMic() {
     // authorize it (config:write / open mode). Offer the one-time download -
     // the "continue anyway" of the network-policy override; nothing persisted.
     if (voice.canDownload) { downloadVoiceModel(); return; }
-    toast(voice.reason || t("voice.notInstalledShort"), true);
+    toast(voice.reason || t("voice.notInstalledReason"), true);
     return;
   }
-  if (!voice.modelCached) {
-    // Transcription is fully local, but the FIRST use fetches the Whisper
-    // model from HuggingFace - make that one network access explicit. (Only
-    // reachable under net_mode=allow: any other mode already reports
-    // available=false + can_download above.)
-    if (!confirm(
-        t("voice.firstUseConfirm", { model: voice.model }))) return;
-    voice.modelCached = true;   // consent given - don't re-ask this session
-  }
+  // Transcription is fully local, but the FIRST use fetches the Whisper model
+  // from HuggingFace: that one network access is confirmed first. (Only
+  // reachable under net_mode=allow: any other mode already reports
+  // available=false + can_download above.) The consent is kept for this
+  // session once the microphone is granted.
+  if (!voice.modelCached &&
+      !confirm(t("voice.firstUseConfirm", { model: voice.model }))) return;
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-    toast(t("voice.noRecording"), true);
+    // A browser hides the microphone on a plain-http address other than localhost.
+    toast(t(window.isSecureContext === false ? "voice.needsSecureAddress" : "voice.noRecording"), true);
     return;
   }
   let stream;
@@ -1651,6 +1675,7 @@ export async function toggleMic() {
     toast(t("voice.micUnavailable", { message: e.message }), true);
     return;
   }
+  voice.modelCached = true;
   voice.chunks = [];
   voice.rec = new MediaRecorder(stream);
   voice.rec.ondataavailable = (e) => { if (e.data.size) voice.chunks.push(e.data); };
@@ -1715,13 +1740,30 @@ export function selectedBrowserVoice() {
   return speechSynthesis.getVoices().find((v) => v.name === want) || null;
 }
 
-/** Read text aloud. With toggle: true (the speak action) a second call stops
- *  instead; auto-speak replaces the current utterance. opts.onEnd, if given,
- *  fires when THIS utterance stops (naturally, interrupted, or errored) -
- *  never when this call only stopped a prior one. Returns whether a new
- *  utterance actually started. */
+/** *text* (Markdown) as the words to read aloud: reasoning and the speech
+ *  prefix removed, code fences, inline code ticks, emphasis markers,
+ *  heading and quote marks, list bullets and link or image syntax dropped
+ *  (a link reads as its label). Characters inside words and in plain text,
+ *  such as the "_" of snake_case or parentheses, are kept. */
+export function speechText(text) {
+  return stripAsrPrefix(stripThink(text))
+    .replace(/^[ \t]*(```|~~~).*$/gm, " ")
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/`+/g, "")
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
+    .replace(/^[ \t]*(?:>[ \t]?)+/gm, "")
+    .replace(/^[ \t]*[*+-][ \t]+/gm, "")
+    .replace(/(^|[^\p{L}\p{N}*_])(\*{1,3}|_{1,3})(?=\S)([^\n]{0,500}?\S)\2(?![\p{L}\p{N}*_])/gu, "$1$3")
+    .trim();
+}
+
+/** Read text aloud (as speechText). With toggle: true (the speak action) a
+ *  second call stops instead; auto-speak replaces the current utterance.
+ *  opts.onEnd, if given, fires when THIS utterance stops (naturally,
+ *  interrupted, or errored) - never when this call only stopped a prior one.
+ *  Returns whether a new utterance actually started. */
 export function speak(text, opts = {}) {
-  const clean = stripAsrPrefix(stripThink(text)).replace(/[*_`#>[\]()]/g, " ").trim();
+  const clean = speechText(text);
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
       ttsProvider.stop();
@@ -1989,17 +2031,14 @@ export async function refreshPluginCommands() {
     // endpoint is configured (otherwise the report is saved-to-file + emailed).
     const bugUp = $("bug-upload");
     if (bugUp) bugUp.hidden = !data.bugreport_upload;
-    // Reveal the app-update sub-block (inside the merged "Updates" card, and
-    // holding the update-behavior toggles) and the Issues card only when their
-    // proxy surfaces are configured. The Updates card itself is never hidden
-    // here - the runtime-update block it also holds stays visible regardless. On
-    // startup, a single throttled, quiet update check surfaces a banner - it
-    // NEVER applies anything (apply is always an explicit click).
-    const upBlock = $("app-update-block");
-    if (upBlock) {
-      upBlock.hidden = !data.update_available;
-      if (data.update_available) maybeAutoUpdateCheck();
-    }
+    // The app-update sub-block (inside the "Updates" card, holding the
+    // update-behavior toggles) shows only when an update server is set; when
+    // it is hidden, a note in its place says so. The Updates card itself is
+    // never hidden here: its runtime-update block stays visible regardless.
+    // On startup a single throttled, quiet update check runs; it never applies
+    // anything (apply is always an explicit click).
+    syncAppUpdateBlock(!!data.update_available);
+    if (data.update_available) maybeAutoUpdateCheck();
     // The rollback sub-block is probed UNCONDITIONALLY, not under update_available:
     // a backup left by an earlier update outlives the proxy configuration that
     // block is gated on, and the probe is a read-only local check that reveals
@@ -2014,15 +2053,38 @@ export async function refreshPluginCommands() {
   finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
 }
 
+/** Show the App update block when *available* (an update server is set),
+ *  else hide it and show, in its place, a note saying app updates are off
+ *  because no update server is set. */
+export function syncAppUpdateBlock(available) {
+  const upBlock = $("app-update-block");
+  if (!upBlock) return;
+  upBlock.hidden = !available;
+  let note = $("app-update-off-note");
+  if (!note && !available) {
+    note = el("div", "sub update-subsection");
+    note.id = "app-update-off-note";
+    note.dataset.i18n = "settings.update.notConfiguredNote";
+    note.textContent = t("settings.update.notConfiguredNote");
+    upBlock.parentNode.insertBefore(note, upBlock);
+  }
+  if (note) note.hidden = available;
+}
+
 // One quiet update check per ~6h (a startup auto-surface). Calls the check only -
-// never applies. Defined here; the actual fetch lives in pages.js (window hook).
-export function maybeAutoUpdateCheck() {
+// never applies. Defined here; the actual fetch lives in pages/models.js (window
+// hook). When the check offers a newer build to install (its Update button is
+// shown), a toast says where to install it.
+export async function maybeAutoUpdateCheck() {
   try {
     const last = +(localStorage.getItem("localm.updateCheckAt") || 0);
     if (Date.now() - last < 6 * 3600 * 1000) return;
     localStorage.setItem("localm.updateCheckAt", String(Date.now()));
   } catch { /* storage blocked: just check */ }
-  if (typeof window.__localmUpdateCheck === "function") window.__localmUpdateCheck();
+  if (typeof window.__localmUpdateCheck !== "function") return;
+  await window.__localmUpdateCheck();
+  const apply = $("update-apply");
+  if (apply && !apply.hidden) toast(t("settings.update.foundToast"));
 }
 
 /** A "/cmd needs the X plugin" hint when *cmd* belongs to a known first-party
@@ -2213,13 +2275,22 @@ export function reconcileActiveView() {
 /* ---- assistant memory ---- */
 
 export const memory = { text: "", writable: false, corrections: [],
-                         canDownloadEmbedder: false, embedderModel: null };
+                         canDownloadEmbedder: false, embedderModel: null,
+                         readError: null };
 
+/** Re-read memory from GET /api/memory into `memory`. A failed read leaves
+ *  the last values and sets `memory.readError` to `{status, detail}` (status
+ *  0 when the server could not be reached); a successful read clears it. */
 export async function refreshMemory() {
   try {
     const r = await fetch("/api/memory", { headers: authHeaders() });
-    if (!r.ok) return;
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      memory.readError = { status: r.status, detail: (body && body.detail) || r.statusText || "" };
+      return;
+    }
     const data = await r.json();
+    memory.readError = null;
     memory.text = data.text || "";
     memory.writable = !!data.writable;
     // Pending supersede proposals: the system spotted a later statement that
@@ -2229,7 +2300,19 @@ export async function refreshMemory() {
     // embedding model, and this caller could fetch it in one click.
     memory.canDownloadEmbedder = !!data.can_download_embedder;
     memory.embedderModel = data.embedder_model || null;
-  } catch { /* server unreachable */ }
+  } catch (e) {
+    memory.readError = { status: 0, detail: e.message || "" };
+  }
+}
+
+/** The dialog sentence for a failed memory read *err* (`memory.readError`):
+ *  a key without the memory scope, a memory plugin that is not active, an
+ *  unreachable server, or the server's own reason. */
+export function memoryReadErrorText(err) {
+  if (err.status === 403) return t("memory.modal.noScope");
+  if (err.status === 404) return t("memory.modal.notActive");
+  if (err.status === 0) return t("memory.modal.unreachable");
+  return t("memory.modal.readFailed", { message: err.detail || String(err.status) });
 }
 
 function _relAge(tsSeconds) {
@@ -2286,7 +2369,7 @@ export async function rememberFact(fact) {
 export function memoryConversation(conv = currentConv()) {
   const rows = [];
   for (const m of (conv && conv.messages) || []) {
-    if (isToolEvent(m) || m.origin === "tool" || m.bridge) continue;
+    if (isToolEvent(m) || m.origin === "tool" || m.bridge || m.failureNote) continue;
     if (m.role === "user") {
       if (m.tag === "kb" || m.tag === "doc") continue;
       rows.push({ role: "user", content: msgText(m) });
@@ -2313,11 +2396,13 @@ export async function synthesizeMemoryNow(statusEl) {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshMemory();
     const n = data.added || 0;
-    const msg = data.status === "skipped"
-      ? t(data.reason === "privacy" ? "memory.synth.privacy" : "memory.synth.nothingNew")
+    let msg = data.status === "skipped"
+      ? t("memory.synth.nothingNew")
       : (n ? tn("memory.synth.added", n) : t("memory.synth.noFacts"));
+    // The run's eviction warning: facts dropped at the memory size cap.
+    if (data.warning) msg += " " + t("memory.synth.evicted", { warning: data.warning });
     if (statusEl) statusEl.textContent = msg;
-    toast(msg);
+    toast(msg, !!data.warning);
     return data;
   } catch (e) {
     const msg = t("memory.synth.failed", { message: e.message });
@@ -2339,12 +2424,17 @@ export async function downloadMemoryEmbedder(btn) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.job_id) {
+      let lastLine = "";
       const end = await streamJob(data.job_id, (text) => {
         const line = String(text || "").trim();
-        if (btn && line) btn.textContent = line;
+        if (line) lastLine = line;
+        if (btn && line && !/^error:/i.test(line)) btn.textContent = line;
       });
-      success = end.status === "done";
-      toast(t(success ? "memory.embedder.ready" : "memory.embedder.incomplete"), !success);
+      const outcome = downloadJobOutcome(end, lastLine, t("memory.embedder.incomplete"));
+      success = outcome.state === "done";
+      if (success) toast(t("memory.embedder.ready"));
+      else if (outcome.state === "cancelled") toast(t("memory.embedder.cancelled"));
+      else toast(t("memory.embedder.downloadFailed", { message: outcome.reason }), true);
     } else {
       success = true;                    // already installed
       toast(t("memory.embedder.alreadyInstalled"));
@@ -2364,8 +2454,10 @@ export async function openMemoryModal() {
   await refreshMemory();
   let base = memory.text;
   openModal(t("memory.modal.title"), (body) => {
-    body.appendChild(el("div", "sub",
-      t(memory.writable ? "memory.modal.writable" : "memory.modal.readOnly")));
+    const readError = memory.readError;
+    body.appendChild(el("div", readError ? "sub key-warn" : "sub",
+      readError ? memoryReadErrorText(readError)
+        : t(memory.writable ? "memory.modal.writable" : "memory.modal.readOnly")));
     if (memory.canDownloadEmbedder) {
       const hint = el("div", "sub", t("memory.embedder.hint", { model: memory.embedderModel }));
       hint.style.marginTop = "6px";
@@ -2692,8 +2784,19 @@ export function parseMemoryHeader(resp) {
   } catch { return null; }
 }
 
+/** Save *text* (Markdown) as a failure note of *conv*: an assistant row
+ *  flagged `failureNote` that the transcript shows and keeps across a reload,
+ *  and that no request, continue or memory pass reads. Then redraw. */
+export function saveFailureNote(conv, text) {
+  conv.messages.push({ role: "assistant", content: text, failureNote: true });
+  saveConversations(conv);
+  renderChat();
+}
+
 /** Runs one reply round (plus any web-loop rounds) and returns `{ stopped,
- *  liveRow }`: `stopped` is true when Stop aborted the turn, `liveRow` is the
+ *  failed, liveRow }`: `stopped` is true when Stop aborted the turn, `failed`
+ *  when it ended in a failure (a refused or broken request, a failed or cut
+ *  generation, a pinned model that is gone), `liveRow` is the
  *  assistant bubble this round streamed into. Called outside a turn (no
  *  chat.busy/chat.abort), it runs itself as a turn through runChatTurn; inside
  *  one it uses the turn's AbortController (chat.abort) for compaction and the
@@ -2751,9 +2854,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // The model this request asks for; earlier turns' images and clips it
   // refused are left out of the request (wireParts).
   const askedModel = pinnedModelName(conv) || modelSelect.value || modelCache.active;
+  // A saved failure note is shown in the transcript and never sent.
+  const history = conv.messages.filter((m) => !m.failureNote);
   let lastUserIdx = -1;
-  conv.messages.forEach((m, i) => { if (m.role === "user" && !isToolEvent(m)) lastUserIdx = i; });
-  const mapped = conv.messages.map((m, i) => {
+  history.forEach((m, i) => { if (m.role === "user" && !isToolEvent(m)) lastUserIdx = i; });
+  const mapped = history.map((m, i) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
       return { role: "user", content, origin: "tool", own: [],
@@ -2769,7 +2874,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // raw tool-call text in any dialect, no display markers, and the call it
     // made in canonical form only when a web tool event answered it.
     if (m.role === "assistant" && typeof m.content === "string") {
-      const next = conv.messages[i + 1];
+      const next = history[i + 1];
       const answered = isToolEvent(next) && next.tool !== "note";
       let text = assistantHistoryText(m.content, answered);
       // A failed reply that the next message continues is sent without its
@@ -2879,8 +2984,6 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
-  document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
-
   let full = "";
   let reasoning = "";   // H4: <think> reasoning now streams in delta.reasoning_content
   let usage = null;
@@ -2890,6 +2993,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let audioRejected = false;
   let mediaOffer = null;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
+  let requestError = "";   // its message
   let pinGone = false;   // the chat's pinned model is no longer registered
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
@@ -3125,15 +3229,19 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         mediaOffer = { suggest, reason: e.routing.askReason || "" };
         toast(t("chat.vision.rejectedSuggest", { model: modelName, suggest }), true);
       } else {
+        // The server's own sentence follows: it names the models in the
+        // library that can read images, or how to get one.
         toast(n
           ? t(pinnedModel ? "chat.vision.rejectedPinned" : "chat.vision.rejectedNoModel",
-              { model: modelName })
+              { model: modelName }) +
+            (e.detail ? "\n\n" + t("chat.vision.serverDetail", { detail: e.detail }) : "")
           : t("chat.requestFailed", { message: e.message }), true);
       }
     } else if (pinnedModel && e.status === 404 && /not registered/i.test(e.detail || "")) {
       pinGone = true;
     } else {
       requestFailed = true;
+      requestError = e.message;
       renderMarkdown(liveBody, full + "\n\n*[error: " + localizeServerNotes(e.message) + "]*");
       toast(t("chat.requestFailed", { message: e.message }), true);
       const suggest = !pinnedModel && e.routing && e.routing.suggested;
@@ -3146,7 +3254,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // A compacted reply that was read to its end (or cut at its first tool call)
   // marks the conversation as server-compacted unless the reply failed.
   if (serverCompacted && readOk && finishReason !== "error") conv.serverCompacted = true;
-  const outcome = { stopped: aborted, liveRow };
+  // A failed turn leaves the queued messages where they are (runChatTurn).
+  const outcome = { stopped: aborted, liveRow,
+                    failed: pinGone || requestFailed || finishReason === "error" ||
+                      (readOk && !finishReason && !aborted) };
   if (pinGone) {
     renderChat();
     outcome.liveRow = showPinnedGone(conv);
@@ -3217,27 +3328,24 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   if (!full.trim() && !reasoning.trim()) {
     if (finishReason === "error") {
-      // The server reported a failed generation without any visible text:
-      // leave a failure marker in the live bubble and persist nothing.
-      renderMarkdown(liveBody, "*[" + t("chat.reply.generationFailed") + "]*");
+      // The server reported a failed generation without any visible text.
+      saveFailureNote(conv, "*[" + t("chat.reply.generationFailed") + "]*");
       toast(t("chat.reply.failedNothingToast"), true);
+      outcome.liveRow = null;
       return outcome;
     }
     if (requestFailed) {
-      // A generic failure (e.g. a 400 before any token streamed) already
-      // rendered "*[error: ...]*" into the live bubble above. renderChat()
-      // rebuilds #chat-messages purely from conv.messages, which never
-      // received this failed turn - calling it here would silently wipe the
-      // only visible trace of the error the moment the toast auto-dismisses.
-      // Leave the rendered error bubble in place instead.
-      if (mediaOffer) outcome.liveRow = showMediaOffer(conv, mediaOffer);
+      // A generic failure (e.g. a 400 before any token streamed): the error
+      // the live bubble showed is saved as a failure note.
+      saveFailureNote(conv, "*[error: " + localizeServerNotes(requestError) + "]*");
+      outcome.liveRow = mediaOffer ? showMediaOffer(conv, mediaOffer) : null;
       return outcome;
     }
     if (!finishReason) {
-      // The stream ended with no finish reason and no text: the live bubble
-      // keeps a cut-off marker and nothing is persisted.
-      renderMarkdown(liveBody, "*[" + t("chat.reply.cutEmpty") + "]*");
+      // The stream ended with no finish reason and no text.
+      saveFailureNote(conv, "*[" + t("chat.reply.cutEmpty") + "]*");
       toast(t("chat.reply.cutToast"), true);
+      outcome.liveRow = null;
       return outcome;
     }
     // A successful-but-empty completion: no error to show, just drop the
@@ -3364,7 +3472,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       web.formatRepairs = 0;
       // The ignored-call notice rides on the RESULT message, and only here.
       const ignored = ignoredCallsNote(webCalls);
-      const ev = await runWebCall(conv, nextCall, ignored, ignored ? "ignored" : "");
+      const ev = await runWebCall(conv, nextCall, ignored, ignored ? "ignored" : "", signal);
+      if (signal.aborted) return { stopped: true, liveRow: null };
       if (webEventHasEvidence(ev)) web.evidence = true;
       web.stale = webEventAddsNew(ev, web.found) ? 0 : web.stale + 1;
       if (web.stale >= WEB_MAX_STALE_ROUNDS) web.final = true;
@@ -3490,7 +3599,7 @@ export function lastReplyIndex(conv) {
   const ms = (conv && conv.messages) || [];
   for (let i = ms.length - 1; i >= 0; i--) {
     const m = ms[i];
-    if (m.tag || isToolEvent(m)) continue;
+    if (m.tag || isToolEvent(m) || m.failureNote) continue;
     return m.role === "assistant" ? i : -1;
   }
   return -1;
@@ -3635,15 +3744,30 @@ export async function refreshKbSelect() {
   } catch { /* server unreachable - selector stays as-is */ }
 }
 
+/** Drop the queued messages whose conversation no longer exists (deleted, or
+ *  wiped by a switch to privacy mode). A message queued with no conversation
+ *  id is kept. */
+export function pruneChatQueue() {
+  const live = new Set(chat.conversations.filter((c) => !c.deleted).map((c) => c.id));
+  const kept = chat.queue.filter((item) => !item.convId || live.has(item.convId));
+  if (kept.length !== chat.queue.length) chat.queue.splice(0, chat.queue.length, ...kept);
+}
+
+/** Draw the queued messages of the open conversation below its transcript
+ *  (none when no conversation is open), after dropping the queued messages
+ *  of conversations that no longer exist; then sync the transcript's
+ *  branch controls with the busy state. */
 export function renderQueuedIndicator() {
   const existing = document.querySelectorAll(".msg-row.queued");
   existing.forEach((el) => el.remove());
+  syncMessageActions();
+  pruneChatQueue();
   const box = $("chat-messages");
-  if (!box || !chat.queue.length) return;
   const conv = currentConv();
+  if (!box || !chat.queue.length || !conv) return;
   for (let i = 0; i < chat.queue.length; i++) {
     const item = chat.queue[i];
-    if (item.convId && conv && item.convId !== conv.id) continue;
+    if (item.convId && item.convId !== conv.id) continue;
     const { row } = addMessageRow(box, "user", item.text, {
       cls: "user queued",
       label: (chat.userName || t("chat.row.you")) + " (" + t("chat.queuedBadge") + ")",
@@ -3681,23 +3805,25 @@ export async function processChatQueue() {
  *  `work(signal)` settles; every phase (knowledge retrieval, compaction,
  *  streaming, web rounds) uses that one signal. Afterwards it clears both,
  *  restores Send and re-renders the transcript, keeping an unsaved live
- *  bubble (an error or an empty stopped reply) on screen. A finished turn
- *  then dispatches the next queued message; a stopped turn leaves the queue
- *  as it is. Returns `{ stopped }`. */
+ *  bubble (a media offer or an empty stopped reply) on screen. While the turn
+ *  runs, Send is a stop button titled as one and the transcript's edit,
+ *  revert, regenerate and branch controls are left out or disabled. A
+ *  finished turn then dispatches the next queued message; a stopped or
+ *  failed turn (`out.failed`) leaves the queue as it is. Returns
+ *  `{ stopped, failed }`. */
 export async function runChatTurn(work) {
   const ctrl = new AbortController();
   chat.busy = true;
   chat.abort = ctrl;
   const sendBtn = $("chat-send");
-  if (sendBtn) {
-    sendBtn.classList.add("stop");
-    sendBtn.replaceChildren(iconEl("stop", "ic"));
-  }
-  document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = true));
+  setSendButtonMode(sendBtn, true);
+  renderChat();
   let stopped = false;
+  let failed = false;
   try {
     const out = await work(ctrl.signal);
     stopped = !!(out && out.stopped) || ctrl.signal.aborted;
+    failed = !!(out && out.failed);
     const liveRow = out && out.liveRow;
     const keep = liveRow && liveRow.isConnected ? liveRow : null;
     chat.busy = false;
@@ -3711,14 +3837,46 @@ export async function runChatTurn(work) {
   } finally {
     chat.busy = false;
     chat.abort = null;
-    if (sendBtn) {
-      sendBtn.classList.remove("stop");
-      sendBtn.replaceChildren(iconEl("send", "ic"));
-    }
-    document.querySelectorAll(".message-actions button").forEach((b) => (b.disabled = false));
-    if (!stopped) processChatQueue();
+    setSendButtonMode(sendBtn, false);
+    syncMessageActions();
+    if (!stopped && !failed) processChatQueue();
   }
-  return { stopped };
+  return { stopped, failed };
+}
+
+/** Show *btn* (the composer's Send) as the stop button of a running turn
+ *  when *running*, else as Send: its icon, its class and its title, whose
+ *  catalog key follows so a language switch keeps it right. */
+export function setSendButtonMode(btn, running) {
+  if (!btn) return;
+  btn.classList.toggle("stop", running);
+  btn.replaceChildren(iconEl(running ? "stop" : "send", "ic"));
+  const key = running ? "chat.stopReply" : "chat.send";
+  btn.dataset.i18nTitle = key;
+  btn.title = t(key);
+}
+
+/** Disable the branch arrows of the transcript while a reply runs (chatBusy)
+ *  and enable them otherwise. Rows rendered during a turn already leave out
+ *  edit, revert and regenerate (renderChat). Queued rows are not touched. */
+export function syncMessageActions() {
+  const busy = chatBusy();
+  document.querySelectorAll("#chat-messages .msg-row:not(.queued) .msg-meta .variant button")
+    .forEach((b) => { b.disabled = busy; });
+}
+
+/** Whether *conv*'s title may be replaced by one made from a message: it is
+ *  the "New chat" placeholder or the title the app last set that way, not
+ *  one the person typed (a rename sets another title). */
+export function chatTitleIsAutomatic(conv) {
+  return !conv.title || conv.title === "New chat" ||
+    (typeof conv.autoTitle === "string" && conv.title === conv.autoTitle);
+}
+
+/** Set *conv*'s title to *title* as an automatic one (chatTitleIsAutomatic). */
+export function setAutomaticChatTitle(conv, title) {
+  conv.title = title;
+  conv.autoTitle = title;
 }
 
 export async function dispatchChatTurn(conv, text, attachments = [], docs = [], clips = []) {
@@ -3749,9 +3907,9 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   conv.messages.push(continues ? { role: "user", content, continues: true }
                                : { role: "user", content });
 
-  if (isFirstMessage) {
-    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") ||
-      (hasClips ? clips[0].name.slice(0, 42) : "Document chat");
+  if (isFirstMessage && chatTitleIsAutomatic(conv)) {
+    setAutomaticChatTitle(conv, text.slice(0, 42) + (text.length > 42 ? "…" : "") ||
+      (hasClips ? clips[0].name.slice(0, 42) : "Document chat"));
     renderConvList();
   }
   saveConversations(conv);
@@ -3814,22 +3972,22 @@ export async function sendChat() {
     return;
   }
 
-  if (refuseWithoutModel()) return;
+  // A send while the model loads waits for the load, shown as a queued message.
+  const waitForLoad = !modelCache.active && !modelCache.resumable && !!modelCache.loading;
+  if (!waitForLoad && refuseWithoutModel()) return;
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
 
-  if (!(await resolvePinnedModel(conv))) {
-    showPinnedGone(conv);
-    return;
-  }
-
+  // The composer is emptied before the pinned-model check, so a second Enter
+  // meanwhile finds nothing to send twice; a refused check gives it back.
   const item = {
     text,
     attachments: [...chat.attachments],
     docs: [...chat.docs],
     clips: [...chat.clips],
     convId: conv.id,
+    seq: ++_sendSeq,
   };
   chat.attachments = [];
   chat.docs = [];
@@ -3840,22 +3998,91 @@ export async function sendChat() {
     autoGrow(input);
   }
 
-  if (chatBusy()) {
-    chat.queue.push(item);
+  _sendsPending.add(item.seq);
+  let pinnedOk;
+  try {
+    pinnedOk = await resolvePinnedModel(conv);
+  } finally {
+    _sendsPending.delete(item.seq);
+  }
+  if (!pinnedOk) {
+    restoreComposer(item);
+    showPinnedGone(conv);
+    // A later send queued behind this one is not left waiting for it.
+    dispatchQueuedWhen("afterSend");
+    return;
+  }
+
+  if (waitForLoad) {
+    item.waitForLoad = true;
+    queueInOrder(item);
+    toast(t("chat.queuedUntilLoaded", { model: modelCache.loading }));
+    renderQueuedIndicator();
+    return;
+  }
+
+  if (chatBusy() || [..._sendsPending].some((seq) => seq < item.seq)) {
+    if (!chatBusy()) item.afterSend = true;
+    queueInOrder(item);
     toast(t("chat.queuedToast"));
     renderQueuedIndicator();
     return;
   }
 
   // Older queued messages of this conversation go first.
-  if (chat.queue.some((q) => !q.convId || q.convId === conv.id)) {
-    chat.queue.push(item);
+  if (chat.queue.some((q) => (!q.convId || q.convId === conv.id) && !(q.seq > item.seq))) {
+    queueInOrder(item);
     await processChatQueue();
     return;
   }
 
   await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
 }
+
+// The order numbers of the sends that have emptied the composer and are still
+// checking the pinned model.
+const _sendsPending = new Set();
+// The order number of the last send, kept on its queued message as `seq`.
+let _sendSeq = 0;
+
+/** Queue *item* before every queued message of a later send. */
+function queueInOrder(item) {
+  const at = chat.queue.findIndex((q) => q.seq > item.seq);
+  if (at === -1) chat.queue.push(item);
+  else chat.queue.splice(at, 0, item);
+}
+
+/** Put a send's text and attachments back into the composer when the box is
+ *  still empty and nothing else was attached meanwhile. */
+function restoreComposer(item) {
+  const input = $("chat-input");
+  if (input && !input.value) {
+    input.value = item.text;
+    autoGrow(input);
+  }
+  if (!chat.attachments.length && !chat.docs.length && !chat.clips.length) {
+    chat.attachments = item.attachments;
+    chat.docs = item.docs;
+    chat.clips = item.clips;
+    renderAttachChips();
+  }
+}
+
+/** Dispatch the queue when the chat is idle, a model is active, no send is
+ *  checking its pinned model, and the open conversation's oldest queued
+ *  message carries the flag *flag*: "waitForLoad" (sent while the model
+ *  loaded) or "afterSend" (queued behind another send's pinned-model check). */
+function dispatchQueuedWhen(flag) {
+  if (!modelCache.active || chatBusy() || _sendsPending.size > 0) return;
+  const conv = currentConv();
+  if (!conv) return;
+  const next = chat.queue.find((item) => !item.convId || item.convId === conv.id);
+  if (next && next[flag]) processChatQueue();
+}
+
+/** After a model became active: dispatch a message sent while it loaded. */
+export function dispatchLoadWaiters() { dispatchQueuedWhen("waitForLoad"); }
+window.addEventListener("localm:active-model-changed", dispatchLoadWaiters);
 
 /** The exported-transcript label for message *m*: noteLabel's override
  *  (Web/Doc/Sources) when set, else the normal You/Model attribution by
@@ -3866,7 +4093,50 @@ export async function sendChat() {
  *  render as "You:" here either (NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-
  *  RESULTS-TO-USER). */
 function exportLabel(m) {
-  return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
+  if (noteLabel(m)) return noteLabel(m);
+  if (m.role === "user") return "You";
+  if (m.model === "MODEL") return modelCache.active || "Model";
+  return m.model || "Model";
+}
+
+/** The exported Markdown lines of message *m*: its label, then for a reply
+ *  with reasoning the reasoning as a quoted block under "Reasoning:", then
+ *  the text without reasoning tags, then the attachment counts. */
+function exportMessageLines(m) {
+  const lines = [`**${exportLabel(m)}:**`, ""];
+  let text = msgText(m);
+  if (m.role === "assistant" && !isToolEvent(m)) {
+    const think = splitThink(text).think;
+    text = stripAsrPrefix(stripThink(text));
+    if (think) {
+      lines.push("*Reasoning:*", "", ...think.split("\n").map((l) => "> " + l), "");
+    }
+  }
+  lines.push(text, "");
+  if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
+  if (msgAudioClips(m).length) lines.push(`*[${msgAudioClips(m).length} audio clip(s) attached]*`, "");
+  return lines;
+}
+
+/** Every timeline parked at a fork of *conv* other than the live one (edits,
+ *  regenerations), as arrays of messages, in fork order. */
+export function parkedBranches(conv) {
+  const out = [];
+  for (const rec of (conv && conv.branches) || []) {
+    (rec.tails || []).forEach((tail, i) => {
+      if (i !== rec.current && Array.isArray(tail) && tail.length) out.push(tail);
+    });
+  }
+  return out;
+}
+
+/** The export file name stem for *title*: letters and digits of any script,
+ *  "-", "_" and spaces (as "_") kept; "conversation" when nothing is left. */
+export function exportFileStem(title) {
+  let stem = String(title || "").replace(/[^\p{L}\p{N}\-_ ]+/gu, "").trim().replace(/\s+/g, "_") || "conversation";
+  // A Windows device name (con, nul, com1 ...) cannot be a file name there.
+  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(stem)) stem += "_chat";
+  return stem;
 }
 
 /** Every real message that a compaction archived, oldest first, walking
@@ -3887,10 +4157,18 @@ export function exportConversation() {
   const conv = currentConv();
   if (!conv || !conv.messages.length) { toast(t("chat.nothingToExport"), true); return; }
   const lines = [`# ${conv.title}`, ""];
-  for (const m of conv.messages) {
-    lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
-    if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
-    if (msgAudioClips(m).length) lines.push(`*[${msgAudioClips(m).length} audio clip(s) attached]*`, "");
+  for (const m of conv.messages) lines.push(...exportMessageLines(m));
+  // Timelines parked at a fork (an edited message, a regenerated reply).
+  const parked = parkedBranches(conv);
+  if (parked.length) {
+    lines.push("---", "",
+      `## Other branches (${parked.length})`,
+      "*Alternative timelines of this chat (an edited message or a regenerated "
+      + "reply), each from the message where it forks.*", "");
+    parked.forEach((tail, i) => {
+      lines.push(`### Branch ${i + 1}`, "");
+      for (const m of tail) lines.push(...exportMessageLines(m));
+    });
   }
   // Include alternative branches that compaction summarised away and archived
   // (chat.js pruneBranches -> conv.droppedBranches). This is what makes those
@@ -3904,9 +4182,7 @@ export function exportConversation() {
       + "and preserved here so they are not lost.*", "");
     dropped.forEach((tail, i) => {
       lines.push(`### Branch ${i + 1}`, "");
-      for (const m of (tail || [])) {
-        lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
-      }
+      for (const m of (tail || [])) lines.push(...exportMessageLines(m));
     });
   }
   // Messages that compaction replaced with a summary or trim note are archived
@@ -3918,14 +4194,9 @@ export function exportConversation() {
       `## Archived compacted messages (${archived.length})`,
       "*These older messages were replaced by a summary or trimmed by context "
       + "compaction and preserved here so they are not lost.*", "");
-    for (const m of archived) {
-      lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
-    }
+    for (const m of archived) lines.push(...exportMessageLines(m));
   }
-  let stem = conv.title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_") || "conversation";
-  // A Windows device name (con, nul, com1 ...) cannot be a file name there.
-  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(stem)) stem += "_chat";
-  const name = stem + ".md";
+  const name = exportFileStem(conv.title) + ".md";
   return saveTextFile(name, lines.join("\n"), "text/markdown");
 }
 
@@ -3972,10 +4243,22 @@ async function saveTextInApp(name, text) {
   }
 }
 
-$("chat-send").onclick = () => {
-  if (chat.abort) { chat.abort.abort(); return; }
+/** The composer's Send button: a click while a turn runs stops it. The
+ *  later clicks of the same multi-click (event.detail > 1) after a click
+ *  that stopped a turn send nothing, so a double click on Stop never sends a
+ *  queued message. */
+export function onSendButtonClick(e) {
+  if (chat.abort) {
+    chat.abort.abort();
+    _stopClicked = true;
+    return;
+  }
+  if (_stopClicked && e && e.detail > 1) return;
+  _stopClicked = false;
   sendChat();
-};
+}
+let _stopClicked = false;
+$("chat-send").onclick = onSendButtonClick;
 /** Enter sends, Shift+Enter inserts a newline, Ctrl/Cmd+Enter also sends.
  *  Skipped while an IME composition or the slash-command menu is active
  *  (the menu's own keydown handler picks the highlighted command).
@@ -4015,16 +4298,26 @@ $("p-web").addEventListener("change", () => {
 $("p-speak").addEventListener("change", () => {
   lsSetScoped("localm.speakAloud", $("p-speak").checked ? "1" : "0");
 });
-// The brain toggle drives the server-side memory_enabled config (single-user), so
-// injection is decided server-side and applies to every client. Persisted via
-// PATCH /v1/config (needs config:write; the owner GUI has it). hydrateChatToggles
-// restores the checkbox from config on boot.
-$("p-memory").addEventListener("change", () => {
-  fetch("/v1/config", {
-    method: "PATCH", headers: authHeaders(),
-    body: JSON.stringify({ memory_enabled: $("p-memory").checked }),
-  }).catch(() => { /* best-effort; a failed save just keeps the old value */ });
-});
+/** Save the memory checkbox *box* as the server's memory_enabled setting
+ *  (PATCH /v1/config, needs config:write). A refused or failed save puts the
+ *  box back and toasts the cause. Resolves whether the save took. */
+export async function saveMemoryToggle(box) {
+  const want = box.checked;
+  try {
+    const r = await fetch("/v1/config", {
+      method: "PATCH", headers: authHeaders(),
+      body: JSON.stringify({ memory_enabled: want }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText || String(r.status));
+    return true;
+  } catch (e) {
+    box.checked = !want;
+    toast(t("chat.memory.toggleFailed", { message: e.message }), true);
+    return false;
+  }
+}
+// hydrateChatToggles restores the checkbox from config on boot.
+$("p-memory").addEventListener("change", () => saveMemoryToggle($("p-memory")));
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
 $("compact-conv").onclick = async () => {

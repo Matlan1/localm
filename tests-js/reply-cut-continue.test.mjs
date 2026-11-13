@@ -116,12 +116,16 @@ test("a length stop keeps its own max-tokens marker, not the cut-off one", async
   assert.equal(reply.cut, undefined);
 });
 
-test("an empty stream with no finish reason leaves a marker and saves nothing", async () => {
+test("an empty stream with no finish reason leaves a marker saved as a failure note", async () => {
   const { window, doc } = setup([[]]);
   const conv = activate(window, { id: "c1", title: "t", messages: [{ role: "user", content: "explain" }] });
   await window.runCompletion(conv);
-  assert.equal(conv.messages.length, 1, "no assistant row is persisted");
+  assert.equal(conv.messages.length, 2);
+  const note = conv.messages[1];
+  assert.equal(note.failureNote, true, "only a failure note is saved, never a reply");
+  assert.equal(note.cut, undefined);
   assert.match(doc.getElementById("chat-messages").textContent, /ended before any text arrived/);
+  assert.equal(window.lastReplyIndex(conv), -1, "the note is never continued");
 });
 
 test("the cut-off flag survives the compaction archive copy", () => {

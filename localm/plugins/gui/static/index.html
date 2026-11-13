@@ -857,7 +857,7 @@
               <!-- Named, not placed: "the settings above" was the last positional
                    reference on the page (D3), and it is redundant now that the two
                    pairs of controls self-distinguish as "(next load)" vs
-                   "(running model)". -->
+                   "(saved; Apply reloads the model)". -->
               <div class="sub" data-i18n="settings.perf.help">Adjust the running model: how much of it is on the GPU,
               and how large its context window is. Apply saves these and reloads the running model
               with them. The VRAM figure is an estimate.</div>
@@ -875,12 +875,12 @@
                    sections above use (settings.js buildField). These four used to
                    merge the label and its description into one long <label>, which
                    read as a different app from the panels directly above them in
-                   the same nav group. The "(running model)" qualifiers distinguish
+                   the same nav group. The "(saved; Apply reloads the model)" qualifiers distinguish
                    them from Runtime & GPU's persisted "GPU layers (next load)". -->
-              <label for="perf-gpu-layers" data-i18n="settings.perf.gpuLayersLabel">GPU layers (running model)</label>
+              <label for="perf-gpu-layers" data-i18n="settings.perf.gpuLayersLabel">GPU layers (saved; Apply reloads the model)</label>
               <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
               <div class="sub" data-i18n="settings.perf.gpuLayersHelp">Model layers to run on the GPU (0-999). 99 lets Auto-size GPU layers from VRAM fit them to free VRAM; 999 puts every layer on the GPU.</div>
-              <label for="perf-ctx" data-i18n="settings.perf.ctxLabel">Starting context window (running model)</label>
+              <label for="perf-ctx" data-i18n="settings.perf.ctxLabel">Starting context window (saved; Apply reloads the model)</label>
               <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
               <!-- Content is fully owned by settings-perf.js's syncPerfCtxHelp() (a text
                    node + a <span id="perf-ctx-val"> live number + a trailing text node -

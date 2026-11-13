@@ -106,10 +106,12 @@ test("error: the failed status survives a reload", async () => {
     "after a reload the turn still renders as failed");
 });
 
-test("error with no content at all persists nothing and leaves a failure marker", async () => {
+test("error with no content at all saves only a failure note and shows the marker", async () => {
   const d = driver({ rounds: [{ deltas: [done("error")] }] });
   await d.window.runCompletion(d.conv);
-  assert.equal(d.conv.messages.length, 1, "no assistant turn saved when nothing was generated");
+  assert.equal(d.conv.messages.length, 2);
+  assert.equal(d.conv.messages[1].failureNote, true, "no assistant reply saved when nothing was generated");
+  assert.equal(d.conv.messages[1].failed, undefined);
   assert.match(d.window.document.getElementById("chat-messages").textContent, /generation failed/);
 });
 
