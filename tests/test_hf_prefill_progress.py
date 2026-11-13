@@ -174,6 +174,7 @@ def test_a_prefill_that_stops_reporting_is_still_caught(monkeypatch):
 
     child = threading.Thread(target=_child, daemon=True)
     child.start()
+    proc = r._proc
     with pytest.raises(RuntimeError) as exc:
         list(r.chat_stream(first_chunk_timeout=1.0, messages=[]))
     child.join(2)
@@ -181,4 +182,4 @@ def test_a_prefill_that_stops_reporting_is_still_caught(monkeypatch):
     assert "made no progress for 1s" in msg
     assert "'HuggingFace first-token timeout (s)'" in msg
     assert "hf_first_token_timeout_s" not in msg
-    assert r._proc.terminated
+    assert proc.terminated
