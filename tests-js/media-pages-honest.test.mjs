@@ -138,14 +138,16 @@ test("a music job started elsewhere is followed on the Music page", async () => 
     "/api/music/history": { tracks: [] },
   });
   runScript(win, `
-    globalThis.__followed = [];
-    streamJob = async (id, onLine) => { globalThis.__followed.push(id); onLine("adopted line");
+    streamJob = async (id, onLine) => { onLine("adopted " + id);
                                         return { status: "failed" }; };`);
   runScript(win, "refreshMusicHistory(); refreshMusicHistory();");
   await settle();
-  const music = [...win.__followed].filter((id) => id !== "img");
-  assert.deepEqual(music, ["j-run"], "the running music job is followed once, a finished one never");
-  assert.match(win.document.getElementById("music-log").textContent, /adopted line/);
+  runScript(win, "refreshMusicHistory();");
+  await settle();
+  const log = win.document.getElementById("music-log").textContent;
+  assert.equal(log.match(/adopted j-run/g)?.length, 1,
+    "the running music job is followed once (the Activity panel streams it on its own)");
+  assert.doesNotMatch(log, /adopted (old|img)/, "a finished job or another kind is never followed");
 });
 
 test("an image the browser cannot decode shows the reason in its detail view", async () => {

@@ -521,10 +521,12 @@ export async function runningJobOf(kind) {
 /** A page's one followed job. `run(work)` marks the page busy for *work* (an
  *  async function) and returns its result; `adopt(kind, follow)` follows the
  *  newest running job of *kind* through `follow(jobId)` when the page follows
- *  none, so a job started from the chat shows on its page too. */
+ *  none, so a job started from the chat shows on its page too. A job id is
+ *  adopted at most once per page load. */
 export function createJobFollower() {
   let busy = false;
   let looking = false;
+  const followed = new Set();
   async function run(work) {
     busy = true;
     try { return await work(); } finally { busy = false; }
@@ -534,7 +536,8 @@ export function createJobFollower() {
     looking = true;
     let job;
     try { job = await runningJobOf(kind); } finally { looking = false; }
-    if (!job || busy) return;
+    if (!job || busy || followed.has(job.id)) return;
+    followed.add(job.id);
     await run(() => follow(job.id));
   }
   return { run, adopt, get busy() { return busy; } };
