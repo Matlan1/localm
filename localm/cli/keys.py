@@ -88,9 +88,13 @@ def _fmt_since(ts) -> str:
 
 
 def _print_wide_table(table) -> None:
-    """Print a Rich table on the shared console, which lays out
-    ``localm.console.PIPED_WIDTH`` columns when output is piped or redirected."""
-    console.print(table)
+    """Print a Rich table at the terminal's width, or at least
+    ``localm.console.PIPED_WIDTH`` columns when output is not a terminal."""
+    if console.is_terminal:
+        console.print(table)
+        return
+    from localm.console import PIPED_WIDTH, SafeConsole
+    SafeConsole(width=max(console.size.width, PIPED_WIDTH)).print(table)
 
 
 def _fmt_expires(ts) -> str:
