@@ -34,10 +34,14 @@ def register(app: FastAPI, ctx) -> None:
             }
         # No engine is warm. An eviction (unload_all_models) keeps the Engine in
         # _engines for a lazy reload, so resolve the unnamed model the way
-        # get_engine does and 503 only when there is nothing to recover.
+        # get_engine does; a model being loaded is reported as loading; 503
+        # only when there is nothing to recover and nothing loading.
         name = _hs._resolve_unnamed_model_name()
         if name and name in _hs._engines:
             return {"status": "ok", "model": name, "loaded": False}
+        loading = _hs.loading_model_name()
+        if loading:
+            return {"status": "ok", "model": loading, "loaded": False, "loading": True}
         raise HTTPException(503, "No engine initialised")
 
     # ---------------------------------------------------------------- #

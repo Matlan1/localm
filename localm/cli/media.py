@@ -202,7 +202,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
         return media_config.generate_media(
             media_backend, s, prompt, out_path, on_progress=say,
             self_url=localm_url, write_sidecar=not is_privacy,
-            swap=bool(localm_url), delete_outputs=is_privacy, privacy=is_privacy,
+            swap=bool(localm_url), privacy=is_privacy,
             **gen_kwargs)
 
     try:
