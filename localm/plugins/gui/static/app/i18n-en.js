@@ -205,6 +205,7 @@ export const I18N_EN = {
   "chat.knowledge":
     "Knowledge - ground replies in an indexed collection (manage on the Knowledge page)",
   "chat.maxTokens": "Max tokens",
+  "chat.maxTokens.title": "Upper limit on tokens per reply in this chat. Blank or 0 uses Max tokens per reply from Settings › Model; set that to 0 for no limit.",
   "chat.memory": "Memory - remind the model what it knows about you",
   "chat.memory.exists": "Already in memory: {text}",
   "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
@@ -2584,6 +2585,7 @@ export const I18N_EN = {
   "settings.perf.estimateLoadingSuffix": " · the model is still loading, the fit check follows once it has loaded",
   "settings.perf.savedNextLoad": "Saved - applies on the next model load",
   "settings.perf.reloadingToast": "Saved - reloading {model} with the new settings",
+  "settings.perf.reloadingUnchangedToast": "Nothing changed - reloading {model} with the saved settings",
   "settings.perf.reloadBusyToast": "Saved, but {model} is busy - the new settings apply on its next load",
   "settings.perf.reloadFailedToast": "Saved, but reloading {model} failed: {message}",
   "settings.perf.saveFailedToast": "Could not save: {message}",

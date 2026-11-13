@@ -110,10 +110,41 @@ def test_chat_reply_cap_negative_or_bool_is_still_refused(value):
         ChatRequest(messages=[{"role": "user", "content": "hi"}], max_tokens=value)
 
 
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("zero", [0.0, -0.0])
+def test_chat_reply_cap_float_zero_reads_as_omitted(field, zero):
+    assert getattr(ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                               **{field: zero}), field) is None
+
+
+def test_completion_reply_cap_float_zero_reads_as_omitted():
+    assert CompletionRequest(prompt="x", max_tokens=0.0).max_tokens is None
+
+
+@pytest.mark.parametrize("value", [-1.0, 0.5, 1.5])
+def test_chat_reply_cap_negative_or_fractional_float_is_still_refused(value):
+    with pytest.raises(ValidationError):
+        ChatRequest(messages=[{"role": "user", "content": "hi"}], max_tokens=value)
+
+
+def test_chat_reply_cap_whole_float_is_kept_as_an_int():
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], max_tokens=64.0)
+    assert req.max_tokens == 64 and isinstance(req.max_tokens, int)
+
+
 def test_chat_route_with_max_tokens_zero_answers_without_a_cap(client, engine):
     r = client.post("/v1/chat/completions", json={
         "model": MODEL, "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 0})
+    assert r.status_code == 200, r.text
+    _messages, kwargs = engine.seen["calls"][-1]
+    assert "max_tokens" not in kwargs
+
+
+def test_chat_route_with_max_tokens_float_zero_answers_without_a_cap(client, engine):
+    r = client.post("/v1/chat/completions", json={
+        "model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 0.0})
     assert r.status_code == 200, r.text
     _messages, kwargs = engine.seen["calls"][-1]
     assert "max_tokens" not in kwargs

@@ -372,6 +372,43 @@ class Job:
         return out
 
 
+# Longest failure cause log_job_end writes, in characters.
+_END_CAUSE_MAX = 500
+
+
+def _job_failure_cause(job: Job, err: Optional[BaseException]) -> str:
+    """The cause of a failed in-thread job: the exception *err* when the job
+    failed by raising, else the text of its last line marked ``outcome``, else
+    the text of its last line, else ``"no cause reported"``. Clipped to
+    ``_END_CAUSE_MAX`` characters."""
+    if err is not None and job._outcome != "done":
+        cause = f"{type(err).__name__}: {err}"
+    else:
+        with job._sub_lock:
+            lines = [e for e in job._history if e.get("type") == "line"]
+        marked = [e for e in lines if e.get("outcome")]
+        last = (marked or lines or [{}])[-1]
+        text = last.get("text") or last.get("line")
+        cause = text if isinstance(text, str) and text.strip() else "no cause reported"
+    cause = " ".join(cause.split())
+    if len(cause) > _END_CAUSE_MAX:
+        cause = cause[:_END_CAUSE_MAX - 3] + "..."
+    return cause
+
+
+def log_job_end(job: Job, err: Optional[BaseException] = None) -> None:
+    """Log the end of an in-thread (``start_fn``) job to the ``localm`` logger:
+    a WARNING naming the job id, kind and cause (``_job_failure_cause``) when
+    its status is ``failed``, a DEBUG line with the id, kind and status
+    otherwise. *err* is the exception the job's callback raised, or None."""
+    from localm.debuglog import logger
+    if job.status == "failed":
+        logger.warning("job %s (%s) failed: %s", job.id, job.kind,
+                       _job_failure_cause(job, err))
+    else:
+        logger.debug("job %s (%s) %s", job.id, job.kind, job.status)
+
+
 class _HostAnnouncer:
     """Mirror a background job's lifecycle to the HOST - the person running
     ``localm gui`` - not only to the requesting client.
@@ -1258,7 +1295,8 @@ class JobManager:
         binds the job to the creating key's principal id so only that key (or an
         admin/owner) may stream/cancel it. label, when given, is the
         human-readable operation name a listing shows; there is no console
-        mirroring for in-thread jobs. Called inside an ``audit.request_privacy``
+        mirroring for in-thread jobs, and the job's end is logged by
+        ``log_job_end``. Called inside an ``audit.request_privacy``
         block, ``fn`` and the job's terminal bookkeeping run inside one too.
         """
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
@@ -1271,11 +1309,13 @@ class JobManager:
                 _work()
 
         def _work():
+            err: Optional[BaseException] = None
             try:
                 ok = fn(job)
                 if job.status != "cancelled":
                     job.status = "done" if ok else "failed"
             except Exception as e:
+                err = e
                 if job._outcome == "done":
                     # mark_outcome("done") was called ahead of the exception, so
                     # the mark wins. None and "failed" both fall through to the
@@ -1297,6 +1337,7 @@ class JobManager:
                     "returncode": job.returncode,
                     "result": job.result,
                 })
+                log_job_end(job, err)
 
         threading.Thread(target=_run, daemon=True).start()
         return job
