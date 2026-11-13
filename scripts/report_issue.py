@@ -12,7 +12,9 @@ PREVIEWS the exact text alongside the destination host, and only files it - as a
 account-less GitHub issue via the proxy - after the user confirms. Only http/https
 endpoints are accepted, so an overridden proxy is visible rather than silent. A
 failed or declined send never reports success: it saves the report to a file and
-points at the maintainer email.
+points at the maintainer email. It honours localm's Network access setting: with
+``net_mode`` off (``LOCALM_NET_MODE`` or the data dir's ``config.json``) nothing is
+sent, and when the setting cannot be read the user is asked before anything is sent.
 
 What it NEVER collects: environment variables (which can hold a key), config
 secrets, or chat/transcript content. Only OS / arch / Python, a few version
@@ -48,6 +50,61 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Maintainer contact for bug reports; kept in sync by hand with localm/bugreport/_common.py.
 MAINTAINER_EMAIL = "theilige@gmail.com"
+
+
+# --------------------------------------------------------------------------- #
+#  Network access (net_mode): read from the data dir with the stdlib only      #
+# --------------------------------------------------------------------------- #
+
+NET_MODES = ("off", "ask", "allow")
+
+#: A copy of localm.config.NET_OFF_REMEDY. See test_the_reporters_copy_the_net_off_remedy.
+NET_OFF_REMEDY = ("Turn it on in Settings > Server & network > Network access, "
+                  "or run: localm config net_mode ask")
+
+NET_OFF_REFUSAL = ("Network access is off (net_mode=off), so the report was not sent. "
+                   f"{NET_OFF_REMEDY}.")
+
+
+def localm_home() -> Path:
+    """The data dir localm uses: LOCALM_HOME, else the first line of the clone's
+    localm-home.cfg, else the clone's ./home."""
+    env = os.environ.get("LOCALM_HOME", "").strip()
+    if env:
+        return Path(env).expanduser()
+    marker = REPO_ROOT / "localm-home.cfg"
+    try:
+        lines = marker.read_text(encoding="utf-8-sig").strip().splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    if lines and lines[0].strip():
+        return Path(lines[0].strip()).expanduser()
+    return REPO_ROOT / "home"
+
+
+def network_mode() -> tuple:
+    """``(mode, why)``: *mode* is ``off``, ``ask`` or ``allow`` as localm reads it
+    (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, an unset
+    or unknown value meaning ``ask``), or None when config.json is missing or cannot
+    be read, with *why* saying which."""
+    env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
+    if env in NET_MODES:
+        return env, ""
+    path = localm_home() / "config.json"
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return None, f"{path} does not exist"
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"{path} could not be read ({e.__class__.__name__})"
+    try:
+        cfg = json.loads(raw)
+    except ValueError:
+        return None, f"{path} is not valid JSON"
+    if not isinstance(cfg, dict):
+        return None, f"{path} does not hold a settings object"
+    mode = str(cfg.get("net_mode", "ask")).strip().lower()
+    return (mode if mode in NET_MODES else "ask"), ""
 
 
 # --------------------------------------------------------------------------- #
@@ -701,8 +758,37 @@ def main(argv=None) -> int:
 
     when = _timestamp()
 
-    # Confirm. Not a tty and not --yes: save only.
-    do_send = args.yes
+    mode, why = network_mode() if url else ("ask", "")
+    if mode == "off":
+        path = save_report(body, when)
+        where = str(path) if path else "the text above"
+        print(f"  {NET_OFF_REFUSAL}")
+        print(f"  The report is saved at {where}; email it to {MAINTAINER_EMAIL} if you "
+              "prefer.")
+        return 1
+    if mode is None:
+        print(f"  localm's Network access setting could not be read: {why}. Sending "
+              "connects to the destination above.")
+        if not interactive:
+            path = save_report(body, when)
+            where = str(path) if path else "the text above"
+            print(f"  No one can confirm that here, so nothing was sent. The report is "
+                  f"saved at {where}; email it to {MAINTAINER_EMAIL}.")
+            return 1
+        try:
+            ans = input("  Send it anyway? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans not in ("y", "yes"):
+            path = save_report(body, when)
+            where = str(path) if path else "the text above"
+            print(f"  Not sent. Saved at {where} - email it to {MAINTAINER_EMAIL} if "
+                  "you change your mind.")
+            return 0
+
+    # Confirm. Not a tty and not --yes: save only. A send confirmed above is not
+    # asked again.
+    do_send = args.yes or mode is None
     if not do_send:
         if not interactive:
             path = save_report(body, when)

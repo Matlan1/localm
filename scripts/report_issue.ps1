@@ -4,7 +4,9 @@
 # uv provisioned one). It reads the proxy URL+token from localm/config.py, shows
 # exactly what will be sent, and files an account-less GitHub issue via the proxy
 # after you confirm. A failed or declined send is NEVER reported as success:
-# it saves the report and points at the maintainer email.
+# it saves the report and points at the maintainer email. With localm's Network
+# access off (LOCALM_NET_MODE, or net_mode in the data dir's config.json) nothing
+# is sent; when that setting cannot be read you are asked before anything is sent.
 #
 # Args (passed through by report-issue.bat): --summary --detail --log --yes
 # No param()/[CmdletBinding()] on purpose: the --foo pass-through args must land in
@@ -36,6 +38,44 @@ function Read-Proxy {
     if (-not $t -and $text -match '"bugreport_upload_token"\s*:\s*"([^"]+)"') { $t = $Matches[1] }
   }
   return @($u, $t)
+}
+
+# A copy of localm.config.NET_OFF_REMEDY. See test_the_reporters_copy_the_net_off_remedy.
+$netOffRemedy = 'Turn it on in Settings > Server & network > Network access, or run: localm config net_mode ask'
+
+# The data dir localm uses: LOCALM_HOME, else the first line of the clone's
+# localm-home.cfg, else the clone's home folder.
+function Get-LocalmHome {
+  if ($env:LOCALM_HOME -and $env:LOCALM_HOME.Trim()) { return $env:LOCALM_HOME.Trim() }
+  $marker = Join-Path $root 'localm-home.cfg'
+  try {
+    if (Test-Path -LiteralPath $marker -PathType Leaf) {
+      $line = Get-Content -LiteralPath $marker -Encoding UTF8 | Where-Object { $_.Trim() } | Select-Object -First 1
+      if ($line) { return $line.Trim() }
+    }
+  } catch { }
+  return (Join-Path $root 'home')
+}
+
+# @(mode, why): mode is off, ask or allow as localm reads it (LOCALM_NET_MODE, else
+# net_mode in the data dir's config.json, an unset or unknown value meaning ask), or
+# unknown when config.json is missing or cannot be read, with why saying which.
+function Get-NetMode {
+  $modes = @('off', 'ask', 'allow')
+  $e = "$env:LOCALM_NET_MODE".Trim().ToLower()
+  if ($modes -contains $e) { return @($e, '') }
+  $p = Join-Path (Get-LocalmHome) 'config.json'
+  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return @('unknown', "$p does not exist") }
+  try { $raw = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8) }
+  catch { return @('unknown', "$p could not be read") }
+  try { $cfg = $raw | ConvertFrom-Json } catch { return @('unknown', "$p is not valid JSON") }
+  if (-not ($cfg -is [System.Management.Automation.PSCustomObject])) {
+    return @('unknown', "$p does not hold a settings object")
+  }
+  $m = 'ask'
+  if ($cfg.PSObject.Properties.Name -contains 'net_mode') { $m = "$($cfg.net_mode)".Trim().ToLower() }
+  if ($modes -notcontains $m) { $m = 'ask' }
+  return @($m, '')
 }
 
 function Scrub([string]$t) {
@@ -177,7 +217,31 @@ function Save-Local {
   } catch { return $null }
 }
 
+$pair = Read-Proxy; $url = $pair[0]; $tok = $pair[1]
+$netMode = 'ask'; $netWhy = ''
+if ($url) { $r = Get-NetMode; $netMode = $r[0]; $netWhy = $r[1] }
+if ($netMode -eq 'off') {
+  $p = Save-Local
+  Write-Host "  Network access is off (net_mode=off), so the report was not sent. $netOffRemedy."
+  Write-Host "  The report is saved at $p; email it to $email if you prefer."
+  exit 1
+}
 $send = $yes
+if ($netMode -eq 'unknown') {
+  Write-Host "  localm's Network access setting could not be read: $netWhy. Sending connects to the bug-report server."
+  if (-not $interactive) {
+    $p = Save-Local
+    Write-Host "  No one can confirm that here, so nothing was sent. The report is saved at $p; email it to $email."
+    exit 1
+  }
+  try { $ans = Read-Host '  Send it anyway? [y/N]' } catch { $ans = '' }
+  if ($ans -notmatch '^\s*(y|yes)\s*$') {
+    $p = Save-Local
+    Write-Host "  Not sent. Saved at $p - email it to $email if you change your mind."
+    exit 0
+  }
+  $send = $true
+}
 if (-not $send) {
   if (-not $interactive) {
     # No one is here to confirm it: fail safe, same as a "no" answer, and
@@ -200,7 +264,6 @@ if (-not $send) {
   exit 0
 }
 
-$pair = Read-Proxy; $url = $pair[0]; $tok = $pair[1]
 if (-not $url) {
   $p = Save-Local
   Write-Host "  No bug-report endpoint is configured. Saved at $p; email it to $email."

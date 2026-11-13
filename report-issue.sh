@@ -7,6 +7,9 @@
 #  GitHub login), showing you exactly what will be sent and asking you to confirm
 #  first. It runs the self-contained reporter on any Python it can find (so a
 #  broken venv still reports fine), and falls back to curl if there is no Python.
+#  With localm's Network access off (LOCALM_NET_MODE, or net_mode in the data dir's
+#  config.json) nothing is sent; when that setting cannot be read you are asked
+#  before anything is sent.
 #
 #  Optional args (used by setup.sh's failure paths) pass straight through:
 #    --summary "..."  --detail "..."  --log <path>  --yes
@@ -143,13 +146,71 @@ echo "  ----- this is exactly what will be sent -----"
 echo "  title: $summary"
 echo "  body:  $body"
 echo "  ---------------------------------------------"
-printf '  Send this to the maintainer now? [Y/n]: '
-if ! IFS= read -r ans; then
-  echo ""
-  echo "  Not sent. Email ${email} if you change your mind."
-  exit 0
+# A copy of localm.config.NET_OFF_REMEDY. See test_the_reporters_copy_the_net_off_remedy.
+net_off_remedy="Turn it on in Settings > Server & network > Network access, or run: localm config net_mode ask"
+
+# The data dir localm uses: LOCALM_HOME, else the first line of localm-home.cfg,
+# else ./home.
+ri_home="$(printf '%s' "${LOCALM_HOME:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [ -z "$ri_home" ] && [ -f localm-home.cfg ]; then
+  ri_home="$(perl -ne 's/\A\xEF\xBB\xBF// if $. == 1; s/^\s+|\s+$//g; if (length) { print; exit }' localm-home.cfg 2>/dev/null)"
 fi
-case "$ans" in [Nn]*) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;; esac
+[ -n "$ri_home" ] || ri_home="$PWD/home"
+case "$ri_home" in "~"|"~/"*) ri_home="${HOME}${ri_home#\~}" ;; esac
+
+# net_mode as localm reads it: LOCALM_NET_MODE, else net_mode in config.json (an
+# unset or unknown value means ask); "unknown" when config.json is missing or
+# cannot be read, with net_why saying which.
+tab="$(printf '\t')"
+net_mode="$(printf '%s' "${LOCALM_NET_MODE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+net_why=""
+case "$net_mode" in
+  off|ask|allow) ;;
+  *)
+    net_cfg="$ri_home/config.json"
+    if [ ! -f "$net_cfg" ]; then
+      net_mode="unknown"; net_why="$net_cfg does not exist"
+    else
+      net_read="$(perl -MJSON::PP -e '
+        my $p = shift;
+        open(my $fh, "<:raw", $p) or do { print "unknown\tcould not be read"; exit 0 };
+        local $/; my $raw = <$fh>; close $fh;
+        $raw =~ s/\A\xEF\xBB\xBF//;
+        my $cfg = eval { JSON::PP->new->utf8->decode($raw) };
+        if ($@) { print "unknown\tis not valid JSON"; exit 0 }
+        if (ref $cfg ne "HASH") { print "unknown\tdoes not hold a settings object"; exit 0 }
+        my $m = defined $cfg->{net_mode} ? lc("$cfg->{net_mode}") : "ask";
+        $m =~ s/^\s+|\s+$//g;
+        print(($m eq "off" || $m eq "ask" || $m eq "allow") ? $m : "ask");
+      ' "$net_cfg" 2>/dev/null)" || net_read="unknown${tab}could not be read (perl JSON::PP is missing)"
+      net_mode="${net_read%%"$tab"*}"
+      [ "$net_mode" = "unknown" ] && net_why="$net_cfg ${net_read#*"$tab"}"
+    fi
+    ;;
+esac
+
+if [ -n "$url" ] && [ "$net_mode" = "off" ]; then
+  echo "  Network access is off (net_mode=off), so the report was not sent. ${net_off_remedy}."
+  echo "  Email ${email} if you prefer."
+  exit 1
+fi
+if [ -n "$url" ] && [ "$net_mode" = "unknown" ]; then
+  echo "  localm's Network access setting could not be read: ${net_why}. Sending connects to the bug-report server."
+  printf '  Send it anyway? [y/N]: '
+  if ! IFS= read -r ans; then ans=""; echo ""; fi
+  case "$ans" in
+    [Yy]|[Yy][Ee][Ss]) ;;
+    *) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;;
+  esac
+else
+  printf '  Send this to the maintainer now? [Y/n]: '
+  if ! IFS= read -r ans; then
+    echo ""
+    echo "  Not sent. Email ${email} if you change your mind."
+    exit 0
+  fi
+  case "$ans" in [Nn]*) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;; esac
+fi
 
 if [ -z "$url" ]; then
   echo "  No bug-report endpoint is configured. Email ${email}."

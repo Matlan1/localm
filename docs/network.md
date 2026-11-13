@@ -273,8 +273,11 @@ coding agent's shell access, so you can grant one without the other.
   subject to the domain lists. With `net_mode` set to `off` it is refused before
   any connection opens, as are the issue list (`localm issues`) and the update
   download (the update check and download follow "Check for updates even when
-  network access is off" instead). The standalone `report-issue` scripts, which
-  run without localm, do not read `net_mode`.
+  network access is off" instead). The standalone `report-issue` reporter (for when
+  localm cannot start) reads `LOCALM_NET_MODE` or `net_mode` from the data
+  directory's `config.json`: `off` sends nothing, and when `config.json` is
+  missing or cannot be read it asks before sending (and sends nothing when no
+  one can answer).
 - **Requests to your ComfyUI instance.** ComfyUI has its own, narrower
   guards instead: a configured `comfy_api_url` (or a media plugin's own
   `comfy.api_url`, the model scan included) that targets a link-local or
