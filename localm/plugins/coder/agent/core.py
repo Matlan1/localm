@@ -665,6 +665,11 @@ class Agent(
         except Exception:
             self._untrusted_provenance = True
 
+    def _warn_and_emit(self, text: str) -> None:
+        """Print *text* as a warning and send it to the event sink as ``info``."""
+        _agent.print_warning(text)
+        self._emit("info", text=text)
+
     def _init_reviewer(self) -> None:
         # Pre-done self-review: an optional reviewer model reads the diff before the
         # agent declares done and feeds blocking issues back. Off by default; a
@@ -673,7 +678,7 @@ class Agent(
         try:
             from ..reviewer import reviewer_for_agent
             self._reviewer = reviewer_for_agent(
-                self.backend, self.mode, self.restricted)
+                self.backend, self.mode, self.restricted, warn=self._warn_and_emit)
         except Exception:
             self._reviewer = None
 
