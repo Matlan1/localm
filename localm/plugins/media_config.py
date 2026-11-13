@@ -279,10 +279,12 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     file at *out_path*, ``generate`` strips
     the metadata from *out_path* as *output_kind* (``image``, ``audio`` or
     ``video``) once, here. A failed strip appends the WARNING to the message;
-    a strict generation instead returns ``(False, "Output withheld: <reason>")``.
-    A strict generation that fails for any reason deletes *out_path*, and the
-    message says when it could not, so a file that may still carry the prompt
-    is never left behind or reported as generated."""
+    a strict generation instead returns ``(False, "Output withheld: <reason>")``
+    and deletes the file. A strict generation that fails for any other reason,
+    with a backend that declares ``EMBEDS_OUTPUT_METADATA``, deletes *out_path*
+    when this generation created or changed it; a file it left as it was is
+    kept. The message says when a file could not be removed, so a file that may
+    still carry the prompt is never left behind or reported as generated."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()
@@ -312,14 +314,18 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
                             "pass them")
         strict = bool(privacy or withhold_on_trace)
         impl = resolve(s)
+        embeds = bool(getattr(impl, "EMBEDS_OUTPUT_METADATA", False))
         if strict and getattr(impl, "NEEDS_COMFY_SERVER", False):
             kwargs["containment_required"] = True
+        before = _file_state(out_path) if strict and embeds else None
         ok, message = impl.generate(
             s, prompt, out_path, *args,
             delete_outputs=bool(privacy or s.get("delete_outputs")), **kwargs)
         if not ok:
-            return False, (message + _remove_withheld(out_path)) if strict else message
-        if (not getattr(impl, "EMBEDS_OUTPUT_METADATA", False)
+            if strict and embeds and _file_state(out_path) not in (None, before):
+                message += _remove_withheld(out_path)
+            return False, message
+        if (not embeds
                 or not Path(out_path).exists() or Path(out_path).stat().st_size == 0):
             return ok, message
         from localm.media.output_metadata import strip_output
@@ -333,6 +339,16 @@ def make_backend_facade(package: str, comfy_ref: SimpleNamespace,
     return SimpleNamespace(resolve=resolve, supports=supports,
                            ensure_available=ensure_available,
                            free_vram=free_vram, generate=generate)
+
+
+def _file_state(path):
+    """``(size, mtime_ns, inode)`` of the file at *path*, or None when there is
+    none or it cannot be read."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ino)
 
 
 def _remove_withheld(out_path) -> str:

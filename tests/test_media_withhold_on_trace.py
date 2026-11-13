@@ -18,13 +18,14 @@ def _facade(impl):
                                             impl, "image")
 
 
-def _impl(calls, *, ok=True, writes=True, comfy=True):
+def _impl(calls, *, ok=True, writes=True, comfy=True, embeds=True):
     def generate(s, prompt, out_path, **kw):
         calls.append(kw)
         if writes:
             Path(out_path).write_bytes(b"data")
         return ok, "done" if ok else "it broke"
-    return SimpleNamespace(generate=generate, NEEDS_COMFY_SERVER=comfy)
+    return SimpleNamespace(generate=generate, NEEDS_COMFY_SERVER=comfy,
+                           EMBEDS_OUTPUT_METADATA=embeds)
 
 
 @pytest.mark.parametrize("privacy, withhold, comfy, expected", [
@@ -53,6 +54,24 @@ def test_a_failed_strict_generation_leaves_no_file(tmp_path, strict):
     ok, msg = _facade(_impl([], ok=False)).generate({}, "p", out, **strict)
     assert (ok, msg) == (False, "it broke")
     assert not out.exists()
+
+
+@pytest.mark.parametrize("strict", [{"privacy": True}, {"withhold_on_trace": True}])
+def test_a_failed_strict_generation_keeps_a_file_it_did_not_write(tmp_path, strict):
+    out = tmp_path / "photo.png"
+    out.write_bytes(b"the user's photo")
+    ok, _msg = _facade(_impl([], ok=False, writes=False)).generate({}, "p", out, **strict)
+    assert not ok
+    assert out.read_bytes() == b"the user's photo"
+
+
+def test_a_failed_strict_generation_of_a_backend_that_embeds_nothing_keeps_its_file(
+        tmp_path):
+    out = tmp_path / "o.bin"
+    ok, _msg = _facade(_impl([], ok=False, embeds=False)).generate(
+        {}, "p", out, privacy=True)
+    assert not ok
+    assert out.read_bytes() == b"data"
 
 
 def test_a_failed_generation_outside_strict_keeps_its_file(tmp_path):

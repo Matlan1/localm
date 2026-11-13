@@ -636,8 +636,15 @@ class TestTheResponseIsHandedOutAsItIs:
         assert r.status_code == 200, r.text
         assert r.json()["warnings"] == [backend.warning]
 
-    def test_a_withheld_file_is_a_502_naming_why(self, client, backend):
-        backend.fail = "Output withheld: WARNING: generated file is not PNG"
-        r = client.post(URL, json={"prompt": "a cat"})
+    def test_a_non_owner_caller_gets_no_host_path_in_a_502(
+            self, client, backend, home):
+        from localm import auth
+        key = auth.create_key("i", ["image"])["key"]
+        backend.fail = ("Output withheld: WARNING: generated file is not PNG The file "
+                        f"could not be removed; delete {home / 'scratch' / 'x.png'} by hand.")
+        r = client.post(URL, json={"prompt": "a cat"},
+                        headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 502
-        assert "Output withheld: WARNING: generated file is not PNG" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert "Output withheld: WARNING: generated file is not PNG" in detail
+        assert str(home) not in detail
