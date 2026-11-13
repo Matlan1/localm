@@ -329,7 +329,8 @@ export async function register(ctx) {
             message = classifyLoadError(e, { cached, online }).message;
           }
           ctx.toast(message + "; using the browser voice (see console for details)", true);
-          throw e;
+          // Rejects with the toasted reason as its message, marked shown.
+          throw Object.assign(new Error(message, { cause: e }), { shown: true });
         },
       );
     }

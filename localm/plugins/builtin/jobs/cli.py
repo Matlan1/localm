@@ -306,6 +306,7 @@ def job_run(job_id):
         if result is not None:
             if result.get("status") == "ok":
                 _safe_echo(result.get("output", ""))
+                _echo_routing(result)
                 return
             _safe_echo(f"Job failed: {result.get('error')}", err=True)
             sys.exit(1)
@@ -324,9 +325,16 @@ def job_run(job_id):
     store.record_result(job_id, result)
     if result.get("status") == "ok":
         _safe_echo(result.get("output", ""))
+        _echo_routing(result)
     else:
         _safe_echo(f"Job failed: {result.get('error')}", err=True)
         sys.exit(1)
+
+
+def _echo_routing(result: dict) -> None:
+    """Print a run's model-routing note to stderr, when it has one."""
+    if result.get("routing"):
+        _safe_echo(f"(model routing: {result['routing']})", err=True)
 
 
 @main.command("results")
@@ -357,6 +365,8 @@ def job_results(job_id, limit, offset):
             else (r.get("output") or "(no output)")
         for line in text.splitlines() or [""]:
             _safe_echo(f"    {line}")
+        if r.get("routing"):
+            _safe_echo(f"    (model routing: {r['routing']})")
         click.echo()
 
 
