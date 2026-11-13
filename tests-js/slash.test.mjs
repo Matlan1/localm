@@ -363,6 +363,32 @@ test("a media page that refuses to generate stops the chat command before any jo
     /Not generated: the model files it needs are not downloaded/);
 });
 
+test("/generate-music sends the Music page's registered components and drops one no longer listed", async () => {
+  const posts = [];
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    if (u === "/api/music/backend") {
+      return { ok: true, status: 200, json: async () => ({ active: "native", choice: "native" }) };
+    }
+    if (u === "/api/music/native-models") {
+      return { ok: true, status: 200, json: async () => ({
+        components: { dit: [{ name: "acestep-dit", file: "dit.gguf" }], text_encoder: [], vae: [], lm: [] },
+        current: {} }) };
+    }
+    if (u === "/api/music" && (init.method || "GET") === "POST") {
+      posts.push(JSON.parse(init.body));
+      return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadAppWithPages({ fetchImpl, seedLocalStorage: {
+    "localm.nativeModels.music": JSON.stringify({ dit: "acestep-dit", text_encoder: "gone-encoder" }) } });
+  await window.runMusicInChat("lo-fi");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].native_models, { dit: "acestep-dit" });
+  assert.deepEqual(JSON.parse(window.localStorage.getItem("localm.nativeModels.music")), { dit: "acestep-dit" });
+});
+
 for (const [run, media, route, arg] of [["runVideoInChat", "video", "/api/video", "a fox"],
                                          ["runMusicInChat", "music", "/api/music", "lo-fi"]]) {
   test(`/generate-${media} on ComfyUI sends the ${media} page's workflow model picks`, async () => {

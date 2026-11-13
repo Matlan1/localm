@@ -215,12 +215,15 @@ function musicModelFields(native) {
 }
 
 /* The model fields of this page's pick for the chat's /generate-music, read
-   against the active backend; null when this page's Generate would refuse
+   against the active backend and the registered models; null when this page's Generate would refuse
    (an applied workflow's main model is still not registered). */
 export async function musicPageModelChoice() {
   await refreshMusicBackend();
   const native = musicBackend.active === "native";
-  if (native && musicWorkflowCard.pending && !(await musicWorkflowCard.prepare())) return null;
+  if (native) {
+    await musicModelPicker.refresh();
+    if (musicWorkflowCard.pending && !(await musicWorkflowCard.prepare())) return null;
+  }
   return musicModelFields(native);
 }
 chatPageModelChoice.music = musicPageModelChoice;
