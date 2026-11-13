@@ -397,6 +397,7 @@ _GATE_PROBES = {
 
 
 def test_every_gate_label_is_enforced_with_its_scope():
+    from localm.inference.app_assembly.errors import error_body
     from localm import auth
     no_scope_key = auth.create_key("characterization", [])["key"]
     app = create_app(None)
@@ -413,8 +414,9 @@ def test_every_gate_label_is_enforced_with_its_scope():
             f"{method} {template} no longer starts with the {label} gate")
         url = _concrete(template)
         anonymous = client.request(method, url, json=body)
+        path = url.split("?")[0]
         assert (anonymous.status_code, anonymous.json()) == (
-            401, {"detail": "Invalid or missing API key"}), f"{label}: {method} {url}"
+            401, error_body(path, 401, "Invalid or missing API key")), f"{label}: {method} {url}"
         if label == "auth":
             continue
         refused = client.request(
@@ -422,7 +424,7 @@ def test_every_gate_label_is_enforced_with_its_scope():
         detail = ("This key does not have host filesystem access" if label == "fs_host"
                   else f"Key lacks required scope: {label[len('scope:'):]}")
         assert (refused.status_code, refused.json()) == (
-            403, {"detail": detail}), f"{label}: {method} {url}"
+            403, error_body(path, 403, detail)), f"{label}: {method} {url}"
 
 
 # --------------------------------------------------------------------------- #

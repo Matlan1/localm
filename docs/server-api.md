@@ -67,10 +67,13 @@ A failed request answers `{"detail": "<message>"}`: `401` for a missing or
 invalid key, `403` for a key without the route's scope (`Key lacks required
 scope: <scope>`), a cookie-authenticated change without its CSRF token, or a
 cross-origin browser request to a route that does not accept one, and the
-statuses listed with each route below. A defect in the server is a `500` with
-`{"detail": "Internal server error"}`; its cause goes to the server log. A body
-that fails validation is a `422` with `{"detail": "<one sentence per field>",
-"errors": [...]}`, where `errors` is the structured list. Three groups answer in
+statuses listed with each route below. On a `/v1/...` path the body also
+carries OpenAI's error object, `"error": {"message", "type", "param", "code"}`,
+with the same message. A defect in the server is a `500` with
+`{"detail": "Internal server error"}` (a failed file operation names its cause,
+`Internal server error: <reason>`, never the path); its cause goes to the server
+log. A body that fails validation is a `422` with `{"detail": "<one sentence per
+field>", "errors": [...]}`, where `errors` is the structured list. Three groups answer in
 their own shape, and a body that fails validation is a `400` there:
 the Ollama routes (`{"error": "..."}`), `POST /v1/messages` (Anthropic's error
 object) and `POST /v1/responses` (OpenAI's error object).
@@ -386,8 +389,9 @@ otherwise carry the account name and install layout to the caller). The reason,
 the file name and any line number are kept - the text is redacted, not muted.
 
 An error that is neither of those - a genuine defect in the server - is a `500`
-with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
-server log rather than to the client.
+with `{"detail": "Internal server error"}` (for a failed file operation,
+`Internal server error: <reason>`), and its cause goes to the server log rather
+than to the client.
 
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 

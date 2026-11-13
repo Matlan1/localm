@@ -58,9 +58,10 @@ route behind it refuses keeps that route's status (for example 413 for a prompt
 longer than the context window, 422 for a model that cannot embed, 503 while a
 model cannot be loaded). A reply from that route that is not JSON, and an
 embedding model that returns the wrong number of vectors, are a 502. A stream
-that fails after it has started ends with one `{"error": "..."}` line. The one
-exception is the open-mode origin and shell-token refusal of a model-management
-route, which keeps the `{"detail": "..."}` body the rest of localm's API uses.
+that fails after it has started ends with one `{"error": "..."}` line. The
+open-mode origin and shell-token refusal of an Ollama route, the management
+routes (`/api/pull`, `/api/push`, `/api/delete`, `/api/create`) included, carries
+the same message as both `"error"` and `"detail"`.
 
 ## Chat and generate
 
