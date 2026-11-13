@@ -360,3 +360,42 @@ def test_a_reload_a_private_job_left_to_a_later_job_says_privacy(monkeypatch):
     assert sent == [("/models/load", {"X-Localm-Session-Mode": "privacy"})]
     vram.reload_chat_after_media(open_job, "http://127.0.0.1:9/v1", s, backend, "image")
     assert sent[-1] == ("/models/load", {})
+
+def test_two_jobs_deferring_in_parallel_both_reach_the_reload(monkeypatch):
+    import threading
+    from localm import vram
+    from localm.jobmanager import Job
+    sent = []
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+    def self_request(method, path, **kw):
+        sent.append((path, kw.get("headers")))
+        return _Resp()
+    monkeypatch.setattr("localm.selfclient.self_request", self_request)
+    monkeypatch.setattr(vram, "_job_headers", lambda job: {f"X-Job-{job.id}": "1"})
+    monkeypatch.setattr(vram, "_handover_deferred_headers", {})
+    monkeypatch.setattr(vram, "_handover_deferred_backends", [])
+    monkeypatch.setattr(vram, "_handover_deferred", None)
+    backend = MagicMock()
+    backend.free_vram.return_value = True
+    s = {"reload_after": True}
+    monkeypatch.setattr(vram, "_handover_jobs", 3)
+    start = threading.Barrier(2)
+
+    def defer(job_id):
+        start.wait()
+        vram.reload_chat_after_media(Job(id=job_id, kind="imagine", argv=[]),
+                                     "http://127.0.0.1:9/v1", s, backend, "image")
+    threads = [threading.Thread(target=defer, args=(i,)) for i in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert sent == []
+    monkeypatch.setattr(vram, "_handover_jobs", 1)
+    vram.reload_chat_after_media(Job(id="c", kind="imagine", argv=[]),
+                                 "http://127.0.0.1:9/v1", s, backend, "image")
+    assert sent == [("/models/load", {"X-Job-a": "1", "X-Job-b": "1", "X-Job-c": "1"})]
