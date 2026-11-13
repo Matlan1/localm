@@ -9,6 +9,7 @@ dollar sign or a backslash must survive the round trip."""
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -233,18 +234,18 @@ def _run_bare_line(monkeypatch, *, orig_argv, executable):
 
 
 def test_bare_localm_exe_starts_the_gui(monkeypatch):
-    assert _run_bare_line(monkeypatch, orig_argv=["C:\\i\\.venv\\localm-app\\LocaLM.exe"],
-                          executable="C:\\i\\.venv\\localm-app\\LocaLM.exe") == [1]
+    exe = os.path.join("i", ".venv", "localm-app", "LocaLM.exe")
+    assert _run_bare_line(monkeypatch, orig_argv=[exe], executable=exe) == [1]
 
 
 def test_localm_exe_with_arguments_is_left_alone(monkeypatch):
     assert _run_bare_line(monkeypatch, orig_argv=["LocaLM.exe", "-m", "localm", "gui"],
-                          executable="C:\\i\\LocaLM.exe") == []
+                          executable=os.path.join("i", "LocaLM.exe")) == []
 
 
 def test_another_interpreter_without_arguments_is_left_alone(monkeypatch):
     assert _run_bare_line(monkeypatch, orig_argv=["python.exe"],
-                          executable="C:\\i\\.venv\\Scripts\\python.exe") == []
+                          executable=os.path.join("i", ".venv", "Scripts", "python.exe")) == []
 
 
 def test_the_bare_start_runs_localm_gui_owning_its_console(monkeypatch):
