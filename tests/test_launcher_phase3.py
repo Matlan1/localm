@@ -267,6 +267,9 @@ def test_launch_handler_uses_helper_on_posix(launcher_mod, monkeypatch):
         def destroy(self):
             pass
 
+        def _save_privacy_config(self):
+            return None
+
     fake = _FakeLauncher()
     # askstring is a module-level import inside launcher; patch it to return a spec.
     monkeypatch.setattr(

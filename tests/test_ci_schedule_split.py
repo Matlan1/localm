@@ -211,9 +211,11 @@ def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
-    ((), {"lint", "python-pr-gate", "voice-stack", "proxy-tests", "gui-tests", "merge-policy"},
+    ((), {"lint", "python-pr-gate", "python-pr-gate-windows", "voice-stack", "proxy-tests", "gui-tests",
+          "merge-policy"},
      {"test", "optional-stacks", "comfyui-pin-check", "llama-rocm-pin-check"}),
-    (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"}, {"python-pr-gate"}),
+    (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"},
+     {"python-pr-gate", "python-pr-gate-windows"}),
 ])
 def test_pull_request_behaviour_is_unchanged_by_the_schedule_split(labels, expected_present, expected_absent):
     ran = _jobs_that_run(_scenario("pull_request", labels=labels))
