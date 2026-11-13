@@ -2156,7 +2156,7 @@
   "settings.field.embeddingModel.label": "Modelo de embeddings",
   "settings.field.embeddingPooling.help": "Cambiarlo invalida las colecciones de documentos y los vectores de memoria: vuelve a indexar después. Un embedder cargado conserva el valor anterior hasta que se libere. mean va bien para bge/nomic; uno basado en decodificador necesita last o auto.",
   "settings.field.embeddingPooling.label": "Pooling de embeddings",
-  "settings.field.ggufFirstTokenTimeoutS.help": "Cuánto tiempo puede pasar una respuesta sin progresar antes de su primer token antes de que el modelo se considere bloqueado. Cada parte del prompt que el modelo termina de leer cuenta como progreso, así que un prompt largo en la CPU no se corta mientras se sigue leyendo.",
+  "settings.field.ggufFirstTokenTimeoutS.help": "Cuánto tiempo puede pasar una respuesta sin progresar, antes de su primer token, hasta que el modelo se considere bloqueado. Leer cada parte de un prompt largo cuenta como progreso.",
   "settings.field.ggufFirstTokenTimeoutS.label": "Tiempo límite del primer token GGUF (s)",
   "settings.field.ggufLoadTimeoutS.help": "Cuánto puede durar la carga de un modelo GGUF en su proceso aislado antes de considerarse bloqueada y cancelarse. Súbelo solo para un modelo enorme en un almacenamiento lento.",
   "settings.field.ggufLoadTimeoutS.label": "Tiempo límite de carga GGUF (s)",

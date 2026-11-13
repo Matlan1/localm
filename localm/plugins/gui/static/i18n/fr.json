@@ -2156,7 +2156,7 @@
   "settings.field.embeddingModel.label": "Modèle d'embeddings",
   "settings.field.embeddingPooling.help": "Modifier ceci invalide les collections de documents et les vecteurs de mémoire : réindexez ensuite. Un embedder chargé garde l'ancienne valeur jusqu'à son déchargement. mean convient à bge/nomic ; un embedder basé sur un décodeur nécessite last ou auto.",
   "settings.field.embeddingPooling.label": "Pooling des embeddings",
-  "settings.field.ggufFirstTokenTimeoutS.help": "Durée pendant laquelle une réponse peut rester sans progrès avant son premier jeton avant que le modèle soit considéré comme bloqué. Chaque partie du prompt que le modèle a fini de lire compte comme un progrès, donc un long prompt sur le CPU n'est pas interrompu tant qu'il est lu.",
+  "settings.field.ggufFirstTokenTimeoutS.help": "Durée pendant laquelle une réponse peut rester sans progrès, avant son premier jeton, avant que le modèle soit considéré comme bloqué. La lecture de chaque partie d'un long prompt compte comme un progrès.",
   "settings.field.ggufFirstTokenTimeoutS.label": "Délai du premier token GGUF (s)",
   "settings.field.ggufLoadTimeoutS.help": "Durée pendant laquelle le chargement d'un modèle GGUF peut s'exécuter dans son worker isolé avant d'être considéré comme bloqué et annulé. Augmentez-le uniquement pour un très gros modèle sur un stockage lent.",
   "settings.field.ggufLoadTimeoutS.label": "Délai de chargement GGUF (s)",

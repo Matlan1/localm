@@ -1911,7 +1911,7 @@ export const I18N_EN = {
   "settings.field.ggufLoadTimeoutS.label": "GGUF load timeout (s)",
   "settings.field.ggufLoadTimeoutS.help": "How long a GGUF model load may run in its isolated worker before it is treated as hung and cancelled. Raise it only for a huge model on slow storage.",
   "settings.field.ggufFirstTokenTimeoutS.label": "GGUF first-token timeout (s)",
-  "settings.field.ggufFirstTokenTimeoutS.help": "How long a reply may go without progress before its first token before the model is treated as hung. Each part of your prompt the model finishes reading counts as progress, so a long prompt on CPU is not cut off while it is still being read.",
+  "settings.field.ggufFirstTokenTimeoutS.help": "How long a reply may go without progress, before its first token, until the model is treated as hung. Reading each part of a long prompt counts as progress.",
   "settings.field.hfLoadTimeoutS.label": "HuggingFace load timeout (s)",
   "settings.field.hfLoadTimeoutS.help": "How long a HuggingFace-format model load may run in its isolated worker before it is treated as hung and cancelled. Raise it only for a huge model on slow storage.",
   "settings.field.hfFirstTokenTimeoutS.label": "HuggingFace first-token timeout (s)",
