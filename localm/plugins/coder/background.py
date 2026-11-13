@@ -720,12 +720,11 @@ class AgentJob(BackgroundJob):
 
     ``result`` payload: ``{"summary": str, "turns": int}``.
 
-    NOT PREEMPTIBLE. ``Agent.run_task`` is a blocking call with no cooperative
-    cancellation anywhere in the agent package (the only interruption path is a
-    KeyboardInterrupt in the INTERACTIVE loop, which a worker thread cannot
-    raise). ``_terminate`` therefore cannot stop a turn already in flight: it
-    records a warning and marks intent, and the daemon thread dies with the
-    process. There is no ``kill_agent_job`` tool.
+    :meth:`kill` cancels the child (``Agent.cancel``): it runs no further tool
+    call and its loop ends at the next check, so a reply being generated still
+    finishes first. The job keeps its ``running`` state until the child has
+    returned, then ends ``killed`` with the child's result (summary, turns,
+    branch) recorded as for any finished job.
     """
 
     kind = "agent"
@@ -744,6 +743,7 @@ class AgentJob(BackgroundJob):
         # The child_limit slot this job holds. Released on FINISH, not on submit.
         self._token = token
         self._outcome: Optional[dict] = None
+        self._kill_requested = False
         self._runner = threading.Thread(
             target=self._run, name=f"bgagent-{self.id}", daemon=True)
         self._runner.start()
@@ -803,15 +803,50 @@ class AgentJob(BackgroundJob):
         return payload
 
     def _terminate(self, *, force: bool) -> None:
-        # A blocking run_task cannot be preempted; record that instead.
-        self.warnings.append(
-            "a background sub-agent cannot be stopped mid-turn; it will finish "
-            "or die with the process")
+        """Cancel the child. Under ``self._lock``."""
+        self._kill_requested = True
+        cancel = getattr(self._child, "cancel", None)
+        if callable(cancel):
+            cancel("stopped by kill_shell_job")
+
+    def kill(self) -> str:
+        """Cancel the child and wait up to the kill grace for it to return.
+
+        Returns "killed" once the child has returned, "already <state>" or
+        "already finished" when it had ended before, or a "stop requested"
+        message when it is still finishing a reply; the job then stays running
+        and ends ``killed`` when the child returns. The lock is released while
+        waiting, because the worker thread records the child's result under it.
+        """
+        with self._lock:
+            if self.state != "running":
+                return f"already {self.state}"
+            value = self._poll()
+            if value is not None:
+                self._finish("done", self._result_for(value))
+                return "already finished"
+            self._terminate(force=False)
+        deadline = time.time() + _KILL_GRACE
+        while time.time() < deadline:
+            with self._lock:
+                if self.state != "running":
+                    return "killed" if self.state == "killed" else f"ended {self.state}"
+                value = self._poll()
+                if value is not None:
+                    self._finish("done", self._result_for(value))
+                    return "killed"
+            time.sleep(_POLL_INTERVAL)
+        return ("stop requested - the sub-agent runs no further tool call and "
+                "ends when its current reply is finished; check_agent_job shows "
+                "when it has")
 
     def _finish(self, state: str, result: Optional[dict],
                 error: Optional[str] = None) -> None:
+        # A cancelled child ends "killed", keeping its result payload.
+        if self._kill_requested and state == "done":
+            state = "killed"
         # Promote a child-raised exception to the job's own error field.
-        if result and result.get("error") and not error:
+        elif result and result.get("error") and not error:
             error, state = result["error"], "failed"
         # A child that returned its failure (max_turns, circuit breaker) did not
         # complete its task: the job is "failed", with no error text.
