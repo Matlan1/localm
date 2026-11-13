@@ -8,11 +8,31 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from localm.plugins.coder.agent.execution import _event_output
 from localm.plugins.coder.parser import ToolCall
 from tests.test_coder_session_controls import _owner, _scoped, _start, _stub
+
+
+@pytest.fixture(autouse=True)
+def _close_sessions(monkeypatch):
+    """Close every coder session a test started, so its audit log is released."""
+    from localm.plugins.coder import sessions as sessions_mod
+    made = []
+    original = sessions_mod.CoderSession.__init__
+
+    def recording(self, *a, **k):
+        original(self, *a, **k)
+        made.append(self)
+
+    monkeypatch.setattr(sessions_mod.CoderSession, "__init__", recording)
+    yield
+    for s in made:
+        if not s.closed:
+            s.close()
 
 
 class _Scripted:
@@ -150,7 +170,7 @@ def test_a_search_replace_card_shows_the_diff(tmp_path, monkeypatch):
     (proj / "a.py").write_text("x = 1\n", encoding="utf-8")
     with TestClient(app) as client:
         s = _session(app, client, owner, proj)
-        diff = s._diff_preview(ToolCall(name="search_replace",
+        diff = s._diff_preview(ToolCall(name="search_replace", raw="", start=0, end=0,
                                         args={"pattern": "x = 1", "replacement": "x = 2",
                                               "glob": "**/*.py"}))
         assert diff and "+x = 2" in diff
@@ -189,7 +209,7 @@ def test_a_disabled_tool_leaves_a_result_event(tmp_path, monkeypatch):
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         s = _session(app, client, owner, proj)
-        s.agent._execute_tool(ToolCall(name="ask_user", args={"question": "?"}),
+        s.agent._execute_tool(ToolCall(name="ask_user", args={"question": "?"}, raw="", start=0, end=0),
                               interactive=False)
         results = [e for e in s.history if e.get("type") == "tool_result"
                    and e.get("tool") == "ask_user"]
