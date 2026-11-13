@@ -59,10 +59,14 @@ def test_a_worker_a_job_uses_is_busy_and_left_running(client, sd_worker):  # noq
 
 
 def test_both_runtimes_are_listed_with_their_own_idle_time(client, sd_worker,  # noqa: F811
-                                                           music_runtime):  # noqa: F811
+                                                           music_runtime,  # noqa: F811
+                                                           monkeypatch):
+    monkeypatch.setattr(sd_shared, "IDLE_UNLOAD_SECONDS", 111.0)
+    monkeypatch.setattr(kobold_server, "IDLE_SECONDS", 222.0)
     rows = {r["name"]: r for r in client.get("/api/media/runtimes").json()["runtimes"]}
     assert set(rows) == {IMAGE_WORKER, MUSIC_RUNTIME}
-    assert rows[MUSIC_RUNTIME]["idle_unload_seconds"] == kobold_server.IDLE_SECONDS
+    assert rows[IMAGE_WORKER]["idle_unload_seconds"] == 111.0
+    assert rows[MUSIC_RUNTIME]["idle_unload_seconds"] == 222.0
     out = client.post("/api/media/runtimes/unload").json()["outcomes"]
     assert sorted((o["name"], o["outcome"]) for o in out) == [
         (IMAGE_WORKER, "stopped"), (MUSIC_RUNTIME, "stopped")]
@@ -81,3 +85,36 @@ def test_the_routes_need_models_read_and_models_write(client, sd_worker):  # noq
     writer = auth.create_key("writer", [S.MODELS_WRITE, S.MODELS_READ])["key"]
     out = client.post("/api/media/runtimes/unload", headers=hdr(writer)).json()
     assert out == {"outcomes": [{"name": IMAGE_WORKER, "outcome": "stopped"}]}
+
+
+def test_a_worker_that_keeps_running_after_its_stop_is_reported_failed(client, sd_worker,  # noqa: F811
+                                                                       monkeypatch):
+    monkeypatch.setattr(sd_shared.runner, "shutdown", lambda *a, **kw: None)
+    out = client.post("/api/media/runtimes/unload").json()
+    assert out == {"outcomes": [{"name": IMAGE_WORKER, "outcome": "failed"}]}
+    assert sd_worker.is_alive()
+    assert client.get("/api/media/runtimes").json()["runtimes"][0]["name"] == IMAGE_WORKER
+
+
+@pytest.mark.parametrize("method,path,helper,limit,text", [
+    ("get", "/api/media/runtimes", "native_media_runtime_states", "_READ_TIMEOUT_S",
+     "Reading the media runtimes timed out"),
+    ("post", "/api/media/runtimes/unload", "stop_idle_native_media", "_UNLOAD_TIMEOUT_S",
+     "Stopping the media runtimes timed out"),
+])
+def test_a_helper_past_the_route_bound_answers_504(client, monkeypatch, method, path, helper,
+                                                    limit, text):
+    import threading
+
+    from localm import vram
+    from localm.plugins.gui.routes import media_runtimes
+    release = threading.Event()
+    monkeypatch.setattr(vram, helper, lambda: release.wait(10) and {})
+    monkeypatch.setattr(media_runtimes, limit, 0.2)
+    try:
+        r = getattr(client, method)(path)
+    finally:
+        release.set()
+    assert r.status_code == 504, r.text
+    assert text in r.json()["detail"]
+
