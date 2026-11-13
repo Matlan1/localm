@@ -734,7 +734,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             return " " + "; ".join(
                 f"GPU {d.device.index} needed about {d.need / 1024**3:.1f} GB of VRAM "
                 f"and had {d.device.free / 1024**3:.1f} GB free" for d in short) + (
-                " - free VRAM on those GPUs, untick them under Settings > Split "
+                " - free VRAM on those GPUs, untick them under Settings > Model > Split "
                 "across GPUs, or offload fewer layers (-g).")
         try:
             planned = self._planned_vram(layers)

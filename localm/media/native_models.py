@@ -352,45 +352,15 @@ def music_options(reg: Optional[dict] = None) -> dict:
 ACESTEP_V1_REASON = ("ACE-Step v1: the native music backend runs ACE-Step 1.5 GGUF parts "
                      "only, so this checkpoint works in ComfyUI only")
 
-_ACESTEP_V1_MARKERS = (b"genre_embedder", b"lyric_embs", b"umt5base")
-_MAX_HEADER_BYTES = 64 * 1024 * 1024
-_V1_CACHE: dict = {}
-_V1_CACHE_MAX = 512
-
-
-def is_acestep_v1_checkpoint(path) -> bool:
-    """True when the ``.safetensors`` file at *path* has an ACE-Step v1 tensor
-    layout (the all-in-one ComfyUI checkpoint: ``genre_embedder``,
-    ``lyric_embs`` and a UMT5 text encoder in one file). Reads only the
-    header; False for any other file or an unreadable one. Never raises."""
-    import struct
-    from pathlib import Path
-    p = Path(path)
-    try:
-        st = p.stat()
-        key = (str(p), st.st_size, st.st_mtime_ns)
-        if key in _V1_CACHE:
-            return _V1_CACHE[key]
-        with open(p, "rb") as f:
-            raw = f.read(8)
-            n = struct.unpack("<Q", raw)[0] if len(raw) == 8 else 0
-            header = f.read(n) if 0 < n <= _MAX_HEADER_BYTES else b""
-    except (OSError, struct.error):
-        return False
-    found = bool(header) and all(m in header for m in _ACESTEP_V1_MARKERS)
-    if len(_V1_CACHE) >= _V1_CACHE_MAX:
-        _V1_CACHE.clear()
-    _V1_CACHE[key] = found
-    return found
-
-
 def unsupported_music(reg: Optional[dict] = None) -> list:
-    """``[{"name", "file", "reason"}]``: registered music checkpoints the native
-    music backend cannot run (today: ACE-Step v1 ``.safetensors`` files), so
-    the picker can say why they are not offered."""
+    """``[{"name", "file", "reason"}]``: registered music files the native
+    music backend cannot run (today: ACE-Step v1, the all-in-one checkpoint or
+    its transformer alone, as ``families.music_entry`` classifies them), so
+    the picker can say why they are not offered. LoRAs and GGUF files are not
+    read."""
     from pathlib import Path
 
-    from localm.pathsafe import is_unc_or_device_path
+    from localm.media.sdcpp import families
     if reg is None:
         from localm.config import load_registry
         reg = load_registry()
@@ -399,11 +369,10 @@ def unsupported_music(reg: Optional[dict] = None) -> list:
         if not isinstance(entry, dict) or entry.get("model_type") == "lora":
             continue
         raw = str(entry.get("path") or "")
-        if Path(raw).suffix.lower() not in (".safetensors", ".sft"):
+        if Path(raw).suffix.lower() == ".gguf":
             continue
-        if is_unc_or_device_path(raw):
-            continue
-        if is_acestep_v1_checkpoint(raw):
+        info = families.music_entry(entry)
+        if info is not None and info.detail.get("acestep") == "v1":
             out.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
                         "reason": ACESTEP_V1_REASON})
     return out

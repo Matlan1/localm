@@ -232,7 +232,7 @@ def test_an_image_that_fits_neither_way_is_refused(monkeypatch, tmp_path):
     assert "1536x1536 is too large for Model on the Vulkan runtime" in msg
     assert "about 1152x1152" in msg and "about 2.6 s" in msg
     assert "Windows resets this GPU when one job runs longer than 2 s" in msg
-    assert msg.endswith(", or pick the ROCm runtime in Settings > Images.")
+    assert msg.endswith(", or pick the ROCm runtime in Settings > Media > Image > Native runtime.")
 
 
 @pytest.mark.parametrize("rate", [None, SdWorkerError("worker died")])

@@ -795,12 +795,37 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
         return UNKNOWN
 
 
-def _classify_tensors(tensors: dict, arch: Optional[str]) -> FileInfo:
-    if not tensors:
-        return UNKNOWN
+_ACESTEP_V1_DIT = ("genre_embedder.", "lyric_embs.")
+_ACESTEP_V1_TEXT_ENCODER = "text_encoders.umt5base."
+_ACESTEP_15_DIT = ("encoder.lyric_encoder.", "detokenizer.", "null_condition_emb")
+
+
+def _acestep_info(tensors: dict, arch: Optional[str]) -> Optional[FileInfo]:
+    """``music`` for an ACE-Step file, else None: a GGUF of an ACE-Step
+    architecture (``detail["arch"]``), an ACE-Step v1 transformer with or
+    without the ``model.diffusion_model.`` prefix (``detail["acestep"]`` is
+    ``"v1"``, ``detail["checkpoint"]`` True when its UMT5 text encoder is in the
+    same file), or an ACE-Step 1.5 transformer under the tensor names its GGUF
+    carries (``detail["acestep"]`` is ``"1.5"``)."""
     from localm.model_manager.gguf import gguf_is_music_architecture
     if gguf_is_music_architecture(arch):
         return FileInfo("music", detail={"arch": arch})
+    view = _diffusion_view(tensors)
+    dit = [n[len(DIFFUSION_PREFIX):] for n in view]
+    if all(any(n.startswith(p) for n in dit) for p in _ACESTEP_V1_DIT):
+        whole = any(n.startswith(_ACESTEP_V1_TEXT_ENCODER) for n in tensors)
+        return FileInfo("music", detail={"acestep": "v1", "checkpoint": whole})
+    if all(any(n.startswith(p) for n in tensors) for p in _ACESTEP_15_DIT):
+        return FileInfo("music", detail={"acestep": "1.5"})
+    return None
+
+
+def _classify_tensors(tensors: dict, arch: Optional[str]) -> FileInfo:
+    if not tensors:
+        return UNKNOWN
+    music = _acestep_info(tensors, arch)
+    if music is not None:
+        return music
     names = tensors.keys()
     if _has(names, "model.diffusion_model.") and _has(
             names, "first_stage_model.", "cond_stage_model.", "conditioner.embedders.",
@@ -896,3 +921,23 @@ def inspect_file(path) -> FileInfo:
             _CACHE.clear()
         _CACHE[key] = info
     return info
+
+
+def music_entry(entry) -> Optional[FileInfo]:
+    """The ``music`` ``FileInfo`` of registry *entry* when it is an ACE-Step
+    music file, else None. Reads the entry's recorded GGUF ``architecture``
+    first, then the header of its file (``inspect_file``); a network or device
+    path is not read. The one test the Images, Video and Music model lists use
+    to tell a music file. Never raises."""
+    if not isinstance(entry, dict):
+        return None
+    recorded = _acestep_info({}, entry.get("architecture"))
+    if recorded is not None:
+        return recorded
+    from localm.model_manager.registry import _entry_path
+    from localm.pathsafe import is_unc_or_device_path
+    raw = _entry_path(entry)
+    if not raw or is_unc_or_device_path(raw):
+        return None
+    info = inspect_file(Path(raw))
+    return info if info.kind == "music" else None

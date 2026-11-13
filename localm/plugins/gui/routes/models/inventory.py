@@ -707,8 +707,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():
         """Every GPU device visible right now, plus the currently configured
-        main GPU index and multi-GPU split indices. Powers the Settings >
-        Live tuning "Main GPU" selector and "Split across GPUs" checkboxes
+        main GPU index and multi-GPU split indices. Powers the Settings > Model >
+        Main GPU selector and Settings > Model > Split across GPUs checkboxes
         (both hidden/disabled when only one device is detected).
 
         ``probe_status`` tells the consumer whether ``gpus`` is a FRESH reading
