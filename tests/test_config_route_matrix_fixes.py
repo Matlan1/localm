@@ -2,11 +2,10 @@
 """/v1/config: the network access mode in force, the embedding_model value
 check shared with the MCP setup_embeddings tool, and the owner-only refusal
 text for keys that run code."""
+# ruff: noqa: F811
 from __future__ import annotations
 
 import json
-
-import pytest
 
 from tests.test_owner_only_settings import _owner, _scoped, app_env  # noqa: F401
 
