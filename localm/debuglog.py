@@ -226,6 +226,11 @@ class _RingBufferHandler(logging.Handler):
         return list(self._buf)
 
 
+# Most records one log writer holds before it drops new ones.
+# See test_a_blocked_stream_holds_at_most_the_bound.
+_MAX_QUEUED_RECORDS = 10_000
+
+
 class _LogWriter:
     """The thread that writes one handler's log records to its stream.
 
@@ -234,12 +239,19 @@ class _LogWriter:
     (a disk saturated by a model load, a paused console) never blocks the
     logging thread, the server's event loop included, nor another handler's
     stream. Records are written in the order they were queued. ``drain`` waits
-    until everything queued before it is written."""
+    until everything queued before it is written.
+
+    At most ``_MAX_QUEUED_RECORDS`` records wait at once; a record logged
+    beyond that is dropped and counted, and once every queued record is written
+    one line says how many were dropped."""
 
     def __init__(self, handler: _OffThreadEmit) -> None:
         import queue
         self.handler = handler
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._count_lock = threading.Lock()
+        self._queued = 0
+        self._dropped = 0
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
 
@@ -261,11 +273,22 @@ class _LogWriter:
             self.handler._write(text, record)
             return
         self._ensure_thread()
+        with self._count_lock:
+            if self._queued >= _MAX_QUEUED_RECORDS:
+                self._dropped += 1
+                return
+            self._queued += 1
         self._queue.put((text, record))
 
     def pending(self) -> int:
-        """About how many items are queued and not yet written."""
-        return self._queue.qsize()
+        """How many records are queued and not yet written."""
+        with self._count_lock:
+            return self._queued
+
+    def dropped(self) -> int:
+        """How many records were dropped since the last drop line."""
+        with self._count_lock:
+            return self._dropped
 
     def drain(self, timeout: float = 5.0) -> bool:
         """Wait until every record queued before this call is written, up to
@@ -285,10 +308,32 @@ class _LogWriter:
                 item.set()
                 continue
             text, record = item
-            try:
-                self.handler._write(text, record)
-            except RecursionError:
-                self.handler.handleError(record)
+            with self._count_lock:
+                self._queued -= 1
+            self._write(text, record)
+            with self._count_lock:
+                dropped = self._dropped if self._queued == 0 else 0
+                self._dropped -= dropped
+            if dropped:
+                self._write_drop_line(dropped)
+
+    def _write(self, text: str, record: logging.LogRecord) -> None:
+        try:
+            self.handler._write(text, record)
+        except RecursionError:
+            self.handler.handleError(record)
+
+    def _write_drop_line(self, dropped: int) -> None:
+        record = logger.makeRecord(
+            logger.name, logging.WARNING, __file__, 0,
+            "debug log: %d records were dropped while %s did not accept writes",
+            (dropped, _describe_handler(self.handler)), None)
+        try:
+            text = self.handler.format(record) + self.handler.terminator
+        except Exception:
+            self.handler.handleError(record)
+            return
+        self._write(text, record)
 
 
 class _Writers:
@@ -413,9 +458,11 @@ def flush_log_handlers(timeout: float = 5.0) -> None:
         try:
             record = logger.makeRecord(
                 logger.name, logging.WARNING, __file__, 0,
-                "debug log: about %d records for %s were not written before this "
-                "process restarted or stopped (its stream did not accept writes)",
-                (writer.pending(), _describe_handler(writer.handler)), None)
+                "debug log: %d records for %s were not written before this process "
+                "restarted or stopped, and %d were dropped (its stream did not accept "
+                "writes)",
+                (writer.pending(), _describe_handler(writer.handler), writer.dropped()),
+                None)
             for h in list(logger.handlers):
                 if h is not writer.handler and record.levelno >= h.level:
                     h.handle(record)

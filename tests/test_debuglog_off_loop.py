@@ -274,3 +274,33 @@ def test_the_stop_writes_the_debug_log_before_the_process_ends(monkeypatch):
     with pytest.raises(SystemExit):
         hs._do_shutdown()
     assert events == ["teardown", "flush", "exit"]
+
+
+def test_the_queue_bound_is_ten_thousand_records():
+    assert debuglog._MAX_QUEUED_RECORDS == 10_000
+
+
+def test_a_blocked_stream_holds_at_most_the_bound(debug_logger, monkeypatch):
+    """A stream that stops accepting writes keeps at most the bound queued:
+    logging stays fast, later records are dropped and counted, and once the
+    stream accepts writes again one line says how many were dropped."""
+    monkeypatch.setattr(debuglog, "_MAX_QUEUED_RECORDS", 20)
+    stream = _BlockingStream()
+    handler = debug_logger(_off_thread(stream))
+    debuglog.logger.debug("first")
+    assert stream.entered.wait(5)
+    start = time.monotonic()
+    for i in range(100):
+        debuglog.logger.debug("queued %d", i)
+    assert time.monotonic() - start < 2
+    writer = handler.writer()
+    assert writer.pending() == 20
+    assert writer.dropped() == 80
+    stream.release.set()
+    assert writer.drain(10)
+    lines = stream.getvalue().splitlines()
+    assert lines[0] == "first"
+    assert lines[1:21] == [f"queued {i}" for i in range(20)]
+    assert lines[21:] == ["debug log: 80 records were dropped while the console did not "
+                          "accept writes"]
+    assert writer.dropped() == 0 and writer.pending() == 0
