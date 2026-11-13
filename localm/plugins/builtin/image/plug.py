@@ -85,7 +85,7 @@ class ImagineRequest(BaseModel):
     lora_strength_clip: float | None = Field(None, allow_inf_nan=False)   # None keeps generate_image()'s default (0.5)
     size: str | None = None                   # WIDTHxHEIGHT, or None for the backend's default
     # Native backend only: {"model"|slot: registered name or "" for automatic}
-    # laid over Settings > Images for this job, and registered LoRAs.
+    # laid over Settings > Media > Image for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
     # Native backend only: images per job (image i uses seed + i), a sampler and

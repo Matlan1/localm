@@ -520,7 +520,7 @@
       <div class="page">
         <h2 data-i18n="images.title">Image generation</h2>
         <div class="sub" data-i18n="images.intro">Generates images on this machine with the built-in
-        stable-diffusion.cpp backend, or with your ComfyUI (Settings, Images). The chat model unloads when the
+        stable-diffusion.cpp backend, or with your ComfyUI (Settings &gt; Media &gt; Image). The chat model unloads when the
         image model needs the VRAM and reloads afterwards.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
@@ -608,7 +608,7 @@
       <div class="page">
         <h2 data-i18n="music.title">Music generation</h2>
         <div class="sub" data-i18n="music.intro">Generates music on this machine with ACE-Step, on the built-in
-        native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music
+        native runtime or on your ComfyUI (Settings &gt; Media &gt; Music). The chat model unloads when the music
         models need the VRAM and reloads afterwards.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
@@ -867,7 +867,7 @@
               <div id="perf-backend-hint" class="perf-backend-hint" hidden>
                 <span data-i18n-rich="settings.perf.backendHint">An NVIDIA GPU was detected; the CUDA backend usually performs better than the
                 currently installed Vulkan backend. localm never switches this for you - pick
-                <strong>cuda</strong> under Settings &gt; Updates &gt; Inference runtime if you want
+                <strong>cuda</strong> under Settings &gt; System &gt; Updates &gt; Inference runtime if you want
                 to try it.</span>
                 <button type="button" id="perf-backend-hint-dismiss" class="btn-secondary" data-i18n="settings.perf.backendHintDismissButton">Dismiss</button>
               </div>
@@ -1541,7 +1541,7 @@
     <div class="modal-head"><span data-i18n="qr.title">Scan the pairing QR</span></div>
     <div class="modal-body">
       <p class="sub" data-i18n-rich="qr.body">On the computer running LocaLM, open
-        <b>Settings → Companion app</b> and point your camera at the QR.</p>
+        <b>Settings → Server &amp; network → Companion app</b> and point your camera at the QR.</p>
       <video id="qr-video" class="qr-video" playsinline muted></video>
       <p id="qr-scan-status" class="sub"></p>
       <div class="actions">

@@ -79,7 +79,8 @@ def _console_url_line(api_mode: bool, base_url: str, open_url: str) -> tuple:
 def _phone_lan_hint(api_mode: bool) -> str:
     """Console line recommending a network bind so a phone can reach a
     loopback-bound server."""
-    alt = "" if api_mode else " or Settings > Server > Bind address (set an API key first)"
+    alt = "" if api_mode else (" or Settings > Server & network > Bind address "
+                                "(set an API key first)")
     return ("  [dim]use from your phone: bind to your network with "
             "[/dim][cyan]localm gui -H 0.0.0.0[/cyan]"
             f"[dim]{alt}; see docs/phone.md[/dim]")
@@ -827,7 +828,7 @@ def _check_config_bind_is_bindable(console, plan: _BindPlan) -> None:
         f"The configured bind address ({plan.host}) was not applied: "
         f"this machine has no usable interface with that address "
         f"right now ({_bind_err}). The server is on 127.0.0.1 "
-        f"(this computer only). Fix Settings > Server > Bind "
+        f"(this computer only). Fix Settings > Server & network > Bind "
         f"address (0.0.0.0 = every interface), then restart the "
         f"server.")
     console.print(
@@ -1331,7 +1332,8 @@ def _serve_beside_native_window(serve, plan: _BindPlan, open_url: str, *, on_qui
               help="Keep diagnostics (a hang stack trace, restart breadcrumbs, and "
                    "a debug log) even in privacy mode, so a bug report has "
                    "something to attach. Chat content is never recorded in privacy "
-                   "mode. Same as the Settings > Privacy toggle, for this run.")
+                   "mode. Same as Settings > Privacy & data > Keep diagnostics for "
+                   "bug reports, for this run.")
 @click.option("--insecure", is_flag=True,
               help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
                    "exposes the unauthenticated coder agent (shell + file edits) "

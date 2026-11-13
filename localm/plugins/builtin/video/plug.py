@@ -64,11 +64,11 @@ class VideoRequest(BaseModel):
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
     # Native backend only: {"model"|slot: registered name or "" for automatic}
-    # laid over Settings > Video for this job, and registered LoRAs.
+    # laid over Settings > Media > Video for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
     # Native backend only: a sampler and scheduler by library name, and the
-    # flow shift (None keeps Settings > Video or the model default).
+    # flow shift (None keeps Settings > Media > Video > Native flow shift or the model default).
     sample_method: str | None = None
     scheduler: str | None = None
     flow_shift: float | None = Field(None, ge=0.0, le=100.0, allow_inf_nan=False)

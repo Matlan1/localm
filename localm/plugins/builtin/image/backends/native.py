@@ -73,6 +73,8 @@ RECOMMENDED_MODELS: tuple[RecommendedModel, ...] = (
 NEGATIVE_AT_CFG_1 = ("The negative prompt has no effect at CFG 1. Raise CFG (for example "
                      "to 3) to apply it; generation then takes about twice as long per step.")
 
+RUNTIME_PLACE = "Settings > Media > Image > Native runtime"
+
 _COMPONENT_FIELDS = (("clip_l", "clip_l_path"), ("clip_g", "clip_g_path"),
                      ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"),
                      ("llm_vision", "llm_vision_path"))
@@ -117,7 +119,7 @@ def missing_model_message() -> str:
     return (f"No native image model is set up. Download the recommended one "
             f"({rec.name}, {rec.size_bytes / 1024 ** 3:.1f} GB) with "
             f"'localm pull {rec.spec} --type diffusion-unet --sha256 {rec.sha256}', or set "
-            "'Native model' in Settings > Media (Image) to a model you have.")
+            "Settings > Media > Image > Native model to a model you have.")
 
 
 def resolve_models(s: dict) -> dict:
@@ -152,7 +154,7 @@ def resolve_models(s: dict) -> dict:
         value = (blk.get(key) or "").strip()
         if value:
             explicit[key] = (display_name(value), _resolve_file(value, key.replace("_", "-")))
-    built = pairing.build_context(main, label, explicit, where="Settings > Images",
+    built = pairing.build_context(main, label, explicit, where="Settings > Media > Image",
                                   media="image")
     ctx = built["ctx"]
     info = built["info"]
@@ -413,7 +415,7 @@ NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference 
 NO_LLM_VISION_21 = ("Qwen-Image 2.1 takes reference images only with the Qwen3-VL vision "
                     "encoder. Download it with 'localm pull "
                     + pairing.QWEN3_VL_8B_MMPROJ.pull_args + "'; it is used automatically "
-                    "once registered, or pick it as the LLM vision encoder in Settings > Images.")
+                    "once registered, or pick it as the LLM vision encoder on the Images page.")
 
 
 def _lacks_llm_vision(models: dict) -> bool:
@@ -715,7 +717,7 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
                   f"{att.score_bytes(width, height, ref_count) / 1024 ** 3:.1f} GB buffer, over "
                   f"the {limit / 1024 ** 3:.1f} GB this runtime takes,{secs}. "
                   f"{attention.limit_sentence(reset)} {fit}"
-                  f"{attention.runtime_hint('Images', sd_runtime.other_gpu_runtimes())}.")
+                  f"{attention.runtime_hint(RUNTIME_PLACE, sd_runtime.other_gpu_runtimes())}.")
 
 
 def _batch_path(out_path: Path, index: int) -> Path:
@@ -747,7 +749,7 @@ def refusal(*, model_overrides=None, lora_name=None,
     None. Checked before any download, VRAM handover or load."""
     if model_overrides:
         return ("Workflow model choices apply to ComfyUI. The native backend uses "
-                "the model set in Settings > Images.")
+                "the model set in Settings > Media > Image > Native model.")
     if lora_name:
         try:
             pairing.resolve_loras([{"name": lora_name}], None)
