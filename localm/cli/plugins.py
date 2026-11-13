@@ -417,6 +417,10 @@ def plugin_uninstall_engine(name, delete_data):
     existed = mgr.is_installed_or_on_disk(name)
     complete = run_or_die(mgr.uninstall, name, delete_data=delete_data,
                           missing_msg=f"No such plugin: {name}")
+    left = getattr(mgr, "last_data_left_in_place", None)
+    if left is not None:
+        from localm.plugins.engine import data_left_in_place_message
+        console.print(f"[yellow]{escape(data_left_in_place_message(name, left))}[/yellow]")
     if complete:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{escape(name)}[/bold]")
         return

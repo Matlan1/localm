@@ -174,6 +174,29 @@ def _write_store_install(dest: Path, src: Path) -> None:
         json.dumps({"source": "store", "package": True}), encoding="utf-8")
 
 
+def _old_data_folder(spec: PluginSpec) -> Optional[Path]:
+    """``<data dir>/<data_subdir>`` of third-party plugin *spec* when that
+    folder exists and is not its current data folder, else None."""
+    if spec.builtin or not spec.data_subdir:
+        return None
+    from localm.config import home_dir
+    home = home_dir()
+    old = home / spec.data_subdir
+    try:
+        if old.is_dir() and old.resolve() != plugin_data_dir(spec, home).resolve():
+            return old
+    except OSError:
+        return None
+    return None
+
+
+def data_left_in_place_message(name: str, folder: Path) -> str:
+    """The sentence every uninstall surface shows for an older data folder of
+    plugin *name* that a delete-data uninstall left in place."""
+    return (f"{folder} was left in place, not removed: earlier data of plugin "
+            f"{name!r}, if it is its own, stays there; move or delete it by hand.")
+
+
 def _warn_old_data_location(spec: PluginSpec) -> None:
     """Log one WARNING when third-party plugin *spec* declares a data_subdir,
     its data folder (``plugin_data_dir``) does not exist, and
@@ -742,6 +765,25 @@ class PluginHost:
                     f"has unknown widget {f.widget!r}; see localm.settings_schema.Widget")
         self.settings.extend(fields)
 
+    def data_dir(self) -> Path:
+        """The plugin's own data folder, created if missing: ``<data dir>/
+        <data_subdir>`` for a store-installed plugin and ``<data dir>/
+        plugin-data/<name>/<data_subdir>`` for a third-party one
+        (``plugin_data_dir``). It is the folder an uninstall that deletes the
+        plugin's data removes. Raises ValueError when the manifest declares no
+        ``data_subdir``, or when the folder would resolve outside the data dir."""
+        from localm.config import home_dir
+        home = home_dir().resolve()
+        d = plugin_data_dir(self._spec, home)
+        if d is None:
+            raise ValueError(f"plugin {self._spec.name!r} declares no data_subdir "
+                             f"in plugin.toml, so it has no data folder")
+        if not d.resolve().is_relative_to(home):
+            raise ValueError(f"plugin {self._spec.name!r}: data folder {d} does not "
+                             f"resolve inside the data dir")
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def register_tab(self, surface: Surface) -> None:
         """Replace the plugin's GUI surface (tab, label, icon, group, settings
         group, assets_dir, client_entry) with *surface* while the plugin is
@@ -962,6 +1004,9 @@ class PluginManager:
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
         self._unload_errors: dict[str, str] = {}     # unregister() failures; cleared by a later load
         self.last_refresh_failures: dict[str, str] = {}
+        # Set by uninstall(delete_data=True): an older data folder of a
+        # third-party plugin that was left in place, else None.
+        self.last_data_left_in_place: Optional[Path] = None
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
         # Serializes discover(), which may run on a worker thread
@@ -2224,8 +2269,13 @@ class PluginManager:
         self._unload(name)
         self._set_enabled(name, False)
         data_deleted = not (delete_data and hook_failed)
+        self.last_data_left_in_place = None
         if delete_data and spec and spec.data_subdir:
             data_deleted = self._delete_plugin_data(spec) and data_deleted
+            self.last_data_left_in_place = _old_data_folder(spec)
+            if self.last_data_left_in_place is not None:
+                _log.warning("plugin %s: %s", name, data_left_in_place_message(
+                    name, self.last_data_left_in_place))
         removed = self._remove_installed_dir(name)    # delete from the installed folder
         existed = was_installed or on_disk
         if existed and not removed:
@@ -2472,7 +2522,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             raise HTTPException(409, str(e)) from e
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}") from e
+        left = manager.last_data_left_in_place
         if complete:
+            if left is not None:
+                return {"status": "uninstalled", "name": name,
+                        "left_in_place": str(left),
+                        "detail": data_left_in_place_message(name, left)}
             return {"status": "uninstalled", "name": name}
         if not existed:
             raise HTTPException(404, f"No such plugin: {name}")

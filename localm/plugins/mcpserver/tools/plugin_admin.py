@@ -128,6 +128,11 @@ def build() -> dict[str, dict]:
                     " delete_data was requested and this uninstall did not "
                     "complete, so do not assume its stored data is gone.")
             return _text_result(detail, is_error=True)
+        left = getattr(mgr, "last_data_left_in_place", None)
+        if left is not None:
+            from localm.plugins.engine import data_left_in_place_message
+            return _text_result(f"Plugin '{plugin}' uninstalled. "
+                                + data_left_in_place_message(plugin, left))
         return _text_result(f"Plugin '{plugin}' successfully uninstalled.")
 
     return {

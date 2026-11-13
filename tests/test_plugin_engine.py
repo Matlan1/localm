@@ -2086,3 +2086,67 @@ def test_no_old_data_warning_once_the_new_folder_exists(env, caplog):
     with caplog.at_level(logging.WARNING, logger="localm.plugins"):
         _install_with_old_data(env, new_exists=True)
     assert not [r for r in caplog.records if "left in place" in r.getMessage()]
+
+
+def test_host_data_dir_is_the_plugins_own_folder_and_is_created(env):
+    from localm.plugins.engine import PluginHost, PluginSpec
+    third = PluginHost(FastAPI(), object(), PluginSpec(name="tp", data_subdir="store"))
+    assert third.data_dir() == (env / "plugin-data" / "tp" / "store").resolve()
+    assert third.data_dir().is_dir()
+    first = PluginHost(FastAPI(), object(),
+                       PluginSpec(name="rag", data_subdir="rag", builtin=True))
+    assert first.data_dir() == (env / "rag").resolve()
+    with pytest.raises(ValueError, match="declares no data_subdir"):
+        PluginHost(FastAPI(), object(), PluginSpec(name="none")).data_dir()
+
+
+def _legacy_with_old_and_new_data(env):
+    old = env / "olddata"
+    old.mkdir()
+    (old / "notes.txt").write_text("keep", encoding="utf-8")
+    new = env / "plugin-data" / "legacy" / "olddata"
+    new.mkdir(parents=True)
+    (new / "cache.bin").write_text("x", encoding="utf-8")
+    src = _make_plugin(env / "src", "legacy", _ping("legacy"),
+                       toml_extra='data_subdir = "olddata"\n')
+    return src, old, new
+
+
+def test_delete_data_reports_an_older_data_folder_as_left_in_place(env):
+    from localm.plugins.engine import PluginManager
+    src, old, new = _legacy_with_old_and_new_data(env)
+    mgr = PluginManager(None)
+    mgr.set_installed_from_dir(src)
+    assert mgr.uninstall("legacy", delete_data=True) is True
+    assert mgr.last_data_left_in_place == old
+    assert (old / "notes.txt").read_text(encoding="utf-8") == "keep"
+    assert not new.exists()
+
+
+def test_the_http_uninstall_names_the_folder_left_in_place(env):
+    from localm.plugins.engine import attach_engine
+    src, old, new = _legacy_with_old_and_new_data(env)
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        assert c.post("/api/plugins/install-external",
+                      json={"source": str(src)}).status_code == 200
+        r = c.post("/api/plugins/legacy/uninstall?delete_data=true")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["left_in_place"] == str(old)
+    assert "left in place, not removed" in body["detail"]
+    assert (old / "notes.txt").exists() and not new.exists()
+
+
+def test_the_mcp_uninstall_names_the_folder_left_in_place(env):
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.mcpserver.tools import plugin_admin
+    src, old, new = _legacy_with_old_and_new_data(env)
+    PluginManager(None).set_installed_from_dir(src)
+    out = plugin_admin.build()["uninstall_plugin"]["handler"](
+        {"plugin": "legacy", "delete_data": True})
+    text = str(out)
+    assert str(old) in text or str(old).replace("\\", "\\\\") in text
+    assert "left in place, not removed" in text
+    assert (old / "notes.txt").exists() and not new.exists()

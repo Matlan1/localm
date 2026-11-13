@@ -103,7 +103,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
 capabilities = ["feature"]   # declared capabilities; "inference-backend" is the one the engine reads (see Inference backends)
-data_subdir = "my_data"      # one folder name; "" = none. First-party: <data dir>/my_data; third-party: <data dir>/plugin-data/<name>/my_data
+data_subdir = "my_data"      # one folder name; "" = none. Get the folder from host.data_dir() (third-party: <data dir>/plugin-data/<name>/my_data)
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
 cli = "module:attr"          # optional legacy Click command entry point
@@ -177,6 +177,7 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 | `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. Every route path must start with `/api/` or `/v1/`: any other path makes `register()` raise `ValueError` and the plugin fails to load. With no server app (a backend-only load) nothing is mounted. |
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
+| `data_dir()` | The plugin's own data folder as a `Path`, created on first call: `<data dir>/plugin-data/<name>/<data_subdir>` for a third-party plugin. Keep the plugin's data there and never build `<data dir>/<data_subdir>` yourself: an uninstall that deletes the plugin's data removes this folder and nothing else. Raises `ValueError` when the manifest declares no `data_subdir`. |
 | `register_tab(surface)` | Replace the plugin's `[surface]` (tab, label, icon, group, settings group, `assets_dir`, `client_entry`) with a `Surface` while the plugin is loaded; the GUI's plugin listing shows it and its `assets_dir` is served at `/plugins/<name>` like a manifest one. Once the plugin is unloaded the manifest's `[surface]` applies again. |
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |

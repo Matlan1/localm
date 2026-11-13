@@ -200,6 +200,13 @@ class Host(Protocol):
     # fields is a list[PluginSettingField]. Rendered/validated generically by
     # GET/POST /v1/plugins/<name>/settings - see PluginSettingField above.
     def add_settings(self, fields: list[PluginSettingField]) -> None: ...
+    def data_dir(self) -> Any:
+        """The plugin's own data folder as a ``pathlib.Path``, created if
+        missing: ``<data dir>/plugin-data/<name>/<data_subdir>`` for a
+        third-party plugin (``<data dir>/<data_subdir>`` for a first-party one).
+        An uninstall that deletes the plugin's data removes this folder. Raises
+        ValueError when the manifest declares no ``data_subdir``."""
+        ...
     def register_tab(self, surface: Surface) -> None: ...
     # Config r/w is CONFINED to the plugin's own block; a different name is
     # refused. name is optional and defaults to the plugin's own.
