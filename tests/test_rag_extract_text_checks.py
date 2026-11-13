@@ -72,6 +72,15 @@ def test_an_ansi_coloured_log_is_read_without_its_colour_codes():
     assert extract.sniff_format(data, "build.weird") == ".txt"
 
 
+def test_an_unterminated_title_sequence_loses_no_text_after_its_line():
+    data = b"line1 \x1b]oops\n" + b"important text\n" * 100
+
+    out = extract_bytes(data, "a.log")
+
+    assert out.count("important text") == 100
+    assert out.startswith("line1 ")
+
+
 def test_a_tie_break_without_a_label_is_tried_again_later(monkeypatch):
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})

@@ -516,7 +516,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
     list the edit started from. Lines and facts are matched with case and
     spacing ignored, as ``add_user_fact`` matches them. A fact in *base* that is
     no longer in *text* is deleted; a line of *text* that matches an existing
-    record keeps that record, taking the line's text when it differs; a line
+    record keeps that record, taking the line's text when it differs (and
+    then counting as a user record, as ``add_user_fact`` makes it); a line
     that repeats an earlier one is dropped; any other line becomes a new user
     record. A record that is in neither (added after *base* was read, by another
     tab, the background pass, the CLI or an MCP client) is kept, so a dialog
@@ -570,6 +571,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
                     continue
                 if keep.text != f:
                     keep.text = f
+                    keep.source = "user"
+                    keep.importance = max(keep.importance, 0.8)
                     retexted.append(keep.id)
                 records.append(keep)
             newer = [r for r in current

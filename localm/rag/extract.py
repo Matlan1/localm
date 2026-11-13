@@ -554,9 +554,10 @@ def _decode_text(data: bytes) -> str:
 
 
 # A terminal control sequence: CSI (colours, cursor moves), OSC (titles,
-# links) up to its terminator, or a two-byte escape.
+# links) up to its terminator and never past the end of its line, or a two-byte
+# escape.
 _TERMINAL_ESCAPE_RE = re.compile(
-    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_]?")
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[@-_]?")
 
 
 def _strip_terminal_escapes(text: str) -> str:

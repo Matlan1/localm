@@ -58,9 +58,12 @@ def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
     vg.require_venv()   # must not raise
 
 
-def test_the_guard_checks_every_core_dependency_but_pywin32():
+def test_the_guard_checks_every_core_dependency_the_cli_loads_at_startup():
     import importlib.metadata as md
+    import json
     import re
+    import subprocess
+    import sys
     import tomllib
     from pathlib import Path
 
@@ -68,18 +71,31 @@ def test_the_guard_checks_every_core_dependency_but_pywin32():
     root = Path(__file__).resolve().parent.parent
     deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"]["dependencies"]
-    modules: dict = {}
-    for module, dists in md.packages_distributions().items():
-        for dist in dists:
-            modules.setdefault(dist.lower().replace("_", "-"), set()).add(module)
-    missing = []
-    for dep in deps:
-        name = re.split(r"[<>=!~;\[ ]", dep, maxsplit=1)[0].strip().lower()
-        if name == "pywin32":
-            continue
-        if not modules.get(name, set()) & set(vg._CORE_DEPS):
-            missing.append(name)
-    assert missing == []
+    core = {re.split(r"[<>=!~;\[ ]", d, maxsplit=1)[0].strip().lower() for d in deps}
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import json, sys; import localm.cli; print(json.dumps(sorted(sys.modules)))"],
+        capture_output=True, text=True, timeout=120, cwd=str(root),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert proc.returncode == 0, proc.stderr
+    loaded = {m.split(".")[0] for m in json.loads(proc.stdout.strip().splitlines()[-1])}
+    dists = md.packages_distributions()
+    needed = {m for m in loaded
+              if any(d.lower().replace("_", "-") in core for d in dists.get(m, ()))}
+    assert needed, "the startup import set was read"
+    assert needed <= set(vg._CORE_DEPS), sorted(needed - set(vg._CORE_DEPS))
+
+
+def test_the_venv_message_names_what_is_missing(monkeypatch):
+    import importlib.util
+
+    import localm._venvguard as vg
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: None if name == "starlette" else real(name, *a))
+    with pytest.raises(SystemExit) as exc:
+        vg.require_venv()
+    assert "missing: starlette" in str(exc.value.code)
 
 
 def test_runtime_deps_present_true_in_this_env():

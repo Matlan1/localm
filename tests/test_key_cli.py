@@ -15,6 +15,18 @@ from localm.cli import main
 _SECRET_RE = re.compile(r"[A-Za-z0-9_\-]{30,}")
 
 
+def _console_state() -> dict:
+    """What decides the width of the shared console's tables, for a failure
+    message."""
+    import os
+
+    from localm.cli import _core
+    c = _core.console
+    return {"width": c.size.width, "is_terminal": c.is_terminal, "_width": c._width,
+            **{k: os.environ.get(k) for k in ("COLUMNS", "TERM", "TTY_COMPATIBLE",
+                                               "FORCE_COLOR")}}
+
+
 @pytest.fixture
 def runner(cli_runner, monkeypatch):
     # Drop any ambient owner key / require-auth so "open mode" assertions are
@@ -259,7 +271,7 @@ class TestNamedKeys:
         assert len(keys) == 1
         assert keys[0]["rag_roots"] == [root_a, root_b]
         listed = runner.invoke(main, ["key", "list"])
-        assert root_a in listed.output and root_b in listed.output
+        assert root_a in listed.output and root_b in listed.output, _console_state()
 
     def test_create_without_rag_roots_defaults_to_unrestricted(self, runner):
         r = runner.invoke(main, ["key", "create", "plain", "--scope", "rag"])
@@ -268,7 +280,7 @@ class TestNamedKeys:
         # "rag-roots" (the note) must NOT appear when none were granted.
         assert "rag-roots" not in r.output.lower()
         listed = runner.invoke(main, ["key", "list"])
-        assert "unrestricted" in listed.output.lower()
+        assert "unrestricted" in listed.output.lower(), _console_state()
 
     def test_create_privileged_scope_refused(self, runner):
         # NEGATIVE: a non-owner mint of keys:admin must fail and store nothing.
@@ -347,7 +359,7 @@ class TestNamedKeys:
         assert secrets
         r = runner.invoke(main, ["key", "list"])
         assert r.exit_code == 0
-        assert "models:read" in r.output
+        assert "models:read" in r.output, _console_state()
         for s in secrets:
             assert s not in r.output                # plaintext never re-shown
 

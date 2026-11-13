@@ -75,3 +75,6 @@ def test_the_bulk_edit_matches_facts_ignoring_case_and_spacing(home, monkeypatch
     assert sorted(i["text"] for i in items) == ["Prefers GREEN  tea", "the garage code is 4711"]
     kept = next(i for i in items if i["text"] == "Prefers GREEN  tea")
     assert kept["id"] == before["prefers green tea"], "the edited fact keeps its record"
+    assert kept["source"] == "user"
+    untouched = next(i for i in items if i["text"] == "the garage code is 4711")
+    assert untouched["source"] == "import"

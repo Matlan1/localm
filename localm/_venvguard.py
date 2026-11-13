@@ -20,39 +20,46 @@ from __future__ import annotations
 
 import sys
 
-# The import names of localm's core runtime dependencies (pyproject.toml
-# [project] dependencies, not optional extras), less pywin32, whose absence
-# localm reports instead of failing on. If they all resolve, this really is a
-# localm environment that can run, whatever the interpreter's directory is named.
-_CORE_DEPS = ("click", "rich", "requests", "certifi", "uv", "regex",
-              "huggingface_hub", "pydantic", "fastapi", "starlette", "uvicorn",
-              "cryptography", "qrcode", "zeroconf", "PIL", "pypdf")
+# The import names of the core dependencies (pyproject.toml [project]
+# dependencies) that ``import localm.cli`` loads. If they all resolve, every
+# entry point can start, whatever the interpreter's directory is named; a
+# feature whose own dependency is missing reports it when used.
+_CORE_DEPS = ("click", "rich", "requests", "certifi", "pydantic", "fastapi",
+              "starlette")
 
 
-def _runtime_deps_present() -> bool:
-    """True when localm's core runtime deps are importable here. Uses find_spec so
+def _missing_runtime_deps() -> list:
+    """The names in ``_CORE_DEPS`` that cannot be located here. Uses find_spec so
     the deps are LOCATED, not imported (fast, no import side effects). A finder
-    that raises is treated as 'not present' (fail toward the friendly message)."""
+    that raises counts as missing (fail toward the friendly message)."""
     import importlib.util
+    missing = []
     for mod in _CORE_DEPS:
         try:
             if importlib.util.find_spec(mod) is None:
-                return False
+                missing.append(mod)
         except (ImportError, ValueError):
-            return False
-    return True
+            missing.append(mod)
+    return missing
+
+
+def _runtime_deps_present() -> bool:
+    """True when every name in ``_CORE_DEPS`` can be located here."""
+    return not _missing_runtime_deps()
 
 
 def require_venv() -> None:
-    """Exit with a friendly message ONLY when localm is run from an interpreter
-    that lacks its runtime dependencies, inside a virtualenv (another project's
-    venv) or not. ANY environment where the deps are installed (localm's venv,
-    pipx / container / system-wide / cold install / CI editable install) runs
-    normally."""
-    if _runtime_deps_present():
+    """Exit with a friendly message naming what is missing ONLY when localm is
+    run from an interpreter that lacks its startup dependencies, inside a
+    virtualenv (another project's venv) or not. ANY environment where they are
+    installed (localm's venv, pipx / container / system-wide / cold install / CI
+    editable install) runs normally."""
+    missing = _missing_runtime_deps()
+    if not missing:
         return
     sys.exit(
-        "Error: localm must be run from its virtual environment. Use "
+        "Error: localm must be run from its virtual environment. This Python "
+        f"({sys.executable}) is missing: {', '.join(missing)}. Use "
         "'.venv\\Scripts\\localm' (Windows) or '.venv/bin/localm' "
         "(Linux/macOS), or activate the venv first, or install localm and its "
         "dependencies into this environment.")
