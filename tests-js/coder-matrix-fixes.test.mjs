@@ -105,7 +105,7 @@ test("attached files stay with the session they were attached in", () => {
     window.__docsInA = coder.docs.map((d) => d.name);
   `);
   assert.equal(window.__docsInB, 0);
-  assert.deepEqual(window.__docsInA, ["notes.txt"]);
+  assert.deepEqual([...window.__docsInA], ["notes.txt"]);
 });
 
 test("a session ended elsewhere is said once and removed from the page", () => {
