@@ -6,6 +6,7 @@ trace, log and exit code, and filing the report on the next start.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from localm.bugreport.logs import _find_run_log, _recent_hang_traces, _recent_log_tail_result
@@ -375,6 +376,16 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
         return None
 
 
+# The last crash report this process filed at start, for recovered_crash_report.
+_RECOVERED_REPORT = None
+
+
+def recovered_crash_report():
+    """The Path of the report check_and_report_prior_crash filed in this process
+    for a crash of the run before it, or None when it filed none."""
+    return _RECOVERED_REPORT
+
+
 def check_and_report_prior_crash(home=None, interactive: bool = False):
     """Scan every crash marker left under this LOCALM_HOME's run/ dir (one per
     instance that has ever armed here) and report+clear any whose recorded pid
@@ -409,4 +420,7 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             filed = result
             logger.warning("bugreport: the previous run crashed while stopping (%s); "
                            "crash report: %s", record.name, result)
+    if filed is not None:
+        global _RECOVERED_REPORT
+        _RECOVERED_REPORT = Path(filed)
     return filed

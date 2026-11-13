@@ -101,7 +101,7 @@ from localm.bugreport.crash_recovery import (
     _POSIX_FAULT_LINE_RE, _WIN_FAULT_CODE_RE, _is_fatal_fault_description,
     _fatal_fault_line, _raw_tail_truncation_signal, _first_chance_codes,
     _classify_prior_death, _report_one_crash_marker, _report_one_stopping_record,
-    check_and_report_prior_crash,
+    check_and_report_prior_crash, recovered_crash_report,
 )
 
 _handlers_installed = False
@@ -113,6 +113,7 @@ __all__ = [
     "_all_crash_markers", "_all_crash_stopping_records", "_APIKEY_RE", "_AUTH_HEADER_RE",
     "_app_state_lines", "arm_crash_guard", "_armed_instance_id", "armed_instance_id",
     "_BEARER_RE", "build_report", "stdin_is_interactive", "check_and_report_prior_crash",
+    "recovered_crash_report",
     "_classify_prior_death", "_classify_url_error", "clear_crash_marker",
     "_client_lines", "collect_diagnostics", "_config_unreadable", "console",
     "_crash_dir", "_crash_marker_path", "_crash_stopping_path", "_crash_trace_fh",

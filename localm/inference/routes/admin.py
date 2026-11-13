@@ -182,6 +182,27 @@ def register(app: FastAPI, ctx) -> None:
         result["report_sha256"] = bugreport.report_digest(text)
         return result
 
+    @app.get("/api/bug-report/recovered",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def recovered_crash_ep():
+        """Whether this server started after a crash of the run before it and
+        saved a report about it: ``{"crashed": false}``, or ``{"crashed": true,
+        "filename", "title"}`` with the saved report's bare file name (for
+        ``POST /api/bug-report/send`` after review) and its first heading. The
+        title is null when the file can no longer be read."""
+        from localm import bugreport
+        path = bugreport.recovered_crash_report()
+        if path is None:
+            return {"crashed": False}
+        title = None
+        try:
+            from fastapi.concurrency import run_in_threadpool
+            text = await run_in_threadpool(path.read_text, encoding="utf-8")
+            title = bugreport.report_title_from_markdown(text)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return {"crashed": True, "filename": path.name, "title": title}
+
     @app.post("/api/bug-report/send",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def send_bug_report_ep(body: dict):
