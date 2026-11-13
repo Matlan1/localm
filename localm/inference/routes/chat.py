@@ -27,7 +27,6 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -59,6 +58,7 @@ from localm.inference.protocol import (
     RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
     RerankRequest, make_chunk_id,
 )
+from localm.streaming_response import StreamingResponse
 
 
 def _entry_path_is_folder(entry: dict) -> bool:
