@@ -286,6 +286,18 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     return False, principal_id(request)
 
 
+def _revocable_key_hash(request: Request) -> str | None:
+    """The sha256 of the keystore key this request presented (as a bearer or
+    through its session cookie), or None for the owner key, open mode and no
+    key."""
+    from localm import auth
+    from localm.inference.http_server import principal_id
+    key_hash = principal_id(request)
+    if key_hash and auth.scopes_for_key_hash(key_hash) is not None:
+        return key_hash
+    return None
+
+
 def _get_session(request: Request, session_id: str):
     session = _sessions(request).get(session_id)
     if session is None:
@@ -676,6 +688,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # run_tests/git-hooks is RCE, so disabling the executing tools - not just
     # confining the cwd - is the real containment.)
     is_owner, principal = _principal_from_request(request)
+    from fastapi.concurrency import run_in_threadpool
+    creating_key = await run_in_threadpool(_revocable_key_hash, request)
     # A key carrying the privileged coder:full scope (owner-only to mint) gets the
     # UNRESTRICTED coder, same as the owner; a plain coder-scoped key stays
     # restricted (read + confined edit, no shell).
@@ -773,7 +787,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         await _ensure_model_loaded(request, req.model, force=req.force,
                                           keep_others=req.keep_others)
 
-    from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
+    from localm.audit import (effective_mode, mode_at_least_as_private, parse_mode,
+                              project_mode)
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
     # is honored by the GUI coder, not just the global coder_mode.
     # Resolved BEFORE the backend, not after: the privacy gate needs it to decide
@@ -792,6 +807,15 @@ async def create_session(req: CreateSessionRequest, request: Request):
                 403, "Requesting a less private mode needs the owner key; a "
                 "scoped key uses the project's configured mode.")
     session_mode = req.mode or floor_mode.value
+    # A mode the project pins is a floor for every caller, the owner included.
+    pinned_mode = project_mode(cwd)
+    pin_note = None
+    if pinned_mode is not None and not mode_at_least_as_private(
+            parse_mode(session_mode), pinned_mode):
+        pin_note = (f"This project pins {pinned_mode.value} mode in "
+                    f".localcoder/config.toml, so this session runs in "
+                    f"{pinned_mode.value} mode, not {parse_mode(session_mode).value}.")
+        session_mode = pinned_mode.value
 
     loop = asyncio.get_running_loop()
     # WHICH model server answers this session. Off the event loop:
@@ -813,6 +837,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # indistinguishable from an applied one.
     # A localm server records this session's requests no less privately than
     # the session's own mode.
+    if pin_note:
+        notes.append(pin_note)
     if hasattr(backend, "session_mode"):
         backend.session_mode = parse_mode(session_mode).value
     if req.native_tools and not backend.supports_native_tools:
@@ -871,6 +897,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
+    session.key_hash = creating_key
     # Whether THIS session is itself a resume, for the join-guard above: it
     # must be able to tell "a resume request landed on an already-resumed
     # session" (join it) apart from "a resume request landed on a plain,
@@ -878,6 +905,11 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # instead, unaffected by the plain session already running).
     session.opened_via_resume = bool(req.resume and not restricted)
     mgr.create(session)
+    if creating_key:
+        from localm import auth
+        if await run_in_threadpool(auth.key_hash_live_checked, creating_key) is False:
+            await run_in_threadpool(mgr.remove, session.id)
+            raise HTTPException(401, "The key that opened this session was revoked.")
     # Optional resume: restore this cwd's saved conversation into the new
     # session. Owner / coder:full only - a restricted scoped session must not
     # load the owner's prior conversation. The checkpoint read runs off the loop.
