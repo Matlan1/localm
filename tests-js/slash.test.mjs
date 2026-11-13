@@ -163,3 +163,77 @@ test("an unrecognised command reports 'Unknown command: /<cmd>'", () => {
   window.handleSlashSubmit("/totally-bogus-cmd", window.execChatCommand);
   assert.equal(toastText(window), "Unknown command: /totally-bogus-cmd");
 });
+
+/* ================================================================ */
+/*  A streaming reply refuses every chat command                     */
+/* ================================================================ */
+
+function pressEnter(win, ta) {
+  ta.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+}
+
+for (const typed of ["/clear", "/new"]) {
+  test(`${typed} picked from the slash menu while a reply streams changes nothing`, () => {
+    const { window } = loadApp();
+    window.newConversation();
+    runScript(window, `currentConv().messages.push({ role: "user", content: "question" });
+      chat.busy = true;`);
+    const before = window.currentConv();
+    const ta = typeSlash(window, "chat-input", typed);
+    assert.equal(menuItems(window, "chat-input").length, 1, "the menu offers the command");
+    pressEnter(window, ta);
+    assert.equal(window.currentConv(), before, "the open chat is still the one that streams");
+    assert.equal(before.messages.length, 1, "the question stays in the chat");
+    assert.equal(toastText(window), "Wait for the current reply to finish");
+  });
+}
+
+test("an alias (/imagine) is refused like its command while a reply streams", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl });
+  window.newConversation();
+  runScript(window, "chat.busy = true;");
+  assert.equal(window.execChatCommand("imagine", "a cat"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(window.currentConv().messages.length, 0, "no turn was added");
+  assert.equal(calls.filter((u) => u.includes("/api/imagine")).length, 0);
+  assert.equal(toastText(window), "Wait for the current reply to finish");
+});
+
+test("a name that is not a chat command is still reported unknown while a reply streams", () => {
+  const { window } = loadApp();
+  runScript(window, "chat.busy = true;");
+  assert.equal(window.execChatCommand("totally-bogus-cmd", ""), false);
+});
+
+test("/rename <title> with no chat open starts a chat with that title", () => {
+  const { window } = loadApp();
+  assert.ok(!window.currentConv(), "no chat is open");
+  window.execChatCommand("rename", "Trip notes");
+  const conv = window.currentConv();
+  assert.ok(conv, "a chat was opened");
+  assert.equal(conv.title, "Trip notes");
+  assert.notEqual(toastText(window), "Usage: /rename <title>");
+});
+
+for (const [run, route] of [["runImagineInChat", "/api/imagine"],
+                            ["runMusicInChat", "/api/music"],
+                            ["runVideoInChat", "/api/video"]]) {
+  test(`a failed ${run} shows its error once, in the chat, and no toast`, async () => {
+    const fetchImpl = async (url) => {
+      if (String(url) === route) {
+        return { ok: false, status: 500, statusText: "Internal", json: async () => ({ detail: "boom" }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadApp({ fetchImpl });
+    await window[run]("x");
+    const text = window.document.getElementById("chat-messages").textContent;
+    assert.match(text, /failed: boom/, "the chat shows the error");
+    assert.equal(toastText(window), "", "no second copy of the error as a toast");
+  });
+}

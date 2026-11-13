@@ -89,7 +89,6 @@ export async function runImagineInChat(promptText) {
     }
   } catch (e) {
     body.textContent = t("slash.imageFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
@@ -184,7 +183,6 @@ export async function runMusicInChat(tags) {
     }
   } catch (e) {
     body.textContent = t("slash.musicFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
@@ -231,15 +229,24 @@ export async function runVideoInChat(promptText) {
     }
   } catch (e) {
     body.textContent = t("slash.videoFailed", { message: e.message });
-    toast(e.message, true);
   }
 }
 
+/** Other names a chat command answers to, mapped to its CHAT_COMMANDS name. */
+export const CHAT_ALIASES = { imagine: "generate-image", music: "generate-music", video: "generate-video" };
+
+/** Run chat command *cmd* with *arg*. Returns false for a name that is not a
+ *  chat command. While a reply streams every command is refused with the
+ *  "wait for the current reply" toast, whether it was typed and sent or picked
+ *  from the slash menu. */
 export function execChatCommand(cmd, arg) {
+  cmd = CHAT_ALIASES[cmd] || cmd;
+  if (!CHAT_COMMANDS.some((c) => c.cmd === cmd)) return false;
+  if (chatBusy()) { toast(t("chat.waitForReply"), true); return true; }
   switch (cmd) {
-    case "generate-image": case "imagine": runImagineInChat(arg); return true;
-    case "generate-music": case "music": runMusicInChat(arg); return true;
-    case "generate-video": case "video": runVideoInChat(arg); return true;
+    case "generate-image": runImagineInChat(arg); return true;
+    case "generate-music": runMusicInChat(arg); return true;
+    case "generate-video": runVideoInChat(arg); return true;
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
@@ -254,9 +261,12 @@ export function execChatCommand(cmd, arg) {
     case "compact": $("compact-conv").onclick(); return true;
     case "export": exportConversation(); return true;
     case "rename": {
+      if (!arg) { toast(t("slash.usage.rename"), true); return true; }
+      if (!currentConv()) newConversation();
       const conv = currentConv();
-      if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
-      else toast(t("slash.usage.rename"), true);
+      conv.title = arg;
+      saveConversations(conv);
+      renderConvList();
       return true;
     }
     case "remember": rememberFact(arg); return true;
