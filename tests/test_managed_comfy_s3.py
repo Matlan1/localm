@@ -252,21 +252,21 @@ def test_torch_spec_unknown_amd_windows_degrades_to_cpu_with_note(monkeypatch):
     assert spec.note and "cpu" in spec.note.lower()
 
 
-def test_torch_install_args_amd_uses_extra_index(monkeypatch):
-    """The pip args builder: AMD ROCm packages go in, with the AMD repo as an
-    --extra-index-url so torch resolves there and everything else from PyPI."""
+def test_torch_install_args_amd_uses_the_amd_index_alone(monkeypatch):
+    """The pip args builder: AMD ROCm packages go in, with the AMD repo as the
+    only index, so no package resolves from PyPI."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
     args = fresh.comfy_torch_install_args(spec)
     assert "torch==2.11.0+rocm7.13.0" in args
-    assert "--extra-index-url" in args
-    assert "https://repo.amd.com/rocm/whl/gfx103X-all/" in args
+    assert args[args.index("--index-url") + 1] == "https://repo.amd.com/rocm/whl/gfx103X-all/"
+    assert "--extra-index-url" not in args
 
 
 def test_torch_install_args_amd_rocm_win_uses_its_family_index(monkeypatch):
     """The pip args builder: RX 7000/9000 packages go in with their family's AMD
-    index as --extra-index-url, never --find-links."""
+    index as the only index, never --find-links."""
     from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
@@ -276,10 +276,9 @@ def test_torch_install_args_amd_rocm_win_uses_its_family_index(monkeypatch):
     assert torch in args
     assert torchvision in args
     assert torchaudio in args
-    assert "--extra-index-url" in args
-    assert hwdetect.amd_rocm_win_index("gfx110x") in args
+    assert args[args.index("--index-url") + 1] == hwdetect.amd_rocm_win_index("gfx110x")
     assert "--find-links" not in args
-    assert "--index-url" not in args
+    assert "--extra-index-url" not in args
 
 
 def test_torch_install_args_cuda_uses_index_url(monkeypatch):
