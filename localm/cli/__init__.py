@@ -17,9 +17,15 @@ The public surface:
     this package at call time, so a patch on ``localm.cli.<name>`` reaches the
     call site.
 """
+from .._venvguard import require_venv
+
+# Runs before the first third-party import. See
+# test_the_console_script_without_its_dependencies_shows_the_venv_message.
+require_venv()
+
 # sys/click on the package surface for test monkeypatch.
-import sys  # noqa: F401
-import click  # noqa: F401
+import sys  # noqa: F401,E402
+import click  # noqa: F401,E402
 
 # Config + model-manager names on the package for test monkeypatch.
 from ..config import (  # noqa: F401
@@ -35,6 +41,7 @@ from ._core import (  # noqa: F401
     main, console_main, console, _GracefulGroup, _read_version_for_cli,
     _bind_preflight_error, _exposed_bind_warning, _resolve_bind_host,
     _resolve_tls, _setup_tls_or_exit, _complete_model_name,
+    _own_help_names,
 )
 
 # Command submodules imported for their import-time side effect: registering
@@ -55,6 +62,9 @@ from . import (  # noqa: F401
     rerank as _rerank,
     speak as _speak,
 )
+
+# Commands added to groups after their registration get the help options too.
+_own_help_names(main)
 
 # Re-export the names tests (and other callers) import directly from localm.cli.
 run = _chat.run
