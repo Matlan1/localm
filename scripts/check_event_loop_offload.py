@@ -102,6 +102,24 @@ def _param_names(node) -> set[str]:
     return names
 
 
+def _loop_names(node) -> set[str]:
+    """The names bound as loop or comprehension targets in function *node*'s
+    own body (nested def/async def/lambda bodies excluded)."""
+    names: set[str] = set()
+    stack: list[ast.AST] = list(node.body)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        target = None
+        if isinstance(item, (ast.For, ast.AsyncFor, ast.comprehension)):
+            target = item.target
+        if target is not None:
+            names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+        stack.extend(ast.iter_child_nodes(item))
+    return names
+
+
 def _dotted(node: ast.AST) -> str:
     parts: list[str] = []
     cur = node
@@ -354,7 +372,7 @@ class Analyzer:
             nested = mod.funcs.get(func.qual + "." + name)
             if nested is not None:
                 return [(nested, True)]
-        if not rest and name in _param_names(func.node):
+        if not rest and (name in _param_names(func.node) or name in _loop_names(func.node)):
             return []
         if name in mod.funcs:
             return [(mod.funcs[name], True)]

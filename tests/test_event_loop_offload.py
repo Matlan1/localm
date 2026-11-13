@@ -382,6 +382,38 @@ def register(app):
     assert "GET /api/caps" not in _routes(mod, root)
 
 
+def test_a_call_through_a_loop_variable_is_not_bound_to_a_same_named_function(tmp_path):
+    """A loop variable called as ``fn()`` (a listener list) has no static target.
+    The one function in the tree named ``fn`` is not what the handler runs."""
+    mod = _load()
+    root = _tree(tmp_path, {
+        "helpers.py": _HELPERS + '''
+
+def submit():
+    def fn(job):
+        return get_embedder()
+    return fn
+''',
+        "routes.py": '''
+_listeners = []
+
+
+def _notify():
+    for fn in list(_listeners):
+        fn(None)
+    [fn(None) for fn in list(_listeners)]
+
+
+def register(app):
+    @app.post("/api/rotate")
+    async def rotate():
+        _notify()
+        return {}
+''',
+    })
+    assert "POST /api/rotate" not in _routes(mod, root)
+
+
 def test_an_unknown_receiver_is_reported_as_unconfirmed_and_never_gates(tmp_path):
     """`x.fetch(...)` where x is a local of unknown type. Resolved by unique
     method name, because dropping that lost a real finding - and marked, because
