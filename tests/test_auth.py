@@ -986,7 +986,7 @@ def test_owner_digest_record_mints_once_then_reuses_it(auth):
 
 
 def test_an_unpersistable_owner_kdf_record_is_reported(auth, monkeypatch, caplog):
-    def refuse(records):
+    def refuse(records, **kw):
         raise OSError("disk full")
     monkeypatch.setattr(auth, "_save_owner_kdf", refuse)
     with caplog.at_level(logging.WARNING, logger="localm"):
