@@ -893,8 +893,8 @@ def test_jobs_in_catalog():
     from localm.plugins import catalog
     entry = catalog.get("jobs")
     assert entry is not None
-    assert "job" in entry.commands
-    assert catalog.commands().get("job") == "jobs"
+    assert entry.commands == ()
+    assert "job" not in catalog.commands()
 
 
 def test_jobs_client_entry_is_served(home, monkeypatch):

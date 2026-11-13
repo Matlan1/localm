@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""First-party plugin catalog: command -> plugin lookup and the
-'that command needs the X plugin' suggestion, plus the CLI REPL wiring that
+"""First-party plugin catalog: chat command -> plugin lookup, plus the CLI REPL wiring that
 turns an unknown command for a known-but-inactive plugin into that hint
 (gated on the suggest_plugins config toggle)."""
 
@@ -16,12 +15,51 @@ from localm.plugins import catalog
 #  Pure catalog helpers                                                        #
 # --------------------------------------------------------------------------- #
 
-def test_for_command_maps_renamed_media_verbs():
-    assert catalog.for_command("generate-image").name == "image"
-    assert catalog.for_command("generate-music").name == "music"
-    assert catalog.for_command("generate-video").name == "video"
-    assert catalog.for_command("coder").name == "coder"
+def test_for_command_maps_the_chat_commands_and_their_aliases():
+    for verbs, plugin in ((("generate-image", "imagine"), "image"),
+                          (("generate-music", "music"), "music"),
+                          (("generate-video", "video"), "video"),
+                          (("web",), "web"),
+                          (("remember", "memory"), "memory")):
+        for verb in verbs:
+            assert catalog.for_command(verb).name == plugin, verb
     assert catalog.for_command("nope") is None
+
+
+def test_cli_verbs_are_not_chat_commands():
+    for verb in ("coder", "knowledge", "mcp", "job"):
+        assert catalog.for_command(verb) is None, verb
+
+
+def _gui_chat_commands() -> set:
+    """The commands the GUI chat composer handles (execChatCommand's cases)."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "static"
+           / "app" / "slash.js").read_text(encoding="utf-8")
+    body = src[src.index("export function execChatCommand"):]
+    body = body[:body.index("\n}\n")]
+    return set(re.findall(r'case "([a-z-]+)"', body))
+
+
+def test_every_catalog_command_is_a_command_the_chat_composer_handles():
+    handled = _gui_chat_commands()
+    assert {"remember", "generate-image"} <= handled, handled
+    missing = {verb for verb in catalog.commands() if verb not in handled}
+    assert not missing, f"catalog commands the chat composer does not handle: {missing}"
+
+
+def test_the_coder_entry_names_no_pip_extra_its_manifest_does_not_declare():
+    import tomllib
+    from pathlib import Path
+    store = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    for entry in catalog.CATALOG:
+        manifest = store / entry.name / "plugin.toml"
+        if not entry.extra or not manifest.is_file():
+            continue
+        declared = tomllib.loads(manifest.read_text(encoding="utf-8")).get(
+            "plugin", {}).get("requires_extras", [])
+        assert entry.extra in declared, (entry.name, entry.extra, declared)
 
 
 def test_commands_map_covers_every_catalog_command():
@@ -32,24 +70,10 @@ def test_commands_map_covers_every_catalog_command():
             assert cmds[verb] == entry.name
 
 
-def test_suggestion_for_known_inactive_plugin_command():
-    msg = catalog.suggestion("generate-image")
-    assert msg is not None
-    assert "image plugin" in msg
-    assert "localm plugin install image" in msg
-
-
-def test_suggestion_none_for_unknown_command():
-    assert catalog.suggestion("totally-made-up") is None
-
-
-def test_suggestion_skips_preinstalled_plugins():
-    # chat is preinstalled/protected and owns no commands, but the guard must
-    # hold even if a preinstalled plugin ever declared one.
+def test_preinstalled_plugins_own_no_chat_command():
     for entry in catalog.CATALOG:
         if entry.preinstalled:
-            for verb in entry.commands:
-                assert catalog.suggestion(verb) is None
+            assert entry.commands == (), entry.name
 
 
 # --------------------------------------------------------------------------- #
@@ -78,20 +102,12 @@ def _run_command(monkeypatch, raw):
     return buf.getvalue()
 
 
-# /knowledge (the rag plugin) is a catalogued verb that is NOT a built-in chat
-# REPL command, so it exercises the unknown-command -> suggestion wiring.
-def test_unknown_plugin_command_suggests_install(cfg_env, monkeypatch):
-    out = _run_command(monkeypatch, "/knowledge")
-    assert "rag plugin" in out
-    assert "localm plugin install rag" in out
-    assert "Unknown" not in out
-
-
-def test_suggest_plugins_off_falls_back_to_unknown(cfg_env, monkeypatch):
-    cfg_env.save_config({"suggest_plugins": False})
-    out = _run_command(monkeypatch, "/knowledge")
+@pytest.mark.parametrize("raw", ["/knowledge", "/coder", "/remember x", "/web q"])
+def test_a_command_the_terminal_chat_does_not_have_is_unknown_not_an_install_hint(
+        cfg_env, monkeypatch, raw):
+    out = _run_command(monkeypatch, raw)
     assert "Unknown" in out
-    assert "rag plugin" not in out
+    assert "plugin" not in out
 
 
 def test_genuinely_unknown_command_is_unknown(cfg_env, monkeypatch):

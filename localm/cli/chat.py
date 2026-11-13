@@ -1344,18 +1344,7 @@ def _handle_command(
             "[/dim]"
         )
     else:
-        hint = None
-        from ..config import load_config
-        if load_config().get("suggest_plugins", True):
-            from ..plugins import catalog
-            hint = catalog.suggestion(cmd)
-        if hint:
-            # escape(): hint is only ever non-None for a command the catalog
-            # itself recognises (a fixed, hardcoded set), so no bracket can reach
-            # here. Escaped anyway as defense-in-depth.
-            console.print(f"[yellow]{escape(hint)}[/yellow]")
-        else:
-            console.print(f"[dim]Unknown: /{escape(cmd)} -- try /help[/dim]")
+        console.print(f"[dim]Unknown: /{escape(cmd)} -- try /help[/dim]")
     return False
 
 
