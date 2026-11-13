@@ -190,8 +190,9 @@ def _old_data_folder(spec: PluginSpec) -> Optional[Path]:
     from localm.config import home_dir
     home = home_dir()
     old = home / spec.data_subdir
+    new = plugin_data_dir(spec, home)
     try:
-        if old.is_dir() and old.resolve() != plugin_data_dir(spec, home).resolve():
+        if old.is_dir() and (new is None or old.resolve() != new.resolve()):
             return old
     except OSError:
         return None
@@ -243,6 +244,8 @@ def _evict_backend_models(plugin_name: str) -> None:
     model that stays loaded, or a failed eviction, at WARNING."""
     import asyncio
     hs = sys.modules.get("localm.inference.http_server")
+    if hs is None:
+        return
     loop = getattr(hs, "_server_loop", None)
     if loop is None or not loop.is_running():
         return
