@@ -31,7 +31,7 @@ def _make_agent(tmp_path: Path, *, verbose: bool):
 def _run_read(agent, output="line one\nline two"):
     tool_def = MagicMock()
     tool_def.destructive = False
-    tool_def.fn = MagicMock(return_value=ToolResult.success("read a.py", output=output))
+    tool_def.fn = MagicMock(return_value=ToolResult.success(output, summary="read a.py"))
     call = ToolCall(name="read_file", args={"path": "a.py"}, raw="", start=0, end=0)
     with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", {"read_file": tool_def}):
         return agent._execute_tool(call, interactive=False)
