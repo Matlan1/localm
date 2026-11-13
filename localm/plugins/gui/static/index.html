@@ -1310,10 +1310,9 @@
               <div class="update-subsection">
                 <h4 class="update-sub-head" data-i18n="settings.runtime.subHead">Inference runtime</h4>
                 <div class="sub" data-i18n="settings.runtime.help">Check for a newer llama.cpp runtime build for your installed
-                backend, or install one on a machine that has none yet. On its own, localm installs
-                only the build this localm release uses, at start, when a different build is installed
-                and none is pinned; a newer one is installed only from here. If a new build does not
-                load on this machine, localm says so.</div>
+                backend, or install one on a machine that has none yet. You always start it -
+                it never re-provisions on its own. A build that fails to load on this machine
+                is never kept: setup-llama walks back to an older one that does.</div>
                 <div id="runtime-choice" class="key-warn" hidden>
                   <span id="runtime-choice-text"></span>
                   <div class="actions">
@@ -1334,8 +1333,8 @@
                   <option value="amd-rocm" data-i18n="settings.runtime.optAmdRocm">amd-rocm - AMD RX 6000, self-contained</option>
                 </select>
                 <div class="sub" data-i18n="settings.runtime.backendHelp">Which prebuilt to install. Changing this re-downloads the
-                runtime. On Windows a loaded model keeps the runtime files in use, so unload it first.
-                Your pick is never swapped silently if it turns out not to load here.</div>
+                runtime; nothing is replaced while a model is loaded, and your pick is never
+                swapped silently if it turns out not to load here.</div>
                 <label for="runtime-tag" data-i18n="settings.runtime.buildLabel">Build</label>
                 <input type="text" id="runtime-tag" style="max-width:340px"
                        placeholder="leave blank to keep the current build" data-i18n-placeholder="settings.runtime.tagPlaceholder">

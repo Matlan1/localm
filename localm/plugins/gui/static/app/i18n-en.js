@@ -1372,6 +1372,7 @@ export const I18N_EN = {
     "{count} models of a type with no tab of its own are not listed here - see the Other tab, or tick \"show other types here\".",
   "models.pull.addButton": "Add",
   "models.pull.browseNoHost": "Browse picks a folder on the server's disk, which this sign-in cannot read. Type the path instead.",
+  "models.pull.badReply": "The server's answer to the download request could not be read. Try again; if it repeats, see the server log.",
   "models.pull.browseButton": "Browse…",
   "models.pull.browseDialogTitle": "Pick a folder that holds the model(s)",
   "models.pull.browseTitle": "Pick a folder on this machine that holds the model(s)",
@@ -2874,7 +2875,8 @@ export const I18N_EN = {
 
   // ---- Settings > Updates > Inference runtime ----
   "settings.runtime.subHead": "Inference runtime",
-  "settings.runtime.help": "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. On its own, localm installs only the build this localm release uses, at start, when a different build is installed and none is pinned; a newer one is installed only from here. If a new build does not load on this machine, localm says so.",
+  "settings.runtime.help":
+    "Check for a newer llama.cpp runtime build for your installed backend, or install one on a machine that has none yet. You always start it - it never re-provisions on its own. A build that fails to load on this machine is never kept: setup-llama walks back to an older one that does.",
   "settings.runtime.backendLabel": "Backend",
   "settings.runtime.optKeepBackend": "Keep the installed backend",
   "settings.runtime.optAuto": "auto - detect this machine's GPU",
@@ -2885,7 +2887,8 @@ export const I18N_EN = {
   "settings.runtime.optCpu": "cpu - no GPU",
   "settings.runtime.optMetal": "metal - Apple Silicon",
   "settings.runtime.optAmdRocm": "amd-rocm - AMD RX 6000, self-contained",
-  "settings.runtime.backendHelp": "Which prebuilt to install. Changing this re-downloads the runtime. On Windows a loaded model keeps the runtime files in use, so unload it first. Your pick is never swapped silently if it turns out not to load here.",
+  "settings.runtime.backendHelp":
+    "Which prebuilt to install. Changing this re-downloads the runtime; nothing is replaced while a model is loaded, and your pick is never swapped silently if it turns out not to load here.",
   "settings.runtime.buildLabel": "Build",
   "settings.runtime.tagPlaceholder": "leave blank to keep the current build",
   "settings.runtime.tagHelp":
@@ -2925,7 +2928,8 @@ export const I18N_EN = {
   "settings.runtime.labelUpdate": "Update runtime",
   "settings.runtime.labelInstallRuntime": "Install runtime",
   "settings.runtime.switchTitle": "Switch the inference runtime",
-  "settings.runtime.switchBody": "This replaces the installed {installed} runtime with {target}. On Windows it cannot run while a model is loaded. If the new build does not work here, localm says so.",
+  "settings.runtime.switchBody":
+    "This replaces the installed {installed} runtime with {target}. It cannot run while a model is loaded, and if the new build does not work here localm says so rather than leaving it installed.",
   "settings.runtime.switchTargetAuto": "whichever backend localm detects for this machine",
   "settings.runtime.switchTargetNamed": "a {wanted} build",
   "settings.runtime.switchConfirm": "Switch",

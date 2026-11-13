@@ -11,7 +11,7 @@ import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
-import { PLAIN_RELOAD_KEYS, backendOverrideNote, caps, refreshBackendInfo, refreshPerfEstimate, reloadWithToasts } from "../app/settings-perf.js";
+import { PLAIN_RELOAD_KEYS, backendOverrideNote, caps, capsReady, refreshBackendInfo, refreshPerfEstimate, reloadWithToasts } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -1781,6 +1781,7 @@ document.addEventListener("click", async (e) => {
   if (e.target && e.target.id === "pull-browse") {
     const spec = $("pull-spec");
     if (!spec) return;
+    await capsReady;
     if (caps.fsAccess !== "host") { toast(t("models.pull.browseNoHost"), true); return; }
     const dir = await pickDirectory(t("models.pull.browseDialogTitle"),
                                     looksLikeLocalPath(spec.value) ? spec.value.trim() : "");
@@ -2357,11 +2358,21 @@ function _updateExtras(d) {
   return text;
 }
 
+/** Raise the reconnect overlay after an applied update that restarts the
+ *  server; with *before* (the /whoami answer read before the apply) it waits
+ *  for a process with a different instance id. */
+function _overlayAfterUpdate(d, before) {
+  if (!d.restarting || !window.onServerUnreachable) return;
+  setTimeout(() => onServerUnreachable({ priorInstanceId: before && before.instance_id }),
+    d.data_backup ? 6000 : 800);
+}
+
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
   if (out) { out.hidden = false; out.textContent = t("settings.update.downloading"); }
   try {
+    const before = window.fetchWhoami ? await window.fetchWhoami() : null;
     const r = await fetch("/api/update/apply", { method: "POST", headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
@@ -2375,6 +2386,7 @@ export async function updateApply() {
             : t("settings.update.updatedPlain", { version }))) + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
+      _overlayAfterUpdate(d, before);
     } else if (d.error) {
       showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
     } else {
@@ -2459,6 +2471,7 @@ async function _postSelectedVersion(rel, extra) {
   if (btn) btn.disabled = true;
   if (out) { out.hidden = false; out.textContent = t("settings.update.installing", { version: rel.version }); }
   try {
+    const before = window.fetchWhoami ? await window.fetchWhoami() : null;
     const r = await fetch("/api/update/apply", {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -2487,9 +2500,7 @@ async function _postSelectedVersion(rel, extra) {
           + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
-      if (d.restarting && window.onServerUnreachable) {
-        setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
-      }
+      _overlayAfterUpdate(d, before);
     } else if (d.error) {
       showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
     } else {
@@ -3239,8 +3250,9 @@ async function postPull(payload) {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify(payload),
   });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.detail || r.statusText);
+  const data = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((data && data.detail) || `HTTP ${r.status} ${r.statusText}`.trim());
+  if (!data) throw new Error(t("models.pull.badReply"));
   return data;
 }
 
