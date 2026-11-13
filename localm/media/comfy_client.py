@@ -2105,7 +2105,7 @@ def _read_launch_record(paths_file: Path) -> Optional[tuple[float, list]]:
     try:
         data = json.loads(paths_file.with_name(LAUNCH_RECORD).read_text(encoding="utf-8"))
         when, folders = float(data["time"]), data["folders"]
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
     if not isinstance(folders, list) or not all(isinstance(f, str) for f in folders):
         return None
