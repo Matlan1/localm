@@ -9,7 +9,7 @@ Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/
 ## Native backend (no ComfyUI)
 
 Video can also run on localm's built-in native backend, the same stable-diffusion.cpp
-worker that generates images (see [native-image.md](native-image.md)). Settings > Video >
+worker that generates images (see [native-image.md](native-image.md)). Settings > Media > Video >
 **Generation backend** picks `auto` (ComfyUI when it is set up, otherwise native),
 `native` or `comfy`; the Video page, `POST /api/video`, `localm video` and the chat
 `/generate-video` command all follow it.

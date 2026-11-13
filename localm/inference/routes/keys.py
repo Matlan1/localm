@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -10,6 +11,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 import localm.inference.http_server as _hs
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback
+
+#: Held across the last-key check and the revoke of one DELETE /v1/keys/{id}.
+_REVOKE_LOCK = threading.Lock()
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -151,17 +155,28 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str, request: Request):
-        """Revoke a named key. Answers 409 when the server is reachable from the
-        network, must hold a key, and this is its last one."""
-        from localm.auth import removal_leaves_no_key, revoke_key
+        """Revoke a named key and end what runs under it: its browser sessions,
+        the coder sessions it created and its open streams. Answers 409 when the
+        server is reachable from the network, must hold a key, and this is its
+        last one."""
+        from fastapi.concurrency import run_in_threadpool
+
+        from localm import auth
         from localm.config import ConfigUnreadable
-        if (_hs.network_bind_needs_key(request.app)
-                and removal_leaves_no_key(revoke_id=key_id)):
-            raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
+        needs_key = _hs.network_bind_needs_key(request.app)
+
+        def _revoke():
+            with _REVOKE_LOCK:
+                if needs_key and auth.removal_leaves_no_key(revoke_id=key_id):
+                    return None
+                return auth.revoke_key(key_id)
+
         try:
-            revoked = revoke_key(key_id)
+            revoked = await run_in_threadpool(_revoke)
         except ConfigUnreadable as e:
             raise HTTPException(409, str(e)) from e
+        if revoked is None:
+            raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
         if not revoked:
             raise HTTPException(404, f"No such key: {key_id}")
         return {"status": "revoked", "id": key_id}

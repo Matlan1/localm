@@ -84,20 +84,16 @@ def test_formats_param_reaches_hf_search_and_response_has_backend_flag(gui_app, 
     assert body["results"][0]["formats"] == ["hf"]
 
 
-def test_net_mode_off_refuses_with_a_gui_native_message_not_a_cli_command(
+def test_net_mode_off_refuses_with_the_settings_place_and_the_command(
         gui_app, monkeypatch):
-    """A browser has no CLI to run: _run_discover must translate the
-    DiscoverError.off refusal into a Settings-pointing message, never the
-    underlying 'localm config net_mode ask' text discover.py writes for a
-    terminal caller."""
+    """The GUI shows the one net-off download refusal every surface shows."""
+    from localm import config
     app, disc = gui_app
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     with TestClient(app) as c:
         r = c.get("/api/discover/search?q=x", headers=_hdr())
-    assert r.status_code == 403, r.text   # _discover_status: a net_mode refusal
-    detail = r.json()["detail"]
-    assert "localm config" not in detail
-    assert "Settings" in detail
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == config.net_off_download_refusal("nothing was searched")
 
 
 def test_net_mode_off_but_downloads_allowed_reaches_the_real_search(
