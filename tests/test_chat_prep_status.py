@@ -481,7 +481,7 @@ class TestMemoryInletAnnouncesRecall:
         monkeypatch.setattr(plug, "_recall_in_privacy", lambda surface: True)
         monkeypatch.setattr(plug, "_chat_store", lambda principal=None: _Store())
         monkeypatch.setattr(plug, "_embed_fn", lambda: order.append("embedder") or None)
-        monkeypatch.setattr(plug, "_legacy_bullets", lambda: [])
+        monkeypatch.setattr(plug, "_legacy_bullets", lambda _store: [])
         monkeypatch.setattr("localm.inference.embedder.will_download_on_first_use",
                             lambda: False)
         plug._memory_inlet([{"role": "user", "content": "what is my name"}], None,
@@ -507,7 +507,7 @@ class TestMemoryInletAnnouncesRecall:
         monkeypatch.setattr(plug, "_recall_in_privacy", lambda surface: True)
         monkeypatch.setattr(plug, "_chat_store", lambda principal=None: _Store())
         monkeypatch.setattr(plug, "_embed_fn", lambda: order.append("embedder") or None)
-        monkeypatch.setattr(plug, "_legacy_bullets", lambda: [])
+        monkeypatch.setattr(plug, "_legacy_bullets", lambda _store: [])
         monkeypatch.setattr("localm.inference.embedder.will_download_on_first_use",
                             lambda: True)
         plug._memory_inlet([{"role": "user", "content": "what is my name"}], None,

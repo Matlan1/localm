@@ -123,6 +123,98 @@ def test_the_decoder_stack_is_found_in_a_real_torch_model_and_its_hooks_fire():
     assert worker_mod._decoder_layers(nn.Linear(2, 2)) is None
 
 
+_VLM_SPECS = {
+    "qwen2_vl": dict(
+        text_config=dict(hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+                         num_attention_heads=2, num_key_value_heads=1, vocab_size=128,
+                         rope_scaling={"type": "mrope", "mrope_section": [2, 2, 4]}),
+        vision_config=dict(depth=6, embed_dim=32, hidden_size=32, num_heads=2, mlp_ratio=2,
+                           in_chans=3, patch_size=14, spatial_merge_size=2,
+                           temporal_patch_size=2)),
+    "qwen2_5_vl": dict(
+        text_config=dict(hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+                         num_attention_heads=2, num_key_value_heads=1, vocab_size=128,
+                         rope_scaling={"type": "mrope", "mrope_section": [2, 2, 4]}),
+        vision_config=dict(depth=6, hidden_size=32, num_heads=2, intermediate_size=64,
+                           out_hidden_size=32, fullatt_block_indexes=[1])),
+    "smolvlm": dict(
+        text_config=dict(hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+                         num_attention_heads=2, num_key_value_heads=1, vocab_size=128,
+                         model_type="llama"),
+        vision_config=dict(hidden_size=32, intermediate_size=64, num_hidden_layers=6,
+                           num_attention_heads=2, image_size=64, patch_size=16)),
+}
+
+
+@pytest.mark.parametrize("model_type", sorted(_VLM_SPECS))
+def test_a_vision_language_model_reports_its_text_decoder_not_its_vision_tower(model_type):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    cfg = transformers.AutoConfig.for_model(model_type, **_VLM_SPECS[model_type])
+    with torch.device("meta"):
+        m = transformers.AutoModelForImageTextToText.from_config(cfg)
+    names = {id(mod): name for name, mod in m.named_modules()}
+
+    layers = worker_mod._decoder_layers(m)
+
+    assert layers is not None
+    assert len(layers) == 3, names.get(id(layers))
+    assert layers is m.get_decoder().layers
+
+
+class ModuleList(list):
+    """Stands in for torch's ModuleList: the stack search matches it by name."""
+
+
+class _FakeModel:
+    def __init__(self, modules, decoder=None, encoder_decoder=False):
+        self._modules = modules
+        self._decoder = decoder
+        self.config = type("C", (), {"is_encoder_decoder": encoder_decoder})()
+
+    def named_modules(self):
+        return iter(self._modules)
+
+    def get_decoder(self):
+        return self._decoder
+
+
+def test_the_text_decoder_wins_over_a_longer_vision_tower_without_torch():
+    vision, text = ModuleList(range(32)), ModuleList(range(28))
+    language_model = _FakeModel([("", None), ("layers", text)])
+    vlm = _FakeModel([("model.visual.blocks", vision),
+                      ("model.language_model.layers", text)], decoder=language_model)
+    assert worker_mod._decoder_layers(vlm) is text
+
+    no_decoder_api = _FakeModel([("model.vision_model.encoder.layers", vision),
+                                 ("model.text_model.layers", text)])
+    del no_decoder_api._decoder
+    no_decoder_api.get_decoder = None
+    assert worker_mod._decoder_layers(no_decoder_api) is text
+
+    encoder, decoder = ModuleList(range(12)), ModuleList(range(6))
+    seq2seq = _FakeModel([("model.encoder.layers", encoder), ("model.decoder.layers", decoder)],
+                         decoder=_FakeModel([("layers", decoder)]), encoder_decoder=True)
+    assert worker_mod._decoder_layers(seq2seq) is encoder
+
+
+def test_a_longer_vision_stack_without_get_decoder_is_passed_over():
+    torch = pytest.importorskip("torch")
+    nn = torch.nn
+    m = nn.Module()
+    m.vision_tower = nn.Module()
+    m.vision_tower.blocks = nn.ModuleList([nn.Linear(2, 2) for _ in range(8)])
+    m.model = nn.Module()
+    m.model.layers = nn.ModuleList([nn.Linear(2, 2) for _ in range(3)])
+
+    assert worker_mod._decoder_layers(m) is m.model.layers
+
+    only_vision = nn.Module()
+    only_vision.visual = nn.Module()
+    only_vision.visual.blocks = nn.ModuleList([nn.Linear(2, 2) for _ in range(4)])
+    assert worker_mod._decoder_layers(only_vision) is only_vision.visual.blocks
+
+
 def test_the_layer_status_survives_the_process_boundary():
     s = protocol.prefill_layers_status(12, 48)
     q = multiprocessing.get_context("spawn").Queue()

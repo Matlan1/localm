@@ -87,16 +87,6 @@ def _fmt_since(ts) -> str:
     return _fmt_age(time.time() - ts)
 
 
-def _print_wide_table(table) -> None:
-    """Print a Rich table at the terminal's width, or at least
-    ``localm.console.PIPED_WIDTH`` columns when output is not a terminal."""
-    if console.is_terminal:
-        console.print(table)
-        return
-    from localm.console import PIPED_WIDTH, SafeConsole
-    SafeConsole(width=max(console.size.width, PIPED_WIDTH)).print(table)
-
-
 def _fmt_expires(ts) -> str:
     """Compact expiry for the 'key list' table: 'never' (no deadline), 'in
     <age>' (still valid), or 'expired'. list_keys() does not filter expired keys
@@ -372,7 +362,7 @@ def key_list():
                       _fmt_since(k.get("created")),
                       _fmt_expires(k.get("expires")),
                       _fmt_since(k.get("last_used")))
-    _print_wide_table(table)
+    console.print(table)
 
 
 

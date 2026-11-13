@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A reply during which the grammar constraint failed is reported as failed
-(GrammarUnsupportedError after its text), not returned as if it matched the
-grammar; the model then refuses grammar requests. Both the GGUF and the
-HuggingFace backend."""
+"""A reply during which a forced grammar constraint failed is reported as
+failed (GrammarUnsupportedError after its text), not returned as if it matched
+the grammar; a lazy grammar's reply is left as generated; the model then
+refuses grammar requests. Both the GGUF and the HuggingFace backend."""
 
 from __future__ import annotations
 
 import pytest
 
 from localm.inference.backends.base import (
-    GRAMMAR_FAILED_THIS_REPLY_MESSAGE, GrammarUnsupportedError,
+    GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE, GRAMMAR_FAILED_THIS_REPLY_MESSAGE,
+    GrammarUnsupportedError,
 )
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.backends.hf import HFBackend
@@ -40,8 +41,11 @@ def _hf():
     return b
 
 
-@pytest.mark.parametrize("make", [_gguf, _hf], ids=["gguf", "hf"])
-def test_the_failing_reply_is_reported_and_later_grammar_is_refused(make):
+@pytest.mark.parametrize("make,message", [
+    (_gguf, GRAMMAR_FAILED_THIS_REPLY_MESSAGE),
+    (_hf, GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE),
+], ids=["gguf", "hf"])
+def test_the_failing_reply_is_reported_and_later_grammar_is_refused(make, message):
     backend = make()
     backend._runner = _FakeRunner({"finish_reason": "stop", "grammar_unsupported": True})
     seen = []
@@ -49,7 +53,7 @@ def test_the_failing_reply_is_reported_and_later_grammar_is_refused(make):
         for tok in backend.chat_stream(_MSG, max_tokens=8, grammar='root ::= "{"'):
             seen.append(tok)
     assert seen == ["{", "not json"], "the text that was generated still streams"
-    assert str(exc.value) == GRAMMAR_FAILED_THIS_REPLY_MESSAGE
+    assert str(exc.value) == message
     assert backend._grammar_unsupported is True
     with pytest.raises(GrammarUnsupportedError):
         backend.validate_grammar('root ::= "{"')
@@ -125,3 +129,21 @@ def test_a_reply_whose_grammar_held_is_not_reported(make):
     assert list(backend.chat_stream(_MSG, max_tokens=8, grammar='root ::= "{"')) == [
         "{", "not json"]
     assert not getattr(backend, "_grammar_unsupported", False)
+
+
+def test_a_gguf_lazy_grammar_that_faulted_leaves_the_reply_as_generated():
+    backend = _gguf()
+    backend._runner = _FakeRunner({"finish_reason": "stop", "grammar_unsupported": True})
+    out = list(backend.chat_stream(_MSG, max_tokens=8, grammar='root ::= "{"',
+                                   grammar_lazy=True, grammar_triggers=["<tool_call>"]))
+    assert out == ["{", "not json"]
+    assert backend._grammar_unsupported is True
+    with pytest.raises(GrammarUnsupportedError) as exc:
+        backend.validate_grammar('root ::= "{"', lazy=True)
+    assert "would be ignored" in str(exc.value)
+
+
+def test_only_the_gguf_failure_message_names_the_llama_runtime():
+    assert "setup-llama" in GRAMMAR_FAILED_THIS_REPLY_MESSAGE
+    assert "setup-llama" not in GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE
+    assert "localm[grammar]" in GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE

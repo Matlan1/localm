@@ -189,14 +189,15 @@ def test_real_tree_a_protocol_change_selects_the_test_posting_to_its_route(real)
 
 @pytest.mark.parametrize(("changed", "test", "via"), [
     (["localm/memory/store.py", "localm/storekit.py"], "tests/test_cli_setup_embeddings_msg.py",
-     "imports localm.cli.maintenance (1 hop(s) from a change)"),
+     ("imports localm.cli.maintenance (1 hop(s) from a change)",)),
     (["localm/storekit.py"], "tests/test_auth_keystore_cross_process.py",
-     "imports localm.auth (1 hop(s) from a change)"),
+     ("imports localm.auth (1 hop(s) from a change)",
+      "imports localm.model_source_credentials (1 hop(s) from a change)")),
 ])
 def test_real_tree_a_storekit_change_leaves_config_out_and_keeps_the_narrow_paths(real, changed, test, via):
     mod, graph = real
     held: dict[str, float] = {}
     selected = mod.select(changed, graph, depth=1, max_share=0.25, held=held)
     assert "localm.config" in held
-    assert via in selected[test]
+    assert any(reason in selected[test] for reason in via), selected[test]
     assert len(selected) / len(graph.test_files) <= 0.25

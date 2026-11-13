@@ -25,7 +25,7 @@ def test_require_venv_exits_when_deps_absent(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: False)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: ["fastapi"])
     with pytest.raises(SystemExit):
         vg.require_venv()
 
@@ -34,7 +34,18 @@ def test_require_venv_passes_inside_venv(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/proj/.venv")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: [])
     vg.require_venv()   # must not raise
+
+
+def test_require_venv_exits_in_another_projects_venv_without_the_deps(monkeypatch):
+    import localm._venvguard as vg
+    monkeypatch.setattr(vg.sys, "prefix", "/other/.venv")
+    monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: ["fastapi"])
+    with pytest.raises(SystemExit) as exc:
+        vg.require_venv()
+    assert "virtual environment" in str(exc.value.code)
 
 
 def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
@@ -43,8 +54,48 @@ def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
-    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
+    monkeypatch.setattr(vg, "_missing_runtime_deps", lambda: [])
     vg.require_venv()   # must not raise
+
+
+def test_the_guard_checks_every_core_dependency_the_cli_loads_at_startup():
+    import importlib.metadata as md
+    import json
+    import re
+    import subprocess
+    import sys
+    import tomllib
+    from pathlib import Path
+
+    import localm._venvguard as vg
+    root = Path(__file__).resolve().parent.parent
+    deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["dependencies"]
+    core = {re.split(r"[<>=!~;\[ ]", d, maxsplit=1)[0].strip().lower() for d in deps}
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import json, sys; import localm.cli; print(json.dumps(sorted(sys.modules)))"],
+        capture_output=True, text=True, timeout=120, cwd=str(root),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert proc.returncode == 0, proc.stderr
+    loaded = {m.split(".")[0] for m in json.loads(proc.stdout.strip().splitlines()[-1])}
+    dists = md.packages_distributions()
+    needed = {m for m in loaded
+              if any(d.lower().replace("_", "-") in core for d in dists.get(m, ()))}
+    assert needed, "the startup import set was read"
+    assert needed <= set(vg._CORE_DEPS), sorted(needed - set(vg._CORE_DEPS))
+
+
+def test_the_venv_message_names_what_is_missing(monkeypatch):
+    import importlib.util
+
+    import localm._venvguard as vg
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: None if name == "starlette" else real(name, *a))
+    with pytest.raises(SystemExit) as exc:
+        vg.require_venv()
+    assert "missing: starlette" in str(exc.value.code)
 
 
 def test_runtime_deps_present_true_in_this_env():
