@@ -552,6 +552,22 @@ class HTTPBackend(BaseLLMBackend):
         self._ctx_capacity_cached = False
         self._ctx_capacity = None
 
+    def with_model(self, model: str) -> "HTTPBackend":
+        """A new backend for *model* on this backend's server: the same URL
+        (scheme, host and port), key, TLS verification, transport, API shape,
+        tool format, required capabilities, extra parameters and session mode,
+        with *model* pinned. Shares no per-request state with this backend.
+        The server was already admitted by this backend's off-machine gate."""
+        child = HTTPBackend(
+            self._base_url, model, api_key=self._api_key, timeout=self._timeout,
+            native_tools=self.native_tools, anthropic=self.anthropic,
+            localm_server=self._is_local_server, verify=self._verify,
+            pinned=self._pinned, model_pinned=True,
+            required_capabilities=self.required_capabilities,
+            trusted_peer=True, **dict(self._extra))
+        child.session_mode = self.session_mode
+        return child
+
     def _note_routing(self, headers) -> None:
         """Record the ``note`` of the ``X-Localm-Model-Routing`` response header
         in ``routing_note`` when the reply was neither routed nor pinned, which

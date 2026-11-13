@@ -319,23 +319,17 @@ def _child_backend(backend: Any, model: Any) -> tuple:
     The parent's *backend* when no other model is asked for, when the backend
     declares ``supports_model_override = False`` (a session answered by another
     instance: a new backend would go to that instance's port with this
-    install's credential), or when the new backend cannot be built. Otherwise a
-    new local backend for *model* on the parent's port."""
+    install's credential), when it cannot build a backend for another model
+    (no ``with_model``), or when building one fails. Otherwise
+    ``backend.with_model(model)``: the same server, reached the same way."""
     if not model or model == getattr(backend, "model_id", None):
         return backend, ""
-    if not getattr(backend, "supports_model_override", True):
+    with_model = getattr(backend, "with_model", None)
+    if not getattr(backend, "supports_model_override", True) or not callable(with_model):
         return backend, (f"requested model '{model}' is not available to this "
                          "session's sub-agents; ran on the parent's model instead")
-    from ..backends.http import make_localm_backend
-    raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
     try:
-        port = int(raw_url.split(":")[-1].split("/")[0])
-    except Exception:
-        port = 8642
-    try:
-        child = make_localm_backend(model, port=port)
-        child.session_mode = getattr(backend, "session_mode", None)
-        return child, ""
+        return with_model(model), ""
     except Exception as exc:
         return backend, (f"requested model '{model}' unavailable ({exc}); "
                          "ran on the parent's model instead")

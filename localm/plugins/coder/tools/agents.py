@@ -250,23 +250,15 @@ def _prepare_child(
     from ..agent import Agent
 
     backend = parent.backend
+    model_note = ""
     if model and model != backend.model_id:
         if not getattr(backend, "supports_model_override", True):
             return None, ToolResult.error(
                 f"{tool}: this session runs every sub-agent on its own model "
                 f"({backend.model_id}); the 'model' override is not available "
                 "here. Call again without 'model'.")
-        from ..backends.http import make_localm_backend
-        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
-        try:
-            port = int(raw_url.split(":")[-1].split("/")[0])
-        except Exception:
-            port = 8642
-        try:
-            backend = make_localm_backend(model, port=port)
-            backend.session_mode = getattr(parent.backend, "session_mode", None)
-        except Exception:
-            backend = parent.backend
+        from .parallel import _child_backend
+        backend, model_note = _child_backend(backend, model)
 
     preload_text = ""
     if files:
@@ -300,6 +292,7 @@ def _prepare_child(
         verify_cmd=_isolated_verify_cmd(parent, cwd) if isolated else None,
     ))
     inherit_session_state(parent, child)
+    child.model_note = model_note
     return child, full_task
 
 
@@ -381,14 +374,16 @@ def tool_spawn_agent(
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
     denied = list(getattr(child, "denied_unconfirmed", None) or [])
-    note = ""
+    model_note = getattr(child, "model_note", "")
+    note = f"[sub-agent '{name}': {model_note}]\n\n" if model_note else ""
     if denied:
         from ..runner import describe_denied
-        note = f"[sub-agent '{name}': {describe_denied(denied)}]\n\n"
+        note += f"[sub-agent '{name}': {describe_denied(denied)}]\n\n"
     return ToolResult.success(
         compose(note, untrusted_span(result_text)),
         summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)"
-                + (f", {len(denied)} tool call(s) denied" if denied else ""),
+                + (f", {len(denied)} tool call(s) denied" if denied else "")
+                + (" on the parent's model" if model_note else ""),
     )
 
 
@@ -605,6 +600,7 @@ def tool_spawn_agent_background(
     from ..background import AgentJob, get_registry
     from .git import git_worktree_remove
     child_cwd = info = None
+    model_note = ""
     try:
         child_cwd, info, iso_error = _isolate_child(cwd, name)
         if iso_error is not None:
@@ -621,6 +617,7 @@ def tool_spawn_agent_background(
             release(token)
             return prepared
         full_task = prepared
+        model_note = getattr(child, "model_note", "")
         child.detached = True
         # Make the child's location introspectable, as dispatch_parallel does.
         child.worktree_path = str(info["worktree"])
@@ -655,8 +652,10 @@ def tool_spawn_agent_background(
         f"its own worktree on branch '{info['branch']}'.\n"
         f"Check it with check_agent_job('{job.id}'); its result is also folded "
         "in automatically at the start of a later turn. Its changes land on that "
-        "branch and are NEVER merged into your working tree automatically.",
-        summary=f"sub-agent '{name}' started in background ({job.id})",
+        "branch and are NEVER merged into your working tree automatically."
+        + (f"\n{model_note}" if model_note else ""),
+        summary=f"sub-agent '{name}' started in background ({job.id})"
+                + (" on the parent's model" if model_note else ""),
     )
 
 
