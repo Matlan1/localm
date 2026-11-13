@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadApp, runScript } from "./harness.mjs";
+import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DE = JSON.parse(
@@ -286,3 +286,53 @@ for (const [run, route] of [["runImagineInChat", "/api/imagine"],
     assert.equal(toastText(window), "", "no second copy of the error as a toast");
   });
 }
+
+/* ================================================================ */
+/*  /generate-image runs the Images page's pick                      */
+/* ================================================================ */
+
+function imagineFetch(active, posts) {
+  return async (url, init = {}) => {
+    const u = String(url);
+    if (u === "/api/imagine/backend") {
+      return { ok: true, status: 200, json: async () => ({ active, choice: active }) };
+    }
+    if (u.startsWith("/api/imagine/native-models")) {
+      return { ok: true, status: 200,
+               json: async () => ({ models: [{ name: "flux-dev" }], slots: {}, loras: [] }) };
+    }
+    if (u === "/api/imagine" && (init.method || "GET") === "POST") {
+      posts.push(JSON.parse(init.body));
+      return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+}
+
+const STORED_IMAGE_PICK = {
+  "localm.nativeModels.image": JSON.stringify(
+    { models: { model: "flux-dev" }, loras: [{ name: "ink", strength: 0.5 }] }),
+};
+
+test("/generate-image sends the Images page's stored native pick on the native backend", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("native", posts),
+                                        seedLocalStorage: STORED_IMAGE_PICK });
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].prompt, "a cat");
+  assert.deepEqual(posts[0].native_models, { model: "flux-dev" });
+  assert.deepEqual(posts[0].loras, [{ name: "ink", strength: 0.5 }]);
+});
+
+test("/generate-image on ComfyUI sends the workflow model picks, never the native pick", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("comfy", posts),
+                                        seedLocalStorage: STORED_IMAGE_PICK });
+  runScript(window, `modelOverrides.image = { "1": { unet_name: "b.gguf" } };`);
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].model_overrides, { "1": { unet_name: "b.gguf" } });
+  assert.ok(!("native_models" in posts[0]), "no native pick on ComfyUI");
+  assert.ok(!("loras" in posts[0]), "no native LoRAs on ComfyUI");
+});

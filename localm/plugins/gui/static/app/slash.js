@@ -44,6 +44,10 @@ export const CODER_COMMANDS = [
   { cmd: "help", hint: "slash.coderCmd.help.hint" },
 ];
 
+/** Per media, an async function returning the model fields that media page's
+ *  Generate would send (set by the page; null when the page is not loaded). */
+export const chatPageModelChoice = { image: null };
+
 export async function runImagineInChat(promptText) {
   if (!promptText) { toast(t("slash.usage.image"), true); return; }
   if (!currentConv()) newConversation();
@@ -56,13 +60,15 @@ export async function runImagineInChat(promptText) {
   body.textContent = t("slash.generatingImage");
   box.scrollTop = box.scrollHeight;
   try {
-    if (!(await checkModelsBeforeGenerate("image", null, {}))) {
+    const picked = chatPageModelChoice.image ? await chatPageModelChoice.image() : {};
+    if (!(await checkModelsBeforeGenerate("image", null, {
+      model_overrides: picked.model_overrides, native_models: picked.native_models }))) {
       body.textContent = t("slash.modelsNotDownloaded");
       return;
     }
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({ prompt: promptText }),
+      body: JSON.stringify({ prompt: promptText, ...picked }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);

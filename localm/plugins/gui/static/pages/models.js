@@ -333,13 +333,13 @@ export async function postAdapterDetach(adapter) {
 }
 
 /** The chat models an adapter can be attached to, from the last list read:
- *  chat models of the adapter's own architecture when both are known (the
- *  attach route refuses any other). */
+ *  a chat model of another architecture is left out only when both
+ *  architectures are known (the attach route refuses only that case). */
 export function adapterBaseCandidates(adapter) {
   const arch = adapter && adapter.architecture;
   return _modelsSnapshot.filter((x) => !x.adapter && !x.missing
     && (!x.model_type || x.model_type === "llm")
-    && (!arch || x.architecture === arch));
+    && (!arch || !x.architecture || x.architecture === arch));
 }
 
 export function openAdapterAttachModal(m) {
@@ -2830,6 +2830,22 @@ async function confirmBackendHardware(wanted, proceed) {
     t("settings.runtime.mismatchConfirm", { wanted }), proceed);
 }
 
+/** Offer in the Backend select only the backends a check lists as installable
+ *  here (its `backends`), plus the "keep the installed backend" option. A
+ *  selected backend that is not offered goes back to that option. A check
+ *  without a `backends` list offers every backend. */
+export function syncRuntimeBackendOptions(backends) {
+  const sel = $("runtime-backend");
+  if (!sel) return;
+  const offered = Array.isArray(backends) ? new Set(backends) : null;
+  for (const opt of sel.options) {
+    const off = !!(opt.value && offered && !offered.has(opt.value));
+    opt.hidden = off;
+    opt.disabled = off;
+  }
+  if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = "";
+}
+
 export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status"), checkBtn = $("runtime-update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
@@ -2837,6 +2853,7 @@ export async function runtimeUpdateCheck() {
   try {
     const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
+    syncRuntimeBackendOptions(d.backends);
     if (out) {
       if (!d.installed) {
         out.textContent = t("settings.runtime.notInstalled");

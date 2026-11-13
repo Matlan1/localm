@@ -13,6 +13,7 @@ import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, createJobFollower, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
+import { chatPageModelChoice } from "../app/slash.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -427,17 +428,15 @@ $("img-generate").onclick = async () => {
     body.lora_strength_model = num("img-lora-strength-model");
     body.lora_strength_clip = num("img-lora-strength-clip");
   }
-  if (!native && modelOverrides.image && Object.keys(modelOverrides.image).length) {
-    body.model_overrides = modelOverrides.image;
-  }
   if (native && imageWorkflowCard.pending) {
     $("img-generate").disabled = true;
     let ready;
     try { ready = await imageWorkflowCard.prepare(); } finally { $("img-generate").disabled = false; }
     if (!ready) return;
   }
-  const nativeChoice = native ? imageModelPicker.choice() : {};
-  Object.assign(body, nativeChoice);
+  const picked = imageModelFields(native);
+  const nativeChoice = native ? picked : {};
+  Object.assign(body, picked);
   if (native) {
     const problem = imageInputs.problem();
     if (problem) { toast(problem, true); return; }
@@ -447,6 +446,23 @@ $("img-generate").onclick = async () => {
   }
   await imageJobs.run(() => generateImage(body, native, loraName, nativeChoice));
 };
+
+/* The model fields Generate sends: the native picker's models and LoRAs on the
+   native backend, the workflow panel's model picks on ComfyUI (none when
+   nothing was picked). */
+function imageModelFields(native) {
+  if (native) return imageModelPicker.choice();
+  const picks = modelOverrides.image;
+  return picks && Object.keys(picks).length ? { model_overrides: picks } : {};
+}
+
+/* The model fields of this page's pick for the chat's /generate-image, read
+   against the active backend. */
+export async function imagePageModelChoice() {
+  await refreshImageBackend();
+  return imageModelFields(imageBackend.active === "native");
+}
+chatPageModelChoice.image = imagePageModelChoice;
 
 async function generateImage(body, native, loraName, nativeChoice) {
   $("img-generate").disabled = true;

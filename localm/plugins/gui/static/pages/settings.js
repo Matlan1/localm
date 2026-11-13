@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, copyTextWithFeedback, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
@@ -1078,10 +1078,12 @@ export async function refreshKeysPanel() {
     secret.className = "key-secret-value";
     box.appendChild(secret);
     const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
+    copy.onclick = async () => {
       secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(made.key);
-      toast(t("settings.keys.copiedToast"));
+      if (await copyTextWithFeedback(copy, made.key, t("settings.keys.copyButton"),
+                                     t("settings.keys.copiedToast"))) {
+        toast(t("settings.keys.copiedToast"));
+      }
     };
     box.appendChild(copy);
     await renderKeyQR(box, made.key);
@@ -1167,10 +1169,12 @@ export async function refreshOwnerKeyPanel() {
     secret.className = "key-secret-value";
     box.appendChild(secret);
     const copy = el("button", "btn-secondary", t("settings.keys.copyButton"));
-    copy.onclick = () => {
+    copy.onclick = async () => {
       secret.select();
-      if (navigator.clipboard) navigator.clipboard.writeText(out.key);
-      toast(t("settings.keys.copiedToast"));
+      if (await copyTextWithFeedback(copy, out.key, t("settings.keys.copyButton"),
+                                     t("settings.keys.copiedToast"))) {
+        toast(t("settings.keys.copiedToast"));
+      }
     };
     box.appendChild(copy);
     box.style.display = "";
@@ -1653,7 +1657,11 @@ export async function saveSettingsSection(secId, within) {
     ({ r, data } = sent);
   }
   if (r.ok) {
-    toast(t(savedToastKey(updates)));
+    // A save the server took with a warning (for example an embedding model
+    // name that resolves to nothing yet) shows the warning in an error toast.
+    const warnings = (Array.isArray(data.warnings) ? data.warnings : []).filter(Boolean);
+    const savedText = t(savedToastKey(updates));
+    toast(warnings.length ? `${savedText}. ${warnings.join(" ")}` : savedText, warnings.length > 0);
     // A save may have moved "Show remote images in replies" (off / ask / on).
     // The route re-decides immediately, but an already-fetched image is held in
     // a page-lifetime blob cache and the reader's per-origin answers are held
