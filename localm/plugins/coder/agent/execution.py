@@ -707,6 +707,17 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
+        # A tool that cannot run in this session refuses before any hook or
+        # confirmation (ToolDef.precheck).
+        precheck = getattr(tool_def, "precheck", None)
+        refused = precheck(self) if callable(precheck) else None
+        if isinstance(refused, str) and refused:
+            result = self._track_tool_failure(call, ToolResult.error(refused))
+            if interactive:
+                print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False, summary=refused)
+            return result
+
         # Project pre_tool_use hooks run before confirmation, so a call a hook
         # blocks never reaches the prompt.
         hook_block = self._run_pre_tool_hooks(call, interactive)

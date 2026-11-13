@@ -9,7 +9,7 @@ skills.py add entries to it at runtime, so it must stay one shared dict object
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, Optional
 
 from .files import (
     tool_edit_file,
@@ -42,6 +42,7 @@ from .git import (
 from .env import tool_read_env
 from .web import tool_fetch_url, tool_web_search
 from .agents import (
+    background_spawn_refusal,
     tool_check_agent_job,
     tool_spawn_agent,
     tool_spawn_agent_background,
@@ -97,6 +98,9 @@ class ToolDef:
     # Marks a tool that asks before every call, under auto_approve too, as if it
     # were listed in always_confirm.
     confirm_always: bool = False
+    # Called with the agent before any confirmation; a returned string refuses
+    # the call with that text, so nobody is asked to approve a call that cannot run.
+    precheck: Optional[Callable[[Any], Optional[str]]] = None
 
 
 # The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an
@@ -474,6 +478,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "spawn_agent_background": ToolDef(
         name="spawn_agent_background",
         fn=tool_spawn_agent_background,
+        precheck=background_spawn_refusal,
         description=(
             "Start a sub-agent in the background and get a job id back immediately, "
             "so you can keep working while it runs. Check it with check_agent_job. "

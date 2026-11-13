@@ -533,6 +533,21 @@ def _finalize_isolated_child(info: dict):
     return _finalize
 
 
+def background_spawn_refusal(parent: Any) -> Optional[str]:
+    """Why a background sub-agent cannot start under *parent*, or None when it
+    can: *parent* confirms tools at the terminal (no ``confirm_handler``, no
+    ``auto_approve``), where a background child cannot prompt. The executor
+    calls this before asking to approve the call (``ToolDef.precheck``), and the
+    tool calls it again before starting."""
+    if (getattr(parent, "confirm_handler", None) is None
+            and not getattr(parent, "auto_approve", True)):
+        return ("spawn_agent_background: this session confirms tools at the "
+                "terminal, and a background sub-agent cannot prompt there while "
+                "you are still working. Use spawn_agent (synchronous) instead, or "
+                "start the session with --yes to pre-approve.")
+    return None
+
+
 def tool_spawn_agent_background(
     cwd: Path,
     task: str,
@@ -581,13 +596,9 @@ def tool_spawn_agent_background(
     # inheriting the terminal prompt (_confirm_tool) is specifically forbidden
     # here. An explicit confirm_handler (GUI/web) is a real async channel and is
     # fine; auto_approve means the user already said yes to everything.
-    explicit_handler = getattr(_parent_agent, "confirm_handler", None)
-    if explicit_handler is None and not getattr(_parent_agent, "auto_approve", True):
-        return ToolResult.error(
-            "spawn_agent_background: this session confirms tools at the terminal, "
-            "and a background sub-agent cannot prompt there while you are still "
-            "working. Use spawn_agent (synchronous) instead, or start the session "
-            "with --yes to pre-approve.")
+    launch_refusal = background_spawn_refusal(_parent_agent)
+    if launch_refusal is not None:
+        return ToolResult.error(launch_refusal)
 
     # The AUTHORITATIVE ceiling: one shared gate across every kind of concurrent
     # child, so background jobs and worktree-isolated parallel dispatch cannot
