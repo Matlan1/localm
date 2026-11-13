@@ -7,10 +7,10 @@
 "use strict";
 
 import { chat, renderAttachChips } from "../app/chat.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, createMissingModelOffer, dismissErrorToast, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { createImageInputs } from "../app/image-inputs.js";
-import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
+import { bindReloadToggle, createGallery, createJobFollower, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { showView } from "../app/tabs.js";
@@ -19,6 +19,8 @@ import { modelOverrides } from "./workflow.js";
 /* ================================================================ */
 /*  Image library                                                    */
 /* ================================================================ */
+
+const imageJobs = createJobFollower();
 
 const imageGallery = createGallery({
   slug: "imagine",
@@ -38,7 +40,10 @@ const imageGallery = createGallery({
     const img = document.createElement("img");
     img.style.maxWidth = "100%";
     img.style.borderRadius = "8px";
-    ctx.fileURL(item.name, img, "load").then((url) => (img.src = url));
+    const unavailable = (why) => img.replaceWith(el("div", "sub", why));
+    img.addEventListener("error", () => unavailable(t("mediaGallery.previewUnavailable")));
+    ctx.fileURL(item.name, img, "load").then((url) => (img.src = url))
+      .catch(() => unavailable(t("mediaGallery.imageLoadFailed")));
     body.appendChild(img);
   },
 
@@ -101,6 +106,7 @@ const imageGallery = createGallery({
   beforeRefresh: () => {
     refreshImageBackend().then(() => { if (imageBackend.active !== "native") refreshLoraPicker(); });
     refreshReloadToggle("image", "img-reload-llm");
+    imageJobs.adopt("imagine", followAdoptedImageJob);
   },
 });
 
@@ -211,10 +217,16 @@ function buildUpscaleAction(item, ctx) {
   row.append(sel, btn);
   (async () => {
     let list = [];
+    let listed = false;
     try {
       const r = await fetch("/api/imagine/native-models", { headers: authHeaders() });
-      if (r.ok) list = (await r.json()).upscalers || [];
+      if (r.ok) { list = (await r.json()).upscalers || []; listed = true; }
     } catch { /* offline: the button stays disabled */ }
+    if (!listed) {
+      sel.hidden = true;
+      btn.title = t("images.upscaleListFailed");
+      return;
+    }
     for (const u of list) {
       const o = document.createElement("option");
       o.value = u.name;
@@ -251,6 +263,7 @@ export async function refreshImageBackend() {
     } else if (imageBackend.active === "comfy") {
       text = t("images.backendComfy");
     }
+    if (data.warning) text = text ? `${text} ${data.warning}` : data.warning;
     note.textContent = text;
     note.hidden = !text;
   }
@@ -270,6 +283,11 @@ export async function refreshImageBackend() {
   }
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
+  }
+  const cfg = $("img-cfg");
+  if (cfg) {
+    cfg.dataset.i18nPlaceholder = native ? "images.cfgPlaceholderNative" : "images.cfgPlaceholder";
+    cfg.placeholder = t(cfg.dataset.i18nPlaceholder);
   }
   for (const node of document.querySelectorAll(
     "#view-images .img-native-only, #view-images .img-native-gen, #view-images .img-native-extra")) {
@@ -331,7 +349,7 @@ function addResultImage(name, shown) {
   $("img-result").appendChild(img);
   fetchImageURL(`/api/imagine/file/${encodeURIComponent(name)}`)
     .then((url) => { img.src = url; })
-    .catch((e) => toast(t("images.generationFailed", { message: e.message }), true));
+    .catch((e) => toast(t("images.resultLoadFailed", { name, message: e.message }), true));
 }
 
 /* Follow image job *jobId*: log lines into *log*, each saved image into the
@@ -357,6 +375,10 @@ async function followImageJob(jobId, log) {
 
 async function runImageUpscale(name, upscaler) {
   if (!upscaler) { toast(t("images.upscaleNone"), true); return; }
+  await imageJobs.run(() => upscaleImage(name, upscaler));
+}
+
+async function upscaleImage(name, upscaler) {
   $("img-generate").disabled = true;
   const log = $("img-log");
   log.style.display = "block";
@@ -383,6 +405,7 @@ async function runImageUpscale(name, upscaler) {
 $("img-generate").onclick = async () => {
   const promptText = $("img-prompt").value.trim();
   if (!promptText) { toast(t("images.enterPrompt"), true); return; }
+  dismissErrorToast(t("images.enterPrompt"));
   const num = (id) => {
     const v = $(id).value.trim();
     return v === "" ? null : Number(v);
@@ -422,6 +445,10 @@ $("img-generate").onclick = async () => {
     body.clip_skip = num("img-clip-skip");
     Object.assign(body, imageGen.body(), imageInputs.body());
   }
+  await imageJobs.run(() => generateImage(body, native, loraName, nativeChoice));
+};
+
+async function generateImage(body, native, loraName, nativeChoice) {
   $("img-generate").disabled = true;
   imageLivePreview.clear();
   const log = $("img-log");
@@ -449,7 +476,28 @@ $("img-generate").onclick = async () => {
     imageLivePreview.clear();
     hideStop("img-stop");
   }
-};
+}
+
+/* Follow an image job this page did not start (one from the chat's
+   /generate-image), into the same log and result area. */
+async function followAdoptedImageJob(jobId) {
+  $("img-generate").disabled = true;
+  const log = $("img-log");
+  log.style.display = "block";
+  log.textContent = "";
+  $("img-result").replaceChildren();
+  try {
+    const end = await followImageJob(jobId, log);
+    if (end.status === "done") toast(t("images.generatedToast"));
+    else toast(t("images.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
+  } catch (e) {
+    toast(t("images.generationFailed", { message: e.message }), true);
+  } finally {
+    $("img-generate").disabled = false;
+    imageLivePreview.clear();
+    hideStop("img-stop");
+  }
+}
 
 /* ================================================================ */
 /*  Prompt helpers: enhance, import parameters from an image         */
@@ -516,8 +564,9 @@ export async function applyImportedParams(result) {
       }
       imageModelPicker.setLoras(kept);
     }
-  } else if (p.model || (p.loras && p.loras.length)) {
-    skipped.push("model", "LoRA");
+  } else {
+    if (p.model) skipped.push("model");
+    if (p.loras && p.loras.length) skipped.push("LoRA");
   }
   revealFilledAdvanced($("view-images"));
   return skipped;
