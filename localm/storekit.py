@@ -106,9 +106,65 @@ def _perm_warn(path: Path, why: str) -> None:
                  "directory's own scoping still applies", path.name, why)
 
 
+def current_user_sid() -> Optional[str]:
+    """The string SID (``S-1-5-21-...``) of the user this process runs as, read
+    from the process token; ``None`` off Windows or when it cannot be read. The
+    USERNAME and USER environment variables are never consulted."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        token_query, token_user = 0x0008, 1
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), token_query,
+                                         ctypes.byref(token)):
+            return None
+        try:
+            size = wintypes.DWORD(0)
+            advapi32.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
+            if not size.value:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if not advapi32.GetTokenInformation(token, token_user, buf, size,
+                                                ctypes.byref(size)):
+                return None
+            # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first field is the PSID.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            text = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+                return None
+            try:
+                sid = text.value or ""
+            finally:
+                kernel32.LocalFree(text)
+        finally:
+            kernel32.CloseHandle(token)
+    except (OSError, AttributeError, ValueError) as e:
+        logger.debug("could not read the process token's user SID: %r", e)
+        return None
+    if not sid.startswith("S-1-") or not sid[4:].replace("-", "").isdigit():
+        return None
+    return sid
+
+
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
-    Windows icacls - which grants the user full control regardless of *mode*,
+    Windows icacls - which grants the user of the process token, named by its
+    SID (see :func:`current_user_sid`), full control regardless of *mode*,
     since ACLs do not encode POSIX bits; inherited entries are dropped, and a
     file created without inherited entries keeps its default SYSTEM and
     Administrators ACEs). Returns True when the tightening is believed
@@ -137,20 +193,22 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             os.chmod(path, mode)
         else:
             import subprocess
-            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-            if not user:
-                _perm_warn(path, "no USERNAME/USER in the environment")
+            sid = current_user_sid()
+            if not sid:
+                _perm_warn(path, "the process token's user SID could not be read")
                 return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
-            # /grant:r replaces any existing grant for this user, so the user
-            # holds an explicit full-control ACE (SYSTEM and Administrators may remain).
+            # /grant:r replaces any existing grant for the token's user (named by
+            # SID, "*S-1-..."), so that user holds an explicit full-control ACE
+            # (SYSTEM and Administrators may remain).
             icacls = sysprog.find("icacls")
             if not icacls:
                 _perm_warn(path, "icacls was not found in the Windows system folder")
                 return False
             r = subprocess.run(
-                [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True, check=False)
+                [icacls, str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
+                capture_output=True, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable
                 # principal, a non-NTFS volume), so a non-zero exit is reported
