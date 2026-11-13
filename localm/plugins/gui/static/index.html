@@ -323,7 +323,7 @@
           <label data-i18n="coder.controls.autoApproveLabel"><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
           <label title="Destructive tools report what they would do without touching anything" data-i18n-title="coder.setup.dryTitle" data-i18n="coder.setup.dryLabel"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
           <label title="Only bites with auto-approve, which is what it carves an exception out of: file writes go through, shell commands still stop for you." data-i18n-title="coder.setup.interactiveConfirmTitle" data-i18n="coder.setup.interactiveConfirmLabel"><input type="checkbox" id="setup-interactive-confirm"> Still confirm shell commands (with auto-approve)</label>
-          <label title="File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done." data-i18n-title="coder.setup.patchTitle" data-i18n="coder.setup.patchLabel"><input type="checkbox" id="setup-patch"> Patch mode (collect a diff, write nothing)</label>
+          <label title="File writes are captured as a unified diff instead of being applied. Shell commands and tests still run and can change files. Download the diff from the session toolbar when you are done." data-i18n-title="coder.setup.patchTitle" data-i18n="coder.setup.patchLabel"><input type="checkbox" id="setup-patch"> Patch mode (file edits become a diff)</label>
           <label title="Run no exit-code check at all, even when this project has an obvious one." data-i18n-title="coder.setup.noVerifyTitle" data-i18n="coder.setup.noVerifyLabel"><input type="checkbox" id="setup-no-verify"> Skip verification</label>
           <label title="Ask the model server for the OpenAI-compatible native tools API. With localm's own server this is not applied and the session says so; it uses grammar-constrained tool calls instead." data-i18n-title="coder.setup.nativeToolsTitle" data-i18n="coder.setup.nativeToolsLabel"><input type="checkbox" id="setup-native-tools"> Native tools API (if the server supports it)</label>
         </div>
@@ -534,13 +534,13 @@
             <div id="img-lora-field"><label data-i18n="images.loraLabel">LoRA</label><select id="img-lora"><option value="" data-i18n="images.loraNone">None</option></select></div>
           </div>
           <label data-i18n="images.inputImageLabel">Input image path (optional, img2img)</label>
-          <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
+          <input type="text" id="img-input" placeholder="a generated image or an uploaded file" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
           <div id="img-native-inputs" class="img-native-extra" hidden></div>
           <!-- Every knob here is placeholder-defaulted: blank already means "use
                the tuned default". "reuse settings" on a history item writes into
                them, so it calls revealFilledAdvanced and this opens itself. -->
           <details class="adv-fold" id="img-advanced">
-            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">size, seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">size, seed, guidance, denoise, CFG and more</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
               <div><label data-i18n="images.sizeLabel">Size</label><input type="text" id="img-size" placeholder="model default, e.g. 768x512" spellcheck="false" data-i18n-placeholder="images.sizePlaceholder"></div>
               <div><label data-i18n="chat.seed">Seed</label><input type="number" id="img-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
@@ -567,8 +567,8 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="img-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
-            <label class="inline-check" title="Applies to image generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="images.reloadCheckboxTitle">
+            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to image generation only. When off, the image backend (ComfyUI or the built-in engine) stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="images.reloadCheckboxTitle">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -635,7 +635,7 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="music-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
             <label class="inline-check" title="Applies to music generation only. When off, the music backend stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="music.reloadCheckboxTitle">
               <input type="checkbox" id="music-reload-llm" checked> reload chat model after generation
             </label>
@@ -689,7 +689,7 @@
           <div class="grid2">
             <div><label data-i18n="mediaGallery.durationLabel">Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
             <div><label data-i18n="video.fpsLabel">FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
-            <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
+            <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="a generated image or an uploaded file" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
           </div>
           <!-- Width and Height are folded even though they look load-bearing: the
                blurb above this form tells you to KEEP the model's native resolution and
@@ -710,8 +710,8 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="video-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
-            <label class="inline-check" title="Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="video.reloadCheckboxTitle">
+            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to video generation only. When off, the video backend (ComfyUI or the built-in engine) stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="video.reloadCheckboxTitle">
               <input type="checkbox" id="video-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -817,7 +817,7 @@
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
             <div class="card-head-text"><h3 data-i18n="plugins.external">External plugins</h3></div></div>
           <div class="sub" data-i18n-rich="plugins.externalIntro">A third-party plugin is a folder with a <code>plugin.toml</code> manifest; installing copies it
-          into the plugins folder of this installation. It can add a CLI command and export tools to the
+          into the plugins folder of this installation. It can add server routes and pages and export tools to the
           coder agent. Third-party plugins run unsandboxed in-process, so install only code you trust.</div>
           <div class="row">
             <input type="text" id="plugin-source" placeholder="path to a plugin folder" spellcheck="false"

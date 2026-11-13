@@ -28,15 +28,60 @@ let _perfCtxSaved = null;
 const _perfCtxValue = (ctx) => (_perfCtxSaved === null ? ctx.value : String(_perfCtxSaved));
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
-export async function refreshPerfEstimate() {
+// The Live tuning controls changed since the last save or seed; Apply writes
+// only these, and a re-seed from the saved config leaves them as typed.
+const _perfTouched = { gl: false, ctx: false };
+
+/** Set the Live tuning controls the person has not touched to the saved
+ *  config values *cfg* (a /v1/config body). */
+function _seedPerfControls(cfg) {
+  const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
+  if (!gl || !ctx || !cfg) return;
+  if (typeof cfg.n_gpu_layers === "number" && !_perfTouched.gl)
+    gl.value = cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers);
+  if (typeof cfg.n_ctx === "number" && !_perfTouched.ctx) {
+    // The slider's range grows to hold a larger saved window, so it shows it.
+    if (cfg.n_ctx > Number(ctx.max)) ctx.max = String(cfg.n_ctx);
+    ctx.value = Math.max(Number(ctx.min), cfg.n_ctx);
+    _perfCtxSaved = cfg.n_ctx >= Number(ctx.min) ? cfg.n_ctx : null;
+  }
+}
+
+/** Re-read the saved GPU layers and context window into the untouched Live
+ *  tuning controls, so the card shows what another card saved. Resolves true
+ *  when a control's value changed. */
+async function _reseedPerfControls() {
+  const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
+  if (!gl || !ctx || (_perfTouched.gl && _perfTouched.ctx)) return false;
+  const before = gl.value + "|" + _perfCtxValue(ctx);
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) { _seedPerfControls(await r.json()); syncPerfCtxHelp(); }
+  } catch { /* server unreachable: the controls keep their values */ }
+  return gl.value + "|" + _perfCtxValue(ctx) !== before;
+}
+
+/** Redraw the Live tuning VRAM estimate (and the reload offer). When the server
+ *  sizes no model (none loaded) it says so instead of showing figures for a
+ *  model that does not exist. Unless *reseed* is false it also re-reads the saved values into the
+ *  untouched controls and redraws again when one changed. */
+export async function refreshPerfEstimate({ reseed = true } = {}) {
   syncPerfReloadButton();
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
+  if (reseed) {
+    _reseedPerfControls().then((changed) => { if (changed) refreshPerfEstimate({ reseed: false }); });
+  }
   try {
     const q = new URLSearchParams({ n_ctx: _perfCtxValue(ctx), n_gpu_layers: gl.value });
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
     if (!r.ok) { out.textContent = t("settings.perf.estimateUnavailable"); return; }
     const d = await r.json();
+    if (!d.model || !d.model_bytes) {
+      out.replaceChildren(document.createTextNode(t("settings.perf.estimateNoModel")));
+      out.classList.remove("perf-warn");
+      return;
+    }
     const text = t("settings.perf.estimateSummary", {
       needed: _perfGiB(d.needed), weights: _perfGiB(d.weights),
       kv: _perfGiB(d.kv_cache), overhead: _perfGiB(d.overhead),
@@ -45,7 +90,7 @@ export async function refreshPerfEstimate() {
     if (d.loading === true) {
       out.appendChild(document.createTextNode(text + t("settings.perf.estimateLoadingSuffix")));
       clearTimeout(_perfEstTimer);
-      _perfEstTimer = setTimeout(refreshPerfEstimate, PERF_ESTIMATE_LOADING_POLL_MS);
+      _perfEstTimer = setTimeout(() => refreshPerfEstimate({ reseed: false }), PERF_ESTIMATE_LOADING_POLL_MS);
     } else if (typeof d.free === "number") {
       const suffix = typeof d.held === "number"
         ? t("settings.perf.estimateFreeHeldSuffix", { free: _perfGiB(d.free), held: _perfGiB(d.held) })
@@ -129,6 +174,8 @@ export function syncPerfReloadButton() {
   const offer = !!modelCache.active && !isPeerSelected();
   const btn = $("perf-reload");
   if (btn) btn.hidden = !offer;
+  const help = $("perf-reload-help");
+  if (help) help.hidden = !offer;
   for (const b of document.querySelectorAll(".settings-section-save-reload")) {
     b.hidden = !offer;
   }
@@ -137,12 +184,11 @@ export function syncPerfReloadButton() {
 export function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
-  // The controls changed since the last save; Apply writes only these.
-  const touched = { gl: false, ctx: false };
+  const touched = _perfTouched;
   const onInput = () => {
     syncPerfCtxHelp();
     clearTimeout(_perfEstTimer);
-    _perfEstTimer = setTimeout(refreshPerfEstimate, 150);   // debounce while dragging
+    _perfEstTimer = setTimeout(() => refreshPerfEstimate({ reseed: false }), 150);   // debounce while dragging
   };
   gl.addEventListener("input", () => { touched.gl = true; onInput(); });
   ctx.addEventListener("input", () => { touched.ctx = true; _perfCtxSaved = null; onInput(); });
@@ -150,7 +196,8 @@ export function setupPerfCard() {
   if (apply) apply.onclick = async () => {
     const updates = {};
     if (touched.gl) {
-      const glVal = Number(gl.value);
+      const raw = gl.value.trim();
+      const glVal = raw === "" ? NaN : Number(raw);
       if (!Number.isInteger(glVal) || glVal < 0 || glVal > 999) {
         toast(t("settings.perf.gpuLayersRangeToast"), true);
         return;
@@ -158,13 +205,22 @@ export function setupPerfCard() {
       updates.n_gpu_layers = glVal;
     }
     if (touched.ctx) updates.n_ctx = Number(ctx.value);
-    if (!Object.keys(updates).length) {
-      if (modelCache.active && !isPeerSelected()) {
-        await reloadWithToasts(modelCache.active, PLAIN_RELOAD_KEYS);
-        setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
-      } else {
-        toast(t("settings.perf.nothingToApply"));
+    // A control moved away and back is unchanged: only a value that differs
+    // from the saved one is written.
+    try {
+      const cur = await fetch("/v1/config", { headers: authHeaders() });
+      if (cur.ok) {
+        const cfg = await cur.json();
+        const savedGl = typeof cfg.n_gpu_layers === "number"
+          ? (cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers)) : null;
+        if ("n_gpu_layers" in updates && updates.n_gpu_layers === savedGl) delete updates.n_gpu_layers;
+        if ("n_ctx" in updates && updates.n_ctx === cfg.n_ctx) delete updates.n_ctx;
       }
+    } catch { /* server unreachable: the save below reports it */ }
+    if (!Object.keys(updates).length) {
+      touched.gl = false;
+      touched.ctx = false;
+      toast(t("settings.perf.nothingToApply"));
       return;
     }
     try {
@@ -196,14 +252,7 @@ export function setupPerfCard() {
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))
     .then((cfg) => {
-      if (typeof cfg.n_gpu_layers === "number" && !touched.gl)
-        gl.value = cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers);
-      if (typeof cfg.n_ctx === "number" && !touched.ctx) {
-        // The slider's range grows to hold a larger saved window, so it shows it.
-        if (cfg.n_ctx > Number(ctx.max)) ctx.max = String(cfg.n_ctx);
-        ctx.value = Math.max(Number(ctx.min), cfg.n_ctx);
-        _perfCtxSaved = cfg.n_ctx >= Number(ctx.min) ? cfg.n_ctx : null;
-      }
+      _seedPerfControls(cfg);
       syncPerfCtxHelp();
       refreshPerfEstimate();
     })
@@ -624,7 +673,11 @@ async function _saveGpuSplit() {
         : value.length === 1 ? t("settings.perf.singleGpuToast", { index: value[0] })
                 : t("settings.perf.savedNextLoad"),
           !!ratioWarning);
-  } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
+  } catch (e) {
+    toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
+    // The boxes go back to what the server holds.
+    refreshGpuSplitCheckboxes();
+  }
 }
 
 /** A "Split across GPUs" checkbox changed: the checked SET changed, so the
@@ -663,6 +716,9 @@ export function setupGpuSplitCheckboxes() {
 export function setupResidencyControls() {
   const cap = $("perf-max-resident"), pinned = $("perf-pinned-models");
   if (!cap || !pinned) return;
+  // Each field keeps the last value the server accepted and returns to it
+  // when a save is refused or fails.
+  const saved = { cap: "", pinned: "" };
   cap.onchange = async () => {
     const raw = cap.value.trim();
     let value = null;
@@ -670,6 +726,7 @@ export function setupResidencyControls() {
       value = Number(raw);
       if (!Number.isInteger(value) || value < 1) {
         toast(t("settings.perf.maxResidentRangeToast"), true);
+        cap.value = saved.cap;
         return;
       }
     }
@@ -679,8 +736,12 @@ export function setupResidencyControls() {
         body: JSON.stringify({ max_resident_models: value }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      saved.cap = value === null ? "" : String(value);
       toast(value === null ? t("settings.perf.capClearedToast") : t("settings.perf.savedNextLoad"));
-    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
+    } catch (e) {
+      toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
+      cap.value = saved.cap;
+    }
   };
   pinned.onchange = async () => {
     // Same CSV-splitting rule settings_schema._to_str_list applies server-side
@@ -693,14 +754,18 @@ export function setupResidencyControls() {
         body: JSON.stringify({ pinned_models: names.length ? names : null }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      saved.pinned = names.join(", ");
       toast(names.length ? t("settings.perf.savedNextLoad") : t("settings.perf.pinsClearedToast"));
-    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
+    } catch (e) {
+      toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
+      pinned.value = saved.pinned;
+    }
   };
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))
     .then((cfg) => {
-      if (typeof cfg.max_resident_models === "number") cap.value = cfg.max_resident_models;
-      if (Array.isArray(cfg.pinned_models)) pinned.value = cfg.pinned_models.join(", ");
+      if (typeof cfg.max_resident_models === "number") cap.value = saved.cap = String(cfg.max_resident_models);
+      if (Array.isArray(cfg.pinned_models)) pinned.value = saved.pinned = cfg.pinned_models.join(", ");
     })
     .catch(() => { /* server unreachable - fields stay at their blank defaults */ });
 }

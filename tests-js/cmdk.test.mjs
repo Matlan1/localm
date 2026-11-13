@@ -75,6 +75,22 @@ test("filter that matches nothing leaves an empty list (negative)", () => {
   const input = window.document.getElementById("cmdk-input");
   input.value = "zzzznotacommand";
   input.dispatchEvent(new window.Event("input", { bubbles: true }));
-  assert.equal(window.document.querySelectorAll("#cmdk-list .cmdk-item").length, 0,
+  assert.equal(window.document.querySelectorAll("#cmdk-list .cmdk-item:not(.cmdk-empty)").length, 0,
     "no items match a nonsense query");
+  const empty = window.document.querySelector("#cmdk-list .cmdk-empty");
+  assert.ok(empty, "the list says nothing matches");
+  assert.equal(empty.textContent, "No command matches");
+  key(window, "Enter");
+  assert.equal(isOpen(window), true, "Enter with nothing to run keeps the palette open");
+});
+
+test("a view whose nav button is hidden for this key is not offered", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  window.applyCoreTabVisibility({ chat: true, models: false, plugins: false, settings: false });
+  const labels = window.cmdkCommands().map((c) => c.label);
+  for (const hidden of ["Models", "Plugins", "Settings"]) {
+    assert.ok(!labels.some((l) => l.startsWith("Go to") && l.includes(hidden)),
+      `no "Go to ${hidden}" row for a key that cannot open it: ${labels.join(" | ")}`);
+  }
+  assert.ok(labels.some((l) => l.startsWith("Go to") && l.includes("Chat")), "Chat stays offered");
 });
