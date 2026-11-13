@@ -469,8 +469,27 @@ def _stop_at_exit() -> None:
 atexit.register(_stop_at_exit)
 
 
+def _stop_server() -> bool:
+    """Stop the server localm started. True once its process has exited; when it
+    is still running after the kill it stays recorded (``running_pid`` keeps
+    reporting it), a warning is logged and False is returned. Caller must hold
+    ``_lock`` and have checked that a server is recorded."""
+    global _server
+    mp = _server.mp
+    _server.stop()
+    _server.mp = mp
+    if mp is not None and _server.alive():
+        from localm.debuglog import logger
+        logger.warning("koboldcpp music: the server (pid %s) is still running after it "
+                       "was stopped", getattr(mp, "pid", None))
+        return False
+    _server = None
+    return True
+
+
 def stop(cancel_check: Optional[CancelCheck] = None) -> bool:
-    """Stop the music server if one is running. True when one was stopped. While
+    """Stop the music server if one is running. True when one was stopped (its
+    process has exited). While
     waiting for a running job, ``cancel_check`` is polled; when it turns true the
     server is left running and False is returned."""
     global _server
@@ -481,9 +500,7 @@ def stop(cancel_check: Optional[CancelCheck] = None) -> bool:
         _cancel_idle_timer()
         if _server is None:
             return False
-        _server.stop()
-        _server = None
-        return True
+        return _stop_server()
     finally:
         _lock.release()
 
@@ -491,15 +508,13 @@ def stop(cancel_check: Optional[CancelCheck] = None) -> bool:
 def stop_if_idle() -> Optional[bool]:
     """Stop the music server when no generation holds it, without waiting for
     one. None when a generation holds it (the server is left running);
-    otherwise True once no server is running."""
-    global _server
+    otherwise True once no server is running, False when it kept running."""
     if not _lock.acquire(blocking=False):
         return None
     try:
         _cancel_idle_timer()
         if _server is not None:
-            _server.stop()
-            _server = None
+            return _stop_server()
         return True
     finally:
         _lock.release()

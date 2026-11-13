@@ -815,3 +815,32 @@ def test_another_main_gpu_starts_a_fresh_server():
     a = server.ServerKey("launcher", "cuda", MODELS, device=0)
     b = server.ServerKey("launcher", "cuda", MODELS, device=1)
     assert a != b
+
+
+class _StandIn:
+    """The parts of ``server._Server`` that stopping uses; *survives* keeps it
+    running after its stop."""
+
+    def __init__(self, survives: bool):
+        from types import SimpleNamespace
+        self.mp = SimpleNamespace(pid=4242)
+        self.survives = survives
+        self.running = True
+
+    def alive(self):
+        return self.mp is not None and self.running
+
+    def stop(self):
+        self.mp = None
+        self.running = self.survives
+
+
+@pytest.mark.parametrize("stop", ["stop_if_idle", "stop"])
+def test_a_server_still_running_after_its_stop_is_not_reported_stopped(monkeypatch, stop):
+    stubborn = _StandIn(survives=True)
+    monkeypatch.setattr(server, "_server", stubborn)
+    assert getattr(server, stop)() is False
+    assert server.running_pid() == 4242
+    monkeypatch.setattr(server, "_server", _StandIn(survives=False))
+    assert getattr(server, stop)() is True
+    assert server.running_pid() is None and server._server is None
