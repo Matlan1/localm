@@ -87,7 +87,7 @@ _NON_SOURCE_DIRS = (
     "__pycache__", ".git",
 )
 
-# torch/torchvision/torchaudio pinned as e.g. ``torch==2.4.1+rocm6.2``. pip does NOT
+# torch/torchvision/torchaudio pinned as e.g. ``torch==<version>+rocm6.2``. pip does NOT
 # record the index-url a package came from, so we recover the PyTorch wheel index
 # from the local version label after the ``+``.
 _TORCH_LABEL_RE = re.compile(
@@ -383,7 +383,7 @@ def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
     ROCm index when the freeze holds an AMD per-GPU device package
     (``amd-torch-device-gfx1030==...``, ``rocm-sdk-device-gfx1030==...``), else
     the one implied by a torch pin's local version label
-    (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
+    (``torch==<version>+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
     None when torch is a plain PyPI build (no ``+label``) or absent. pip does not
     record the index a package came from, so these names and labels are the only
     signal we have."""

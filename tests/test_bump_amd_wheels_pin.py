@@ -38,6 +38,7 @@ dependencies = [
 gpu = [
     "torch==2.10.0+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.25.0+rocm7.13.0; sys_platform == 'win32'",
+    "torchaudio==2.10.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
@@ -49,6 +50,9 @@ torch = [
 ]
 torchvision = [
   {{ url = "{BASE}/torchvision-0.25.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" }},
+]
+torchaudio = [
+  {{ url = "{BASE}/torchaudio-2.10.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" }},
 ]
 rocm-sdk-core = [
   {{ index = "rocm-gfx1030", marker = "sys_platform == 'win32'" }},
@@ -89,10 +93,22 @@ version = "2.10.0+rocm7.13.0"
 source = {{ url = "{BASE}/torch-2.10.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }}
 
 [[package]]
+name = "torchaudio"
+version = "2.10.0+rocm7.13.0"
+source = {{ url = "{BASE}/torchaudio-2.10.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }}
+
+[[package]]
 name = "torchvision"
 version = "0.25.0+rocm7.13.0"
 source = {{ url = "{BASE}/torchvision-0.25.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }}
 '''
+
+HWDETECT = """_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"
+_AMD_GFX103X_WIN_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
+_AMD_GFX103X_WIN_TORCH = "torch==2.10.0+rocm7.13.0"
+_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.25.0+rocm7.13.0"
+_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.10.0+rocm7.13.0"
+"""
 
 NEW = {"torch": "2.11.0+rocm7.13.0", "torchvision": "0.26.0+rocm7.13.0",
        "rocm-sdk-core": "7.13.0", "rocm-sdk-libraries-gfx103x-all": "7.13.0"}
@@ -118,6 +134,8 @@ def bump():
 def tree(bump, tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8", newline="\n")
     (tmp_path / "uv.lock").write_text(LOCK, encoding="utf-8", newline="\n")
+    (tmp_path / "localm").mkdir()
+    (tmp_path / "localm" / "hwdetect.py").write_text(HWDETECT, encoding="utf-8", newline="\n")
     monkeypatch.setattr(bump, "REPO", tmp_path)
 
     def no_network(req, timeout):
@@ -141,6 +159,8 @@ class FakeIndex:
                       "torch-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl"],
             "torchvision": ["torchvision-0.25.0+rocm7.13.0-cp312-cp312-win_amd64.whl",
                             "torchvision-0.26.0+rocm7.13.0-cp312-cp312-win_amd64.whl"],
+            "torchaudio": ["torchaudio-2.10.0+rocm7.13.0-cp312-cp312-win_amd64.whl",
+                           "torchaudio-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl"],
             "rocm-sdk-core": ["rocm_sdk_core-7.13.0-py3-none-win_amd64.whl",
                               "rocm_sdk_core-7.14.0-py3-none-win_amd64.whl"],
             "rocm-sdk-libraries-gfx103x-all": [
@@ -176,10 +196,13 @@ class FakeUv:
         lock = (Path(directory) / "uv.lock").read_text(encoding="utf-8")
         torch = re.search(r'"torch==([^";]+);', py).group(1)
         vision = re.search(r'"torchvision==([^";]+);', py).group(1)
+        audio = re.search(r'"torchaudio==([^";]+);', py).group(1)
         lock = re.sub(r'(name = "torch"\nversion = ")[^"]*\+rocm[^"]*(")',
                       lambda m: m.group(1) + torch + m.group(2), lock)
         lock = re.sub(r'(name = "torchvision"\nversion = ")[^"]*(")',
                       lambda m: m.group(1) + vision + m.group(2), lock)
+        lock = re.sub(r'(name = "torchaudio"\nversion = ")[^"]*(")',
+                      lambda m: m.group(1) + audio + m.group(2), lock)
         for i, arg in enumerate(args):
             if arg == "--upgrade-package":
                 pkg, _, ver = args[i + 1].partition("==")
@@ -255,7 +278,7 @@ def test_plan_moves_refuses_a_backward_stalled_or_split_request(
 # --------------------------------------------------------------------------- #
 
 def test_the_current_pins_are_read_from_pyproject_and_the_lock(bump):
-    assert bump.read_current(PYPROJECT, LOCK) == {
+    assert bump.read_current(PYPROJECT, LOCK, HWDETECT) == {
         "torch": "2.10.0+rocm7.13.0", "torchvision": "0.25.0+rocm7.13.0",
         "rocm-sdk-core": "7.13.0", "rocm-sdk-libraries-gfx103x-all": "7.13.0"}
 
@@ -279,19 +302,49 @@ def test_the_current_pins_are_read_from_pyproject_and_the_lock(bump):
 def test_a_tree_that_is_not_in_the_edited_shape_is_refused(bump, mutate, fragment):
     py, lock = mutate(PYPROJECT, LOCK)
     with pytest.raises(bump.Refused, match=fragment):
-        bump.read_current(py, lock)
+        bump.read_current(py, lock, HWDETECT)
 
 
-def test_the_rewrite_moves_the_four_regions_and_nothing_else(bump):
+@pytest.mark.parametrize("hwdetect, fragment", [
+    (HWDETECT.replace('"torch==2.10.0+rocm7.13.0"', '"torch==2.9.0+rocm7.13.0"'),
+     "localm/hwdetect.py names 2.9.0"),
+    (HWDETECT.replace('_AMD_GFX103X_WIN_TORCHVISION = ', '_AMD_GFX103X_VISION = '),
+     "_AMD_GFX103X_WIN_TORCHVISION: expected exactly one match, found 0"),
+])
+def test_a_hwdetect_pin_that_disagrees_with_pyproject_is_refused(bump, hwdetect, fragment):
+    with pytest.raises(bump.Refused, match=fragment):
+        bump.read_current(PYPROJECT, LOCK, hwdetect)
+
+
+def test_a_torchaudio_pin_off_torchs_version_is_refused(bump):
+    py = PYPROJECT.replace("torchaudio==2.10.0+", "torchaudio==2.10.1+").replace(
+        "torchaudio-2.10.0%2B", "torchaudio-2.10.1%2B")
+    hw = HWDETECT.replace("torchaudio==2.10.0+", "torchaudio==2.10.1+")
+    with pytest.raises(bump.Refused, match="torchaudio is pinned at 2.10.1"):
+        bump.read_current(py, LOCK, hw)
+
+
+def test_the_hwdetect_rewrite_moves_the_three_gfx103x_constants_and_nothing_else(bump):
+    new = bump.rewrite_hwdetect(HWDETECT, NEW)
+    assert '_AMD_GFX103X_WIN_TORCH = "torch==2.11.0+rocm7.13.0"' in new
+    assert '_AMD_GFX103X_WIN_TORCHVISION = "torchvision==0.26.0+rocm7.13.0"' in new
+    assert '_AMD_GFX103X_WIN_TORCHAUDIO = "torchaudio==2.11.0+rocm7.13.0"' in new
+    assert '_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"' in new
+    assert len(new.split("\n")) == len(HWDETECT.split("\n"))
+
+
+def test_the_rewrite_moves_the_six_regions_and_nothing_else(bump):
     new = bump.rewrite_pyproject(PYPROJECT, NEW)
     old_lines, new_lines = PYPROJECT.split("\n"), new.split("\n")
     assert len(old_lines) == len(new_lines)
     changed = [(a, b) for a, b in zip(old_lines, new_lines, strict=True) if a != b]
-    assert len(changed) == 4
+    assert len(changed) == 6
     assert '"torch==2.11.0+rocm7.13.0; sys_platform == \'win32\'",' in new
     assert '"torchvision==0.26.0+rocm7.13.0; sys_platform == \'win32\'",' in new
     assert f"{BASE}/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" in new
     assert f"{BASE}/torchvision-0.26.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" in new
+    assert '"torchaudio==2.11.0+rocm7.13.0; sys_platform == \'win32\'",' in new
+    assert f"{BASE}/torchaudio-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" in new
     assert "2.10.0" not in new and "0.25.0" not in new
 
 
@@ -315,6 +368,7 @@ def test_the_index_check_reads_percent_encoded_names_and_fragments(bump):
     ("torch-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl", "lists no torch-2.11.0"),
     ("torchvision-0.26.0+rocm7.13.0-cp312-cp312-win_amd64.whl", "lists no torchvision-0.26.0"),
     ("rocm_sdk_core-7.13.0-py3-none-win_amd64.whl", "lists no rocm_sdk_core-7.13.0"),
+    ("torchaudio-2.11.0+rocm7.13.0-cp312-cp312-win_amd64.whl", "lists no torchaudio-2.11.0"),
 ])
 def test_a_wheel_the_index_does_not_list_is_refused(bump, drop, fragment):
     with pytest.raises(bump.Refused, match=fragment):
@@ -401,7 +455,8 @@ def test_a_missing_uv_is_refused(bump, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def snapshot(root: Path) -> dict:
-    return {p.name: p.read_bytes() for p in sorted(root.iterdir()) if p.is_file()}
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
 
 
 def test_dry_run_changes_nothing_and_shows_both_diffs(bump, tree, capsys):
@@ -411,7 +466,7 @@ def test_dry_run_changes_nothing_and_shows_both_diffs(bump, tree, capsys):
     assert "moving: torch 2.10.0+rocm7.13.0 -> 2.11.0+rocm7.13.0" in out
     assert '+    "torch==2.11.0+rocm7.13.0; sys_platform == \'win32\'",' in out
     assert "--- a/uv.lock" in out and "dry run: nothing written" in out
-    assert "REMAINING STEPS" in out and "_AMD_GFX103X_TORCH" in out
+    assert "REMAINING STEPS" in out and "--- a/localm/hwdetect.py" in out
     assert snapshot(tree) == before
 
 
@@ -422,6 +477,8 @@ def test_write_moves_the_pyproject_regions_and_replaces_the_lock(bump, tree, cap
     lock = (tree / "uv.lock").read_text(encoding="utf-8")
     assert lock == LOCK.replace("2.10.0+rocm7.13.0", "2.11.0+rocm7.13.0").replace(
         "0.25.0+rocm7.13.0", "0.26.0+rocm7.13.0")
+    assert (tree / "localm" / "hwdetect.py").read_text(encoding="utf-8") == bump.rewrite_hwdetect(
+        HWDETECT, NEW)
     assert run(bump, ["--tag", tag(), "--write"]) == 1
 
 
@@ -481,14 +538,18 @@ def test_an_sdk_move_passes_the_upgrade_arguments_to_uv(bump, tree):
 def test_the_regions_the_script_edits_exist_once_on_the_real_tree(bump):
     py, _ = bump._read(_ROOT / "pyproject.toml")
     lock, _ = bump._read(_ROOT / "uv.lock")
-    current = bump.read_current(py, lock)
+    hw, _ = bump._read(_ROOT / bump.HWDETECT_REL)
+    current = bump.read_current(py, lock, hw)
     assert set(current) == set(bump.PACKAGES)
     new_wanted = dict(current, torch=current["torch"].replace("+rocm", ".1+rocm"),
                       torchvision=current["torchvision"].replace("+rocm", ".1+rocm"))
     new_py = bump.rewrite_pyproject(py, new_wanted)
-    assert new_py != py
-    assert new_py.count(new_wanted["torch"]) == 1 and new_py.count(new_wanted["torchvision"]) == 1
-    assert bump.read_current(new_py, lock)["torch"] == new_wanted["torch"]
+    new_hw = bump.rewrite_hwdetect(hw, new_wanted)
+    assert new_py != py and new_hw != hw
+    assert new_py.count(f"torch=={new_wanted['torch']}") == 1
+    assert new_py.count(f"torchaudio=={new_wanted['torch']}") == 1
+    assert new_py.count(new_wanted["torchvision"]) == 1
+    assert bump.read_current(new_py, lock, new_hw)["torch"] == new_wanted["torch"]
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")

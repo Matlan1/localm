@@ -126,16 +126,15 @@ def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6900 XT"))
-    assert "torchaudio==2.11.0+rocm7.13.0" in spec.packages
+    from localm import hwdetect
+    assert hwdetect.amd_gfx103x_win_torch_packages()[2] in spec.packages
 
 
 def test_comfy_amd_torch_pins_match_pyproject_gpu_extra():
     """The managed ComfyUI venv installs the same ROCm torch stack as the [gpu]
-    extra: _AMD_GFX103X_TORCH has no runtime link to pyproject, so this is the
-    only thing that keeps the two from drifting apart."""
+    extra."""
     import tomllib
 
-    from localm.media import managed_comfy_fresh as fresh
     root = Path(__file__).resolve().parents[1]
     deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"]["optional-dependencies"]["gpu"]
@@ -147,7 +146,8 @@ def test_comfy_amd_torch_pins_match_pyproject_gpu_extra():
             wanted[name] = req.replace(" ", "")
     assert set(wanted) == {"torch", "torchvision", "torchaudio"}
     assert all("+rocm" in req for req in wanted.values())
-    assert sorted(fresh._AMD_GFX103X_TORCH) == sorted(wanted.values())
+    from localm import hwdetect
+    assert sorted(hwdetect.amd_gfx103x_win_torch_packages()) == sorted(wanted.values())
 
 
 def test_torch_spec_nvidia_is_cuda(monkeypatch):
