@@ -874,7 +874,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "
                 "it and using the loopback default", url)
             return _COMFY_LOOPBACK_DEFAULT, (
-                f"comfy_api_url {url!r} targets a link-local/metadata address; "
+                f"The ComfyUI address {url!r} targets a link-local/metadata address; "
                 f"ignoring it and using the loopback default instead")
     except Exception as e:
         # FAIL CLOSED: if the guard itself cannot parse or verify the URL (e.g.
@@ -887,7 +887,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
             "comfy_api_url %r could not be validated (%s); ignoring it and "
             "using the loopback default", url, e)
         return _COMFY_LOOPBACK_DEFAULT, (
-            f"comfy_api_url {url!r} could not be validated ({e}); ignoring it "
+            f"The ComfyUI address {url!r} could not be validated ({e}); ignoring it "
             f"and using the loopback default instead")
     return url, None
 
@@ -962,13 +962,31 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
 #  Helpers
 # ---------------------------------------------------------------------------
 
+# api_url -> the refused redirect its last /system_stats probe answered with.
+_last_redirect: dict[str, str] = {}
+
+
 def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
-    """Quick reachability probe so callers can fail fast with a clear error."""
+    """Quick reachability probe so callers can fail fast with a clear error.
+    A refused redirect is remembered for ``_redirect_detail``."""
     try:
         with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout):
+            _last_redirect.pop(api_url, None)
             return True
-    except Exception:
+    except ComfyRedirectRefused as e:
+        _last_redirect[api_url] = str(e)
         return False
+    except Exception:
+        _last_redirect.pop(api_url, None)
+        return False
+
+
+def _redirect_detail(api_url: str) -> Optional[str]:
+    """``"it answers with a redirect, which localm refuses (...)"`` when the last
+    ``_comfy_alive`` probe of *api_url* was refused a redirect, else None. Makes
+    no request."""
+    reason = _last_redirect.get(api_url)
+    return f"it answers with a redirect, which localm refuses ({reason})" if reason else None
 
 
 def comfy_failure_detail(api_url: str, timeout: float = 10.0) -> Optional[str]:
@@ -983,6 +1001,8 @@ def comfy_failure_detail(api_url: str, timeout: float = 10.0) -> Optional[str]:
             return None
     except urllib.error.HTTPError as e:
         return f"it answers HTTP {e.code}"
+    except ComfyRedirectRefused as e:
+        return f"it answers with a redirect, which localm refuses ({e})"
     except Exception:
         return "it does not answer"
 
@@ -1166,7 +1186,8 @@ def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
         "ONLY a ComfyUI that localm itself starts (via a PYTHONPATH env var), writes "
         "NOTHING into your ComfyUI install, and self-expires once ComfyUI ships its "
         "own fix. " + apply_hint + "\n"
-        "To stop being asked, turn it on: localm config comfy_func_shim on")
+        "To stop being asked, turn on 'Fix ComfyUI ACE-Step __func__ crash (in-memory)' "
+        "in Settings > Media (or run: localm config comfy_func_shim on).")
 
 
 # ---------------------------------------------------------------------------
@@ -2036,6 +2057,42 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                         workdir=workdir)
 
 
+def _is_managed_target(api_url: str, cfg: Optional[dict] = None) -> bool:
+    """Whether *api_url* is localm's own managed ComfyUI and it is the one in
+    use. Never raises."""
+    try:
+        from localm.media.managed_comfy import managed_comfy_active, managed_comfy_api_url
+        return (managed_comfy_active(cfg)
+                and api_url.rstrip("/") == managed_comfy_api_url().rstrip("/"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# api_url -> the registered-model section of the model paths file localm's own
+# ComfyUI was launched with by this process.
+_launched_model_folders: dict[str, list] = {}
+
+STALE_MODEL_FOLDERS = ("Models registered with localm since localm's ComfyUI started are "
+                       "listed by it after a restart (run: localm comfy restart).")
+
+
+def _running_note(api_url: str) -> str:
+    """``"ComfyUI is running."``, plus ``STALE_MODEL_FOLDERS`` when *api_url* is
+    localm's own ComfyUI and the folders of the registered models differ from
+    the ones it was started with (known when this process started it; otherwise
+    from the file it last read). The file is rewritten for its next start."""
+    if _is_managed_target(api_url):
+        from localm.media.managed_comfy import (refresh_extra_model_paths,
+                                                registered_folders_in_file)
+        folders_changed, _problems = refresh_extra_model_paths()
+        launched = _launched_model_folders.get(api_url)
+        if launched is not None:
+            folders_changed = launched != registered_folders_in_file()
+        if folders_changed:
+            return "ComfyUI is running. " + STALE_MODEL_FOLDERS
+    return "ComfyUI is running."
+
+
 def comfy_launch_wait_seconds(cfg: Optional[dict] = None) -> int:
     """The wait budget ``ensure_comfy`` gives an unpinned launch: the
     configured ``comfy_launch_timeout`` (a ZLUDA/ROCm cold start compiles GPU
@@ -2091,10 +2148,10 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     api_url = (api_url or default_api_url()).rstrip("/")
     if comfy_device_error(api_url) is None:
         if is_comfy_confirmed(api_url):
-            return True, "ComfyUI is running."
+            return True, _running_note(api_url)
         if _comfy_alive(api_url):
             mark_comfy_alive(api_url)
-            return True, "ComfyUI is running."
+            return True, _running_note(api_url)
     mark_comfy_dead(api_url)
 
     with _launch_lock_for(api_url):
@@ -2229,6 +2286,12 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
         if found:
             launch_cmd, discovered = found, True
     if not launch_cmd:
+        redirect = _redirect_detail(api_url)
+        if redirect:
+            return False, (
+                f"The server at {api_url} is not answering as ComfyUI: {redirect}. "
+                "Point localm at the address ComfyUI itself serves, without a proxy "
+                "that redirects.")
         return False, (
             f"ComfyUI is not reachable at {api_url}.\n"
             "Point localm at your ComfyUI install so it can start it for you:\n"
@@ -2263,6 +2326,14 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     holder = comfy_port_holder(api_url)
     if holder is not None:
         return False, comfy_port_held_message(api_url, holder)
+
+    if _is_managed_target(api_url, cfg):
+        from localm.media.managed_comfy import (refresh_extra_model_paths,
+                                                registered_folders_in_file)
+        _changed, problems = refresh_extra_model_paths(cfg)
+        for problem in problems:
+            _say(f"Warning: {problem}; ComfyUI may not list every registered model.")
+        _launched_model_folders[api_url] = registered_folders_in_file()
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:
@@ -2351,17 +2422,27 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     if launch_log_path and tail:
         log_hint = f" The launcher's own output ({launch_log_path}):\n{tail}"
     elif launch_log_path:
-        log_hint = (f" The launcher's own output was captured to {launch_log_path} - "
-                    "check it for the reason it failed to start.")
+        log_hint = f" The launcher wrote nothing to its log ({launch_log_path})."
     else:
         log_hint = ""
+    redirect = _redirect_detail(api_url)
+    if redirect:
+        log_hint = f" The server at {api_url} {redirect}.{log_hint}"
     return False, (
-        f"ComfyUI did not come up within {wait_seconds // 60} minutes - "
-        "check the launcher window for errors. If it is just a slow first "
-        "(ZLUDA / ROCm) start, raise the limit: "
-        "localm config comfy_launch_timeout 600"
+        f"ComfyUI did not come up within {launch_wait_text(wait_seconds)}. If it is "
+        "just a slow first (ZLUDA / ROCm) start, raise 'ComfyUI launch timeout (s)' in "
+        "Settings > Media (or run: localm config comfy_launch_timeout 600)."
         f"{log_hint}"
     )
+
+
+def launch_wait_text(seconds: float) -> str:
+    """*seconds* as ``"45 seconds"`` under two minutes, else ``"N minutes"``
+    (rounded down, never 0)."""
+    seconds = int(seconds)
+    if seconds < 120:
+        return f"{seconds} seconds"
+    return f"{seconds // 60} minutes"
 
 
 def comfy_http_error_detail(e: urllib.error.HTTPError) -> str:

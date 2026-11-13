@@ -54,7 +54,7 @@ def test_auto_without_comfyui_is_native(no_comfy):
 
 
 def test_auto_with_comfyui_configured_is_comfy(no_comfy):
-    s = video_backend.settings({"comfy_target": "user"})
+    s = video_backend.settings({"comfy_target": "user", "comfy_api_url": "http://127.0.0.1:8190"})
     assert s["backend"] == "comfy"
 
 

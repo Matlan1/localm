@@ -338,3 +338,48 @@ def test_huge_and_non_dict_values_are_notes_not_crashes():
     wf, report = ci.convert(api, "image", reg={})
     assert "width" not in wf["params"] and wf["loras"][0]["strength"] == 1.0
     assert any("VAELoader #50: its inputs are not readable" in n for n in report["notes"])
+
+
+
+def test_the_shipped_example_workflow_keeps_model_steps_guidance_and_prompt():
+    import json
+    from pathlib import Path
+
+    import localm.image_gen as image_gen
+    example = Path(image_gen.__file__).with_name("flux_workflow.example.json")
+    wf, report = ci.convert(json.loads(example.read_text(encoding="utf-8")), "image", reg={})
+    assert wf["models"]["model"]["file"] == "flux1-dev-Q8_0.gguf"
+    assert {k: wf["params"][k] for k in ("steps", "sample_method", "scheduler", "guidance",
+                                         "prompt", "width", "height")} == {
+        "steps": 20, "sample_method": "euler", "scheduler": "simple", "guidance": 3.5,
+        "prompt": "PROMPT_PLACEHOLDER", "width": 1024, "height": 1024}
+    assert {u["class_type"] for u in report["unsupported"]} == {"ModelSamplingFlux"}
+
+
+def test_a_custom_sampler_with_a_cfg_guider_keeps_cfg_and_both_prompts():
+    graph = {
+        "1": {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {"unet_name": "sd3.gguf"}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "a lighthouse"}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "fog"}},
+        "4": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                                                    "negative": ["3", 0], "cfg": 4.5}},
+        "5": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "dpmpp_2m"}},
+        "6": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "steps": 28,
+                                                         "scheduler": "karras",
+                                                         "denoise": 0.6}},
+        "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": 7}},
+        "8": {"class_type": "EmptySD3LatentImage",
+              "inputs": {"width": 832, "height": 1216, "batch_size": 1}},
+        "9": {"class_type": "SamplerCustomAdvanced",
+              "inputs": {"noise": ["7", 0], "guider": ["4", 0], "sampler": ["5", 0],
+                         "sigmas": ["6", 0], "latent_image": ["8", 0]}},
+    }
+    wf, report = ci.convert(graph, "image", reg={})
+    assert wf["models"]["model"]["file"] == "sd3.gguf"
+    assert wf["params"]["cfg"] == 4.5 and wf["params"]["steps"] == 28
+    assert wf["params"]["sample_method"] == "dpm++2m"
+    assert wf["params"]["scheduler"] == "karras"
+    assert wf["params"]["prompt"] == "a lighthouse"
+    assert wf["params"]["negative_prompt"] == "fog"
+    assert any("denoise 0.6" in n for n in report["notes"])
+    assert report["unsupported"] == []
