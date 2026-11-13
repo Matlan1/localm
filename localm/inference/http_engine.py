@@ -40,6 +40,18 @@ def _error_detail(resp) -> str:
     return text[:400]
 
 
+def _routing_object(raw) -> Optional[dict]:
+    """The JSON object in an ``X-Localm-Model-Routing`` header value, or None
+    when it is absent or not a JSON object."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 class HttpEngine:
     """Engine stand-in that routes chat through a remote localm server's ``/v1`` API."""
 
@@ -64,6 +76,8 @@ class HttpEngine:
         self.pin_model = bool(pin_model)
         # The model the server reported answering the most recent request.
         self.answered_model: Optional[str] = None
+        # The capability-routing object of the most recent request's refusal.
+        self.refusal_routing: Optional[dict] = None
 
     # --- lifecycle (no-ops: the server owns the model) ---------------------- #
     @property
@@ -142,10 +156,13 @@ class HttpEngine:
                     min_context: Optional[int] = None,
                     on_status: Optional[Callable[[str], None]] = None,
                     thinking: Optional[bool] = None,
-                    cache_prompt: Optional[bool] = None) -> Iterator[str]:
+                    cache_prompt: Optional[bool] = None,
+                    model: Optional[str] = None) -> Iterator[str]:
         """Stream assistant tokens from the server's ``/v1/chat/completions``.
         *min_context* asks for a model whose trained window holds that many
-        tokens; it only has an effect when ``pin_model`` is False.
+        tokens; it only has an effect when ``pin_model`` is False. *model*
+        names the model to answer this request instead of the engine's own,
+        pinned.
         ``thinking=False`` is sent as ``chat_template_kwargs.enable_thinking``.
         ``cache_prompt`` is sent when set.
 
@@ -156,11 +173,14 @@ class HttpEngine:
         stream that ends with ``finish_reason: "error"`` (its message is the last
         content piece, the server's error text). A refusal the server sends
         in-stream (``localm_error``, on a stream it opened before it finished
-        preparing) raises exactly what the same HTTP error would."""
+        preparing) raises exactly what the same HTTP error would. Before raising
+        for a refusal, ``refusal_routing`` is set to the refusal's capability
+        routing object (the ``X-Localm-Model-Routing`` header, or the in-stream
+        ``localm_error["routing"]``) when it carries one; it is None otherwise."""
         import requests
 
         body: dict = {
-            "model": self._model or self.display_name,
+            "model": model or self._model or self.display_name,
             "messages": messages,
             "stream": True,
         }
@@ -175,11 +195,12 @@ class HttpEngine:
                 body[key] = val
         if thinking is not None:
             body["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
-        if not self.pin_model:
+        if not self.pin_model and not model:
             body["pin_model"] = False
             if min_context:
                 body["min_context"] = int(min_context)
         self.answered_model = None
+        self.refusal_routing = None
 
         try:
             resp = requests.post(f"{self._base}/chat/completions",
@@ -197,6 +218,8 @@ class HttpEngine:
 
         if resp.status_code >= 400:
             detail = _error_detail(resp)
+            self.refusal_routing = _routing_object(
+                (getattr(resp, "headers", None) or {}).get("X-Localm-Model-Routing"))
             # Mirror the in-process path: image-on-text-only is an UnsupportedInputError
             # the REPL catches to print vision guidance.
             if resp.status_code == 400 and "image" in detail.lower():
@@ -226,6 +249,8 @@ class HttpEngine:
             if isinstance(refusal, dict):
                 code = refusal.get("status")
                 detail = str(refusal.get("detail") or "request refused")
+                routing = refusal.get("routing")
+                self.refusal_routing = routing if isinstance(routing, dict) else None
                 if code == 400 and "image" in detail.lower():
                     raise UnsupportedInputError(detail)
                 raise RuntimeError(f"server error (HTTP {code}): {detail}")

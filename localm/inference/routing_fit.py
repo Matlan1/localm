@@ -134,6 +134,17 @@ def _classify_by_size(engine, free: int, reading: VramReading,
     return FIT_PARTIAL, 0
 
 
+def _configured_cpu_layers(engine) -> Optional[int]:
+    """The GPU layer count *engine*'s configuration sets when it puts no layer
+    on the GPU (``configured_gpu_layers`` at or below 0), else None, also for
+    an engine that does not report its configured count."""
+    configured = getattr(engine, "configured_gpu_layers", None)
+    if not callable(configured):
+        return None
+    layers = configured()
+    return layers if isinstance(layers, int) and layers <= 0 else None
+
+
 def _file_bytes(engine) -> int:
     path = getattr(engine, "model_path", None)
     if not path:
@@ -222,6 +233,8 @@ def assess(names: Sequence[str], *, residents: Mapping[str, Resident],
             free = None if reading.free is None else reading.free + int(freed or 0)
             cls, disk = classify(engine, free, reading, ram_available, ram_total)
             options.append(Fit(cls, evicts_user=evicts, load_bytes=size,
-                               disk_read_bytes=disk))
+                               disk_read_bytes=disk,
+                               configured_layers=(_configured_cpu_layers(engine)
+                                                  if cls == FIT_CPU_ONLY else None)))
         out[name] = min(options, key=lambda f: (f.needs_ask, f.cls, len(f.evicts_user)))
     return out
