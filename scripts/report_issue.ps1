@@ -65,13 +65,19 @@ function Get-LocalmHome {
 }
 
 # True when $t is one JSON value in strict syntax (what Python's json module
-# accepts without NaN): no comments, single quotes, bare names or trailing commas.
+# accepts without NaN), nested at most 512 levels: no comments, single quotes,
+# bare names or trailing commas.
 function Test-StrictJson([string]$t) {
   if ($t -match '[\x00-\x08\x0b\x0c\x0e-\x1f]') { return $false }
   $s = [regex]::Replace($t, '"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"', [string][char]1)
   if ($s.Contains('"')) { return $false }
   $s = [regex]::Replace($s, '-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null', [string][char]2)
   $s = [regex]::Replace($s, '[ \t\r\n]', '')
+  $depth = 0
+  foreach ($ch in $s.ToCharArray()) {
+    if ($ch -eq '[' -or $ch -eq '{') { $depth++; if ($depth -gt 512) { return $false } }
+    elseif ($ch -eq ']' -or $ch -eq '}') { $depth-- }
+  }
   $v = '[\x01\x02\x03]'
   do {
     $prev = $s

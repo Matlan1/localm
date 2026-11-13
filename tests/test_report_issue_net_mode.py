@@ -68,6 +68,7 @@ CORPUS = {
     "raw-tab-in-string": {"config.json": b'{"net_mode": "a\tsk"}'},
     "duplicate-key": {"config.json": b'{"net_mode": "ask", "net_mode": "off"}'},
     "deep": {"config.json": _DEEP},
+    "deep-700": {"config.json": b'{"net_mode": "ask", "x": ' + b"[" * 700 + b"]" * 700 + b"}"},
     "bak-only-off": {"config.json.bak": b'{"net_mode": "off"}'},
     "bak-only-ask": {"config.json.bak": b'{"net_mode": "ask"}'},
     "corrupt-with-bak": {"config.json": b"{not json", "config.json.bak": b'{"net_mode": "ask"}'},
