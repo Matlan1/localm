@@ -119,11 +119,10 @@ def stt_available() -> tuple[bool, str]:
 def _stt_download_blocked_reason(name: str, mode: str) -> str:
     from localm.netpolicy import downloads_allowed_when_off
     if mode == "off" and not downloads_allowed_when_off():
-        return (
-            f"The Whisper '{name}' speech model is not downloaded, and network "
-            "access is disabled (net_mode=off). Enable network access or turn on "
-            "\"Allow model downloads while network access is off\" to fetch "
-            "it once; transcription itself runs fully offline.")
+        from localm.config import net_off_download_refusal
+        return net_off_download_refusal(
+            f"the Whisper '{name}' speech model is not downloaded (transcription "
+            "itself runs fully offline once it is)")
     return (
         f"The Whisper '{name}' speech model is not downloaded yet, and "
         f"net_mode={mode} does not download automatically. Use the one-time "
