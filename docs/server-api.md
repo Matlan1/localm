@@ -781,6 +781,11 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
+The image is returned only when its embedded metadata (which can carry the prompt)
+was stripped and, when ComfyUI's own copy is to be removed, that copy is gone;
+otherwise the request fails with `502` and the reason, and no file is kept. Any
+other warning the generation reported is listed in the response's `warnings`.
+
 Failures: `400` an empty or over-long prompt, a bad `size`, an `output_format` other
 than `png`, a bad `response_format`, or `url` where none can be served (above);
 `422` an `n` outside 1 to 4 or a body that does not validate; `409` the job was

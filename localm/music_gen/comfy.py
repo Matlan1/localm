@@ -181,6 +181,7 @@ def generate_music(
     swap: bool = True,
     cancel_check: Optional[callable] = None,
     delete_outputs: bool = False,
+    containment_required: bool = False,
     placement: Optional[dict] = None,
 ) -> tuple[bool, str]:
     """
@@ -421,6 +422,8 @@ def generate_music(
         output_sha256=output_sha256,
         delete_outputs=delete_outputs,
     )
+    if containment_required and contain_warning:
+        return False, f"Output withheld: {contain_warning}"
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
     # Skipped entirely in privacy mode (write_sidecar=False): with the container
