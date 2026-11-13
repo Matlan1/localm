@@ -55,6 +55,12 @@ Notes:
   mode. The surface's mode applies only to requests made with the owner key (or
   in open mode); a scoped key's requests are recorded under the global mode,
   and the chat page opened with one follows the global mode too.
+- Images, music and video made from the chat page (`/imagine`, `/generate-music`,
+  `/generate-video`) follow the same rule: under `chat_mode = privacy` they get
+  no prompt sidecar and ComfyUI's own copy is removed, even when the global mode
+  keeps them. The automatic diagnostics that the server writes in the course of
+  handling such a request are off unless you turned on `keep_diagnostics`, and
+  a failed `localm run` follows the chat mode for its bug report.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
