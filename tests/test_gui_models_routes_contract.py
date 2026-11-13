@@ -805,9 +805,21 @@ class TestMediaPreflight:
         assert r.json() == {"status": "unavailable", "missing": [],
                             "warning": f"Could not check {kind} models before generating."}
 
-    def test_verified_with_nothing_missing(self, harness, monkeypatch):
+    def test_unreachable_comfyui_is_unavailable_not_verified(self, harness, monkeypatch):
         monkeypatch.setattr("localm.media.comfy_client.comfy_object_info",
                             lambda *a, **kw: None)
+        with TestClient(harness.app) as c:
+            r = c.post("/api/media/image/preflight", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert (data["status"], data["missing"]) == ("unavailable", [])
+        assert data["warning"].startswith("ComfyUI did not answer at http")
+        assert data["warning"].endswith(
+            "so the image models could not be checked before generating.")
+
+    def test_verified_with_nothing_missing(self, harness, monkeypatch):
+        monkeypatch.setattr("localm.media.comfy_client.describe_missing_models",
+                            lambda workflow, api_url: [])
         with TestClient(harness.app) as c:
             r = c.post("/api/media/image/preflight", json={})
         assert r.status_code == 200

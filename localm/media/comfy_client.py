@@ -678,18 +678,18 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     return True, ""
 
 
-def describe_missing_models(workflow: dict, api_url: str) -> list:
+def describe_missing_models(workflow: dict, api_url: str) -> Optional[list]:
     """Read-only variant of the ``preflight_models`` check: reports missing model
     slots as ``MissingModelSlot`` entries WITHOUT applying substitutions or
     otherwise mutating *workflow*. Used by a pre-check (e.g. before a user
     clicks Generate) that must not have side effects on the caller's workflow
     dict. Built on the same ``workflow_model_slots()`` walk ``preflight_models``
     uses - one shared walk, not a third independently-maintained one. Returns
-    ``[]`` when /object_info is unavailable (same best-effort behavior as
-    ``preflight_models``) or nothing is missing."""
+    None when /object_info is unavailable (the models could not be checked),
+    ``[]`` when nothing is missing."""
     slots = workflow_model_slots(workflow, api_url)
     if slots is None:
-        return []
+        return None
     return [MissingModelSlot(slot["class_type"], slot["input_name"],
                              slot["current"], slot["options"])
             for slot in slots if not slot_is_satisfied(slot)]

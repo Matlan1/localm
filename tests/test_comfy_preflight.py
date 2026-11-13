@@ -227,12 +227,11 @@ class TestDescribeMissingModels:
             missing = comfy_client.describe_missing_models(wf, "http://x")
         assert missing == []
 
-    def test_unreachable_object_info_reports_nothing_missing(self):
-        # Same best-effort contract as preflight_models: cannot validate -> defer.
+    def test_unreachable_object_info_is_not_reported_as_nothing_missing(self):
         wf = _wan_unet_workflow("does-not-exist.safetensors")
         with patch.object(comfy_client, "comfy_object_info", return_value=None):
             missing = comfy_client.describe_missing_models(wf, "http://x")
-        assert missing == []
+        assert missing is None
 
 
 class TestPreflightBeforeUnload:

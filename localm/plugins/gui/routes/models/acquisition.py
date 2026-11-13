@@ -548,6 +548,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 }
             target = resolve_comfy_target(plugin=kind)
             missing = describe_missing_models(workflow, target.api_url)
+            if missing is None:
+                return {
+                    "status": "unavailable",
+                    "missing": [],
+                    "warning": (f"ComfyUI did not answer at {target.api_url}, so the {kind} "
+                                "models could not be checked before generating."),
+                }
 
             results = []
             for slot in missing:
