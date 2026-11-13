@@ -630,7 +630,8 @@ def _job_headers(job: Any) -> Optional[dict]:
     (``jobmanager.Job.self_request_headers``), or None for an object that is not
     a ``Job``."""
     method = getattr(type(job), "self_request_headers", None)
-    return method(job) if callable(method) else None
+    headers = method(job) if callable(method) else None
+    return headers if isinstance(headers, dict) else None
 
 
 def unload_chat_for_media(job: Any, self_url: str, media_label: str,
