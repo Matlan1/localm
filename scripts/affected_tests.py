@@ -172,6 +172,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_speech_engine.py": (_LOCALM_PY, "walks the AST of every localm .py for speech engine calls"),
     "tests/test_remote_backend_gate.py": (_LOCALM_PY, "scans every localm .py for remote backend calls"),
     "tests/test_event_loop_offload.py": (_LOCALM_PY, "runs the event-loop offload sweep over localm/"),
+    "tests/test_config_reads_off_the_loop.py": (_LOCALM_PY,
+                                                "walks the AST of every localm .py for store writes in async functions"),
     "tests/test_mtp_arch_allowlist.py": (_LOCALM_PY, "runs the MTP architecture gate over localm/"),
     "tests/test_config_write.py": (("localm/plugins/*.py",), "scans every plugin module for direct config writes"),
     "tests/test_rag_store_live_lookups.py": (("localm/rag/_store/*.py",), "reads every module of the RAG store"),
