@@ -63,7 +63,7 @@ function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model",
       return { ok: true, status: 200,
                json: async () => ({ jobs, scheduler_warning: schedulerWarning }) };
     }
-    if (method === "GET" && /\/api\/models$/.test(url)) {
+    if (method === "GET" && /\/api\/models(\?|$)/.test(url)) {
       return { ok: true, status: 200, json: async () => ({ models, active }) };
     }
     if (method === "POST" && /\/api\/jobs\/[^/]+\/run$/.test(url)) {
@@ -200,8 +200,8 @@ test("the Model field is a dropdown populated from /api/models", async () => {
   assert.ok(values.includes(""), "keeps a blank = active/default option");
   assert.ok(values.includes("chat-model") && values.includes("coder-model"),
     "installed model names are added as options");
-  assert.ok(calls.some((c) => c.method === "GET" && /\/api\/models$/.test(c.url)),
-    "the dropdown is sourced from GET /api/models");
+  assert.ok(calls.some((c) => c.method === "GET" && /\/api\/models\?(.*&)?type=llm(&|$)/.test(c.url)),
+    "the dropdown is sourced from GET /api/models, asking for chat models only (type=llm)");
 });
 
 // --- the rag (knowledge re-sync) task kind ---------------------------------
