@@ -309,6 +309,8 @@ def plan_chat(req: ResponsesRequest, history: list[dict[str, Any]]
     and that conversation with this request's input added (``instructions``
     left out: they do not carry over to a continuation)."""
     refuse_unserved(req)
+    if isinstance(req.input, str) and not req.input.strip():
+        raise ResponsesError(400, "input must not be empty", "input")
     conversation = history + input_to_messages(req.input)
     if not any(m["role"] != "system" for m in conversation):
         raise ResponsesError(400, "input is required", "input")

@@ -63,7 +63,8 @@ class _Base(BaseModel):
     stream: Optional[bool] = None
     keep_alive: Optional[Union[float, int, str]] = None
     format: Optional[Union[str, dict[str, Any]]] = None
-    think: Optional[Union[bool, str]] = None
+    # Any type, so a wrong one reaches thinking_requested() and its 400.
+    think: Any = None
 
 
 class OllamaChatRequest(_Base):
