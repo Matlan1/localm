@@ -5607,8 +5607,11 @@ def _set_restart_env() -> None:
     """Set the environment a restart's re-exec'd process inherits:
     LOCALM_RESTART_IN_PROGRESS to the surface recorded by set_restart_ui, or to
     "1" when none is recorded, LOCALM_RESTART_GUI_MOUNTED to "1" when the
-    GUI was mounted live onto this process's API-only app (removed otherwise)."""
+    GUI was mounted live onto this process's API-only app (removed otherwise),
+    and appends this process's pid to ``bugreport.logs.RESTARTED_FROM_ENV``."""
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
+    from localm.bugreport.logs import note_restart
+    note_restart()
     if _gui_mounted_live:
         os.environ[_GUI_MOUNTED_ENV] = "1"
     else:

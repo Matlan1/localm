@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional, TypeGuard
 
-from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
+from localm.bugreport.logs import _recent_log_tail_result, run_hang_traces
 from localm.bugreport.assembly import build_report, report_title
 import localm.bugreport as _br
 
@@ -168,12 +168,10 @@ def save_user_report(description: str = "", *, summary: str = "",
                 context["recent_log_tail"] = tail
             elif log_unavailable:
                 context["log_unavailable"] = log_unavailable
-        # Always attach a hang trace captured by THIS run (independent of
-        # include_log): it only exists if the server actually froze. Scoped to
-        # our own pid like the log tail above, so an old freeze from a previous
-        # run is never presented as this report's diagnosis.
-        import os as _os
-        hang = _recent_hang_traces(pid=_os.getpid())
+        # Always attach a hang trace captured by this server (independent of
+        # include_log): this process or an earlier process of it that a restart
+        # replaced. Other runs' freezes are not attached.
+        hang = run_hang_traces()
         # extra_hang_trace covers the ``localm bug-report`` CLI's own case: it is
         # a separate, short-lived process whose OWN pid never froze, while the
         # server that DID freeze is a different, still-running process - a pid-of-

@@ -196,6 +196,39 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
         return ""
 
 
+# The pids of the earlier processes of this server, oldest first, comma
+# separated: a restart that re-executes the server (a new process on Windows)
+# appends its own pid before it does.
+RESTARTED_FROM_ENV = "LOCALM_RESTARTED_FROM_PIDS"
+_MAX_EARLIER_PIDS = 8
+
+
+def note_restart() -> None:
+    """Record this process's pid in ``RESTARTED_FROM_ENV`` for the process a
+    restart is about to start, keeping the newest ``_MAX_EARLIER_PIDS``."""
+    import os
+    pids = [p for p in os.environ.get(RESTARTED_FROM_ENV, "").split(",") if p.isdigit()]
+    pids.append(str(os.getpid()))
+    os.environ[RESTARTED_FROM_ENV] = ",".join(pids[-_MAX_EARLIER_PIDS:])
+
+
+def run_pids() -> list:
+    """This process's pid, then the pids of the earlier processes of the same
+    server (newest first) that restarts recorded with :func:`note_restart`."""
+    import os
+    earlier = [int(p) for p in os.environ.get(RESTARTED_FROM_ENV, "").split(",")
+               if p.isdigit()]
+    own = os.getpid()
+    return [own] + [p for p in reversed(earlier) if p != own]
+
+
+def run_hang_traces(home=None) -> str:
+    """:func:`_recent_hang_traces` for every pid of :func:`run_pids`, joined by
+    a blank line; empty when none of them captured a freeze."""
+    found = [t for t in (_recent_hang_traces(home, pid=p) for p in run_pids()) if t]
+    return "\n\n".join(found)
+
+
 def live_server_hang_trace(home=None) -> str:
     """The event-loop hang trace captured by a LIVE server of this install, for a
     user-initiated ``localm bug-report`` filed from a SEPARATE process.
