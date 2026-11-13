@@ -520,6 +520,65 @@ def test_provision_phase_records_the_failure_verdict(confirm, tmp_path, monkeypa
     assert f"{verdict}: Installing ComfyUI requirements failed" in capsys.readouterr().out
 
 
+
+def test_provision_phase_passes_checkout_on_a_source_archive_tree_without_git(
+        confirm, tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from localm import hwdetect
+    from localm.media import managed_comfy as mc
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import source_archive
+
+    commit = "c" * 40
+    root = tmp_path / "comfyui"
+    root.mkdir()
+    (root / "main.py").write_text("", encoding="utf-8")
+    source_archive.write_record(root, fresh.COMFYUI_REPO, commit, ["main.py"])
+    (root / ".localm-comfy.json").write_text(json.dumps({
+        "custom_nodes_installed": len(fresh.required_custom_nodes().nodes),
+        "custom_node_failures": [], "localm_patches": {"p": "applied"}}), encoding="utf-8")
+    assert not (root / ".git").exists()
+    monkeypatch.setattr(confirm, "_prepare_scratch_env", lambda wd: (wd, wd))
+    monkeypatch.setattr(confirm, "_verify_isolation", lambda wd: (True, "scoped"))
+    monkeypatch.setattr(hwdetect, "detect", lambda: None)
+    monkeypatch.setattr(fresh, "comfy_torch_spec",
+                        lambda det: SimpleNamespace(variant="rocm", note="", packages=("torch",)))
+    monkeypatch.setattr(fresh, "provision_fresh",
+                        lambda **kw: SimpleNamespace(ok=True, status="ok", message="ready"))
+    monkeypatch.setattr(mc, "managed_comfy_paths", lambda: SimpleNamespace(root=root))
+    monkeypatch.setattr(confirm, "_tag_commit", lambda repo, tag: (commit, ""))
+    monkeypatch.setattr(confirm, "_requirements_changed", lambda repo, old, new: True)
+    receipt_path = tmp_path / "r.json"
+    assert confirm.run_provision_phase("v9.9.9", commit, tmp_path / "wd", receipt_path,
+                                       require_gpu=False) == 0
+    receipt = confirm._load_receipt(receipt_path, "v9.9.9", commit)
+    assert receipt["checks"]["checkout"]["verdict"] == "PASS", receipt["checks"]["checkout"]
+    assert receipt["baseline"]["requirements_changed"] is True
+
+
+def test_fetch_repo_file_reads_the_raw_file_of_that_commit(confirm, monkeypatch):
+    from localm import http_ssl
+    seen = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"torch\n"
+
+    def fake(req, timeout=None):
+        seen.append(req.full_url)
+        return Resp()
+    monkeypatch.setattr(http_ssl, "verified_urlopen", fake)
+    got = confirm._fetch_repo_file("https://github.com/o/r.git", "a" * 40, "requirements.txt")
+    assert got == b"torch\n"
+    assert seen == [f"https://raw.githubusercontent.com/o/r/{'a' * 40}/requirements.txt"]
+
 # --------------------------------------------------------------------------- #
 #  Teardown: keeps cache/, removes everything else                          #
 # --------------------------------------------------------------------------- #

@@ -4,7 +4,7 @@
 
 ``localm/media/managed_comfy_fresh.py`` installs ``COMFYUI_PINNED_COMMIT`` - one
 commit we decided on - into every fresh managed ComfyUI. This script is what
-earns the word "confirmed": a commit that merely CLONES is not confirmed,
+earns the word "confirmed": a commit that merely DOWNLOADS is not confirmed,
 because a real install needs hardware-matched torch, localm's own custom
 node, localm's patch set, and a running server that actually executes a
 graph, all to line up.
@@ -12,7 +12,7 @@ graph, all to line up.
 WHAT IT DOES, in three PHASES (each a separate ``--phase`` invocation, so the
 caller can hold the shared GPU lease only around the phase that needs it):
 
-  provision  Clone the candidate commit into an ISOLATED scratch LOCALM_HOME
+  provision  Fetch the candidate commit's source archive into an ISOLATED scratch LOCALM_HOME
              (never the real one), install hardware-matched torch, ComfyUI's
              own requirements, the derived pinned custom node, and localm's
              patch set - exactly scripts/setup would, via
@@ -51,7 +51,7 @@ scratch dir; if not, nothing is installed and the run is INCONCLUSIVE.
 
 IDENTITY. ensure_comfy() reuses whatever already answers at a URL - so the
 smoke phase never uses the ComfyUI default port, and verifies /system_stats
-names paths under the scratch checkout before trusting anything else it says.
+names paths under the scratch install before trusting anything else it says.
 
 Three outcomes, kept distinct, same as confirm_llama_runtime.py: PASS, FAIL
 (the candidate is bad), INCONCLUSIVE (could not measure - no network, GPU
