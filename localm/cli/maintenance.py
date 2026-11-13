@@ -101,8 +101,11 @@ from ..media.sdcpp.cli import main as _setup_sdcpp_main  # noqa: E402
 
 main.add_command(_setup_sdcpp_main, name="setup-sdcpp")
 
+from ..discover import listed_gpus as _listed_gpus  # noqa: E402
+from ..media.koboldcpp import cli as _music_cli  # noqa: E402
 from ..media.koboldcpp.cli import main as _setup_music_main  # noqa: E402
 
+_music_cli.gpu_list = _listed_gpus
 main.add_command(_setup_music_main, name="setup-music")
 
 
@@ -361,7 +364,8 @@ def _live_server_stall_stacks() -> str:
               help="What did you expect to happen? (optional)")
 @click.option("-w", "--happened", default="", help="What actually happened?")
 @click.option("--no-log", "no_log", is_flag=True,
-              help="Do not attach this run's debug log tail even if one exists. "
+              help="Do not attach the debug log tail of the running localm server "
+                   "(or of this command when no server runs) even if one exists. "
                    "Attached by default when present (debug mode only - a normal "
                    "run has none to attach - and always scrubbed, never chat "
                    "content).")
@@ -419,7 +423,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     stall_stacks = "" if hang else _live_server_stall_stacks()
     path = bugreport.save_user_report(
         description, what_i_expected=what_expected, what_happened=what_happened,
-        include_log=not no_log, extra_hang_trace=hang, stall_stacks=stall_stacks)
+        include_log=not no_log, extra_hang_trace=hang, stall_stacks=stall_stacks,
+        log_pid=None if no_log else bugreport.live_server_log_pid())
     if path is not None:
         console.print(
             f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}",
@@ -427,7 +432,10 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
-    bugreport.offer_to_send(summary, path, "", interactive=interactive, auto_send=send)
+    sent = bugreport.offer_to_send(summary, path, "", interactive=interactive,
+                                   auto_send=send)
+    if send and not sent:
+        sys.exit(1)
 
 
 
@@ -762,7 +770,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 @main.command("issues")
 @click.argument("number", required=False, type=int)
 def issues_cmd(number) -> None:
-    """Show the bug reports this install filed, or one issue by NUMBER.
+    """Show the bug reports this install filed, or any issue of the localm
+    tracker by NUMBER (marked when this install did not file it).
 
     Read-only, through the bug-report proxy - no GitHub account needed. Lets a tester
     see whether a bug they filed is acknowledged or fixed. Requires the proxy to be
@@ -789,6 +798,9 @@ def issues_cmd(number) -> None:
                 f"{escape(str(it.get('title', '')))}")
             if it.get("html_url"):
                 console.print(f"[dim]{escape(str(it['html_url']))}[/dim]")
+            filed = {str(e.get("number")) for e in issue_tracker.recorded()}
+            if str(number) not in filed:
+                console.print("[dim]This install did not file this issue.[/dim]")
             return
         issues = issue_tracker.filed_status()
     except LocalmError as e:

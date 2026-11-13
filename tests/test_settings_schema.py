@@ -302,7 +302,7 @@ METRICS_OWNER_KEYS = {"metrics_enabled"}
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
-    # disables the SSRF guard. The bug-report / update endpoints are the same
+    # relaxes the SSRF guard. The bug-report / update endpoints are the same
     # class of boundary, cors_origins names which browser origins may call the
     # authenticated API, and hf_trust_remote_code lets a downloaded model
     # directory run its OWN Python inside the localm process.

@@ -137,6 +137,7 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_check_pins.py": (_LOCALM_PY, "greps every tracked localm/*.py for pin-shaped constants"),
     "tests/test_embedding_model_writers_refuse_a_chat_model.py": (
         _LOCALM_PY, "reads every localm/*.py for embedding_model config writers"),
+    "tests/test_streaming_response_closes_body.py": (_LOCALM_PY, "reads every localm/*.py for StreamingResponse uses"),
     "tests/test_update_steps_run_in_the_new_version.py": (
         _LOCALM_PY, "scans every localm module for updater.apply calls"),
     "tests/test_amd_windows_torch_pin_one_source.py": (
@@ -250,6 +251,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                             "net-off refusal not taken from config"),
     "tests/test_pin_weekly.py": (("scripts/*.py", "tests/*.py"),
                                  "reads the pin, bump and confirm scripts for gitignored paths"),
+    "tests/test_doctor_exit_and_findings.py": (_LOCALM_PY,
+                                               "reads every localm module for test-only "
+                                               "environment switches"),
     "tests/test_store_lock_create_refused.py": (_LOCALM_PY,
                                                 "walks the AST of every localm .py for O_EXCL lock-file creates"),
 }
@@ -259,6 +263,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_check_hygiene_non_ascii_paths.py": "runs the hygiene file list on a repository in tmp_path",
     "tests/test_check_hygiene_no_child_console_print.py": "reads the fixed module list check_hygiene names",
     "tests/test_conftest_isolation_guards.py": "runs one named test file",
+    "tests/test_config_reading.py": "loads scripts.report_issue, whose log glob reads the data folder, not the checkout",
     "tests/test_confirm_sdcpp_runtime.py": "reads the sd.cpp pin file only",
     "tests/test_confirm_comfyui_runtime.py": "writes a source record into a ComfyUI tree in tmp_path",
     "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",

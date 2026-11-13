@@ -80,6 +80,34 @@ test("Runtime: check surfaces a different build and reveals 'Update runtime'", a
   assert.equal(btn.textContent, "Update runtime");
 });
 
+test("Runtime: the Backend list offers only the backends the check lists", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, backends: ["auto", "vulkan", "cuda", "cpu"] }],
+  ]) });
+  const doc = window.document;
+  pick(doc, window, "metal");
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const offered = [...doc.getElementById("runtime-backend").options]
+    .filter((o) => !o.hidden && !o.disabled).map((o) => o.value);
+  assert.deepEqual(offered, ["", "auto", "vulkan", "cuda", "cpu"]);
+  assert.equal(doc.getElementById("runtime-backend").value, "",
+    "a pick the check does not list goes back to keeping the installed backend");
+  assert.equal(doc.getElementById("runtime-update-apply").textContent, "Update runtime");
+});
+
+test("Runtime: a check without a backends list offers every backend", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_VULKAN],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const sel = doc.getElementById("runtime-backend");
+  assert.equal([...sel.options].filter((o) => o.hidden || o.disabled).length, 0);
+  assert.equal(sel.options.length, 9);
+});
+
 test("Runtime: up to date hides the button", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([
     ["/api/runtime/check", { ...INSTALLED_VULKAN, current: "b10361", newer: false }],

@@ -345,9 +345,9 @@ CORE_FIELDS: list = [
     # number box would not show device names/VRAM. Still accepted by PATCH
     # /v1/config (and `localm config main_gpu_index N`) like any other field.
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
-                 "GPU for HuggingFace models, the embedder, the vision projector and "
-                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU unless "
-                 "Split across GPUs names some. Blank lets each choose.",
+                 "GPU for HuggingFace models, the embedder, the vision projector, "
+                 "localm's own ComfyUI and native music. A GGUF chat model uses every "
+                 "GPU unless Split across GPUs names some. Blank lets each choose.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
                  max=MAX_GPU_SPLIT_INDEX, tier=Tier.CONFIG_WRITE),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
@@ -782,9 +782,9 @@ CORE_FIELDS: list = [
     # A small on-device model, loaded separately from the chat model. The known
     # keys are bge-small-en-v1.5 and nomic-embed-text-v1.5.
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Fetched on first use; with network access off, enable Allow model "
-                 "downloads and run 'localm setup-embeddings'. Until then memory and RAG "
-                 "search lexically. A known key, registered name or GGUF path.",
+                 "A known key, registered name or GGUF path. Fetched on first use only "
+                 "when network access is allow; else use Download on the Knowledge or "
+                 "memory page. Until then search is by keyword.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # returns a CALLER-CHOSEN filesystem path with no confined_*
                  # check, and that path is then handed to llama.cpp's native GGUF
@@ -1228,14 +1228,15 @@ CORE_FIELDS: list = [
                  "(deny wins). Empty = none.",
                  group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_private", Widget.TOGGLE,
-                 "Allow private/loopback targets (disables the SSRF guard)",
-                 "Permit requests to localhost and private IP ranges. Off by "
-                 "default (a common SSRF vector); only enable for a trusted setup.",
-                 # admin_only: flipping this DISABLES the server-wide SSRF guard, so
+                 "Allow private/loopback targets (not link-local or cloud metadata)",
+                 "Permit requests to localhost and private IP ranges; link-local and "
+                 "cloud-metadata addresses stay refused. Off by default (a common SSRF "
+                 "vector); only enable for a trusted setup.",
+                 # admin_only: flipping this relaxes the server-wide SSRF guard, so
                  # it widens a network trust boundary exactly like the rag_* folder
                  # keys widen a filesystem one - a non-owner config:write key must not
-                 # be able to set it (else it could reach loopback/metadata via any
-                 # model-initiated fetch). See routes/config.py admin_only gate.
+                 # be able to set it (else it could reach loopback/private services
+                 # via any model-initiated fetch). See routes/config.py admin_only gate.
                  group="Network", owner="web", tier=Tier.OWNER),
     SettingField("net_allow_model_downloads", Widget.TOGGLE,
                  "Allow model downloads while network access is off",
@@ -2044,10 +2045,14 @@ MEDIA_PLUGIN_FIELDS: list = [
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
                plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
-               "Blank uses the steps recommended for the model's family.", plugins=_NATIVE),
+               "Blank uses the steps of a model localm offers for download, else those "
+               "recommended for the model's family, else stable-diffusion.cpp's default.",
+               plugins=_NATIVE),
     MediaField("native_cfg_scale", ("native", "cfg_scale"), "", Widget.TEXT,
                "Native CFG scale",
-               "Blank uses the CFG scale recommended for the model's family.",
+               "Blank uses the CFG scale of a model localm offers for download, else the "
+               "one recommended for the model's family, else stable-diffusion.cpp's "
+               "default (7.0).",
                plugins=_NATIVE),
     MediaField("native_flow_shift", ("native", "flow_shift"), "", Widget.TEXT,
                "Native flow shift",

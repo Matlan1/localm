@@ -646,7 +646,7 @@ Long chats compact automatically before they collide with the ceiling. See [docs
 
 ### Multi-GPU: picking the main device
 
-On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads and where a GGUF model's vision projector goes. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
+On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads, where a GGUF model's vision projector goes and where native music starts (KoboldCpp's CUDA or Vulkan build). `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
 
 ```bash
 localm gpus                        # list detected GPUs
@@ -849,7 +849,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-In bash/zsh/fish, model names complete for the MODEL argument of the model commands and for the `--model` option of `rerank`, `speak` and `coder` (not for `job add --model`, `mcp -m` or `setup-embeddings --model`). In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `bench-spec`, `gui`) complete only the command name, not the model.
+In bash/zsh/fish, model names complete for the MODEL argument of the model commands and for the `--model` option of `rerank`, `speak` and `coder` (not for `job add --model`, `mcp -m` or `setup-embeddings --model`). PowerShell completes the same commands, options and model names, and quotes a model name that contains a space.
 
 ---
 
@@ -1293,6 +1293,8 @@ localm stop <id>                         # stop one instance by id (or an id pre
 localm stop --all                        # stop every running localm instance
 ```
 
+`localm doctor` exits with code 1 when any line is a failure (a red cross) and with code 0 otherwise; warnings alone leave it at 0, so a script can run `localm doctor` and test its exit code.
+
 `--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
 `localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits (on Windows it starts in its own console window, which is hidden once the server is listening); `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
@@ -1323,7 +1325,7 @@ localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send
 localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
 ```
 
-`bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.
+`bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of the running localm server's own debug log when one exists (the most recently started server of this data folder that has one; with no such server, this command's own log), with `--no-log` to leave it out, never chat content, and never the log of a run that has ended. With `--send`, a report that could not be sent exits 1, including one refused because Network access is off. Two reports saved in the same second get separate files. `issues` is read-only and needs the bug-report proxy to be configured; `issues NUMBER` shows any issue of the tracker and says when this install did not file it.
 
 Updates are signed: localm verifies an Ed25519 signature from its release key
 before applying anything, and refuses a build that is not newer. The keys are

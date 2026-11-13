@@ -273,3 +273,68 @@ class TestPatchMode:
         assert result.ok is False
         assert (project / "src" / "main.py").read_bytes() == before
         assert agent.flush_patch() == ""
+
+
+class TestDiffMatchesWhatTheToolWrites:
+    """The approval card and patch mode show the diff edit_files writes,
+    including a whitespace-tolerant match the tool accepts."""
+
+    _TOLERANT = {"path": "a.py", "old": "x  =   1\n  return x",
+                 "new": "x = 2\n    return x"}
+
+    @pytest.fixture
+    def indented(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(
+            "def f():\n    x = 1\n    return x\n", encoding="utf-8")
+        return proj
+
+    def test_tolerant_edit_previews_the_written_change(self, indented):
+        from localm.plugins.coder.diffutil import compute_multifile_diff
+        from localm.plugins.coder.tools.files import tool_edit_files
+        diff = compute_multifile_diff(indented, [dict(self._TOLERANT)])
+        assert diff is not None
+        assert "-    x = 1" in diff and "+    x = 2" in diff
+        result = tool_edit_files(indented, [dict(self._TOLERANT)])
+        assert result.ok is True
+        assert (indented / "a.py").read_text(encoding="utf-8") == (
+            "def f():\n    x = 2\n    return x\n")
+
+    def test_approval_card_diff_shows_a_tolerant_edit(self, indented):
+        from localm.plugins.coder.sessions import CoderSession
+        session = CoderSession.__new__(CoderSession)
+        session.cwd = indented
+        diff = session._diff_preview(
+            _call("edit_files", edits=[dict(self._TOLERANT)]))
+        assert diff is not None and "+    x = 2" in diff
+
+    def test_patch_mode_captures_a_tolerant_edit(self, indented):
+        agent = _make_agent(indented, patch_mode=True)
+        before = (indented / "a.py").read_bytes()
+        result = agent._execute_tool(
+            _call("edit_files", edits=[dict(self._TOLERANT)]), interactive=False)
+        assert (indented / "a.py").read_bytes() == before
+        assert result.ok is True
+        assert "+    x = 2" in agent.flush_patch()
+
+    def test_a_batch_that_breaks_syntax_previews_nothing(self, indented):
+        from localm.plugins.coder.diffutil import compute_multifile_diff
+        assert compute_multifile_diff(indented, [
+            {"path": "a.py", "old": "    return x", "new": "    return (x"},
+        ]) is None
+
+    def test_patch_mode_captures_nothing_for_a_syntax_break(self, indented):
+        agent = _make_agent(indented, patch_mode=True)
+        agent._execute_tool(
+            _call("edit_files", edits=[
+                {"path": "a.py", "old": "    return x", "new": "    return (x"}]),
+            interactive=False)
+        assert agent.flush_patch() == ""
+
+    def test_a_path_outside_the_project_previews_nothing(self, indented):
+        from localm.plugins.coder.diffutil import compute_multifile_diff
+        (indented.parent / "outside.txt").write_text("a\n", encoding="utf-8")
+        assert compute_multifile_diff(indented, [
+            {"path": "../outside.txt", "old": "a", "new": "b"},
+        ]) is None

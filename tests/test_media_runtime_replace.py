@@ -99,7 +99,7 @@ def test_a_folder_that_cannot_be_moved_aside_is_left_whole(media_runtime, monkey
         if Path(src) == dest:
             raise PermissionError(13, "The process cannot access the file", str(src))
         return real_replace(src, dst)
-    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(provision_error) as info:
         install(force=True)
     assert _snapshot(dest) == before
@@ -117,7 +117,7 @@ def test_a_new_folder_that_cannot_be_moved_in_puts_the_old_one_back(media_runtim
         if Path(dst) == dest and Path(src).name == "staging":
             raise PermissionError(13, "Access is denied", str(dst))
         return real_replace(src, dst)
-    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(provision_error) as info:
         install(force=True)
     assert _snapshot(dest) == before
@@ -155,7 +155,7 @@ def test_install_steps_and_the_failure_reach_the_debug_log(media_runtime, monkey
     logged = [r.getMessage() for r in caplog.records if r.name == "localm"]
     assert shown and all(any(m in line for line in logged) for m in shown)
     caplog.clear()
-    monkeypatch.setattr(runtime_files.os, "replace", lambda s, d: (_ for _ in ()).throw(
+    monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(
         PermissionError(13, "denied", str(s))))
     with caplog.at_level(logging.INFO, logger="localm"), pytest.raises(provision_error):
         install(force=True)
@@ -214,7 +214,7 @@ def test_when_the_old_folder_cannot_be_put_back_its_files_stay_where_the_error_s
         if Path(dst) == dest:
             raise PermissionError(13, "Access is denied", str(dst))
         return real_replace(src, dst)
-    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(provision_error) as info:
         install(force=True)
     kept = [p for p in dest.parent.iterdir() if p.name.startswith(f".{dest.name}.previous-")]
@@ -240,7 +240,7 @@ def refused_tree_moves(monkeypatch):
             err.winerror = 5
             raise err
         return real_replace(src, dst)
-    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    monkeypatch.setattr(os, "replace", replace)
     if os.name != "nt":
         monkeypatch.setattr(storekit, "_is_transient_permission_error",
                             lambda e: getattr(e, "winerror", None) in (5, 32))

@@ -280,6 +280,13 @@ def _strip_report_footer(text: str) -> str:
     return text
 
 
+def report_for_review(text: str) -> str:
+    """*text*, a saved report, as it would be uploaded: without the closing
+    edit note that upload strips. For showing a report to review before it is
+    sent; the saved file keeps the note."""
+    return _strip_report_footer(text)
+
+
 def _client_lines(client: dict) -> list:
     """Render the GUI-supplied browser context (user agent, page, viewport, recent
     console errors) for the report. All values are treated as untrusted text."""

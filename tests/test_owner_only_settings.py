@@ -101,8 +101,8 @@ def test_scoped_key_patch_forbidden_owner_allowed(app_env):
 
 
 def test_net_allow_private_is_owner_only(app_env):
-    """net_allow_private DISABLES the SSRF guard server-wide (it permits requests
-    to loopback / private / link-local / cloud-metadata targets), so - exactly like
+    """net_allow_private relaxes the SSRF guard server-wide (it permits requests
+    to loopback and private targets), so - exactly like
     the rag_* folder settings - it widens a trust boundary and must be owner-only.
     A non-owner config:write key must be refused at the API, or it could flip the
     guard off and then reach internal services via any model-initiated fetch."""

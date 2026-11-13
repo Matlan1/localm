@@ -5,10 +5,15 @@ default ACE-Step 1.5 models, and check that a short track generates."""
 from __future__ import annotations
 
 import sys
+from typing import Callable, Optional
 
 import click
 
 from . import pins, runtime
+
+# The GPUs the main GPU setting counts in (``discover.list_gpus``) for the test
+# track, set by the localm command line that mounts this command.
+gpu_list: Optional[Callable[[], list]] = None
 
 
 @click.command("setup-music")
@@ -100,7 +105,7 @@ def _test(console, backend: str, say) -> None:
         data, used = generate_wav({}, backend, {
             "caption": "calm acoustic guitar", "lyrics": "[Instrumental]",
             "instrumental": True, "duration": 5.0, "seed": 1, "stereo": True,
-        }, plan=False, on_progress=say)
+        }, plan=False, on_progress=say, gpus=gpu_list)
         work_dir().mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=work_dir()) as tmp:
             seconds = write_wav(data, Path(tmp) / "test.wav")

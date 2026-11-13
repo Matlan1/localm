@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from localm import scopes
 from localm.debuglog import logger
 from localm.inference.http_server import require_scope
 from localm.plugins import deps_task
+from localm.streaming_response import StreamingResponse
 from localm.plugins.gui.routes.models._context import (ModelRouteContext,
                                                        _require_registered)
 
