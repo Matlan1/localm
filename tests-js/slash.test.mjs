@@ -77,7 +77,7 @@ test("both dropdowns follow a language change", async () => {
   typeSlash(window, "chat-input", "/generate-image");
   const [image] = menuItems(window, "chat-input");
   assert.equal(image.querySelector(".cmd").textContent, "/generate-image <Prompt>");
-  assert.equal(image.querySelector(".hint").textContent, "ein Bild mit FLUX erzeugen");
+  assert.equal(image.querySelector(".hint").textContent, "ein Bild mit dem Modell der Bilder-Seite erzeugen");
 
   typeSlash(window, "chat-input", "/generate-music");
   const [music] = menuItems(window, "chat-input");
