@@ -232,6 +232,9 @@ class _FakeRunner:
     def shutdown(self, grace=5.0):
         self.alive = False
 
+    def survivor_pid(self):
+        return None
+
 
 @pytest.fixture
 def fake_native(tmp_path, monkeypatch):
@@ -1569,3 +1572,66 @@ def test_preflight_marks_the_image_offer_blocked_when_net_mode_is_off(gui_app, m
     [entry] = data["missing"]
     assert entry["blocked"] == "net_mode_off"
     assert entry["source"]["sha256"] == native.RECOMMENDED_MODELS[0].sha256
+
+
+def test_a_cancel_stops_the_worker_and_a_finished_job_keeps_it(fake_native, tmp_path,
+                                                              monkeypatch):
+    runner, s = fake_native
+    armed = []
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: armed.append(seconds))
+    ok, _ = native.generate(s, "p", tmp_path / "kept.png", write_sidecar=False)
+    assert ok and runner.alive and len(armed) == 1
+    runner.raise_on_generate = SdCancelled("Generation cancelled.")
+    assert native.generate(s, "p", tmp_path / "stop.png", write_sidecar=False) == (
+        False, "Cancelled.")
+    assert runner.alive is False and len(armed) == 1
+
+
+@pytest.mark.parametrize("src_size,size,said", [
+    ((300, 200), (512, 512), "stretched to 512x512; its aspect ratio is not kept."),
+    ((256, 128), (512, 256), "scaled to 512x256."),
+    ((512, 512), (512, 512), None),
+])
+def test_a_requested_size_says_how_the_input_image_is_resized(fake_native, tmp_path,
+                                                              src_size, size, said):
+    from PIL import Image
+    runner, s = fake_native
+    src = tmp_path / "src.png"
+    Image.new("RGB", src_size).save(src)
+    lines = []
+    ok, _ = native.generate(s, "p", tmp_path / "r.png", write_sidecar=False, input_image=src,
+                            width=size[0], height=size[1], on_progress=lines.append)
+    assert ok
+    notes = [line for line in lines if line.startswith("The input image")]
+    assert notes == ([] if said is None else [
+        f"The input image ({src_size[0]}x{src_size[1]}) is {said}"])
+
+
+def test_an_input_image_without_a_size_says_nothing_about_resizing(fake_native, tmp_path):
+    from PIL import Image
+    runner, s = fake_native
+    src = tmp_path / "src.png"
+    Image.new("RGB", (301, 205)).save(src)
+    lines = []
+    ok, _ = native.generate(s, "p", tmp_path / "n.png", write_sidecar=False, input_image=src,
+                            on_progress=lines.append)
+    assert ok and not any("input image" in line for line in lines)
+
+
+@pytest.mark.parametrize("steps", [0, -1, 201])
+def test_steps_outside_the_range_are_refused_before_any_load(fake_native, tmp_path, steps):
+    runner, s = fake_native
+    ok, msg = native.generate(s, "p", tmp_path / "s.png", write_sidecar=False, steps=steps)
+    assert not ok and msg.startswith("Steps must be between 1 and 200")
+    assert runner.loads == []
+
+
+def test_an_unknown_sampler_in_settings_is_refused_before_the_handover(fake_native, tmp_path):
+    runner, s = fake_native
+    s = {**s, "native": {**s["native"], "sample_method": "bogus"}}
+    refused = native.input_refusal(s)
+    assert refused.startswith("Settings > Media > Image > Native sampler: Unknown sampler "
+                              "'bogus'. Allowed: ")
+    ok, msg = native.generate(s, "p", tmp_path / "b.png", write_sidecar=False)
+    assert (ok, msg) == (False, refused)
+    assert runner.loads == []

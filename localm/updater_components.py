@@ -54,6 +54,9 @@ PENDING_FILE = "pending-components.json"
 STATUS_FILE = "components-update.json"
 # The install root and version whose components were last found at its pins.
 CHECKED_FILE = "components-checked.json"
+# The (install root, version) pairs found at their pins in this process while
+# the session mode allowed no automatic write.
+_checked_in_process: set = set()
 # Seconds a failed first-start update waits before the next start tries again.
 RETRY_AFTER_S = 3600.0
 STATE_FILE = "state.json"
@@ -1005,18 +1008,33 @@ def _write_status(status: dict, root: Optional[Path] = None,
 
 def _mark_checked(root: Path, version: Optional[str]) -> None:
     """Record that every component of the install at *root*, at *version*, is
-    at its pins (or kept by the user's choice)."""
+    at its pins (or kept by the user's choice): in :data:`CHECKED_FILE`, or,
+    when the session mode allows no automatic write
+    (``audit.automatic_write_allowed("server")`` False, as in privacy mode),
+    only in this process, without writing or creating anything on disk."""
+    from localm import audit
+    resolved = str(Path(root).resolve())
+    if not audit.automatic_write_allowed("server"):
+        _checked_in_process.add((resolved, version))
+        return
     try:
         (_updates_dir() / CHECKED_FILE).write_text(json.dumps(
-            {"root": str(Path(root).resolve()), "version": version}), encoding="utf-8")
+            {"root": resolved, "version": version}), encoding="utf-8")
     except OSError as e:
         _warn("update: could not record the component check: %s", e)
 
 
 def _is_checked(root: Path, version: Optional[str]) -> bool:
+    """Whether :func:`_mark_checked` recorded the install at *root* at
+    *version*, in this process or in :data:`CHECKED_FILE`. False for an empty
+    *version*."""
+    if not version:
+        return False
+    resolved = str(Path(root).resolve())
+    if (resolved, version) in _checked_in_process:
+        return True
     data = _read_json(_updates_dir(create=False) / CHECKED_FILE) or {}
-    return bool(version) and data.get("version") == version and data.get("root") == str(
-        Path(root).resolve())
+    return data.get("version") == version and data.get("root") == resolved
 
 
 def last_status() -> Optional[dict]:
@@ -1035,7 +1053,9 @@ def catch_up(root=None, *, repair: bool = False) -> Optional[list]:
 
     Checks once per install root and version: after the components were found
     at their pins (:func:`finish_pending` or this check) it returns None at
-    once. After a failed attempt it waits :data:`RETRY_AFTER_S` seconds before
+    once; when the session mode allows no automatic write that is recorded in
+    this process only (:func:`_mark_checked`), so each new process checks
+    again. After a failed attempt it waits :data:`RETRY_AFTER_S` seconds before
     trying again."""
     import time
 

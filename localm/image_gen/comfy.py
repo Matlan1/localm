@@ -514,6 +514,7 @@ def generate_image(
     workdir: Optional[str] = None,
     comfy_output_dir: Optional[str] = None,
     delete_outputs: bool = False,
+    containment_required: bool = False,
     swap: bool = True,
     fast_dequant: bool = True,
     cancel_check: Optional[callable] = None,
@@ -615,6 +616,9 @@ def generate_image(
         Remove ComfyUI's copies: its history entry and its output file after a
         fetch, and the uploaded *input_image* on every way out of this function
         (see ``UploadedInputCopy``). A copy that stays is named in the message.
+    containment_required
+        With *delete_outputs*, a ComfyUI copy or history entry that could not
+        be removed fails the generation: ``(False, "Output withheld: ...")``.
 
     Returns
     -------
@@ -825,6 +829,8 @@ def generate_image(
                 output_sha256=output_sha256,
                 delete_outputs=delete_outputs,
             )
+            if containment_required and contain_warning:
+                return False, f"Output withheld: {contain_warning}"
 
             # Sidecar JSON: everything needed to reproduce or tweak this image,
             # saved as <output>.json next to it. Skipped when write_sidecar is

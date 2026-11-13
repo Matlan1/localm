@@ -78,6 +78,14 @@ def ram_reading() -> tuple[Optional[int], Optional[int]]:
     return system_ram()
 
 
+
+# The settings behind the command-line options of the VRAM advice, as the GUI
+# names them.
+_GUI_PLACES_NOTE = (
+    "In the app these are in Settings > Model: 'Context window (initial)' (-c), "
+    "'GPU layers (next load)' (-g), 'MoE expert layers on CPU' (n_cpu_moe), "
+    "'Auto-size GPU layers from VRAM' and 'Auto-size context from VRAM'.")
+
 class MmapDecision(NamedTuple):
     """How a load memory-maps the model file (:func:`decide_use_mmap`).
 
@@ -1798,7 +1806,8 @@ class VramSizingMixin:
                 f"    - Let localm auto-size GPU offload:  "
                 f"localm config n_gpu_layers_auto true\n"
                 f"    - Let localm auto-size the context:  "
-                f"localm config ctx_auto true"
+                f"localm config ctx_auto true\n"
+                f"  {_GUI_PLACES_NOTE}"
             )
         if free >= need:
             return
@@ -1822,6 +1831,7 @@ class VramSizingMixin:
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
             f"{options}"
+            f"  {_GUI_PLACES_NOTE}\n"
             f"  Continuing anyway - load may be slow or fail."
         )
 

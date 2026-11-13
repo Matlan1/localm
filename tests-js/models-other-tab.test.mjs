@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages } from "./harness.mjs";
+import { loadAppWithPages, runScript } from "./harness.mjs";
 
 function makeFetch(models) {
   return async (url) => {
@@ -360,4 +360,25 @@ test("view-opts: a control is hidden on a tab it cannot affect", async () => {
   await tick();
   assert.equal(showOther.hidden, true, "a single-type tab: neither applies");
   assert.equal(group.hidden, true);
+});
+
+test("an empty type tab says that type has no models, not that the library is empty", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    { name: "qwen-7b", model_type: "llm", size_bytes: 30 }]) });
+  await window.refreshModelsPage();
+  await tick();
+  clickTab(window, "lora");
+  await tick();
+  const box = window.document.getElementById("models-table");
+  assert.ok(!/No models yet/.test(box.textContent), box.textContent);
+  assert.match(box.textContent, /No .+ models/);
+  assert.match(box.textContent, /All tab/);
+});
+
+test("the Role column sorts an untyped model apart from the chat models", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  runScript(window, "globalThis.__cols = MODEL_COLUMNS;");
+  const col = window.__cols.find((c) => c.key === "model_type");
+  assert.equal(col.get({ name: "x", model_type: "llm", model_type_recorded: false }), "");
+  assert.equal(col.get({ name: "y", model_type: "llm" }), "llm");
 });

@@ -30,6 +30,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
@@ -1279,6 +1280,72 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         # xgrammar cannot compile gets the same answer.
         raise InvalidGrammarError(
             f"grammar could not be compiled ({type(e).__name__}: {e})") from e
+
+
+_DECODER_STACK_NAMES = ("layers", "h", "blocks", "layer")
+
+
+def _decoder_layers(model) -> Optional[Sequence]:
+    """The longest ``ModuleList`` in *model* named ``layers``, ``h``, ``blocks`` or
+    ``layer`` (the text decoder's layer stack), or None when the model has none
+    with more than one entry."""
+    best = None
+    try:
+        modules = model.named_modules()
+    except Exception:
+        return None
+    for name, mod in modules:
+        if (name.rsplit(".", 1)[-1] in _DECODER_STACK_NAMES
+                and type(mod).__name__ == "ModuleList" and len(mod) > 1
+                and (best is None or len(mod) > len(best))):
+            best = mod
+    return best
+
+
+class _PrefillLayerProgress:
+    """Sends ``prefill_layers_status`` through *on_status* while the prompt passes
+    through *layers*, at most once per *interval* seconds, counting from
+    construction. Each status is progress for the parent's first-token limit.
+    Reports only the first pass through the stack (the prompt): nothing is sent
+    once the last layer has run, or after ``close()``. Hooks every layer at
+    construction; ``close()`` removes the hooks and is idempotent. A status
+    callback that raises is logged at debug and ignored."""
+
+    def __init__(self, on_status: Callable[[str], None], layers: Sequence,
+                 interval: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._on_status = on_status
+        self._total = len(layers)
+        self._interval = interval
+        self._clock = clock
+        self._last = clock()
+        self._done = False
+        self._handles = [layer.register_forward_hook(self._hook_for(i + 1))
+                         for i, layer in enumerate(layers)]
+
+    def _hook_for(self, done: int):
+        def hook(_module, _inputs, _output) -> None:
+            if self._done:
+                return
+            if done == self._total:
+                self._done = True
+                return
+            now = self._clock()
+            if now - self._last < self._interval:
+                return
+            self._last = now
+            from localm.inference.protocol import prefill_layers_status
+            try:
+                self._on_status(prefill_layers_status(done, self._total))
+            except Exception:
+                logger.debug("prefill progress status callback raised (ignored)",
+                             exc_info=True)
+        return hook
+
+    def close(self) -> None:
+        self._done = True
+        handles, self._handles = self._handles, []
+        for h in handles:
+            h.remove()
 
 
 class _CancelCriteria:
@@ -2668,6 +2735,12 @@ class HFWorker:
 
         if vision_plan is not None:
             vision_cache.arm(*vision_plan)
+        prefill_progress = None
+        layers = _decoder_layers(model) if on_status is not None else None
+        if on_status is not None and layers is not None:
+            from localm.inference.protocol import PREFILL_PROGRESS_INTERVAL_S
+            prefill_progress = _PrefillLayerProgress(
+                on_status, layers, PREFILL_PROGRESS_INTERVAL_S)
         thread = threading.Thread(target=_run_generate, daemon=True)
         thread.start()
 
@@ -2676,6 +2749,8 @@ class HFWorker:
             for token_text in streamer:
                 if first_token:
                     first_token = False
+                    if prefill_progress is not None:
+                        prefill_progress.close()
                     if on_status:
                         try:
                             on_status("Generating response...")
@@ -2685,6 +2760,8 @@ class HFWorker:
 
             thread.join()
         finally:
+            if prefill_progress is not None:
+                prefill_progress.close()
             if vision_cache is not None:
                 vision_cache.disarm()
         if vision_plan is not None:

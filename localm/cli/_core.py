@@ -271,6 +271,57 @@ def _stdout_is_a_pipe() -> bool:
         return False
 
 
+SUBCOMMAND_ARGS = "localm.subcommand_args"
+
+
+def _session_mode_param(cmd):
+    """The parameter of *cmd* that selects the session mode: an option whose
+    type is a ``click.Choice`` of exactly the ``audit.SessionMode`` values, or
+    None."""
+    from localm.audit import SessionMode
+    modes = {m.value for m in SessionMode}
+    for p in cmd.params:
+        if (isinstance(p, click.Option) and isinstance(p.type, click.Choice)
+                and {str(c).lower() for c in p.type.choices} == modes):
+            return p
+    return None
+
+
+def _export_subcommand_mode(ctx) -> None:
+    """When the subcommand in *ctx* takes a session-mode option
+    (:func:`_session_mode_param`) and was given a value, export it as
+    ``audit.MODE_ENV_VAR``, as that subcommand does itself, so the steps the
+    group runs before it follow the same session mode. The arguments are parsed
+    by the subcommand's own parser without callbacks. Arguments it cannot parse
+    export nothing (the subcommand then reports them); any other failure exports
+    nothing and is logged at debug level. Never raises."""
+    import os
+    try:
+        from localm.audit import MODE_ENV_VAR, SessionMode
+        args = ctx.meta.get(SUBCOMMAND_ARGS)
+        if not args:
+            return
+        name, cmd, rest = ctx.command.resolve_command(ctx, list(args))
+        if cmd is None:
+            return
+        param = _session_mode_param(cmd)
+        if param is None:
+            return
+        sub = cmd.make_context(name, list(rest), parent=ctx, resilient_parsing=True)
+        mode = sub.params.get(param.name)
+        if isinstance(mode, str) and mode.strip():
+            os.environ[MODE_ENV_VAR] = SessionMode(mode.strip().lower()).value
+    except click.ClickException:
+        return
+    except Exception as e:   # noqa: BLE001 - see test_a_failing_mode_read_never_stops_the_command
+        try:
+            from localm.debuglog import logger
+            logger.debug("could not read the subcommand's --mode before the start-up "
+                         "steps (%s: %s); they follow the configured mode",
+                         type(e).__name__, e)
+        except Exception:   # noqa: BLE001
+            pass
+
 HELP_REQUESTED = "localm.help_requested"
 HELP_OPTION_NAMES = ["-h", "--help"]
 
@@ -295,6 +346,13 @@ class _GracefulGroup(click.Group):
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
     through untouched. A model load refusal (ModelRefusedError) is printed as a
     refusal and exits 1, with no bug report."""
+
+    def parse_args(self, ctx, args):
+        """Parse as ``click.Group`` does and keep the subcommand's name and
+        arguments in ``ctx.meta[SUBCOMMAND_ARGS]`` for the group callback."""
+        rest = super().parse_args(ctx, args)
+        ctx.meta[SUBCOMMAND_ARGS] = [*getattr(ctx, "_protected_args", ()), *ctx.args]
+        return rest
 
     def add_command(self, cmd, name=None) -> None:
         """Register *cmd* with ``-h`` and ``--help`` as its own help options,
@@ -554,6 +612,7 @@ def main() -> None:
     honor_env_debug()
     bugreport.install_global_handlers()
     ctx = click.get_current_context()
+    _export_subcommand_mode(ctx)
     if not ctx.meta.get(HELP_REQUESTED):
         _update_steps_at_start(ctx.invoked_subcommand)
 

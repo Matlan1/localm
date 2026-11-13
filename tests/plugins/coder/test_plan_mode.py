@@ -631,7 +631,8 @@ def test_one_shot_tasks_and_the_gui_do_not_offer_the_interaction_tools(
     assert not (INTERACTION_TOOLS & built("").disabled_tools)
     gui = CoderSession(tmp_path, _Stub(), auto_approve=True, auto_verify=False)
     try:
-        assert INTERACTION_TOOLS <= gui.agent.disabled_tools
+        assert "ask_user" in gui.agent.disabled_tools
+        assert not ({"enter_plan_mode", "exit_plan_mode"} & gui.agent.disabled_tools)
     finally:
         gui.close()
 

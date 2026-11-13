@@ -37,11 +37,14 @@ import localm.plugins.coder.cli as _cli
 from localm.netpolicy import NetworkPolicyError
 from localm.remotegate import OffMachineModelRefused
 from localm.stdio import force_utf8_stdio
+import requests
+
 from ..backends.http import (
     HTTPBackend,
     make_anthropic_backend,
     make_openai_backend,
     CoderAuthError,
+    CoderServerError,
 )
 from ..audit import SessionMode
 from ..privacy import (
@@ -137,7 +140,9 @@ def _complete_model(ctx, param, incomplete):
                    "browser tools and git_push run without asking while "
                    "net_mode is ask. net_mode off still refuses them.")
 @click.option("--interactive-confirm", "interactive_confirm", is_flag=True,
-              help="Auto-approve file writes but still prompt before shell commands.")
+              help="With --yes (or auto_approve), still ask before every tool that "
+                   "runs code: shell commands, tests and untrusted MCP tools. File "
+                   "writes are asked about unless auto-approved.")
 @click.option("--dry-run",          is_flag=True,
               help="Show what the agent would do without executing destructive tools.")
 @click.option("--estimate",         is_flag=True,
@@ -271,12 +276,12 @@ def main(
     # The coder is an optional plugin and ships uninstalled. Running localm coder
     # or localcoder before it is installed and enabled gets a clear refusal.
     from localm.plugins.engine import PluginManager
-    if not PluginManager(None).is_active("coder"):     # installed (on disk) AND enabled
-        click.echo(
-            "The coder plugin is not active.\n"
-            "Install it with:  localm plugin install coder",
-            err=True,
-        )
+    _plugins = PluginManager(None)
+    if not _plugins.is_active("coder"):     # installed (on disk) AND enabled
+        how = ("Enable it with:  localm plugin enable coder"
+               if _plugins.is_installed("coder")
+               else "Install it with:  localm plugin install coder")
+        click.echo(f"The coder plugin is not active.\n{how}", err=True)
         raise SystemExit(1)
 
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
@@ -383,7 +388,7 @@ def main(
     # but shell and network tools are not silently auto-run. run_shell requires
     # confirmation unless --yes was passed, and a non-interactive run cannot
     # confirm, so the gate in execution.py fails CLOSED.
-    if task and not yes:
+    if task and not yes and not estimate:
         # build_agent adds EXECUTES_PROJECT_CODE to always_confirm for this case.
         print_warning(
             "Unattended one-shot: run_shell, run_tests and untrusted MCP tools run "
@@ -456,7 +461,14 @@ def main(
             else:
                 ckpt = agent.load_checkpoint(ckpt_id)
                 if ckpt is None:
-                    if ckpt_id:
+                    if ckpt_id and not task:
+                        print_warning(
+                            f"No saved session with id '{ckpt_id}'. A value right "
+                            "after --resume/-r is read as a session id; to resume "
+                            'the latest session with a task, put the task first: '
+                            f'localm coder "{ckpt_id}" --resume. /sessions lists '
+                            "the saved ids.")
+                    elif ckpt_id:
                         print_warning(f"No saved session with id '{ckpt_id}'.")
                     else:
                         print_warning("No interrupted session found to resume.")
@@ -534,8 +546,13 @@ def main(
                         "Type /resume to continue, or /sessions to see all of them."
                     )
             _repl(agent)
-    except CoderAuthError as e:
+    except (CoderAuthError, CoderServerError) as e:
         print_error(str(e))
+        sys.exit(2 if ci else 1)
+    except requests.ConnectionError as e:
+        print_error(f"No model server answers at {_backend_url(backend)} ({e}). "
+                    "Check that it is running and the address and port are right, "
+                    "or run without --no-server so the coder starts one.")
         sys.exit(2 if ci else 1)
     finally:
         # Flush patch output before closing
@@ -604,6 +621,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
         else:
             click.echo(f"No episode with id {forget_episode_id} for {work_dir}.",
                        err=True)
+            sys.exit(1)
         return True
 
     if restore_episode_id:
@@ -636,6 +654,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
             sys.exit(1)
         else:
             click.echo(f"No archived episode with id {restore_episode_id}.", err=True)
+            sys.exit(1)
         return True
 
     if show_archive:
@@ -733,6 +752,9 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
         import os as _os
         _os.environ.setdefault("NO_COLOR", "1")
         _os.environ.setdefault("TERM", "dumb")
+        from ..display import console as _out, err_console as _err
+        _out.no_color = True
+        _err.no_color = True
 
     # Project-level config (.localcoder/config.toml) - CLI flags override
     try:
@@ -1221,8 +1243,9 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                         elif headless:
                             detail = ""
                         else:
-                            detail = (" Check the new console window it opened "
-                                      "for the specific error.")
+                            detail = (" Its console window closed when it exited. "
+                                      "To see why, run it in this terminal: localm "
+                                      + " ".join(cmd[3:]))
                         print_error(
                             f"The auto-started server exited immediately (exit code "
                             f"{proc.returncode}) instead of starting.{detail}"
@@ -1246,6 +1269,12 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                     sys.exit(2 if ci else 1)
 
     return backend
+
+
+def _backend_url(backend) -> str:
+    """The address *backend* sends its requests to, for an error message."""
+    from localm.console import show_url
+    return show_url(str(getattr(backend, "_base_url", "") or "the configured address"))
 
 
 def console_main() -> None:

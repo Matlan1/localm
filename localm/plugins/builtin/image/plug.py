@@ -156,7 +156,8 @@ _IMAGE_INPUT_KEYS = ("init_image_data", "mask_image", "ref_images", "control_ima
 
 def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                    instance_token, width=None, height=None, in_gallery=True,
-                   native_choice=None, native_loras=None, native_extras=None):
+                   native_choice=None, native_loras=None, native_extras=None,
+                   withhold_on_trace=False):
     """The background-job body for one image generation of ``req`` into
     ``out_path``: backend availability, VRAM handover, generation, and the
     chat-model reload on every exit path. ``width``/``height`` are forwarded to
@@ -164,7 +165,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     ``out_path`` as a gallery artifact owned by ``owner``. ``native_choice``
     and ``native_loras`` (from ``native_models.check_request``) and
     ``native_extras`` (``native_models.check_generation_extras``) apply to the
-    native backend only; a ComfyUI job given any of them is refused."""
+    native backend only; a ComfyUI job given any of them is refused.
+    ``withhold_on_trace`` is passed to the backend facade's ``generate``: the
+    file is handed to the caller as it is, so a failed metadata strip or
+    ComfyUI-copy removal fails the job."""
     extras = native_extras or {}
     saved_names: list = []
 
@@ -323,6 +327,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 **({"on_preview": lambda p: job.push(frame_event(p))}
                    if _backend.supports(s, "SUPPORTS_JOB_OPTIONS") else {}),
                 privacy=is_privacy,
+                withhold_on_trace=withhold_on_trace,
             )
             job.push({"type": "line", "outcome": True, "text": message})
             if ok and not saved_names:
@@ -639,6 +644,12 @@ def _remove_tree(path: Path) -> None:
         ) from e
 
 
+def _outcome_warnings(outcome: str) -> list:
+    """The WARNING lines of a finished job's outcome *outcome*: every
+    non-empty line after the first (the first says where the file was saved)."""
+    return [line.strip() for line in (outcome or "").splitlines()[1:] if line.strip()]
+
+
 @_router.post("/v1/images/generations")
 async def create_image(req: ImageGenerationRequest, request: Request):
     """OpenAI-compatible image generation: runs the same job as ``/api/imagine``
@@ -650,8 +661,11 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     ``b64_json`` when none is, where ``url`` is a 400. In privacy mode nothing
     is kept: the image is generated into a private directory, returned as
     ``b64_json`` (the default there; ``url`` is a 400) and the directory is
-    deleted before the response is sent. When a gallery image's owner could only
-    be held in memory, the response also carries ``warnings``."""
+    deleted before the response is sent. A generated file whose metadata could
+    not be stripped, or whose ComfyUI copy could not be removed, is not
+    returned: the request fails with 502. The response carries ``warnings``
+    for any other warning the generation reported, and when a gallery image's
+    owner could only be held in memory."""
     prompt = req.prompt.strip()
     if not prompt:
         raise HTTPException(400, "Empty prompt")
@@ -695,6 +709,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                              lora_strength_model=None, lora_strength_clip=None)
     width, height = size if size else (None, None)
 
+    show = path_formatter(request)
     private_dir = None
     started_jobs = []
     items = []
@@ -715,7 +730,8 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                     gen_req, input_image=None, lora_name=None,
                     out_path=out_path, owner=owner, self_url=self_url,
                     instance_token=instance_token, width=width,
-                    height=height, in_gallery=not private)),
+                    height=height, in_gallery=not private,
+                    withhold_on_trace=True)),
                 result_path=out_path.name, owner=owner)
             started_jobs.append(job)
             status, last_line = await _await_job(job, request)
@@ -723,7 +739,9 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                 raise HTTPException(409, "The image generation was cancelled.")
             if status != "done" or not out_path.is_file():
                 raise HTTPException(
-                    502, f"Image generation failed: {last_line or 'no reason was reported'}")
+                    502, "Image generation failed: "
+                         + (show(last_line) if last_line else "no reason was reported"))
+            warnings.extend(show(line) for line in _outcome_warnings(last_line))
             if not private:
                 held = gallery.held_stamp_warning("image", out_path.name)
                 if held:

@@ -2,8 +2,8 @@
 """The one sd.cpp worker of this process, shared by every caller.
 
 ``lock`` serialises use of ``runner``; callers take it through ``held``. The worker exits after
-``IDLE_UNLOAD_SECONDS`` without use (``arm_idle_timer``), on ``free()``, or when
-this process exits.
+``IDLE_UNLOAD_SECONDS`` without use (``arm_idle_timer``), when a job is cancelled
+(``after_job``), on ``free()``, or when this process exits.
 """
 
 from __future__ import annotations
@@ -96,6 +96,17 @@ def arm_idle_timer(seconds: Optional[float] = None) -> None:
         t.start()
 
 
+def after_job(cancelled: bool) -> None:
+    """End a job's use of ``runner``: stop the worker when the job was
+    *cancelled* (Stop frees the GPU), else (re)start the idle countdown while it
+    runs. Caller must hold ``lock``."""
+    if cancelled:
+        cancel_idle_timer()
+        runner.shutdown()
+    elif runner.is_alive():
+        arm_idle_timer()
+
+
 def _idle_unload() -> None:
     if lock.acquire(blocking=False):
         try:
@@ -114,7 +125,7 @@ def free(cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     try:
         cancel_idle_timer()
         runner.shutdown()
-        return not runner.is_alive()
+        return worker_pid() is None
     finally:
         lock.release()
 
@@ -128,7 +139,7 @@ def free_if_idle() -> Optional[bool]:
     try:
         cancel_idle_timer()
         runner.shutdown()
-        return not runner.is_alive()
+        return worker_pid() is None
     finally:
         lock.release()
 
@@ -139,6 +150,9 @@ def is_busy() -> bool:
 
 
 def worker_pid() -> Optional[int]:
-    """The live worker's process id, or None."""
+    """The live worker's process id; else the id of an earlier worker that kept
+    running after it was killed, while it runs; else None."""
     pid = runner.pid
-    return pid if pid is not None and runner.is_alive() else None
+    if pid is not None and runner.is_alive():
+        return pid
+    return runner.survivor_pid()

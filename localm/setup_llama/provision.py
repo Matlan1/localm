@@ -439,7 +439,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # An explicit --sha256 pin means "exactly this artifact" - never silently
     # swap to a different (unpinned) build, even to recover. Report and stop.
     if sha256:
-        why = "failed validation" if not provisioned else "provisioned but did not load"
+        why = "failed validation" if not provisioned else "was provisioned but did not load"
         console.print(f"[red]The pinned artifact {why}.[/red] Not falling back "
                       "(an explicit --sha256 was set).")
         sys.exit(1)

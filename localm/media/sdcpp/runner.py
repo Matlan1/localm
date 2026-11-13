@@ -57,6 +57,7 @@ class SdRunner:
         self._resp_q = None
         self._cancel = None
         self._crash_trace_path = None
+        self._survivors: list = []
         self.loaded_key: Optional[Any] = None
         self.load_info: Optional[dict] = None
         self.loaded_ctx: Optional[dict] = None
@@ -65,6 +66,27 @@ class SdRunner:
     def is_alive(self) -> bool:
         proc = self._proc
         return proc is not None and proc.is_alive()
+
+    def survivor_pid(self) -> Optional[int]:
+        """The process id of an earlier worker that kept running after it was
+        killed, while it still runs, or None. Changes nothing."""
+        for proc in self._survivors:
+            if proc.is_alive():
+                return proc.pid
+        return None
+
+    def _kill_survivors(self) -> None:
+        still = []
+        for proc in self._survivors:
+            if proc.is_alive():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc.join(timeout=5)
+            if proc.is_alive():
+                still.append(proc)
+        self._survivors = still
 
     @property
     def pid(self) -> Optional[int]:
@@ -305,12 +327,18 @@ class SdRunner:
         self.loaded_ctx = None
         self._attention_rate = None
 
-    def shutdown(self, grace: float = 5.0) -> None:
-        """Stop the worker (asking first, then killing). Process exit releases
-        all of its VRAM. Safe to call repeatedly."""
+    def shutdown(self, grace: float = 5.0) -> bool:
+        """Stop the worker (asking first, then killing), and kill again any
+        earlier worker that kept running after its kill. Process exit releases
+        all of its VRAM. Safe to call repeatedly. Returns True once no worker
+        process of this runner is running; False when one kept running after
+        the kill: it is logged at WARNING, its process id stays readable through
+        :meth:`survivor_pid`, and the next call kills it again. The runner is
+        reset either way, so the next job starts a fresh worker."""
+        self._kill_survivors()
         proc = self._proc
         if proc is None:
-            return
+            return not self._survivors
         if proc.is_alive() and grace > 0 and self._req_q is not None:
             try:
                 self._req_q.put(("shutdown", None))
@@ -329,4 +357,9 @@ class SdRunner:
             except OSError:
                 pass
             self._crash_trace_path = None
+        if proc.is_alive():
+            from localm.debuglog import logger
+            logger.warning("sd.cpp worker (pid %s) kept running after it was killed", proc.pid)
+            self._survivors.append(proc)
         self._reset()
+        return not self._survivors

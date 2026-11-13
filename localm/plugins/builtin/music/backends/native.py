@@ -36,8 +36,12 @@ def refusal(*, model_overrides=None, sampler_name=None, scheduler=None,
     named = [n for n, v in (("sampler", sampler_name), ("scheduler", scheduler),
                             ("lyrics strength", lyrics_strength)) if v is not None]
     if named:
-        return (f"The {', '.join(named)} setting applies to the ComfyUI workflow only; "
-                "leave it unset or use the ComfyUI backend.")
+        if len(named) == 1:
+            what = f"The {named[0]} setting applies"
+        else:
+            what = f"The {', '.join(named[:-1])} and {named[-1]} settings apply"
+        return (f"{what} to the ComfyUI workflow only; leave "
+                f"{'it' if len(named) == 1 else 'them'} unset or use the ComfyUI backend.")
     return None
 
 

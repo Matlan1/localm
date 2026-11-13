@@ -106,7 +106,7 @@ class CreateSessionRequest(BaseModel):
     # carves an exception out of; on its own it changes nothing, because every
     # destructive tool already prompts.
     interactive_confirm: bool = False
-    temperature: float | None = None
+    temperature: float | None = Field(None, ge=0, le=2)
     max_tokens: int | None = None
     # Pins the sampler's RNG (the CLI's --seed). A plain generation kwarg
     # alongside the two above, forwarded the same way.
@@ -220,6 +220,8 @@ class SessionSettingsRequest(BaseModel):
     verify: str | None = None
     # True re-detects the project's own check (the REPL's `/verify auto`).
     auto_verify: bool | None = None
+    # False leaves plan mode (the REPL's `/plan off`); True enters it.
+    plan_mode: bool | None = None
 
 
 class SessionCwdRequest(BaseModel):
@@ -699,8 +701,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     held = _caller_scopes(request) or set()
     restricted = not _caller_grants(request, _S.CODER_FULL)
     # Browser automation needs BOTH: the capability on the key, and the setting
-    # switched on. Held independently of coder's shell tier, so a browser key
-    # need not also be a coder:full key.
+    # switched on. A restricted (non coder:full) session gets no browser tools
+    # whatever the key holds.
     browser_enabled = _browser_enabled_for(is_owner, held)
 
     if restricted:
@@ -924,33 +926,30 @@ async def create_session(req: CreateSessionRequest, request: Request):
 @_session_router.get("/api/coder/sessions/{session_id}/events")
 async def session_events(session_id: str, request: Request, replay: bool = False):
     """SSE event stream. ``?replay=true`` first re-sends the session's
-    event history (so a reloaded page rebuilds its feed), then goes live."""
+    event history (so a reloaded page rebuilds its feed), then goes live.
+    Every open stream receives every event (``CoderSession.subscribe``)."""
     session = request.state.coder_session
     loop = asyncio.get_running_loop()
 
     async def _stream():
-        if replay:
-            # Snapshot history, then drop anything still queued - those
-            # events are part of the snapshot and must not arrive twice.
-            snapshot = list(session.history)
+        snapshot, events = session.subscribe(replay=replay)
+        try:
+            if replay:
+                for event in snapshot:
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'replay_done'})}\n\n"
             while True:
                 try:
-                    session.events.get_nowait()
+                    event = await loop.run_in_executor(
+                        get_plugin_executor(), events.get, True, _KEEPALIVE_S)
                 except queue.Empty:
-                    break
-            for event in snapshot:
+                    yield ": keepalive\n\n"
+                    continue
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'replay_done'})}\n\n"
-        while True:
-            try:
-                event = await loop.run_in_executor(
-                    get_plugin_executor(), session.events.get, True, _KEEPALIVE_S)
-            except queue.Empty:
-                yield ": keepalive\n\n"
-                continue
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            if event.get("type") == "closed":
-                return
+                if event.get("type") == "closed":
+                    return
+        finally:
+            session.unsubscribe(events)
 
     return StreamingResponse(
         _stream(),
@@ -962,19 +961,23 @@ async def session_events(session_id: str, request: Request, replay: bool = False
 @_session_router.post("/api/coder/sessions/{session_id}/undo")
 async def session_undo(session_id: str, request: Request):
     session = request.state.coder_session
+    if session.busy:
+        raise HTTPException(409, "The agent is working; undo once it has finished")
     summary = session.undo()
     if summary is None:
-        raise HTTPException(409, "Nothing to undo (or agent is busy)")
+        raise HTTPException(409, "Nothing to undo")
     return {"status": "undone", "summary": summary}
 
 
 @_session_router.post("/api/coder/sessions/{session_id}/compact")
 async def session_compact(session_id: str, request: Request):
     session = request.state.coder_session
+    if session.busy:
+        raise HTTPException(409, "The agent is working; compact once it has finished")
     loop = asyncio.get_running_loop()
     compacted = await loop.run_in_executor(get_plugin_executor(), session.compact)
     if not compacted:
-        raise HTTPException(409, "Nothing to compact (or agent is busy)")
+        raise HTTPException(409, "Nothing to compact")
     return {"status": "compacted"}
 
 
@@ -983,9 +986,12 @@ async def session_log(session_id: str, request: Request):
     """Parsed JSONL audit log (log/full modes only)."""
     session = request.state.coder_session
     path = session.audit_log_path()
-    if path is None or not Path(path).is_file():
+    if path is None:
         raise HTTPException(404, "No audit log for this session "
                                  "(privacy mode keeps nothing)")
+    if not Path(path).is_file():
+        raise HTTPException(404, "This session's audit log is not on disk "
+                                 "(it may have been deleted)")
     entries = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         try:
@@ -1263,6 +1269,9 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
         except SessionUnavailable as e:
             raise HTTPException(409, str(e)) from e
         changed.append("verify")
+    if "plan_mode" in sent and req.plan_mode is not None:
+        session.agent.set_plan_mode(req.plan_mode)
+        changed.append("plan_mode")
     # info() reports the EFFECTIVE state, so the caller reads back what actually
     # took rather than an echo of what it asked for - a re-detect that found no
     # check is the case that must not look like a check was set.
@@ -1793,8 +1802,8 @@ async def coder_episodes(request: Request, cwd: str = ""):
     owner's own past sessions on their own projects, and a restricted (scoped-
     key) session is excluded from episodic memory entirely - it neither recalls
     a lesson nor writes one - so there is nothing here that belongs to a shared
-    key. A non-owner gets an empty list rather than a 403, matching resumable:
-    the answer carries no information either way.
+    key. A non-owner gets an empty list and ``authorized: false`` rather than a
+    403, so a client can say "owner only" instead of "none stored".
 
     Read-only. Forgetting, restoring and consolidating a lesson are separate CLI
     flags with their own destructive semantics and are not exposed here.
@@ -1803,7 +1812,7 @@ async def coder_episodes(request: Request, cwd: str = ""):
     ``cwd`` here is only the KEY they are filed under; nothing in the project
     tree is read, and a directory that no longer exists still has its lessons."""
     if not _is_owner(request):
-        return {"episodes": [], "cwd": None}
+        return {"episodes": [], "cwd": None, "authorized": False}
     root = _episode_root(cwd)
 
     def _read():
@@ -1839,9 +1848,12 @@ async def coder_episodes_archive(request: Request, cwd: str = ""):
     The CLI refuses that collapse by exiting non-zero; here it is a 503, because
     the condition is transient (another process holding the file) and a retry is
     the right next move.
+
+    A non-owner gets an empty list and ``authorized: false``, as for the
+    stored lessons.
     """
     if not _is_owner(request):
-        return {"archived": [], "cwd": None}
+        return {"archived": [], "cwd": None, "authorized": False}
     root = _episode_root(cwd)
 
     def _read():
@@ -2054,7 +2066,8 @@ async def coder_hooks(request: Request, cwd: str = ""):
     ``/hooks``.
 
     Owner-only: trusting them lets them run commands on this machine. A
-    non-owner gets ``configured: false`` and nothing else. ``digest`` is what
+    non-owner gets ``configured: false`` and ``authorized: false`` and
+    nothing else. ``digest`` is what
     POST /api/coder/hooks/trust must echo back. ``mcp_servers`` lists each
     server as ``{"name", "argv", "env", "trusted_calls", "line"}``, where
     ``line`` is the one-line description the REPL shows. ``project`` lists
@@ -2064,7 +2077,7 @@ async def coder_hooks(request: Request, cwd: str = ""):
     ``matcher``, ``command`` and ``error`` come escaped by
     ``hooks.display_safe`` (non-ASCII as ``\\uXXXX``)."""
     if not _is_owner(request):
-        return {"configured": False, "cwd": None}
+        return {"configured": False, "cwd": None, "authorized": False}
     root = _episode_root(cwd)
 
     def _read():
