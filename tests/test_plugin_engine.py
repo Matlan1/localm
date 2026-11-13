@@ -2009,3 +2009,47 @@ def test_delete_data_refuses_a_plugin_data_root_linked_out_of_the_data_dir(tmp_p
     _link_dir(home / "plugin-data" / "evil", outside)
     assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
     assert (outside / "evil_data" / "keep.txt").read_text(encoding="utf-8") == "important"
+
+
+_TAB_PLUGIN = '''
+from localm.plugins.contract import PluginSettingField, Surface
+
+def register(host):
+    host.register_tab(Surface(tab_id="tabby", label="Tabby", icon="star",
+                              group="tools", settings_group="Tabby settings",
+                              assets_dir="static", client_entry="tab.js"))
+    host.add_settings([PluginSettingField(key="x", widget="toggle", label="X",
+                                          default=False)])
+
+def unregister():
+    pass
+'''
+
+
+def test_a_registered_tab_shows_in_the_plugin_listing_and_is_served(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    pdir = _make_plugin(plugins, "tabby", _TAB_PLUGIN)
+    (pdir / "static").mkdir()
+    (pdir / "static" / "tab.js").write_text("export function register() {}\n",
+                                            encoding="utf-8")
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("tabby")
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tabby")
+    assert (entry["tab"], entry["label"], entry["icon"], entry["group"],
+            entry["client_entry"], entry["assets_base"]) == (
+        "tabby", "Tabby", "star", "tools", "tab.js", "/plugins/tabby")
+    assert [s["label"] for s in mgr.get_all_plugin_settings()] == ["Tabby settings"]
+    with TestClient(app) as c:
+        assert c.get("/plugins/tabby/tab.js").status_code == 200
+    mgr.disable("tabby")
+    entry = next(p for p in mgr.api_state()["plugins"] if p["name"] == "tabby")
+    assert (entry["tab"], entry["client_entry"], entry["assets_base"]) == ("", "", "")
+
+
+def test_register_tab_rejects_anything_but_a_surface(env):
+    from localm.plugins.engine import PluginHost, PluginSpec
+    host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
+    with pytest.raises(TypeError, match="Surface"):
+        host.register_tab({"tab_id": "x"})

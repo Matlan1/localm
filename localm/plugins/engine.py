@@ -511,6 +511,7 @@ class PluginHost:
         self._stoppers: list = []           # stop callables from track()
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
+        self._surface_assets_mounted = False
         self.model_roles: list = []
 
 
@@ -614,8 +615,10 @@ class PluginHost:
         ``client_entry`` serves its assets without having to call
         ``mount_static`` itself. Idempotent: a plugin that DID mount the prefix
         in register() short-circuits here. Best-effort: an absent assets_dir is
-        ignored, never fatal."""
-        surface = self._spec.surface
+        ignored, never fatal. Uses the surface :meth:`register_tab` set, else
+        the manifest's."""
+        self._surface_assets_mounted = True
+        surface = self.surface
         if not surface or not surface.assets_dir:
             return None
         try:
@@ -715,7 +718,21 @@ class PluginHost:
         self.settings.extend(fields)
 
     def register_tab(self, surface: Surface) -> None:
+        """Replace the plugin's GUI surface (tab, label, icon, group, settings
+        group, assets_dir, client_entry) with *surface* while the plugin is
+        loaded; the manifest's ``[surface]`` applies again once it is unloaded.
+        Its ``assets_dir`` is served like a manifest one, confined to the
+        plugin's folder; a call made after the engine mounted the surface
+        assets mounts its assets_dir at once unless ``/plugins/<name>`` is
+        already served. Raises TypeError for anything but a
+        ``contract.Surface``."""
+        if not isinstance(surface, Surface):
+            raise TypeError(
+                f"plugin {self._spec.name!r}: register_tab() takes a Surface (see "
+                f"localm.plugins.contract), got {type(surface).__name__}")
         self.surface = surface
+        if self._surface_assets_mounted:
+            self.mount_surface_assets()
 
     def register_model_role(self, descriptor) -> None:
         from localm.model_manager.registry import MODEL_TYPES
@@ -1000,9 +1017,9 @@ class PluginManager:
             fields = getattr(host, "settings", None)
             if not fields:
                 continue
-            label = (spec.surface.settings_group
-                     if spec and spec.surface and spec.surface.settings_group
-                     else name)
+            surface = self.surface_of(name)
+            label = (surface.settings_group
+                     if surface and surface.settings_group else name)
             out.append({"plugin": name, "label": label, "fields": list(fields)})
         return out
 
@@ -1740,6 +1757,16 @@ class PluginManager:
                 self.last_refresh_failures[n] = str(e)
         return refreshed
 
+    def surface_of(self, name: str) -> Optional[Surface]:
+        """The GUI surface of plugin *name*: the one its loaded host holds
+        (``register_tab``, else the manifest's), else the installed manifest's,
+        or None for an unknown name."""
+        entry = self._loaded.get(name)
+        if entry is not None:
+            return getattr(entry[2], "surface", None)
+        spec = self._specs.get(name)
+        return spec.surface if spec is not None else None
+
     def _is_protected(self, name: str) -> bool:
         """True when *name* cannot be disabled or uninstalled. An installed
         plugin is protected only through its own spec, which honours
@@ -2237,6 +2264,8 @@ class PluginManager:
 
         def _entry(spec, name, *, available):
             cat = _cat.get(name)
+            surface = (spec.surface if spec is not None else None) if available \
+                else self.surface_of(name)
             return {
                 "name": name,
                 "version": spec.version if spec else "",
@@ -2245,15 +2274,13 @@ class PluginManager:
                 "scope": spec.scope if spec else name,
                 "builtin": spec.builtin if spec is not None else bool(cat),
                 "protected": self._is_protected(name),
-                "tab": spec.surface.tab_id if spec and spec.surface else "",
-                "label": spec.surface.label if spec and spec.surface else "",
-                "icon": spec.surface.icon if spec and spec.surface else "",
-                "group": spec.surface.group if spec and spec.surface else "",
-                "client_entry": (spec.surface.client_entry
-                                 if spec and spec.surface else ""),
+                "tab": surface.tab_id if surface else "",
+                "label": surface.label if surface else "",
+                "icon": surface.icon if surface else "",
+                "group": surface.group if surface else "",
+                "client_entry": surface.client_entry if surface else "",
                 "assets_base": (f"/plugins/{name}"
-                                if spec and spec.surface and spec.surface.assets_dir
-                                else ""),
+                                if surface and surface.assets_dir else ""),
                 # Coder-agent tools a third-party plugin exports ([tools]
                 # exports), shown in the GUI's External plugins card.
                 "tool_exports": list(spec.tool_exports) if spec else [],

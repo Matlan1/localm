@@ -54,19 +54,21 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
 
 
 def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names: installed (physically present in the
-    installed folder) AND enabled (config). "Installed" is disk presence in the
+    """The set of ACTIVE plugin names: installed from the bundled store
+    (physically present in the installed folder, without a third-party
+    provenance marker) AND enabled (config). "Installed" is disk presence in the
     store to installed model, NOT a config flag, so this scans the installed
-    folder."""
+    folder; a third-party folder under a first-party name does not count."""
     from pathlib import Path
 
     from localm.debuglog import logger
     from localm.plugins.loader import plugins_dir
+    from localm.plugins.lookup import installed_from_store
     installed = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
             if (not child.name.startswith(".") and child.is_dir()
-                    and (child / "plugin.toml").is_file()):
+                    and installed_from_store(child)):
                 installed.add(child.name)
     except OSError as exc:
         # Surface a real disk or permission fault on the plugins-dir scan: an

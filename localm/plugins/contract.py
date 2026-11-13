@@ -150,7 +150,7 @@ class PluginSpec:
     requires_extras: list = field(default_factory=list)   # pip extras to install
     requires: list = field(default_factory=list)          # other plugins this needs
     capabilities: list = field(default_factory=list)      # declared in the manifest; informational
-    data_subdir: str = ""                    # under the data dir; "" = none
+    data_subdir: str = ""                    # one folder name; "" = none
     builtin: bool = False                    # ships in-tree
     protected: bool = False                  # cannot be disabled/uninstalled (chat)
     default_enabled: bool = False            # auto-enabled on first run (preinstalled #0)
@@ -257,11 +257,13 @@ class Host(Protocol):
         """Offer a backend for model files or folders the built-in GGUF and
         Hugging Face backends refuse (see :class:`InferenceBackendDescriptor`).
 
-        Registered backends are asked in registration order and the first whose
+        Registered backends are asked store-installed plugins first, then
+        third-party ones, each group in registration order, and the first whose
         ``claims`` returns True builds the backend; the built-ins are always
         asked first, so a registered backend never replaces one. The host drops
-        the descriptor when the plugin is disabled or uninstalled, and the
-        model's refusal returns unchanged. A plugin that registers one declares
+        the descriptor when the plugin is disabled or uninstalled, the model's
+        refusal returns unchanged, and a running server unloads the models
+        loaded on that backend. A plugin that registers one declares
         ``capabilities = ["inference-backend"]`` in its manifest, which lets an
         in-process load (``localm run --no-server``) find it without starting
         the server; in that load there is no server app, so the plugin's
