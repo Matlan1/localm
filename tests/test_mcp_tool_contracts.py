@@ -789,7 +789,9 @@ class TestPluginAdministration:
         assert "installed and enabled" in _text(reply)
 
     def test_uninstall_plugin_forwards_delete_data(self, all_tools):
-        with patch("localm.plugins.engine.PluginManager.uninstall", return_value=True) as un:
+        from localm.plugins.engine import UninstallResult
+        with patch("localm.plugins.engine.PluginManager.uninstall_report",
+                   return_value=UninstallResult(True, None)) as un:
             reply = _call(all_tools, "uninstall_plugin", {"plugin": "p", "delete_data": True})
         assert reply["isError"] is False
         un.assert_called_once_with("p", delete_data=True)

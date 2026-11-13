@@ -970,9 +970,9 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
         return
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 if r.get("id") == key_id and not r.get("alg"):
@@ -1537,9 +1537,9 @@ def _touch_last_used(key_hash: str) -> None:
         _last_used_writes[key_hash] = now
     try:
         from localm.config import ensure_dirs
-        from localm.storekit import store_lock
+        from localm.storekit import BEST_EFFORT_LOCK_TIMEOUT, store_lock
         ensure_dirs()
-        with _KEYSTORE_LOCK, store_lock(keystore_file()):
+        with _KEYSTORE_LOCK, store_lock(keystore_file(), timeout=BEST_EFFORT_LOCK_TIMEOUT):
             records = _load_keystore_for_write()
             for r in records:
                 # Plain == is fine here (not constant-time): the key is ALREADY

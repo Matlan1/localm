@@ -552,7 +552,7 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
         info = _sl.nvidia_preflight()
         cuda_line = info.cuda_line
         chosen, with_cudart, not_used_reason = _sl._cuda_setup_dialogue(
-            info, assume_yes, det, explicit=requested is not None)
+            info, assume_yes, det, explicit=requested is not None, same_major_ok=keep_choice)
         if chosen != "cuda" and not_used_reason is None:
             requested = chosen
     _pin_note_for_backend(chosen)
