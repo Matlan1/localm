@@ -355,6 +355,18 @@ def _load_options_given() -> list:
     return out
 
 
+def _print_model_not_found(model) -> None:
+    """The "Model not found" lines for *model*, with the ways to get one."""
+    from rich.markup import escape
+    console.print(f"[red]Model not found:[/red] {escape(str(model))}")
+    console.print("  [dim]localm list[/dim]              - downloaded models")
+    console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
+    console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
+    console.print("  [dim]localm pull name[/dim]         - download GGUF shortcut")
+    console.print("  [dim]localm add <path>[/dim]        - register local file/dir")
+    console.print("  [dim]localm run /full/path[/dim]    - use path directly")
+
+
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-p", "--prompt",       default=None,  help="Single prompt (non-interactive).")
@@ -504,6 +516,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     f"[/dim]")
 
     autostart_attempted = False
+    if (engine is None and not no_server and switch_note is None and model
+            and get_operator_model_info(model) is None):
+        _print_model_not_found(model)
+        sys.exit(1)
     if engine is None and not no_server and switch_note is None:
         autostart_attempted = True
         console.print("[dim]No server running. Starting one in the background...[/dim]")
@@ -566,13 +582,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         # A registered name or a path on disk (`localm run /full/path`).
         info = get_operator_model_info(model)
         if info is None:
-            console.print(f"[red]Model not found:[/red] {escape(model)}")
-            console.print("  [dim]localm list[/dim]              - downloaded models")
-            console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
-            console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
-            console.print("  [dim]localm pull name[/dim]         - download GGUF shortcut")
-            console.print("  [dim]localm add <path>[/dim]        - register local file/dir")
-            console.print("  [dim]localm run /full/path[/dim]    - use path directly")
+            _print_model_not_found(model)
             sys.exit(1)
 
         model_path, _display_hint = info
