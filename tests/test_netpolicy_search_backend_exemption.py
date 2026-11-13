@@ -165,10 +165,12 @@ def test_session_exemption_follows_the_configured_origin():
         netpolicy._session_for("http://127.0.0.1:8080/search?q=x")
 
 
-def test_net_allow_private_still_opens_everything():
+def test_net_allow_private_opens_private_but_not_link_local():
     _configure(net_allow_private=True, net_search_url="")
     check_url("http://192.168.1.10:8080/x")
-    assert netpolicy._resolve_pinned_all("169.254.169.254") == ["169.254.169.254"]
+    assert netpolicy._resolve_pinned_all("192.168.1.10") == ["192.168.1.10"]
+    with pytest.raises(NetworkPolicyError, match="even with net_allow_private on"):
+        netpolicy._resolve_pinned_all("169.254.169.254")
 
 
 def test_a_unicode_and_an_a_label_spelling_are_the_same_origin(monkeypatch):
