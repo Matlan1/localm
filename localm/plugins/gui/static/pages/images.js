@@ -457,10 +457,17 @@ function imageModelFields(native) {
 }
 
 /* The model fields of this page's pick for the chat's /generate-image, read
-   against the active backend. */
+   against the active backend and the registered models; null when this
+   page's Generate would refuse (an applied workflow's main model is still
+   not registered). */
 export async function imagePageModelChoice() {
   await refreshImageBackend();
-  return imageModelFields(imageBackend.active === "native");
+  const native = imageBackend.active === "native";
+  if (native) {
+    await imageModelPicker.refresh();
+    if (imageWorkflowCard.pending && !(await imageWorkflowCard.prepare())) return null;
+  }
+  return imageModelFields(native);
 }
 chatPageModelChoice.image = imagePageModelChoice;
 

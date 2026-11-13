@@ -336,3 +336,52 @@ test("/generate-image on ComfyUI sends the workflow model picks, never the nativ
   assert.ok(!("native_models" in posts[0]), "no native pick on ComfyUI");
   assert.ok(!("loras" in posts[0]), "no native LoRAs on ComfyUI");
 });
+
+test("/generate-image drops a stored native pick that is no longer registered", async () => {
+  const posts = [];
+  const base = imagineFetch("native", posts);
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/imagine/native-models") && u.includes("model=flux-dev")) {
+      return { ok: false, status: 400, json: async () => ({ detail: "'flux-dev' is not a registered model." }) };
+    }
+    return base(url, init);
+  };
+  const { window } = loadAppWithPages({ fetchImpl, seedLocalStorage: STORED_IMAGE_PICK });
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 1);
+  assert.ok(!("native_models" in posts[0]), "the unregistered pick is not sent");
+});
+
+test("a media page that refuses to generate stops the chat command before any job", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: imagineFetch("native", posts) });
+  runScript(window, "chatPageModelChoice.image = async () => null;");
+  await window.runImagineInChat("a cat");
+  assert.equal(posts.length, 0, "no job is started");
+  assert.match(window.document.getElementById("chat-messages").textContent,
+    /Not generated: the model files it needs are not downloaded/);
+});
+
+for (const [run, media, route, arg] of [["runVideoInChat", "video", "/api/video", "a fox"],
+                                         ["runMusicInChat", "music", "/api/music", "lo-fi"]]) {
+  test(`/generate-${media} on ComfyUI sends the ${media} page's workflow model picks`, async () => {
+    const posts = [];
+    const fetchImpl = async (url, init = {}) => {
+      const u = String(url);
+      if (u === `/api/${media}/backend`) {
+        return { ok: true, status: 200, json: async () => ({ active: "comfy", choice: "comfy" }) };
+      }
+      if (u === route && (init.method || "GET") === "POST") {
+        posts.push(JSON.parse(init.body));
+        return { ok: false, status: 500, json: async () => ({ detail: "stop here" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadAppWithPages({ fetchImpl });
+    runScript(window, `modelOverrides.${media} = { "7": { ckpt_name: "m.safetensors" } };`);
+    await window[run](arg);
+    assert.equal(posts.length, 1);
+    assert.deepEqual(posts[0].model_overrides, { "7": { ckpt_name: "m.safetensors" } });
+  });
+}
