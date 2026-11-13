@@ -57,6 +57,10 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
     except ValueError:
         console.print(f"[red]Invalid --prompts:[/red] {escape(prompts)}")
         sys.exit(1)
+    if not sizes or any(n <= 0 for n in sizes):
+        console.print("[red]--prompts needs one or more prompt sizes above 0, "
+                      "for example 64,512,2048.[/red]")
+        sys.exit(1)
 
     from ..inference.engine import Engine
     engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
@@ -83,15 +87,19 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
             console.print(f"  prompt ≈ {prompt_tokens} tok … ", end="")
             start = _time.perf_counter()
             first_at = None
-            generated = 0
-            for _token in engine.chat_stream(
+            pieces = []
+            for piece in engine.chat_stream(
                 [{"role": "user", "content": prompt}],
                 max_tokens=gen_tokens, temperature=0.0,
             ):
                 if first_at is None:
                     first_at = _time.perf_counter()
-                generated += 1
+                pieces.append(piece)
             elapsed = _time.perf_counter() - start
+            # A streamed piece can hold several tokens or part of one: the
+            # reply text is counted with the model's own tokenizer.
+            reply = "".join(pieces)
+            generated = engine.count_tokens(reply) if reply else 0
 
             ttft_ms = (first_at - start) * 1000 if first_at else float("nan")
             gen_time = elapsed - (first_at - start) if first_at else elapsed
@@ -1910,8 +1918,9 @@ def _fmt_age(seconds) -> str:
 
 
 def _print_activity(scheme: str, port, instance_token=None,
-                    bind_host=None) -> None:
-    """Render what the server is doing, or why that could not be determined."""
+                    bind_host=None, mode=None) -> None:
+    """Render what the server is doing, or why that could not be determined.
+    *mode* is the instance's recorded surface (``"api"`` for ``localm serve``)."""
     from rich.markup import escape
 
     state, payload = read_activity(scheme, port, instance_token, bind_host)
@@ -1932,8 +1941,12 @@ def _print_activity(scheme: str, port, instance_token=None,
                       "it is doing.[/dim]")
         return
     if state == "unsupported":
-        console.print("[dim]This server does not report activity (it predates "
-                      "this feature).[/dim]")
+        if mode == "api":
+            console.print("[dim]An API-only server (localm serve) does not report "
+                          "activity; a server started with localm gui does.[/dim]")
+        else:
+            console.print("[dim]This server does not report activity (it predates "
+                          "this feature).[/dim]")
         return
     if state == "http":
         console.print(f"[yellow]![/yellow]  Could not read activity (HTTP {payload}).")
@@ -1941,7 +1954,9 @@ def _print_activity(scheme: str, port, instance_token=None,
 
     ops = (payload or {}).get("operations") or []
     if not ops:
-        console.print("[dim]Nothing running right now.[/dim]")
+        console.print("[dim]No background operation running right now (downloads, "
+                      "indexing, media; a chat reply or a scheduled job is not "
+                      "listed here).[/dim]")
         return
     now = (payload or {}).get("now")
     console.print("[bold]activity[/bold]")
@@ -1976,6 +1991,21 @@ def _print_activity(scheme: str, port, instance_token=None,
         console.print("[dim]Cancel one with[/dim] localm cancel <id>")
 
 
+def _print_more_servers(instances, home, root, entry) -> None:
+    """Name the other live servers for *root* besides *entry*, if any."""
+    from rich.markup import escape
+
+    others = [e for e in instances.live_entries(home, root)
+              if e.get("instance_id") != entry.get("instance_id")]
+    if not others:
+        return
+    ids = ", ".join(escape(str(e.get("instance_id", ""))[:8]) for e in others)
+    console.print(f"[yellow]![/yellow]  {len(others) + 1} servers serve this directory; "
+                  f"commands here use {escape(str(entry.get('instance_id', ''))[:8])}, "
+                  f"the first one started. Also running: {ids}")
+    console.print("[dim]See[/dim] localm ps  [dim]and stop one with[/dim]  localm stop <id>")
+
+
 @main.command("status")
 @click.option("--project", default=None, type=click.Path(file_okay=False),
               help="Check this directory instead of the current one.")
@@ -2006,8 +2036,9 @@ def status_cmd(project):
     # doing; everything above is read from the on-disk instance registry and is
     # fixed at process start. Printed last so the identity block still renders
     # when the server cannot be reached.
+    _print_more_servers(instances, home_dir(), root, entry)
     _print_activity(scheme, entry.get("port"), entry.get("token"),
-                    entry.get("host"))
+                    entry.get("host"), entry.get("mode"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 
@@ -2438,8 +2469,9 @@ def stop_cmd(instance_id, stop_all, timeout):
     """Stop a running localm server.
 
     With no argument, stops the instance serving the current directory (see
-    `localm status`). Pass an ID or ID prefix (as shown by `localm ps`) to
-    stop a specific instance, or --all to stop every running one.
+    `localm status`); when several serve it, lists them and stops none. Pass
+    an ID or ID prefix (as shown by `localm ps`) to stop a specific instance,
+    or --all to stop every running one.
 
     Requests the same clean shutdown the GUI's Settings page uses (model
     unloaded, then the process exits), with the API key when one is set and
@@ -2502,6 +2534,15 @@ def stop_cmd(instance_id, stop_all, timeout):
         if entry is None:
             console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
             console.print("[dim]Pass an id (see[/dim] localm ps[dim]) or --all.[/dim]")
+            sys.exit(1)
+        live = [entry] + [e for e in instances.live_entries(home, root)
+                          if e.get("instance_id") != entry.get("instance_id")]
+        if len(live) > 1:
+            console.print(f"[red]{len(live)} servers serve {escape(root)} - pass the id "
+                          f"of the one to stop, or --all:[/red]")
+            for e in live:
+                console.print(f"  {escape(str(e.get('instance_id', ''))[:8])}  "
+                              f"{escape(str(e.get('mode', '?')))}  port {e.get('port', '?')}")
             sys.exit(1)
         targets = [entry]
 
