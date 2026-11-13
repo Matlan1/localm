@@ -174,6 +174,31 @@ def _write_store_install(dest: Path, src: Path) -> None:
         json.dumps({"source": "store", "package": True}), encoding="utf-8")
 
 
+def _warn_old_data_location(spec: PluginSpec) -> None:
+    """Log one WARNING when third-party plugin *spec* declares a data_subdir,
+    its data folder (``plugin_data_dir``) does not exist, and
+    ``<data dir>/<data_subdir>`` does: that older folder is left in place and an
+    uninstall that deletes the plugin's data no longer removes it. Moves and
+    deletes nothing; never raises."""
+    if spec.builtin or not spec.data_subdir:
+        return
+    try:
+        from localm.config import home_dir
+        home = home_dir()
+        new = plugin_data_dir(spec, home)
+        old = home / spec.data_subdir
+        if new is None or new.exists() or not old.is_dir():
+            return
+    except OSError as e:
+        _log.debug("plugin %s: could not check its old data folder: %s", spec.name, e)
+        return
+    _log.warning(
+        "plugin %s: its data folder is now %s; %s exists and was left in place. "
+        "An uninstall that deletes the plugin's data removes only the new folder; "
+        "move the old folder's contents there by hand if they belong to %s",
+        spec.name, new, old, spec.name)
+
+
 # Eviction tasks started on the server loop's own thread, kept until they finish.
 _BACKEND_EVICTIONS: set = set()
 
@@ -1407,6 +1432,7 @@ class PluginManager:
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
         self._unload_errors.pop(spec.name, None)
+        _warn_old_data_location(spec)
         self._maybe_fire_first_use(spec.name)
 
     def _maybe_fire_first_use(self, name: str) -> None:

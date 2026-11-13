@@ -2053,3 +2053,36 @@ def test_register_tab_rejects_anything_but_a_surface(env):
     host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
     with pytest.raises(TypeError, match="Surface"):
         host.register_tab({"tab_id": "x"})
+
+
+def _install_with_old_data(env, *, new_exists):
+    from localm.plugins.engine import PluginManager
+    old = env / "olddata"
+    old.mkdir()
+    (old / "notes.txt").write_text("keep", encoding="utf-8")
+    if new_exists:
+        (env / "plugin-data" / "legacy" / "olddata").mkdir(parents=True)
+    plugins = env / "plugins"
+    _make_plugin(plugins, "legacy", _ping("legacy"),
+                 toml_extra='data_subdir = "olddata"\n')
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.install("legacy")
+    return old
+
+
+def test_an_old_third_party_data_folder_is_warned_about_and_left_in_place(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        old = _install_with_old_data(env, new_exists=False)
+    hits = [r.getMessage() for r in caplog.records if "left in place" in r.getMessage()]
+    new = env / "plugin-data" / "legacy" / "olddata"
+    assert len(hits) == 1 and str(old) in hits[0] and str(new) in hits[0]
+    assert (old / "notes.txt").read_text(encoding="utf-8") == "keep"
+    assert not new.exists()
+
+
+def test_no_old_data_warning_once_the_new_folder_exists(env, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        _install_with_old_data(env, new_exists=True)
+    assert not [r for r in caplog.records if "left in place" in r.getMessage()]
