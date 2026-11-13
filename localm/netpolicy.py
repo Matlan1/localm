@@ -111,8 +111,8 @@ def downloads_allowed_when_off() -> bool:
 
 def automatic_download_allowed() -> bool:
     """Whether a download nobody asked for may start: a model fetched on first
-    use by a background task (memory consolidation, recall, a scheduled job) or
-    by a startup sync. True only under ``net_mode=allow``.
+    use by a background task (memory consolidation, recall, a scheduled job).
+    True only under ``net_mode=allow``.
 
     Under ``ask`` such a download needs the user's own action, passed as a
     one-call authorization (``allow_download=True``) by the code that collected
