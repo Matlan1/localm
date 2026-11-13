@@ -3,9 +3,10 @@
 
 from localm._venvguard import require_venv
 
-require_venv()
+if __name__ == "__main__":
+    require_venv()
 
-from localm.cli import main  # noqa: E402
+from localm.cli import main  # noqa: E402  (imports click; must follow the guard)
 
 if __name__ == "__main__":
     main()

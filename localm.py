@@ -1,9 +1,9 @@
-import os
 import sys
 
 if __name__ == "__main__":
-    launcher = r".venv\Scripts\localm" if os.name == "nt" else ".venv/bin/localm"
+    _cli = (".venv\\Scripts\\localm" if sys.platform == "win32"
+            else ".venv/bin/localm")
     sys.exit(
-        "Error: localm is not started by running this file. "
-        f"Use '{launcher}' from the install folder, or activate its virtual "
-        "environment and run 'localm'.")
+        "Error: this Python is not localm's own environment, and localm must be "
+        "run from it.\n"
+        f"Use '{_cli}' in the install folder, or activate that venv first.")
