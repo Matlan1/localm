@@ -32,7 +32,7 @@ def refusal(*, model_overrides=None, sampler_name=None, scheduler=None,
     None. Checked before any download, VRAM handover or load."""
     if model_overrides:
         return ("Workflow model choices apply to ComfyUI. The native backend uses "
-                "the models set in Settings > Music.")
+                "the models set in Settings > Media > Music.")
     named = [n for n, v in (("sampler", sampler_name), ("scheduler", scheduler),
                             ("lyrics strength", lyrics_strength)) if v is not None]
     if named:

@@ -48,7 +48,7 @@ class TestConsoleUrlLine:
 class TestPhoneLanHint:
     def test_gui_mode_offers_the_settings_page_alternative(self):
         hint = _phone_lan_hint(False)
-        assert "Settings > Server > Bind address" in hint
+        assert "Settings > Server & network > Bind address" in hint
         assert "localm gui -H 0.0.0.0" in hint
 
     def test_api_mode_does_not_mention_settings(self):

@@ -846,8 +846,8 @@ def _check_installed_parts() -> None:
     console.print(f"  {_WARN_SYM}  parts of this install differ from localm {app}:")
     for line in parts["problems"]:
         console.print(f"       - {escape(line)}")
-    console.print("     [dim]repair: localm update --repair (or Settings > Updates > "
-                  "Repair)[/dim]")
+    console.print("     [dim]repair: localm update --repair (or Settings > System > Updates > "
+                  "Installed parts > Repair)[/dim]")
 
 
 @main.command()
