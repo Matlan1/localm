@@ -1027,7 +1027,8 @@ class MtmdContext:
         return self._n_embd_inp
 
     def eval_media_chunk(self, llama_ctx: int, chunk: MtmdChunk, n_past: int,
-                         n_batch: int) -> int:
+                         n_batch: int,
+                         on_status: Optional[Callable[[str], None]] = None) -> int:
         """Decode media *chunk* into *llama_ctx*'s KV cache at position *n_past*
         and return the position after it.
 
@@ -1036,7 +1037,9 @@ class MtmdContext:
         and its embeddings are cached. A failed encode or decode raises
         :class:`MtmdGpuEncodeFailed` while the projector is on the GPU, else
         :class:`VisionInputError`; a decode that reports a position other than
-        ``n_past + chunk.n_pos`` raises :class:`VisionInputError`."""
+        ``n_past + chunk.n_pos`` raises :class:`VisionInputError`. *on_status*
+        gets ``"Encoding image (GPU)..."`` (or audio, or CPU) before an encode and
+        ``"Processing prompt..."`` before the decode."""
         m = self._m
         exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
         noun = _media_noun(chunk.kind)
@@ -1045,6 +1048,8 @@ class MtmdContext:
             embd = self._embd[chunk.key]
             self._embd.move_to_end(chunk.key)
         if embd is None:
+            if on_status is not None:
+                on_status(f"Encoding {noun} ({'GPU' if self.on_gpu else 'CPU'})...")
             self.encode_count += 1
             rc = m.mtmd_encode_chunk(self._ctx, chunk.handle)
             if rc != 0:
@@ -1058,6 +1063,8 @@ class MtmdContext:
             ctypes.memmove(embd, out, ctypes.sizeof(embd))
             if chunk.key is not None:
                 self._store_embedding(chunk.key, embd)
+        if on_status is not None:
+            on_status("Processing prompt...")
         new_n_past = ctypes.c_int32(n_past)
         rc = m.mtmd_helper_decode_image_chunk(
             self._ctx, llama_ctx, chunk.handle, ctypes.addressof(embd), n_past, 0,

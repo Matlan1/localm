@@ -79,6 +79,7 @@ class TestDeferLog:
         assert len(debuglog._deferred_records) == 1
 
         path = debuglog.enable_debug()
+        debuglog.flush_log_handlers()
         text = path.read_text(encoding="utf-8", errors="replace")
         assert "queued diagnostic here" in text
         # Drained, so a second enable_debug() cannot double-replay it.

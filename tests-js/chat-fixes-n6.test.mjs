@@ -37,7 +37,7 @@ const chatCalls = (calls) => calls.filter((c) => c.url === "/v1/chat/completions
 test("an audio turn after an image turn is answered with the earlier images left out of that request", async () => {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions") {
@@ -84,7 +84,7 @@ test("an audio turn after an image turn is answered with the earlier images left
 test("an image refusal on an audio turn that also carries an image keeps the image and asks once", async () => {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/chat/completions") {
@@ -441,7 +441,7 @@ test("a Qwen3-ASR prefix is left out of Copy, Speak and the stored reply", async
 });
 
 const refuseImageWithAudio = (calls, onlyWhenBoth) => async (url, opts = {}) => {
-  let body = null;
+  let body;
   try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
   calls.push({ url: String(url), body });
   if (String(url) === "/v1/chat/completions") {
@@ -514,7 +514,7 @@ for (const [label, row] of [
   test(`a text turn after an audio turn still sends the earlier clip to ${label}`, async () => {
     const calls = [];
     const { window } = loadApp({ fetchImpl: async (url, opts = {}) => {
-      let body = null;
+      let body;
       try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
       calls.push({ url: String(url), body });
       return okResponse;
@@ -645,7 +645,7 @@ test("a send with web access on reads the lookup limit from the server, not the 
   let limit = 20;
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/config") {
@@ -666,7 +666,7 @@ test("a send with web access on reads the lookup limit from the server, not the 
 test("with network access off a checked web toggle sends no web tools", async () => {
   const calls = [];
   const impl = async (url, opts = {}) => {
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     calls.push({ url: String(url), body });
     if (String(url) === "/v1/config") {
