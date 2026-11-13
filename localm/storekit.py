@@ -401,7 +401,8 @@ def read_json_state(path: Path, default):
     *default*).
 
     A file that parses but holds the wrong shape is ``READ_CURRENT``. A
-    candidate that cannot be read is reported once through the logger."""
+    candidate that cannot be read is reported once through the logger. A file
+    is read as UTF-8 with or without a byte-order mark."""
     saw_file = False
     served_backup = False
     for candidate in (path, path.with_name(path.name + ".bak")):
@@ -410,7 +411,7 @@ def read_json_state(path: Path, default):
         saw_file = True
         for attempt in range(_REPLACE_RETRIES):
             try:
-                with open(candidate, encoding="utf-8") as f:
+                with open(candidate, encoding="utf-8-sig") as f:
                     value = json.load(f)
                 return value, (READ_FROM_BACKUP if served_backup else READ_CURRENT)
             except PermissionError as e:

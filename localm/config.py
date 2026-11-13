@@ -164,6 +164,13 @@ def _read_home_cfg(path: Path) -> str:
     return lines[0].strip() if lines else ""
 
 
+def _home_from_cfg_line(line: str, repo_root: Path) -> Path:
+    """The data folder a ``localm-home.cfg`` line names: ``~`` expanded, and a
+    relative path taken relative to *repo_root*."""
+    home = Path(line).expanduser()
+    return home if home.is_absolute() else repo_root / home
+
+
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -175,7 +182,10 @@ def _detect_home() -> Path:
          sits in a source tree (pyproject.toml next to it) that contains a
          ``localm-home.cfg`` (one line: the data path) or a ``home``
          directory, that wins.  Created by setup.bat's "keep data in this
-         folder" option.
+         folder" option. A relative path in ``localm-home.cfg`` is relative
+         to the checkout; a relative LOCALM_HOME is made absolute against the
+         working folder at the first read and stored back into the
+         environment.
       3. Contained fallback: ``./home`` INSIDE the install, with a stderr
          warning, when NOTHING is configured. Reaching here is a special case
          (setup never ran, or the config/marker was lost), not a normal default -
@@ -184,7 +194,13 @@ def _detect_home() -> Path:
     """
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        home = Path(env).expanduser()
+        if not home.is_absolute():
+            # A relative LOCALM_HOME is made absolute against the working folder
+            # at the first read and written back to the environment.
+            home = home.absolute()
+            os.environ["LOCALM_HOME"] = str(home)
+        return home
 
     repo_root = Path(__file__).resolve().parents[1]
     if (repo_root / "pyproject.toml").is_file():       # source checkout only
@@ -193,7 +209,7 @@ def _detect_home() -> Path:
             try:
                 line = _read_home_cfg(cfg_marker)
                 if line:
-                    return Path(line).expanduser()
+                    return _home_from_cfg_line(line, repo_root)
             except (OSError, ValueError, LookupError) as e:
                 # The marker EXISTS but could not be read: warn and fall back to
                 # the default data dir rather than silently switching. stderr
@@ -1497,31 +1513,48 @@ def instance_id() -> str:
 
     Served to the GUI over ``/v1/config``, which compares it against the id it
     last saw for this browser origin to tell a restart of the same install
-    apart from a different install sharing that origin's localStorage."""
+    apart from a different install sharing that origin's localStorage.
+
+    A file that exists but cannot be read is never overwritten. When the file
+    cannot be read or written, one in-memory id serves every call of this
+    process."""
     ensure_dirs()
     path = HOME_DIR / "instance_id.txt"
     with _io_lock:
+        held = _RUN_INSTANCE_IDS.get(str(path))
         if path.is_file():
             try:
                 val = path.read_text(encoding="utf-8").strip()
                 if val:
                     return val
             except OSError as e:
-                # The marker exists but could not be read: warn, then fall
-                # through and mint a fresh id for this run.
-                print(f"[localm] WARNING: cannot read {path} ({e}); minting a "
-                      "fresh instance id for this run.", file=sys.stderr)
+                # The file exists but cannot be read: it is left as it is, and
+                # this run uses one in-memory id for every call.
+                if held:
+                    return held
+                val = uuid.uuid4().hex
+                _RUN_INSTANCE_IDS[str(path)] = val
+                print(f"[localm] WARNING: cannot read {path} ({e}); using an "
+                      "in-memory id for this run; the file is left unchanged.",
+                      file=sys.stderr)
+                return val
+        if held:
+            return held
         val = uuid.uuid4().hex
         try:
             path.write_text(val, encoding="utf-8")
         except OSError as e:
-            # Cannot persist: this run's id will not survive a restart, so the
-            # client treats the next launch as a new pairing and starts empty /
-            # re-syncs from the server.
+            # Cannot persist: one in-memory id serves every call of this run.
+            _RUN_INSTANCE_IDS[str(path)] = val
             print(f"[localm] WARNING: cannot persist instance id to {path} "
                   f"({e}); using an in-memory-only id for this run (it will "
                   "change on the next start).", file=sys.stderr)
         return val
+
+
+# Per-run instance ids for data folders whose instance_id.txt cannot be read
+# or written, keyed by the file's path.
+_RUN_INSTANCE_IDS: dict[str, str] = {}
 
 
 def _drop_stray_credentials(stored: dict) -> None:
