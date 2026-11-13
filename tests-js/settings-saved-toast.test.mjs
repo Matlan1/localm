@@ -40,3 +40,9 @@ test("an unchanged Keep diagnostics does not take over the toast", () => {
   assert.equal(toastKey([DIAGNOSTICS, LIVE], { keep_diagnostics: false, show_tips: false }).key,
                "settings.toast.saved");
 });
+
+test("turning Keep diagnostics off gets the same next-start toast as turning it on", () => {
+  const on = { ...DIAGNOSTICS, default: true };
+  const { key } = toastKey([on, LIVE], { keep_diagnostics: false, show_tips: true });
+  assert.equal(key, "settings.toast.savedDiagnostics");
+});
