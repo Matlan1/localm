@@ -49,6 +49,7 @@ comparable.
 from __future__ import annotations
 
 import json
+import os
 import multiprocessing as mp
 import subprocess
 import sys
@@ -405,6 +406,31 @@ def _worker_spawn_probe(conn) -> None:
         conn.close()
 
 
+# Environment switches that make a worker fail or stop on purpose. Product code
+# reads each one; tests set them. See test_every_fault_switch_is_listed.
+FAULT_SWITCH_VARIABLES = (
+    "LOCALM_GGUF_FAULT_FOR_TEST",
+    "LOCALM_GGUF_FORCE_LOAD_CANCEL_FOR_TEST",
+    "LOCALM_HF_FAULT_FOR_TEST",
+    "LOCALM_EMBEDDER_FAULT_FOR_TEST",
+    "LOCALM_SPEECH_FAULT_FOR_TEST",
+    "LOCALM_SDCPP_FAULT_FOR_TEST",
+    "LOCALM_VOICE_FAULT_FOR_TEST",
+)
+
+
+def fault_switch_findings(environ=None) -> list:
+    """One WARN finding per variable of ``FAULT_SWITCH_VARIABLES`` set to a
+    non-empty value in *environ* (default ``os.environ``), else an empty
+    list."""
+    env = os.environ if environ is None else environ
+    return [Finding(WARN, f"{name} is set: worker processes started from this "
+                          "environment fail on purpose (a switch for localm's own tests)",
+                    hints=(f"Remove {name} from the environment and start localm "
+                           "again.",))
+            for name in FAULT_SWITCH_VARIABLES if env.get(name)]
+
+
 def check_worker_spawn() -> CheckResult:
     """Verify localm can actually spawn its isolated worker process - the SAME
     ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
@@ -428,7 +454,8 @@ def check_worker_spawn() -> CheckResult:
         # Setup itself failed (e.g. the fix helper or Pipe() errored) - rarer
         # and genuinely different from a spawn failure, so it gets its own line.
         return _result("worker_spawn", label, [Finding(
-            FAIL, f"background worker spawn check errored: {e}")])
+            FAIL, f"background worker spawn check errored: {e}"),
+            *fault_switch_findings()])
 
     reply = None
     error_detail = None
@@ -448,12 +475,14 @@ def check_worker_spawn() -> CheckResult:
     if reply == "ok":
         return _result("worker_spawn", label, [Finding(
             OK, "background worker spawn: OK "
-                "(model loads and voice transcription use this)")])
+                "(model loads and voice transcription use this)"),
+            *fault_switch_findings()])
     detail = f" ({error_detail})" if error_detail else ""
     return _result("worker_spawn", label, [Finding(
         FAIL, f"background worker spawn FAILED{detail} - GGUF "
               "model loads and voice transcription will fail even though the "
-              "runtime above checks out")])
+              "runtime above checks out"),
+        *fault_switch_findings()])
 
 
 # ------------------------------------------------------------------ #

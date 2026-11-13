@@ -224,6 +224,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                             "net-off refusal not taken from config"),
     "tests/test_pin_weekly.py": (("scripts/*.py", "tests/*.py"),
                                  "reads the pin, bump and confirm scripts for gitignored paths"),
+    "tests/test_doctor_exit_and_findings.py": (_LOCALM_PY,
+                                               "reads every localm module for test-only "
+                                               "environment switches"),
 }
 # Test files that walk a folder of the checkout, or load a module that does,
 # while their result does not depend on what that folder holds, with how.
