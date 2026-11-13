@@ -10,7 +10,6 @@ failed carries ``FAILED_MARKER`` instead and is skipped by ``auto``.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import site
 import sys
@@ -305,16 +304,32 @@ def _flatten(staging: Path) -> None:
         shutil.move(str(item), str(staging / item.name))
 
 
+RUNTIME_LABEL = "native image and video runtime"
+
+
 def install(backend: str, *, force: bool = False,
             on_progress: Optional[Progress] = None,
             probe: Optional[Callable[[Runtime], dict]] = None) -> Runtime:
     """Download, verify, extract and load-test the runtime for *backend*.
 
-    Network access goes through ``netpolicy`` as an explicit download. On a
-    failed load-test the directory is kept with ``FAILED_MARKER`` and
-    :class:`ProvisionError` is raised. *probe* replaces the real worker
-    load-test (tests only)."""
-    say = on_progress or (lambda _m: None)
+    Network access goes through ``netpolicy`` as an explicit download. An
+    installed runtime of the same build stays in place until the new one is
+    fully downloaded and can be moved in. On a failed load-test the directory
+    is kept with ``FAILED_MARKER`` and :class:`ProvisionError` is raised. Every
+    progress message, and the failure, is also written to the debug log.
+    *probe* replaces the real worker load-test (tests only)."""
+    from localm.debuglog import logger
+    from localm.media.runtime_files import logged
+    say = logged(on_progress, "sdcpp runtime")
+    try:
+        return _install(backend, force=force, say=say, probe=probe)
+    except ProvisionError as e:
+        logger.warning("sdcpp runtime: installing the %s runtime failed: %s", backend, e)
+        raise
+
+
+def _install(backend: str, *, force: bool, say: Progress,
+             probe: Optional[Callable[[Runtime], dict]]) -> Runtime:
     plat = platform_key()
     if plat is None or (plat, backend) not in pins.ASSETS:
         raise ProvisionError(
@@ -325,6 +340,7 @@ def install(backend: str, *, force: bool = False,
         if rt is not None:
             return rt
     from localm import netpolicy
+    from localm.media.runtime_files import ReplaceError, refused_download_message, replace_dir
     root = runtimes_root()
     root.mkdir(parents=True, exist_ok=True)
     dest = runtime_dir(backend)
@@ -335,26 +351,23 @@ def install(backend: str, *, force: bool = False,
         staging.mkdir()
         try:
             for name, sha in assets:
-                say(f"Installing the native image runtime (stable-diffusion.cpp "
+                say(f"Installing the {RUNTIME_LABEL} (stable-diffusion.cpp "
                     f"{pins.TAG}, {backend}): {name}")
                 _fetch_into(name, sha, staging, tmp, say)
         except netpolicy.NetworkPolicyError as e:
-            raise DownloadError(f"the download was refused by the network policy: {e}") from e
+            raise DownloadError(refused_download_message(e)) from e
         _flatten(staging)
         if any(name.startswith("cudart-")
                for name, _sha in pins.EXTRA_ASSETS.get((plat, backend), [])):
             (staging / NVIDIA_CUDA_LICENSE).write_text(NVIDIA_CUDA_LICENSE_NOTICE,
                                                        encoding="utf-8")
-        if dest.exists():
-            try:
-                shutil.rmtree(dest)
-            except OSError as e:
-                raise ProvisionError(
-                    f"could not replace {dest} ({e}); stop any image generation that is "
-                    "using it and retry") from e
-        os.replace(staging, dest)
+        try:
+            replace_dir(staging, dest, tmp / "previous")
+        except ReplaceError as e:
+            raise ProvisionError(f"{e}; stop any image or video generation that is using "
+                                 "it and retry") from e
     rt = Runtime(backend=backend, path=dest, extra_dirs=extra_dirs_for(backend))
-    say(f"Testing the native image runtime ({backend})...")
+    say(f"Testing the {RUNTIME_LABEL} ({backend})...")
     try:
         info = (probe or _probe)(rt)
     except Exception as e:  # noqa: BLE001
@@ -382,7 +395,7 @@ def install(backend: str, *, force: bool = False,
          "devices": devices}, indent=2), encoding="utf-8")
     rt.devices = devices
     names = ", ".join(f"{n} ({desc})" for n, desc in devices)
-    say(f"Native image runtime ready ({backend}): {names}")
+    say(f"The {RUNTIME_LABEL} is ready ({backend}): {names}")
     return rt
 
 

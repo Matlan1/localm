@@ -201,7 +201,7 @@ def test_net_mode_off_refuses_before_any_connection(monkeypatch):
 
     monkeypatch.setattr(netpolicy, "pinned_request", no_network)
     monkeypatch.setattr(http_ssl, "verified_urlopen", no_network)
-    with pytest.raises(runtime.DownloadError, match="network policy"):
+    with pytest.raises(runtime.DownloadError, match="Network access is off"):
         runtime.install("cpu", probe=_ok_probe)
     assert calls == []
     assert not runtime.runtime_dir("cpu").exists()

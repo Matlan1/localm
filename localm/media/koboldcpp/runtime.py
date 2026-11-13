@@ -403,8 +403,27 @@ def install(build: str, *, force: bool = False,
     processes; one that finds the runtime installed by the holder before it
     returns that. *cancel_check* is polled during the download and the unpack
     (raising :class:`InstallCancelled`). *unpack* and *version_of* replace the
-    real subprocess steps (tests only)."""
-    say = on_progress or (lambda _m: None)
+    real subprocess steps (tests only). An installed runtime of the same build
+    stays in place until the new one can be moved in. Every progress message,
+    and the failure, is also written to the debug log."""
+    from localm.debuglog import logger
+    from localm.media.runtime_files import logged
+    say = logged(on_progress, "koboldcpp runtime")
+    try:
+        return _install(build, force=force, say=say, cancel_check=cancel_check,
+                        unpack=unpack, version_of=version_of)
+    except InstallCancelled:
+        logger.info("koboldcpp runtime: installing the %s build was cancelled", build)
+        raise
+    except ProvisionError as e:
+        logger.warning("koboldcpp runtime: installing the %s build failed: %s", build, e)
+        raise
+
+
+def _install(build: str, *, force: bool, say: Progress,
+             cancel_check: Optional[Callable[[], bool]],
+             unpack: Optional[Callable[[Path, Path, Path], None]],
+             version_of: Optional[Callable[[Path], str]]) -> Runtime:
     plat = platform_key()
     if plat is None or (plat, build) not in pins.ASSETS:
         raise ProvisionError(
@@ -415,6 +434,7 @@ def install(build: str, *, force: bool = False,
         if rt is not None:
             return rt
     from localm import netpolicy
+    from localm.media.runtime_files import ReplaceError, refused_download_message, replace_dir
     name, size, sha = pins.ASSETS[(plat, build)]
     root = runtimes_root()
     dest = runtime_dir(build)
@@ -434,8 +454,7 @@ def install(build: str, *, force: bool = False,
             try:
                 _download(pins.asset_url(name), binary, say, name, cancel_check)
             except netpolicy.NetworkPolicyError as e:
-                raise DownloadError(
-                    f"the download was refused by the network policy: {e}") from e
+                raise DownloadError(refused_download_message(e)) from e
             verify_file(binary, size, sha, name)
             say("Unpacking the native music runtime...")
             if unpack is not None:
@@ -452,13 +471,10 @@ def install(build: str, *, force: bool = False,
                 {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
                  "sha256": sha}, indent=2), encoding="utf-8")
             try:
-                if dest.exists():
-                    shutil.rmtree(dest)
-                os.replace(staging, dest)
-            except OSError as e:
+                replace_dir(staging, dest, tmp / "previous")
+            except ReplaceError as e:
                 raise ProvisionError(
-                    f"could not install into {dest} ({e}); stop any music generation that "
-                    "is using it and retry") from e
+                    f"{e}; stop any music generation that is using it and retry") from e
     say(f"Native music runtime ready (KoboldCpp {pins.VERSION}, {build} build)")
     return Runtime(build=build, path=dest, launcher=dest / launcher_name())
 

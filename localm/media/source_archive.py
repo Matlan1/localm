@@ -98,7 +98,8 @@ def download(url: str, dest: Path) -> None:
         with verified_urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as r, open(dest, "wb") as f:
             shutil.copyfileobj(r, f, 256 * 1024)
     except netpolicy.NetworkPolicyError as e:
-        raise ArchiveError(f"the download was refused by the network policy: {e}") from None
+        from localm.media.runtime_files import refused_download_message
+        raise ArchiveError(refused_download_message(e)) from None
     except (OSError, ValueError, http.client.HTTPException) as e:
         raise ArchiveError(f"downloading {url} failed: {e!r}") from None
 
