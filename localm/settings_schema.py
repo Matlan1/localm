@@ -420,10 +420,9 @@ CORE_FIELDS: list = [
     # first token can take minutes.
     SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
                  "GGUF first-token timeout (s)",
-                 "How long a reply may take to produce its first token before the "
-                 "model is treated as hung. It covers reading your whole prompt, "
-                 "so on CPU or with a long prompt this can legitimately take "
-                 "minutes.",
+                 "How long a reply may go without progress, before its first token, "
+                 "until the model is treated as hung. Reading each part of a long "
+                 "prompt counts as progress.",
                  group="Timeouts", min=10, step=60, tier=Tier.CONFIG_WRITE),
     SettingField("hf_load_timeout_s", Widget.NUMBER,
                  "HuggingFace load timeout (s)",
@@ -510,7 +509,7 @@ CORE_FIELDS: list = [
                  "system prompt asking the model to answer directly and to speak of "
                  "itself as \"I\". API requests from other programs never get it.",
                  group="Chat", owner="chat", applies=Applies.LIVE, tier=Tier.CONFIG_WRITE),
-    # HIDDEN: the Settings > Chat "Avatars" panel renders these with its own
+    # HIDDEN: the Settings > Model > Avatars panel renders these with its own
     # upload/emoji picker, not a generic text box - see settings.js.
     SettingField("user_avatar", Widget.HIDDEN, "Your icon",
                  "An emoji or a small uploaded image shown next to your own "
@@ -549,8 +548,8 @@ CORE_FIELDS: list = [
     # that, so an unauthenticated network bind always requires a terminal.
     # Applies.RESTART: an in-place restart re-execs the same argv,
     # and the fresh process re-reads this key (cli._resolve_bind_host) when no
-    # explicit -H was typed - that read is what makes the Settings > Restart
-    # server flow work for a browser-only user.
+    # explicit -H was typed - that read is what makes the Settings > Server &
+    # network > Restart server flow work for a browser-only user.
     SettingField("bind_host", Widget.TEXT, "Bind address",
                  "Which interface the server binds to. Blank = this computer "
                  "only (127.0.0.1). 0.0.0.0 = every interface, so phones on "
@@ -654,14 +653,15 @@ CORE_FIELDS: list = [
                  "local disks.",
                  group="Security", tier=Tier.OWNER),
     # ---- Interface ----
-    # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
-    # form control. Accepted by PATCH /v1/config so the launcher stays in sync.
+    # HIDDEN: chosen with the logo picker in the GUI (Settings > System > Logo
+    # style), not a form control. Accepted by PATCH /v1/config so the launcher
+    # stays in sync.
     SettingField("logo_style", Widget.HIDDEN, "Logo style",
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
                  group="General", tier=Tier.CONFIG_WRITE),
-    # HIDDEN: chosen with the language picker in the GUI (Settings -> Appearance),
-    # which names each language in its own language, not a form control whose
+    # HIDDEN: chosen with the language picker in the GUI (Settings > System >
+    # Interface language), which names each language in its own language, not a form control whose
     # own label would be in a language the reader may not have.
     SettingField("language", Widget.HIDDEN, "Interface language",
                  "Language the web GUI is shown in. Anything not translated "
@@ -1712,8 +1712,8 @@ def _validate_one(key: str, val, field: SettingField, default):
     if key == "bind_host":
         # Store "" (loopback default) or a value the server can actually bind:
         # 'localhost' or an IP literal. Rejecting everything else AT WRITE TIME
-        # is what keeps the Settings > Restart server flow safe: an unbindable
-        # value would only surface as a startup failure, and the user who set
+        # is what keeps the Settings > Server & network > Restart server flow
+        # safe: an unbindable value would only surface as a startup failure, and the user who set
         # it from the GUI may have no terminal to recover from one. The read
         # site (cli._resolve_bind_host) re-checks with the same predicate as
         # defense in depth against a hand-edited config.json.
@@ -1997,6 +1997,8 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
 # --------------------------------------------------------------------------- #
 
 MEDIA_PLUGINS = ("image", "music", "video")
+# The heading of each plugin's box on the Settings > Media page.
+MEDIA_PLUGIN_LABELS = {"image": "Image", "music": "Music", "video": "Video"}
 
 
 @dataclass

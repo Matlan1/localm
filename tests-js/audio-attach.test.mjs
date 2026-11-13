@@ -318,7 +318,7 @@ test("a clip sent while the chat is busy is queued with its message", async () =
   assert.equal(clipCount(window), 0);
 });
 
-test("a server refusal is shown as the server wrote it and the clip is not sent again", async () => {
+test("a server refusal is shown as the server wrote it, the clip stays and is not sent again", async () => {
   const detail = "The loaded model cannot hear audio. Load a model with an audio projector.";
   const { window, fetchCalls, ctl } = setup({ rejectWith: detail });
   const conv = { id: "c1", title: "t", messages: [] };
@@ -329,17 +329,19 @@ test("a server refusal is shown as the server wrote it and the clip is not sent 
   assert.ok(toastText(window).includes(detail), "the server's own message reaches the user");
   assert.equal(window.document.getElementById("toast").className.includes("error"), true);
   assert.equal(conv.messages.length, 1, "no blank assistant turn is saved");
-  assert.equal(typeof conv.messages[0].content, "string");
-  assert.match(conv.messages[0].content, /Transcribe this\./);
-  assert.match(conv.messages[0].content, /\[Audio removed/);
-  assert.equal(window.document.querySelectorAll("#chat-messages audio").length, 0);
+  assert.ok(Array.isArray(conv.messages[0].content), "the message keeps its parts");
+  assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
+    "the clip stays in the conversation");
+  assert.doesNotMatch(JSON.stringify(conv.messages[0].content), /Audio removed/);
+  assert.equal(window.document.querySelectorAll("#chat-messages audio").length, 1,
+    "the clip still has its player");
 
   ctl.rejectWith = null;
   await sendText(window, "never mind, just chat");
   const last = streamed(fetchCalls).pop();
   const resent = last.body.messages.some((m) => Array.isArray(m.content) &&
     m.content.some((p) => p.type === "input_audio"));
-  assert.equal(resent, false, "the refused clip is gone from the next request");
+  assert.equal(resent, false, "the refusing model is not sent the clip again");
   assert.ok(conv.messages.some((m) => m.role === "assistant" && m.content === "a transcript"),
     "the chat answers again");
 });
@@ -350,7 +352,7 @@ const audioMsg = (text, extra, tag) => ({ role: "user", content: [
   { type: "input_audio", input_audio: { data: tag + WAV_B64, format: "wav" }, name: `${tag}.wav`, seconds: 1 },
 ] });
 
-test("a refused message with an image and a clip keeps the image and the text", async () => {
+test("a refused message with an image and a clip keeps the image, the clip and the text", async () => {
   const detail = "The loaded model cannot hear audio.";
   const { window } = setup({ rejectWith: detail });
   const conv = { id: "c1", title: "t", messages: [
@@ -361,24 +363,30 @@ test("a refused message with an image and a clip keeps the image and the text", 
 
   const parts = conv.messages[0].content;
   assert.ok(Array.isArray(parts), "the message keeps its parts");
-  assert.equal(parts.some((p) => p.type === "input_audio"), false);
+  assert.equal(parts.filter((p) => p.type === "input_audio").length, 1, "the clip survives");
   assert.equal(parts.filter((p) => p.type === "image_url").length, 1, "the image survives");
   const text = parts.filter((p) => p.type === "text").map((p) => p.text).join("");
   assert.match(text, /what is this\?/);
-  assert.match(text, /\[Audio removed/);
   assert.ok(toastText(window).includes(detail));
 });
 
-test("a 413 from a too-large request drops the clips like a 400", async () => {
-  const { window, ctl } = setup({ rejectWith: "Request body too large" });
+test("a 413 from a too-large request keeps the clips and sends none of them again", async () => {
+  const { window, fetchCalls, ctl } = setup({ rejectWith: "Request body too large" });
   ctl.rejectStatus = 413;
   ctl.refusal = "body-size";
   const conv = { id: "c1", title: "t", messages: [audioMsg("hi", [], "BBBB")] };
   activate(window, conv);
   await window.runCompletion(conv);
-  assert.equal(typeof conv.messages[0].content, "string");
-  assert.match(conv.messages[0].content, /\[Audio removed/);
+  assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
+    "the clip stays in the conversation");
   assert.ok(toastText(window).includes("Request body too large"));
+
+  ctl.rejectWith = null;
+  conv.messages.push({ role: "user", content: "ok" });
+  const before = streamed(fetchCalls).length;
+  await window.runCompletion(conv);
+  assert.equal(JSON.stringify(streamed(fetchCalls)[before].body.messages).includes("BBBB"), false,
+    "no request sends the clip again");
 });
 
 test("a 413 context overflow keeps the clips from earlier turns", async () => {
@@ -396,7 +404,7 @@ test("a 413 context overflow keeps the clips from earlier turns", async () => {
   assert.doesNotMatch(toastText(window), /audio clip was not accepted/i);
 });
 
-test("a 501 for a missing audio decoder drops only the clip just sent, earlier clips stay", async () => {
+test("a 501 for a missing audio decoder stops sending only the clip just sent, earlier clips are sent", async () => {
   const detail = "Reading this audio format needs the voice extra.";
   const { window, fetchCalls, ctl } = setup({ rejectWith: detail });
   ctl.rejectStatus = 501;
@@ -408,12 +416,10 @@ test("a 501 for a missing audio decoder drops only the clip just sent, earlier c
   ] };
   activate(window, conv);
   await window.runCompletion(conv);
-  assert.ok(Array.isArray(conv.messages[0].content), "the earlier message keeps its parts");
   assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
     "the earlier clip is kept");
-  assert.equal(typeof conv.messages[2].content, "string");
-  assert.match(conv.messages[2].content, /and this mp3/);
-  assert.match(conv.messages[2].content, /\[Audio removed/);
+  assert.equal(conv.messages[2].content.some((p) => p.type === "input_audio"), true,
+    "the refused clip stays on screen");
   assert.equal(conv.messages.length, 3, "no blank assistant turn is saved");
   assert.ok(toastText(window).includes(detail), "the server's message reaches the user");
   assert.equal(window.document.getElementById("toast").className.includes("error"), true);
@@ -421,12 +427,12 @@ test("a 501 for a missing audio decoder drops only the clip just sent, earlier c
   ctl.rejectWith = null;
   const before = streamed(fetchCalls).length;
   await window.runCompletion(conv);
-  const next = streamed(fetchCalls)[before];
-  assert.equal(JSON.stringify(next.body.messages).includes("FFFF"), false,
-    "the refused clip is not sent again");
+  const next = JSON.stringify(streamed(fetchCalls)[before].body.messages);
+  assert.equal(next.includes("FFFF"), false, "the refused clip is not sent again");
+  assert.equal(next.includes("EEEE"), true, "the earlier clip is still sent");
 });
 
-test("an image refusal keeps the clips from earlier turns", async () => {
+test("an image refusal keeps the clips from earlier turns and the image", async () => {
   const detail = "This model cannot accept image input.";
   const { window, ctl } = setup({ rejectWith: detail });
   ctl.refusal = "image";
@@ -442,7 +448,7 @@ test("an image refusal keeps the clips from earlier turns", async () => {
   await window.runCompletion(conv);
   assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
     "the earlier clip survives");
-  assert.equal(window.msgImages(conv.messages[2]).length, 0, "the refused image is dropped");
+  assert.equal(window.msgImages(conv.messages[2]).length, 1, "the refused image stays");
 });
 
 test("ten clips in one transcript each keep a live player and are not rebuilt on re-render", async () => {

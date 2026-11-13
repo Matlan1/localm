@@ -180,7 +180,7 @@ def _build_video_workflow(
         return False, (
             "The video workflow has no sampler / prompt / latent node (with inputs) "
             "localm can drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API "
-            "format) and select it on the Workflow panel (Settings -> Media -> Video)."), None
+            "format) and select it on the Workflow panel of the Video page."), None
 
     # Positive prompt (the conditioning node feeding the sampler's positive input).
     if "text" in positive.get("inputs", {}):

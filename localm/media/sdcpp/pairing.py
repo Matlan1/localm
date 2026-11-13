@@ -714,7 +714,8 @@ def native_options(media: str, cands: Optional[list] = None,
     """What a *media* (``"image"``/``"video"``) model picker offers:
     ``{"models", "slots", "loras"}``, plus ``controlnets`` and ``embeddings``
     (``addon_options``) for image. ``models`` are the registered files that
-    can be the main model (a registered folder never is); ``slots`` maps each component slot of that media to
+    can be the main model (a registered folder never is, nor a file
+    ``families.music_entry`` calls music); ``slots`` maps each component slot of that media to
     the registered files of a fitting kind; ``loras`` the registered LoRAs.
     Each entry is ``{"name", "file", "kind", "family", "family_label"}``.
     With the *family* (and wan2.2 *variant*) of the chosen model, each slot
@@ -723,18 +724,16 @@ def native_options(media: str, cands: Optional[list] = None,
     if cands is None:
         cands = registry_candidates(reg)
     from localm.model_manager import load_registry
-    from localm.model_manager.gguf import gguf_is_music_architecture
     from localm.model_manager.registry import _entry_is_folder
     reg = load_registry() if reg is None else reg
-    music = {name for name, entry in reg.items() if isinstance(entry, dict)
-             and gguf_is_music_architecture(entry.get("architecture"))}
-    models = [_option(c) for c in cands if is_media_model(c, media) and c.name not in music]
+    models = [_option(c) for c in cands if is_media_model(c, media)
+              and families.music_entry(reg.get(c.name)) is None]
     for name, entry in sorted(reg.items()):
         if (isinstance(entry, dict) and entry.get("model_type") == "diffusion-unet"
-                and name not in music
                 and not any(m["name"] == name for m in models)
                 and not any(c.name == name for c in cands)
-                and not _entry_is_folder(entry)):
+                and not _entry_is_folder(entry)
+                and families.music_entry(entry) is None):
             raw = str(entry.get("path") or "")
             models.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
                            "kind": "unknown", "family": None, "family_label": None})

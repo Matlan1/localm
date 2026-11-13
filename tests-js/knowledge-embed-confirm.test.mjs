@@ -149,11 +149,11 @@ test("cancelling the modal sends no confirmed POST and no job", async () => {
 });
 
 // --------------------------------------------------------------------------- //
-//  Dismissing via the shared modal chrome (the x, or the backdrop) must be a   //
+//  Dismissing via the shared modal chrome (the x, or Escape) must be a   //
 //  decline, exactly like Cancel - not a promise that never settles.           //
 // --------------------------------------------------------------------------- //
 
-test("dismissing the modal via the x/backdrop cancels and re-enables Apply", async () => {
+test("dismissing the modal via the x/Escape cancels and re-enables Apply", async () => {
   const { window, calls } = setup({
     dryRun: {
       needs_confirm: true, model: "new-model",
@@ -183,7 +183,7 @@ test("dismissing the modal via the x/backdrop cancels and re-enables Apply", asy
   assert.match(log.textContent, /Cancelled/);
 });
 
-test("kbConfirmAddRoots: an x/backdrop dismissal resolves false", async () => {
+test("kbConfirmAddRoots: an x/Escape dismissal resolves false", async () => {
   const { window } = setup({ dryRun: {} });
   const p = window.kbConfirmAddRoots(["C:/somewhere"]);
   await tick();
@@ -194,7 +194,7 @@ test("kbConfirmAddRoots: an x/backdrop dismissal resolves false", async () => {
     "__PENDING__ means the promise never settled: the caller is stuck forever");
 });
 
-test("kbConfirmReembed: an x/backdrop dismissal resolves false", async () => {
+test("kbConfirmReembed: an x/Escape dismissal resolves false", async () => {
   const { window } = setup({ dryRun: {} });
   const p = window.kbConfirmReembed("docs");
   await tick();
@@ -205,7 +205,7 @@ test("kbConfirmReembed: an x/backdrop dismissal resolves false", async () => {
     "__PENDING__ means the promise never settled: the caller is stuck forever");
 });
 
-test("kbConfirmRepair: an x/backdrop dismissal resolves false", async () => {
+test("kbConfirmRepair: an x/Escape dismissal resolves false", async () => {
   const { window } = setup({ dryRun: {} });
   const p = window.kbConfirmRepair("docs", "needs a full re-embed");
   await tick();
@@ -216,7 +216,7 @@ test("kbConfirmRepair: an x/backdrop dismissal resolves false", async () => {
     "__PENDING__ means the promise never settled: the caller is stuck forever");
 });
 
-test("confirmEmbeddingModelSwitch: an x/backdrop dismissal resolves false", async () => {
+test("confirmEmbeddingModelSwitch: an x/Escape dismissal resolves false", async () => {
   const { window } = setup({ dryRun: {} });
   const p = window.confirmEmbeddingModelSwitch("new-model",
     { note: "may invalidate", collections: [] });

@@ -491,7 +491,8 @@ def _refuse_downgrade(new_version: str) -> None:
         raise LocalmError(
             "cannot read the installed localm version",
             reason="without it an update cannot be confirmed as newer; choose the "
-                   "version to install (Settings > Updates, or 'localm update "
+                   "version to install (Settings > System > Updates > Choose a version, "
+                   "or 'localm update "
                    "--to <version>')")
     if not _version.is_newer(new_version, current):
         raise LocalmError(
@@ -1496,6 +1497,12 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 verified, verify_reason = assessed["verified"], assessed["reason"]
                 if not verified and not allow_unverified:
                     raise UnverifiedBuild(str(target_version), verify_reason, digest)
+            if hashlib.sha256(zip_path.read_bytes()).hexdigest() != digest:
+                raise LocalmError(
+                    "refusing to install: the downloaded build changed after its "
+                    "signature was checked",
+                    reason="the file on disk no longer matches the verified bytes; "
+                           "try the update again")
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
@@ -2194,7 +2201,7 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
            for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += (" (" + "; ".join(why) + "). To try again, close anything else using this "
-                 "install, then choose Update now in Settings > Updates")
+                 "install, then choose Settings > System > Updates > Update now")
     write_runtime = not keep_failures or (runtime_last is not None
                                           and not failed_now(runtime_last))
     write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))

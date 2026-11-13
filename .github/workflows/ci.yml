@@ -549,6 +549,47 @@ jobs:
       - name: Affected tests
         run: python scripts/run_affected_tests.py --depth 1
 
+  # Runs the python-pr-gate affected-test selection on windows-latest, with the
+  # same `if`, install and test command; tests that skip on Linux (skipif not
+  # win32) run here. The lock, hygiene and ruff checks run on the Linux job only.
+  # See test_the_windows_gate_runs_the_linux_gate_selection_on_windows.
+  python-pr-gate-windows:
+    name: Python PR gate, Windows (affected tests)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv (for the requirements export)
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+      - name: Install
+        run: |
+          pip install --require-hashes --no-deps -r .github/requirements/editable.txt
+          uv export --quiet --locked --no-emit-project --extra dev --extra rag -o "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps --no-build-isolation -r "$RUNNER_TEMP/requirements.txt"
+          pip install --no-deps --no-build-isolation -e .
+
+      - name: Affected tests
+        run: python scripts/run_affected_tests.py --depth 1
+
   # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
   # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it
   # runs weekly + on manual dispatch only, not on every push. Per-push coverage of
@@ -1209,7 +1250,7 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && 'merge-policy' || 'merge-policy (pull_request runs only)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test]
+    needs: [python-pr-gate, python-pr-gate-windows, lint, gui-tests, test, mutation-scope, mutation-test]
     # Runs after a needed job failed or was skipped. See
     # test_the_merge_policy_job_cannot_be_skipped_green.
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -1231,6 +1272,7 @@ jobs:
         env:
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           RESULT_PYTHON_PR_GATE: ${{ needs.python-pr-gate.result }}
+          RESULT_PYTHON_PR_GATE_WINDOWS: ${{ needs.python-pr-gate-windows.result }}
           RESULT_LINT: ${{ needs.lint.result }}
           RESULT_GUI_TESTS: ${{ needs.gui-tests.result }}
           RESULT_TEST: ${{ needs.test.result }}
@@ -1241,6 +1283,7 @@ jobs:
           python scripts/merge_policy.py --full-ci "$FULL_CI"
           --mutation-modules "$MUTATION_MODULES"
           --result "python-pr-gate=$RESULT_PYTHON_PR_GATE"
+          --result "python-pr-gate-windows=$RESULT_PYTHON_PR_GATE_WINDOWS"
           --result "lint=$RESULT_LINT"
           --result "gui-tests=$RESULT_GUI_TESTS"
           --result "test=$RESULT_TEST"

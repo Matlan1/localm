@@ -394,7 +394,7 @@ export function kbConfirmEmbeddingSwitch(model, report) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);
@@ -605,7 +605,7 @@ export function kbConfirmReembed(name) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);
@@ -636,7 +636,7 @@ function kbConfirmRepair(name, detail) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);
@@ -722,7 +722,7 @@ export function kbConfirmAddRoots(folders) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);
