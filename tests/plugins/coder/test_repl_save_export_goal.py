@@ -78,9 +78,9 @@ def _rendered(text: str) -> str:
 
 
 def _handled_commands() -> set[str]:
-    """Every command name _handle_command compares ``cmd`` against."""
+    """Every command name the REPL module compares ``cmd`` against."""
     from localm.plugins.coder.cli import repl as repl_mod
-    tree = ast.parse(inspect.getsource(repl_mod._handle_command))
+    tree = ast.parse(inspect.getsource(repl_mod))
     names: set[str] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
