@@ -59,7 +59,7 @@ test("chat dropdown shows a command's translated hint and args", () => {
   typeSlash(window, "chat-input", "/generate-image");
   const [item] = menuItems(window, "chat-input");
   assert.equal(item.querySelector(".cmd").textContent, "/generate-image <prompt>");
-  assert.equal(item.querySelector(".hint").textContent, "generate an image with FLUX");
+  assert.equal(item.querySelector(".hint").textContent, "generate an image with the Images page's model");
 });
 
 test("coder dropdown shows a no-args command's translated hint", () => {
