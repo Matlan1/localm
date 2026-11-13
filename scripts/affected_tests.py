@@ -248,6 +248,9 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
                                             "net-off refusal not taken from config"),
     "tests/test_pin_weekly.py": (("scripts/*.py", "tests/*.py"),
                                  "reads the pin, bump and confirm scripts for gitignored paths"),
+    "tests/test_doctor_exit_and_findings.py": (_LOCALM_PY,
+                                               "reads every localm module for test-only "
+                                               "environment switches"),
     "tests/test_store_lock_create_refused.py": (_LOCALM_PY,
                                                 "walks the AST of every localm .py for O_EXCL lock-file creates"),
 }
