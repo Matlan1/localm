@@ -512,3 +512,25 @@ def test_a_table_without_exactly_one_pinned_toolkit_refuses(monkeypatch, names, 
     monkeypatch.setattr(pins, "_PINNED_FALLBACK_SHA256", dict.fromkeys(names, "0" * 64))
     with pytest.raises(RuntimeError, match=match):
         pins._pinned_cuda_toolkit("win", "13")
+
+
+@pytest.mark.parametrize("assume_yes", [True, False])
+def test_a_blackwell_driver_on_the_previous_13x_toolkit_gets_vulkan_not_a_broken_cuda(
+        monkeypatch, assume_yes):
+    major, minor = sl._MIN_DRIVER_CUDA["cuda-13"]
+    previous = f"{major}.{minor - 1}"
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
+    info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="580.00",
+                         cuda_capability=previous, compute_capability="12.0")
+    assert info.cuda_line == "cuda-13" and info.driver_ok is False
+    backend, cudart, reason = sl._cuda_setup_dialogue(info, assume_yes=assume_yes)
+    assert (backend, cudart) == ("vulkan", False)
+    assert f"needs CUDA {CUDA13} or newer" in reason
+
+
+def test_an_older_card_with_a_driver_on_the_previous_13x_toolkit_keeps_cuda_12():
+    major, minor = sl._MIN_DRIVER_CUDA["cuda-13"]
+    info = sl.NvidiaInfo(present=True, gpu_name="RTX 4090", driver_version="580.00",
+                         cuda_capability=f"{major}.{minor - 1}", compute_capability="8.9")
+    assert info.cuda_line == "cuda-12" and info.driver_ok is True
+    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True, None)
