@@ -221,7 +221,11 @@ def fetch_tree(repo: str, commit: str, dest: Path, *, on_progress: Progress = No
         staging = work / "tree"
         files = _unpack(archive, staging, commit)
         write_record(staging, repo, commit, files)
-        os.replace(staging, dest)
+        from localm.media.runtime_files import move_dir
+        try:
+            move_dir(staging, dest)
+        except OSError as e:
+            raise ArchiveError(f"the downloaded tree could not be moved into {dest}: {e}") from e
         return files
     finally:
         shutil.rmtree(long_path(work), ignore_errors=True)

@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from localm import procid, sysprog
 
@@ -299,9 +299,11 @@ def _is_transient_permission_error(e: OSError) -> bool:
     return getattr(e, "winerror", None) in (5, 32, None)
 
 
-def replace_atomic(src: Path, dst: Path) -> None:
+def replace_atomic(src: Path, dst: Path, *,
+                   on_retry: Optional[Callable[[int, OSError], None]] = None) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
-    sharing violation.
+    sharing violation. *on_retry*, when given, is called with the number of
+    the refused attempt (from 1) and its error before each retry.
 
     os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
     when another handle has *dst* open at that instant: a second localm process
@@ -320,6 +322,8 @@ def replace_atomic(src: Path, dst: Path) -> None:
         except PermissionError as e:
             if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
+            if on_retry is not None:
+                on_retry(attempt + 1, e)
             _transient_backoff(attempt)
 
 

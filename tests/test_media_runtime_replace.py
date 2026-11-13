@@ -219,3 +219,65 @@ def test_when_the_old_folder_cannot_be_put_back_its_files_stay_where_the_error_s
     kept = [p for p in dest.parent.iterdir() if p.name.startswith(f".{dest.name}.previous-")]
     assert len(kept) == 1 and _snapshot(kept[0]) == before
     assert str(kept[0]) in str(info.value)
+
+
+@pytest.fixture
+def refused_tree_moves(monkeypatch):
+    """``os.replace`` of a fetched tree into place refused with the Windows
+    sharing error a handle on a file inside causes, ``times`` times (None:
+    every time). Off Windows, where that error is not retried, the storekit
+    rule is set to the Windows one for this error."""
+    from localm import storekit
+    state = {"times": 0, "refused": 0}
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(src).name == "tree" and (state["times"] is None
+                                         or state["refused"] < state["times"]):
+            state["refused"] += 1
+            err = PermissionError(13, "Access is denied", str(src))
+            err.winerror = 5
+            raise err
+        return real_replace(src, dst)
+    monkeypatch.setattr(runtime_files.os, "replace", replace)
+    if os.name != "nt":
+        monkeypatch.setattr(storekit, "_is_transient_permission_error",
+                            lambda e: getattr(e, "winerror", None) in (5, 32))
+    return state
+
+
+def test_a_tree_move_refused_twice_then_allowed_completes_the_fetch(
+        monkeypatch, tmp_path, refused_tree_moves, caplog):
+    from localm.media import source_archive as sa
+    from tests._source_archives import FakeGitHub
+    caplog.set_level(logging.WARNING, logger="localm")
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, commit = hub.add("o", "R", {"a.py": "1\n"})
+    refused_tree_moves["times"] = 2
+    dest = tmp_path / "home" / "comfyui"
+    assert sa.fetch_tree(repo, commit, dest) == ["a.py"]
+    assert (dest / "a.py").read_text() == "1\n"
+    assert refused_tree_moves["refused"] == 2
+    retries = [r for r in caplog.records if "was refused" in r.getMessage()]
+    assert [r.getMessage().split(": attempt ")[1].split(" ")[0] for r in retries] == ["1", "2"]
+    assert all(r.levelno == logging.WARNING for r in retries)
+    assert not [p for p in dest.parent.iterdir() if p.name.startswith(".localm-src-")]
+
+
+def test_a_tree_move_refused_every_time_names_the_folder(monkeypatch, tmp_path,
+                                                         refused_tree_moves):
+    from localm import storekit
+    from localm.media import source_archive as sa
+    from tests._source_archives import FakeGitHub
+    monkeypatch.setattr(storekit, "_transient_backoff", lambda attempt: None)
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, commit = hub.add("o", "R", {"a.py": "1\n"})
+    refused_tree_moves["times"] = None
+    dest = tmp_path / "home" / "comfyui"
+    with pytest.raises(sa.ArchiveError) as info:
+        sa.fetch_tree(repo, commit, dest)
+    assert f"could not be moved into {dest}" in str(info.value)
+    assert "Access is denied" in str(info.value)
+    assert refused_tree_moves["refused"] == storekit._REPLACE_RETRIES
+    assert not dest.exists()
+    assert not [p for p in dest.parent.iterdir() if p.name.startswith(".localm-src-")]

@@ -49,6 +49,21 @@ def logged(on_progress: Optional[Progress], tag: str) -> Progress:
     return say
 
 
+def move_dir(src: Path, dst: Path) -> None:
+    """Rename the folder *src* to *dst* (``os.replace``), retried with a short
+    backoff while Windows refuses it with the sharing or access violation an
+    open handle on a file inside causes (:func:`localm.storekit.replace_atomic`);
+    each refused attempt is logged at WARNING with its number. Raises the last
+    error when every attempt was refused, any other OSError at once."""
+    from localm.debuglog import logger
+    from localm.storekit import replace_atomic
+
+    def refused(attempt: int, error: OSError) -> None:
+        logger.warning("moving %s to %s: attempt %d was refused (%s); retrying",
+                       src, dst, attempt, error)
+    replace_atomic(src, dst, on_retry=refused)
+
+
 def replace_dir(staging: Path, dest: Path) -> None:
     """Put the folder *staging* in place of *dest* (same volume). An existing
     *dest* is first renamed to a hidden ``.<name>.previous-<pid>-<n>`` folder
@@ -63,15 +78,15 @@ def replace_dir(staging: Path, dest: Path) -> None:
     aside = dest.with_name(f".{dest.name}.previous-{os.getpid()}-{time.monotonic_ns()}")
     if had_old:
         try:
-            os.replace(dest, aside)
+            move_dir(dest, aside)
         except OSError as e:
             raise ReplaceError(f"{dest} is in use and was left as it is ({e})") from e
     try:
-        os.replace(staging, dest)
+        move_dir(staging, dest)
     except OSError as e:
         if had_old:
             try:
-                os.replace(aside, dest)
+                move_dir(aside, dest)
             except OSError as back:
                 logger.warning("media runtime: %s could not be put back from %s (%s)",
                                dest, aside, back)
