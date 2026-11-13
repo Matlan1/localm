@@ -92,7 +92,7 @@ installed, with no `--tag`, keeps it; in a terminal it asks whether to download 
 again (or, when this release ships a newer build, whether to update to it), and
 `--force` re-downloads without asking.
 
-The same actions are in the GUI under **Settings -> Updates -> Inference
+The same actions are in the GUI under **Settings -> System -> Updates -> Inference
 runtime**: a **Check for runtime update** button (compares what is installed
 against what `setup-llama` would install right now, without downloading
 anything), an **Update runtime** button once a change is available (pick a
@@ -223,7 +223,7 @@ CUDA build that loads but cannot use the GPU (it would run on the CPU) counts as
 not loading.
 
 Whenever another backend is installed in place of the one you chose, your choice
-is kept on record with the reason: `localm doctor` and Settings > Updates >
+is kept on record with the reason: `localm doctor` and Settings > System > Updates >
 Inference runtime show "you chose cuda, vulkan is installed" with why, and offer
 to retry your choice or keep what is installed. `localm update` keeps that record.
 To keep the installed backend from the terminal, ask for it by name:
