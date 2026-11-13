@@ -232,6 +232,9 @@ class _FakeRunner:
     def shutdown(self, grace=5.0):
         self.alive = False
 
+    def survivor_pid(self):
+        return None
+
 
 @pytest.fixture
 def fake_native(tmp_path, monkeypatch):
