@@ -205,6 +205,8 @@ _TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/test_gui_no_import_reassignment.py": (_GUI_JS, "parses every GUI app and page module"),
     "tests/test_gui_render_loop.py": (_GUI_JS, "reads every GUI script"),
     "tests/test_gui_slash_menu.py": (_GUI_JS, "reads every GUI script"),
+    "tests/test_gui_no_native_dialogs.py": ((_GUI_STATIC + "*", "localm/plugins/builtin/*/static/*"),
+                                            "reads every GUI script and page for native browser dialogs"),
     "tests/test_static_cache.py": (_GUI_JS, "checks the cache headers of every GUI script"),
     "tests/test_i18n_language_setting.py": ((_GUI_STATIC + "i18n/*",), "lists the GUI translation catalogs"),
     "tests/test_protocol.py": ((_GUI_STATIC + "i18n/*",), "reads every GUI translation catalog"),

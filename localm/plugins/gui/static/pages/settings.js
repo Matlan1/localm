@@ -4,8 +4,8 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
-import { refreshCtxLimit } from "../app/chat.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, reloadApp, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { chat, refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey, modelCache } from "../app/models-sidebar.js";
@@ -1215,7 +1215,7 @@ export async function refreshOwnerKeyPanel() {
           toast(t("settings.ownerKey.removedToast"));
           // That call invalidates this session cookie, so re-read the page state
           // rather than leaving a view authed by a session that no longer exists.
-          window.location.reload();
+          reloadApp();
           return;
         }
         // Not fully cleared. The session cookie is already gone regardless (the
@@ -1254,7 +1254,7 @@ if (guiKeySave) guiKeySave.onclick = async () => {
     if (!ok) { toast(t("settings.signIn.keyRejected"), true); return; }
     try { sessionStorage.setItem("localm.loginOk", "1"); } catch { /* private mode */ }
     toast(t("settings.signIn.keySaved"));
-    setTimeout(() => location.reload(), 600);
+    setTimeout(() => reloadApp(), 600);
     return;
   }
   // Empty -> sign out (clear the session cookie).
@@ -1265,7 +1265,7 @@ if (guiKeySave) guiKeySave.onclick = async () => {
   } catch { /* fetch failed */ }
   if (!signedOut) { toast(t("settings.signIn.signOutFailed"), true); return; }
   toast(t("settings.signIn.signedOut"));
-  setTimeout(() => location.reload(), 600);
+  setTimeout(() => reloadApp(), 600);
 };
 
 // Friendly section label per plugin owner (falls back to the capitalized scope).
@@ -1806,17 +1806,123 @@ export function buildBrowserSetupBox() {
  *  shared control, "m:<plugin>:<key>" for a media plugin box control. */
 const _pendingEdits = new Map();
 
-/** Record every drawn control whose value differs from its saved value. */
-export function collectPendingEdits() {
+/** Call fn(id, ctrl) for every drawn control whose value differs from its
+ *  saved value; ids as in _pendingEdits. */
+function forEachChangedControl(fn) {
   const take = (id, ctrl) => {
     if (!ctrl.write || !ctrl.node || !ctrl.node.isConnected) return;
     if (!("shown" in ctrl) || !settingControlChanged(ctrl)) return;
-    _pendingEdits.set(id, ctrl.read());
+    fn(id, ctrl);
   };
   for (const ctrl of _settingsControls) take("c:" + ctrl.field.key, ctrl);
   for (const [name, ctrls] of Object.entries(_mediaControls)) {
     for (const ctrl of ctrls) take(`m:${name}:${ctrl.field.key}`, ctrl);
   }
+}
+
+/** Record every drawn control whose value differs from its saved value. */
+export function collectPendingEdits() {
+  forEachChangedControl((id, ctrl) => _pendingEdits.set(id, ctrl.read()));
+}
+
+/** sessionStorage key of the unsaved Settings edits kept across a reload. */
+export const SETTINGS_DRAFT_KEY = "localm.settingsDraft";
+// True once this page load has read the stored draft (or found none).
+let _draftRead = false;
+// True after the person chose to discard their unsaved edits.
+let _draftDiscarded = false;
+// Edits read from the stored draft and not yet put back into the controls.
+let _draftRestored = 0;
+
+/** Keep the unsaved Settings edits in sessionStorage while the page unloads,
+ *  so a reload puts them back. Secret fields are never kept, and no drawn edit
+ *  is kept in privacy mode or before the session mode is known. A draft this
+ *  page load has not read yet is left as it is; one read but not yet put back
+ *  into the controls is kept again. */
+export function storeSettingsDraft() {
+  try {
+    if (_draftDiscarded) { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); return; }
+    if (!_draftRead) return;
+    const entries = new Map(_draftRestored ? _pendingEdits : []);
+    if (chat.modeKnown && !chat.serverPrivacy && settingsDirty()) {
+      forEachChangedControl((id, ctrl) => {
+        if (ctrl.field && ctrl.field.widget === "secret") return;
+        entries.set(id, ctrl.read());
+      });
+    }
+    if (entries.size) sessionStorage.setItem(SETTINGS_DRAFT_KEY, JSON.stringify([...entries]));
+    else sessionStorage.removeItem(SETTINGS_DRAFT_KEY);
+  } catch (e) {
+    console.warn("localm: could not keep the unsaved settings for the reload:", e);
+  }
+}
+window.addEventListener("pagehide", storeSettingsDraft);
+
+/** Drop the unsaved Settings edits: no draft is kept for the next load. */
+export function discardSettingsDraft() {
+  _draftDiscarded = true;
+  try { sessionStorage.removeItem(SETTINGS_DRAFT_KEY); } catch { /* storage blocked: nothing kept */ }
+}
+
+/** Move a draft stored by an earlier load of this tab into the carried edits,
+ *  once per page load. Returns the number of edits read. */
+function readSettingsDraft() {
+  if (_draftRead) return 0;
+  _draftRead = true;
+  let entries = [];
+  try {
+    const raw = sessionStorage.getItem(SETTINGS_DRAFT_KEY);
+    sessionStorage.removeItem(SETTINGS_DRAFT_KEY);
+    if (raw) entries = JSON.parse(raw);
+  } catch (e) {
+    console.warn("localm: the unsaved settings kept from the last load could not be read:", e);
+    return 0;
+  }
+  if (!Array.isArray(entries)) return 0;
+  let n = 0;
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+    if (!_pendingEdits.has(entry[0])) { _pendingEdits.set(entry[0], entry[1]); n++; }
+  }
+  return n;
+}
+
+/** Save every Settings section that holds an unsaved edit, with each
+ *  section's own Save button, one after another. Resolves true when no unsaved
+ *  edit is left afterwards. */
+export async function saveDirtySettings() {
+  const buttons = [];
+  for (const n of _dirtySettings) {
+    if (!n.isConnected) continue;
+    const ctrl = _controlByNode.get(n);
+    if (ctrl && !settingControlChanged(ctrl)) continue;
+    const btn = sectionSaveButton(n);
+    if (btn && !buttons.includes(btn)) buttons.push(btn);
+  }
+  for (const btn of buttons) {
+    if (!btn.isConnected || btn.disabled) continue;
+    btn.click();
+    const until = Date.now() + 120000;
+    while (btn.isConnected && btn.disabled && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return !settingsDirty();
+}
+
+/** The Save button of the nearest box around *node* that has one: a
+ *  `.settings-section-save`, `.media-save` or `.settings-save` button in an
+ *  `.actions` row that is a direct child of that box. */
+function sectionSaveButton(node) {
+  for (let box = node.parentElement; box; box = box.parentElement) {
+    for (const row of box.children) {
+      if (!row.classList.contains("actions")) continue;
+      const btn = row.querySelector(".settings-section-save, .media-save, .settings-save");
+      if (btn) return btn;
+    }
+    if (box.id === "settings-content") break;
+  }
+  return null;
 }
 
 /** Put the carried edits back into the freshly drawn controls. */
@@ -1839,6 +1945,7 @@ export function restorePendingEdits() {
 export async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   collectPendingEdits();
+  _draftRestored += readSettingsDraft();
   _dirtySettings.clear();   // R10: a fresh render is a clean baseline
   $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
   const form = $("config-form");
@@ -2087,6 +2194,10 @@ export async function refreshSettingsPage() {
   }
 
   restorePendingEdits();
+  if (_draftRestored) {
+    _draftRestored = 0;
+    toast(t("settings.unsaved.restored"));
+  }
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
@@ -2264,7 +2375,7 @@ export async function buildMediaSection(form, fields) {
       _settingsControls.push(ctrl);
     }
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary",
+    const save = el("button", "btn-primary settings-save",
       t("settings.save.section", { name: t("settings.media.sharedHead") }));
     save.type = "button";
     save.onclick = () => savingState(save, () => saveSettingsSection("media", box));
@@ -2291,7 +2402,7 @@ export async function buildMediaSection(form, fields) {
       _settingsControls = _settingsControls.filter(c => c.field.key !== placementField.key);
       _settingsControls.push(ctrl);
       const actions = el("div", "actions");
-      const save = el("button", "btn-primary",
+      const save = el("button", "btn-primary settings-save",
         t("settings.save.section", { name: t("settings.media.experimentalHead") }));
       save.type = "button";
       save.onclick = () => savingState(save, () => saveSettingsSection("media", box));
@@ -2520,7 +2631,7 @@ export async function buildAvatarsSection(form, fields) {
   });
 
   const actions = el("div", "actions");
-  const save = el("button", "btn-primary", t("settings.save.section", { name: t("settings.sectionHeading.avatars") }));
+  const save = el("button", "btn-primary settings-save", t("settings.save.section", { name: t("settings.sectionHeading.avatars") }));
   save.type = "button";
   save.onclick = () => savingState(save, () => saveSettingsSection("avatars"));
   actions.appendChild(save);
@@ -3121,7 +3232,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
     const actions = el("div", "actions");
     if (ctrls.length) {
-      const save = el("button", "btn-primary",
+      const save = el("button", "btn-primary settings-save",
         t("settings.save.section", { name: t("settings.comfy.ownHead") }));
       save.type = "button";
       save.onclick = () => savingState(save, () => saveSettingsSection("media", host));
