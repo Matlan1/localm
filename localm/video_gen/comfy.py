@@ -476,18 +476,16 @@ def generate_video(
         if kind == SUBMIT_NO_ID:
             return False, (
                 "ComfyUI accepted the request but returned no prompt_id.\n"
-                "Check the ComfyUI console for workflow validation errors - "
-                "missing Wan 2.2 model files are the usual cause (see "
-                "docs/video.md for the download list), and the Wan nodes "
-                "need ComfyUI v0.3.46+."
+                "Check the ComfyUI console for workflow validation errors: a node "
+                "this ComfyUI lacks (the Wan nodes need ComfyUI v0.3.46+) or a value "
+                "it refuses."
             )
         elif kind == SUBMIT_HTTP_ERROR:
             return False, (
                 f"ComfyUI rejected the Wan 2.2 workflow (HTTP {value.code}):\n"
                 f"{comfy_http_error_detail(value)}\n"
-                "Missing Wan 2.2 model files are the usual cause (see "
-                "docs/video.md for the download list); the Wan nodes need "
-                "ComfyUI v0.3.46+."
+                "This ComfyUI may lack a node the workflow uses (the Wan nodes need "
+                "ComfyUI v0.3.46+)."
             )
         elif kind == SUBMIT_URL_ERROR:
             return False, f"Could not connect to ComfyUI at {api_url}: {value}"
