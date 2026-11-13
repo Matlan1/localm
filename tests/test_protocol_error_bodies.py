@@ -81,3 +81,24 @@ def test_the_open_mode_gate_answers_an_ollama_client_in_its_shape():
     assert r.status_code == 403
     assert r.json()["error"] == r.json()["detail"]
     assert "API key" in r.json()["error"]
+
+
+def test_an_os_error_without_a_file_stays_generic():
+    with patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
+        app = create_app(None)
+
+        @app.get("/v1/probe-connect-error")
+        def _boom():
+            raise ConnectionRefusedError(10061, "Connect call failed ('10.0.0.9', 8188)")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.get("/v1/probe-connect-error", headers={"Authorization": f"Bearer {SECRET}"})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Internal server error"
+    assert "10.0.0.9" not in r.text
+
+
+def test_every_ollama_management_path_is_a_route():
+    from localm.inference import ollama_protocol as O
+    paths = {getattr(r, "path", None) for r in create_app(None).routes}
+    assert O.MANAGEMENT_PATHS <= paths

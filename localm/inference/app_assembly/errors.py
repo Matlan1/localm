@@ -17,12 +17,6 @@ SERVER_ERROR_LOG_INTERVAL_S = 30.0
 _ONE_LINE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
-_OLLAMA_MANAGEMENT_PATHS = frozenset(
-    {"/api/pull", "/api/push", "/api/delete", "/api/create"})
-_OPENAI_ERROR_TYPES = {401: "authentication_error", 403: "permission_error",
-                       404: "not_found_error", 429: "rate_limit_error"}
-
-
 def error_body(path: str, status: int, detail) -> dict:
     """The JSON body of an error answer for a request to *path*: ``{"detail":
     detail}``, plus the error field the clients of *path*'s protocol read. An
@@ -30,22 +24,21 @@ def error_body(path: str, status: int, detail) -> dict:
     paths) adds ``"error": "<message>"``; ``/v1/messages...`` adds Anthropic's
     ``"type": "error"`` and ``"error": {"type", "message"}``; every other
     ``/v1/...`` path adds OpenAI's ``"error": {"message", "type", "param",
-    "code"}``. Any other path gets ``{"detail": detail}`` alone."""
+    "code"}`` (:func:`responses_protocol.error_body`). Any other path gets
+    ``{"detail": detail}`` alone."""
     from localm.inference import anthropic_protocol as A
     from localm.inference import ollama_protocol as O
+    from localm.inference import responses_protocol as R
     body: dict = {"detail": detail}
     message = detail if isinstance(detail, str) else str(detail)
     if (path in O.INFERENCE_POST_PATHS or path in O.READ_GET_PATHS
-            or path in (O.SHOW_PATH, O.COPY_PATH) or path in _OLLAMA_MANAGEMENT_PATHS
+            or path in (O.SHOW_PATH, O.COPY_PATH) or path in O.MANAGEMENT_PATHS
             or path.startswith(O.BLOBS_PREFIX)):
         body["error"] = message
     elif path == "/v1/messages" or path.startswith("/v1/messages/"):
         body.update(A.error_body(status, message))
     elif path.startswith("/v1/"):
-        kind = _OPENAI_ERROR_TYPES.get(status) or (
-            "invalid_request_error" if status < 500 else "server_error")
-        body["error"] = {"message": message, "type": kind, "param": None,
-                         "code": None}
+        body.update(R.error_body(status, message))
     return body
 
 
@@ -88,7 +81,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         from localm.debuglog import logger as _dbg
         _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
         detail = "Internal server error"
-        if isinstance(exc, OSError) and exc.strerror:
+        if isinstance(exc, OSError) and exc.strerror and exc.filename is not None:
             detail = f"Internal server error: {exc.strerror}"
         return JSONResponse(status_code=500,
                             content=error_body(request.url.path, 500, detail))
