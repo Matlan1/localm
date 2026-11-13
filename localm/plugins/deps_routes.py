@@ -35,6 +35,10 @@ def register_dep_routes(app, manager) -> None:
                      f"(e.g. localm plugin install-deps {name}).")
         if manager._spec_for(name) is None:
             raise HTTPException(404, f"No such plugin: {name}")
+        if not manager.is_installed(name):
+            raise HTTPException(
+                409, f"Plugin {name!r} is not installed; install it first, and its "
+                     "dependencies with it.")
         task = manager.start_dep_install(name)
         return {"status": task.status, "name": name,
                 "missing": manager.plugin_missing_deps(name),

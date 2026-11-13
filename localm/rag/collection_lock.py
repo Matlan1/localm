@@ -89,6 +89,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
+from localm.storekit import lock_create_refusal_is_transient
 
 # How often the holder refreshes its heartbeat. Everything else is a multiple of
 # this.
@@ -604,23 +605,11 @@ def _hold_lock_file(lockpath: Path, token: str, *, collection: str, op: str,
         try:
             fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except PermissionError as e:
-            # WINDOWS ONLY, and it is a WAIT, not a failure. On Windows a lock
-            # file that exists but is momentarily inaccessible - the holder's
-            # unlink in flight, a scanner or backup holding a handle - reports
-            # ERROR_ACCESS_DENIED here rather than the ERROR_FILE_EXISTS that
-            # becomes FileExistsError. Letting it propagate aborts the user's
-            # command with "localm hit an unexpected error" over a condition
-            # that clears on its own in milliseconds.
-            #
-            # Treated as "a holder may be there and I could not read it": it
-            # waits on the SAME deadline as every other contended path, so it
-            # can never spin longer than the caller's timeout, and it reports a
-            # normal lock timeout if it never clears.
-            #
-            # NOT applied on POSIX: there this genuinely means the directory is
-            # not writable, which no amount of waiting fixes, and where raising
-            # at once is the honest answer.
-            if os.name != "nt":
+            # Windows: a lock file in transit (its holder's unlink pending, a
+            # scanner's handle) refuses the create with access denied; it is
+            # waited for on the same deadline as a held lock and reported as a
+            # lock timeout if it never clears. POSIX: raised at once.
+            if not lock_create_refusal_is_transient(e):
                 raise
             rec, mtime = _read_record(lockpath)
             waited = time.time() - started_waiting

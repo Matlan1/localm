@@ -23,7 +23,7 @@ import sys
 # localm's core runtime dependencies - always installed with the package (these
 # are core requires, not optional extras). If they resolve, this really is a
 # localm environment that can run, whatever the interpreter's directory is named.
-_CORE_DEPS = ("click", "fastapi")
+_CORE_DEPS = ("click", "fastapi", "rich")
 
 
 def _runtime_deps_present() -> bool:

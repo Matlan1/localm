@@ -410,17 +410,16 @@ def _post(client, body: str):
 _MSGS = '{"model":"localm","messages":[{"role":"user","content":"hi"}],'
 
 
-def test_max_tokens_zero_explains_itself_instead_of_dumping_pydantic():
-    """Reported verbatim by the maintainer as
-    `422: {"detail":[{"type":"greater_than_equal","loc":["body","max_tokens"],...}]}`.
-    0 looks like a legitimate "no limit"; the real reason it is refused (it
-    collides with the engine's internal unlimited sentinel) is not guessable."""
-    r = _post(_api(), _MSGS + '"max_tokens":0}')
+def test_a_negative_max_tokens_explains_itself_instead_of_dumping_pydantic():
+    """A refused max_tokens reads as a sentence, not pydantic's error list. (0 is
+    not refused: it means no request cap.)"""
+    r = _post(_api(), _MSGS + '"max_tokens":-1}')
     assert r.status_code == 422
     detail = r.json()["detail"]
     assert isinstance(detail, str), "detail must be a readable sentence, not a raw error list"
-    assert "max_tokens" in detail and "no limit" in detail
+    assert "max_tokens" in detail
     assert "greater_than_equal" not in detail, "pydantic's machine type leaked into the message"
+    assert "no limit" not in detail
 
 
 def test_validation_errors_keep_the_structured_form_under_errors():

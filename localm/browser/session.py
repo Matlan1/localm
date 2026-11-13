@@ -840,10 +840,15 @@ class BrowserSession:
     # -- the driving surface ------------------------------------------------ #
 
     def navigate(self, url: str, *, timeout_ms: int = 30000) -> dict:
-        """Go to *url*. A refusal by the gate is reported as ``refused``."""
+        """Go to *url*. An address with no scheme (``example.com``,
+        ``localhost:8080``) gets one first, see :func:`netgate.with_default_scheme`.
+        A refusal by the gate is reported as ``refused`` and recorded like a
+        refused request; any other failure as ``error``."""
+        url = netgate.with_default_scheme(url)
         pre = netgate.decide(url, extra_deny=self.extra_deny,
                              extra_allow=self.extra_allow)
         if pre is not None:
+            self._refuse(url, pre)
             return {"ok": False, "url": url, "refused": pre}
 
         mark = len(self.state.blocked)

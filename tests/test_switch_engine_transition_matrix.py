@@ -2844,3 +2844,20 @@ class TestUnloadPolicyWithExpertsInRam:
 
         assert res["status"] == "loaded"
         assert a.loaded and b.load_calls == 1
+
+
+def test_a_switch_does_not_commit_an_engine_whose_backend_plugin_left(monkeypatch):
+    from localm.inference import backend_registry
+    monkeypatch.setattr(backend_registry, "_DESCRIPTORS", [])
+
+    class _Orphan(GatedEngine):
+        backend_plugin = "gone"
+
+    b = _Orphan("model-b")
+    env = _install(monkeypatch, {"model-b": b}, total=12 * GB)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                     activate=False))
+    assert exc.value.status_code == 503
+    assert "was disabled while it loaded" in exc.value.detail
+    assert "model-b" not in hs._engines and not b.loaded

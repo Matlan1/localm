@@ -1119,6 +1119,8 @@ class TestDiscoverSearch:
         from localm.discover import DiscoverError
 
         def _search(*a, **kw):
+            if status == 502:
+                raise DiscoverError(message, off=off) from TimeoutError("timeout")
             raise DiscoverError(message, off=off)
         monkeypatch.setattr("localm.discover.hf_search", _search)
         with TestClient(harness.app) as c:
@@ -1181,7 +1183,7 @@ class TestDiscoverFiles:
         from localm.discover import DiscoverError
 
         def _down(repo):
-            raise DiscoverError("HuggingFace request failed: timeout")
+            raise DiscoverError("HuggingFace request failed: timeout") from TimeoutError("timeout")
         monkeypatch.setattr("localm.discover.hf_gguf_files", _down)
         with TestClient(harness.app) as c:
             assert c.get("/api/discover/files", params={"repo": "a/b"}).status_code == 502

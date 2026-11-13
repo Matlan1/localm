@@ -18,12 +18,13 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -173,6 +174,120 @@ def _write_store_install(dest: Path, src: Path) -> None:
         json.dumps({"source": "store", "package": True}), encoding="utf-8")
 
 
+class UninstallResult(NamedTuple):
+    """What ``PluginManager.uninstall_report`` did: ``complete`` as
+    ``uninstall`` returns it, and ``left_in_place``, the older data folder of a
+    third-party plugin a delete-data uninstall left untouched, else None."""
+    complete: bool
+    left_in_place: Optional[Path]
+
+
+def _old_data_folder(spec: PluginSpec) -> Optional[Path]:
+    """``<data dir>/<data_subdir>`` of third-party plugin *spec* when that
+    folder exists and is not its current data folder, else None."""
+    if spec.builtin or not spec.data_subdir:
+        return None
+    from localm.config import home_dir
+    home = home_dir()
+    old = home / spec.data_subdir
+    new = plugin_data_dir(spec, home)
+    try:
+        if old.is_dir() and (new is None or old.resolve() != new.resolve()):
+            return old
+    except OSError:
+        return None
+    return None
+
+
+def data_left_in_place_message(name: str, folder: Path) -> str:
+    """The sentence every uninstall surface shows for an older data folder of
+    plugin *name* that a delete-data uninstall left in place."""
+    return (f"{folder} was left in place, not removed: earlier data of plugin "
+            f"{name!r}, if it is its own, stays there; move or delete it by hand.")
+
+
+def _warn_old_data_location(spec: PluginSpec) -> None:
+    """Log one WARNING when third-party plugin *spec* declares a data_subdir,
+    its data folder (``plugin_data_dir``) does not exist, and
+    ``<data dir>/<data_subdir>`` does: that older folder is left in place and an
+    uninstall that deletes the plugin's data no longer removes it. Moves and
+    deletes nothing; never raises."""
+    if spec.builtin or not spec.data_subdir:
+        return
+    try:
+        from localm.config import home_dir
+        home = home_dir()
+        new = plugin_data_dir(spec, home)
+        old = home / spec.data_subdir
+        if new is None or new.exists() or not old.is_dir():
+            return
+    except OSError as e:
+        _log.debug("plugin %s: could not check its old data folder: %s", spec.name, e)
+        return
+    _log.warning(
+        "plugin %s: its data folder is now %s; %s exists and was left in place. "
+        "An uninstall that deletes the plugin's data removes only the new folder; "
+        "move the old folder's contents there by hand if they belong to %s",
+        spec.name, new, old, spec.name)
+
+
+# Eviction tasks started on the server loop's own thread, kept until they finish.
+_BACKEND_EVICTIONS: set = set()
+
+
+def _evict_backend_models(plugin_name: str) -> None:
+    """Start, on the HTTP server's event loop, the unload of every loaded model
+    that runs on an inference backend *plugin_name* registered
+    (``http_server.unload_models_of_backend_plugin``), and return without
+    waiting for it. Does nothing in a process with no running server loop,
+    which holds no server engines. Each unloaded model is logged at INFO; a
+    model that stays loaded, or a failed eviction, at WARNING."""
+    import asyncio
+    hs = sys.modules.get("localm.inference.http_server")
+    if hs is None:
+        return
+    loop = getattr(hs, "_server_loop", None)
+    if loop is None or not loop.is_running():
+        return
+    coro = hs.unload_models_of_backend_plugin(plugin_name)
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        fut = loop.create_task(coro)
+        _BACKEND_EVICTIONS.add(fut)
+        fut.add_done_callback(_BACKEND_EVICTIONS.discard)
+    else:
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    fut.add_done_callback(lambda f: _log_backend_eviction(plugin_name, f))
+
+
+def _log_backend_eviction(plugin_name: str, fut) -> None:
+    """Log the outcome of an ``_evict_backend_models`` run."""
+    if fut.cancelled():
+        _log.warning("plugin %s: unloading the models on its inference backend "
+                     "was cancelled; they may still be loaded", plugin_name)
+        return
+    exc = fut.exception()
+    if exc is not None:
+        _log.warning("plugin %s: unloading the models on its inference backend "
+                     "failed (%s: %s); they may still be loaded",
+                     plugin_name, type(exc).__name__, exc)
+        return
+    for result in fut.result():
+        model = result.get("model")
+        if result.get("status") == "error":
+            continue
+        if result.get("status") in ("unloaded", "already_unloaded"):
+            _log.info("plugin %s: unloaded model %s, which ran on its inference "
+                      "backend", plugin_name, model)
+        else:
+            _log.warning("plugin %s: model %s, which runs on its inference "
+                         "backend, is still loaded (%s)", plugin_name, model,
+                         result.get("status"))
+
+
 def _purge_plugin_modules(uniq: str) -> None:
     """Remove a plugin's module namespace ("<uniq>" and every "<uniq>.*"
     submodule) from sys.modules so the next import reads fresh from disk."""
@@ -184,6 +299,21 @@ def _purge_plugin_modules(uniq: str) -> None:
 # --------------------------------------------------------------------------- #
 #  Manifest parsing (the richer contract; superset of loader.PluginManifest)  #
 # --------------------------------------------------------------------------- #
+
+_DATA_SUBDIR_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
+
+
+def plugin_data_dir(spec: PluginSpec, home: Path) -> Optional[Path]:
+    """The data folder *spec* declares with ``data_subdir``, under the data dir
+    *home*: ``<home>/<data_subdir>`` for a store-installed plugin and
+    ``<home>/plugin-data/<name>/<data_subdir>`` for a third-party one. None when
+    it declares none."""
+    if not spec.data_subdir:
+        return None
+    if spec.builtin:
+        return Path(home) / spec.data_subdir
+    return Path(home) / "plugin-data" / spec.name / spec.data_subdir
+
 
 def parse_spec(plugin_dir: Path, *, builtin: bool = False,
                warnings: Optional[list] = None) -> PluginSpec:
@@ -235,6 +365,13 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     if not (isinstance(exports, list) and all(isinstance(t, str) for t in exports)):
         raise ValueError(f"{manifest}: [tools] exports must be a list of strings")
 
+    data_subdir = p.get("data_subdir", "")
+    if not isinstance(data_subdir, str) or (
+            data_subdir and not _DATA_SUBDIR_RE.fullmatch(data_subdir)):
+        raise ValueError(f"{manifest}: [plugin] data_subdir must be one folder name "
+                         f"(letters, digits, '.', '_' or '-', not starting with "
+                         f"'.'), got {data_subdir!r}")
+
     s = data.get("surface", {}) if isinstance(data.get("surface"), dict) else {}
     if warnings is not None:
         unknown = [f"[plugin] {k}" for k in sorted(set(p) - KNOWN_PLUGIN_KEYS)]
@@ -242,8 +379,6 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         if unknown:
             warnings.append(
                 "unknown manifest key(s) ignored: " + ", ".join(unknown))
-    from localm.plugins import catalog as _cat
-    first_party = builtin or any(e.name == name for e in _cat.CATALOG)
     surface = Surface(
         tab_id=str(s.get("tab_id", "")),
         label=str(s.get("label", "")),
@@ -262,10 +397,10 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         requires_extras=str_lists["requires_extras"],
         requires=str_lists["requires"],
         capabilities=str_lists["capabilities"],
-        data_subdir=str(p.get("data_subdir", "")),
+        data_subdir=data_subdir,
         builtin=builtin,
-        protected=first_party and bool(p.get("protected", False)),
-        default_enabled=first_party and bool(p.get("default_enabled", False)),
+        protected=builtin and bool(p.get("protected", False)),
+        default_enabled=builtin and bool(p.get("default_enabled", False)),
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
@@ -436,6 +571,7 @@ class PluginHost:
         self._stoppers: list = []           # stop callables from track()
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
+        self._surface_assets_mounted = False
         self.model_roles: list = []
 
 
@@ -539,8 +675,10 @@ class PluginHost:
         ``client_entry`` serves its assets without having to call
         ``mount_static`` itself. Idempotent: a plugin that DID mount the prefix
         in register() short-circuits here. Best-effort: an absent assets_dir is
-        ignored, never fatal."""
-        surface = self._spec.surface
+        ignored, never fatal. Uses the surface :meth:`register_tab` set, else
+        the manifest's."""
+        self._surface_assets_mounted = True
+        surface = self.surface
         if not surface or not surface.assets_dir:
             return None
         try:
@@ -581,6 +719,7 @@ class PluginHost:
         self._stoppers.append(stop_callable)
 
     def unmount(self) -> None:
+        self._surface_assets_mounted = False
         stoppers, self._stoppers = self._stoppers, []
         for stop in reversed(stoppers):
             try:
@@ -604,6 +743,7 @@ class PluginHost:
             from localm.inference import backend_registry
             backend_registry.unregister_plugin(self._spec.name)
             self._backends = []
+            _evict_backend_models(self._spec.name)
         if self._app is None:
             return
         self._app.openapi_schema = None
@@ -638,8 +778,63 @@ class PluginHost:
                     f"has unknown widget {f.widget!r}; see localm.settings_schema.Widget")
         self.settings.extend(fields)
 
+    def data_dir(self) -> Path:
+        """The plugin's own data folder, created if missing: ``<data dir>/
+        <data_subdir>`` for a store-installed plugin and ``<data dir>/
+        plugin-data/<name>/<data_subdir>`` for a third-party one
+        (``plugin_data_dir``). It is the folder an uninstall that deletes the
+        plugin's data removes. Raises ValueError when the manifest declares no
+        ``data_subdir``, or when the folder would resolve outside the data dir."""
+        from localm.config import home_dir
+        home = home_dir().resolve()
+        d = plugin_data_dir(self._spec, home)
+        if d is None:
+            raise ValueError(f"plugin {self._spec.name!r} declares no data_subdir "
+                             f"in plugin.toml, so it has no data folder")
+        if not d.resolve().is_relative_to(home):
+            raise ValueError(f"plugin {self._spec.name!r}: data folder {d} does not "
+                             f"resolve inside the data dir")
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def register_tab(self, surface: Surface) -> None:
+        """Replace the plugin's GUI surface (tab, label, icon, group, settings
+        group, assets_dir, client_entry) with *surface* while the plugin is
+        loaded; the manifest's ``[surface]`` applies again once it is unloaded.
+        Its ``assets_dir`` is served like a manifest one, confined to the
+        plugin's folder; a call made after the engine mounted the surface
+        assets serves the new assets_dir at ``/plugins/<name>`` at once,
+        replacing the previous one. Raises TypeError for anything but a
+        ``contract.Surface``."""
+        if not isinstance(surface, Surface):
+            raise TypeError(
+                f"plugin {self._spec.name!r}: register_tab() takes a Surface (see "
+                f"localm.plugins.contract), got {type(surface).__name__}")
+        previous = self.surface
         self.surface = surface
+        if not self._surface_assets_mounted:
+            return
+        prefix = f"/plugins/{self._spec.name}"
+        if (previous is not None and previous.assets_dir != surface.assets_dir
+                and prefix in self._static_prefixes):
+            self._unmount_static(prefix)
+        self.mount_surface_assets()
+
+    def _unmount_static(self, prefix: str) -> None:
+        """Remove the static mount this host serves at *prefix*."""
+        keep = []
+        for r in self._routes:
+            if getattr(r, "path", None) == prefix and hasattr(r, "app") \
+                    and not hasattr(r, "endpoint"):
+                try:
+                    self._app.router.routes.remove(r)
+                except ValueError:
+                    pass
+            else:
+                keep.append(r)
+        self._routes = keep
+        self._static_prefixes.discard(prefix)
+        self._app.openapi_schema = None
 
     def register_model_role(self, descriptor) -> None:
         from localm.model_manager.registry import MODEL_TYPES
@@ -650,8 +845,9 @@ class PluginHost:
 
     def register_inference_backend(self, descriptor) -> None:
         """Register *descriptor* (a ``contract.InferenceBackendDescriptor``) in
-        the process-wide backend registry, stamped with this plugin's name.
-        Removed again by :meth:`unmount`."""
+        the process-wide backend registry, stamped with this plugin's name. A
+        store-installed plugin's descriptors are asked before a third-party
+        plugin's. Removed again by :meth:`unmount`."""
         import dataclasses
 
         from localm.inference import backend_registry
@@ -661,7 +857,7 @@ class PluginHost:
                 f"InferenceBackendDescriptor (see localm.plugins.contract), got "
                 f"{type(descriptor).__name__}")
         stamped = dataclasses.replace(descriptor, plugin_name=self._spec.name)
-        backend_registry.register(stamped)
+        backend_registry.register(stamped, first_party=self._spec.builtin)
         self._backends.append(stamped)
         self.audit("inference_backend_registered", {"backend": stamped.name})
 
@@ -923,9 +1119,9 @@ class PluginManager:
             fields = getattr(host, "settings", None)
             if not fields:
                 continue
-            label = (spec.surface.settings_group
-                     if spec and spec.surface and spec.surface.settings_group
-                     else name)
+            surface = self.surface_of(name)
+            label = (surface.settings_group
+                     if surface and surface.settings_group else name)
             out.append({"plugin": name, "label": label, "fields": list(fields)})
         return out
 
@@ -1003,9 +1199,9 @@ class PluginManager:
     def _drop_scope_collisions(specs: dict, errors: dict) -> None:
         """Remove from *specs* every third-party spec whose scope is reserved
         or already claimed by a first-party plugin or an earlier (by name)
-        third-party plugin, and record why in *errors*."""
-        from localm.plugins import catalog as _cat
-        first_party = {e.name for e in _cat.CATALOG}
+        third-party plugin, and record why in *errors*. First-party means
+        installed from the store (``PluginSpec.builtin``), never a name."""
+        first_party = {n for n, sp in specs.items() if sp.builtin}
         claimed = {sp.scope: n for n, sp in specs.items() if n in first_party}
         for name in sorted(specs):
             if name in first_party:
@@ -1257,7 +1453,7 @@ class PluginManager:
                 self._note_provision_error(name, f"preinstall: {e}")
                 continue
             try:
-                spec = parse_spec(self._installed_dir(name))
+                spec = parse_spec(self._installed_dir(name), builtin=True)
                 if spec.default_enabled and name not in self._enabled_set():
                     self._set_enabled(name, True)
                 self._clear_provision_error(name, "preinstall")
@@ -1313,6 +1509,7 @@ class PluginManager:
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
         self._unload_errors.pop(spec.name, None)
+        _warn_old_data_location(spec)
         self._maybe_fire_first_use(spec.name)
 
     def _maybe_fire_first_use(self, name: str) -> None:
@@ -1663,10 +1860,39 @@ class PluginManager:
                 self.last_refresh_failures[n] = str(e)
         return refreshed
 
+    def surface_of(self, name: str) -> Optional[Surface]:
+        """The GUI surface of plugin *name*: the one its loaded host holds
+        (``register_tab``, else the manifest's), else the installed manifest's,
+        or None for an unknown name."""
+        entry = self._loaded.get(name)
+        if entry is not None:
+            return getattr(entry[2], "surface", None)
+        spec = self._specs.get(name)
+        return spec.surface if spec is not None else None
+
     def _is_protected(self, name: str) -> bool:
+        """True when *name* cannot be disabled or uninstalled. An installed
+        plugin is protected only through its own spec, which honours
+        ``protected`` for a store install alone; a name with no installed spec
+        falls back to the catalog."""
         from localm.plugins import catalog as _cat
         spec = self._specs.get(name)
-        return bool(spec and spec.protected) or name in _cat.protected()
+        if spec is not None:
+            return bool(spec.protected)
+        return name in _cat.protected()
+
+    def _reserved_name_problem(self, name: str) -> Optional[str]:
+        """Why a THIRD-PARTY plugin may not be installed under *name*, or None:
+        a built-in command verb, a first-party catalog name, or the name of a
+        plugin in the bundled store."""
+        from localm.plugins import catalog as _cat
+        from localm.plugins.loader import _RESERVED_NAMES
+        if name in _RESERVED_NAMES:
+            return f"plugin name {name!r} clashes with a built-in command"
+        if _cat.get(name) is not None or self._store_dir(name) is not None:
+            return (f"plugin name {name!r} is reserved for a first-party plugin; "
+                    f"a third-party plugin must use another name")
+        return None
 
     # ---- shared install-sequence helpers -----------------------------------
     def _reject_scope_collision(self, spec0: PluginSpec) -> None:
@@ -1694,13 +1920,12 @@ class PluginManager:
         _reject_source_links(src)
         spec0 = parse_spec(src)                       # validate + name (raises)
         name = spec0.name
-        # A third-party plugin must not shadow a built-in command name
-        # (run/serve/config/coder/...). Only arbitrary-source third-party
-        # installs are gated; builtins install via install() from the store.
-        from localm.plugins.loader import _RESERVED_NAMES
-        if name in _RESERVED_NAMES:
-            raise ValueError(
-                f"plugin name {name!r} clashes with a built-in command")
+        # A third-party plugin must not take a built-in command name or a
+        # first-party plugin's name. Only arbitrary-source third-party installs
+        # are gated; first-party plugins install via install() from the store.
+        reserved = self._reserved_name_problem(name)
+        if reserved:
+            raise ValueError(reserved)
         self._reject_scope_collision(spec0)
         # name came out of the MANIFEST; parse_spec has already rejected any
         # name that is not a single identifier-shaped component, and
@@ -2018,7 +2243,17 @@ class PluginManager:
         self._set_enabled(name, on)
 
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
-        """Uninstall a plugin: unload it, disable it, and DELETE its directory from
+        """``uninstall_report(name, delete_data=...).complete``."""
+        return self.uninstall_report(name, delete_data=delete_data).complete
+
+    def uninstall_report(self, name: str, *,
+                         delete_data: bool = False) -> UninstallResult:
+        """Uninstall a plugin and return an ``UninstallResult``: ``complete`` is
+        the bool described below and ``left_in_place`` the older data folder of
+        a third-party plugin a delete-data uninstall left untouched
+        (``<data dir>/<data_subdir>``), else None.
+
+        Uninstall a plugin: unload it, disable it, and DELETE its directory from
         the installed folder (it reverts to being merely available in the store).
         User content is kept unless *delete_data*, in which case its data
         directory is deleted too; the on_uninstall hook runs first. Returns True
@@ -2076,8 +2311,13 @@ class PluginManager:
         self._unload(name)
         self._set_enabled(name, False)
         data_deleted = not (delete_data and hook_failed)
+        left_in_place = None
         if delete_data and spec and spec.data_subdir:
             data_deleted = self._delete_plugin_data(spec) and data_deleted
+            left_in_place = _old_data_folder(spec)
+            if left_in_place is not None:
+                _log.warning("plugin %s: %s", name,
+                             data_left_in_place_message(name, left_in_place))
         removed = self._remove_installed_dir(name)    # delete from the installed folder
         existed = was_installed or on_disk
         if existed and not removed:
@@ -2092,7 +2332,7 @@ class PluginManager:
                 "rather than a bare success", name)
         if existed and removed:
             self._record_event("plugin_uninstalled", name)
-        return existed and removed and data_deleted
+        return UninstallResult(existed and removed and data_deleted, left_in_place)
 
     def _delete_plugin_data(self, spec: PluginSpec) -> bool:
         """Delete the plugin's data_subdir. Returns True iff it is confirmed gone
@@ -2103,14 +2343,15 @@ class PluginManager:
         installed-dir as the whole story."""
         import shutil
         from localm.config import home_dir
-        if not spec.data_subdir:
-            return True
-        # data_subdir comes verbatim from a manifest. Resolve it and confine to
-        # home_dir: reject traversal, absolute escapes, and the home root
-        # itself before any rmtree.
         home = home_dir().resolve()
-        d = (home / spec.data_subdir).resolve()
-        if d == home or not d.is_relative_to(home):
+        target = plugin_data_dir(spec, home)
+        if target is None:
+            return True
+        # Resolve and confine to the plugin's own root (the data dir for a store
+        # install, plugin-data/<name> for a third-party one) before any rmtree.
+        root = home if spec.builtin else (home / "plugin-data" / spec.name).resolve()
+        d = target.resolve()
+        if d == home or not root.is_relative_to(home) or not d.is_relative_to(root):
             _log.warning(
                 "plugin %s: refusing to delete data_subdir %r -> %s (it does "
                 "not resolve inside the data dir); the data is NOT deleted",
@@ -2141,23 +2382,23 @@ class PluginManager:
 
         def _entry(spec, name, *, available):
             cat = _cat.get(name)
+            surface = (spec.surface if spec is not None else None) if available \
+                else self.surface_of(name)
             return {
                 "name": name,
                 "version": spec.version if spec else "",
                 "description": (spec.description if spec and spec.description
                                 else (cat.description if cat else "")),
                 "scope": spec.scope if spec else name,
-                "builtin": (name in store) or bool(cat),
+                "builtin": spec.builtin if spec is not None else bool(cat),
                 "protected": self._is_protected(name),
-                "tab": spec.surface.tab_id if spec and spec.surface else "",
-                "label": spec.surface.label if spec and spec.surface else "",
-                "icon": spec.surface.icon if spec and spec.surface else "",
-                "group": spec.surface.group if spec and spec.surface else "",
-                "client_entry": (spec.surface.client_entry
-                                 if spec and spec.surface else ""),
+                "tab": surface.tab_id if surface else "",
+                "label": surface.label if surface else "",
+                "icon": surface.icon if surface else "",
+                "group": surface.group if surface else "",
+                "client_entry": surface.client_entry if surface else "",
                 "assets_base": (f"/plugins/{name}"
-                                if spec and spec.surface and spec.surface.assets_dir
-                                else ""),
+                                if surface and surface.assets_dir else ""),
                 # Coder-agent tools a third-party plugin exports ([tools]
                 # exports), shown in the GUI's External plugins card.
                 "tool_exports": list(spec.tool_exports) if spec else [],
@@ -2316,7 +2557,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         # directory is something uninstall() below can still act on.
         existed = manager.is_installed_or_on_disk(name)
         try:
-            complete = manager.uninstall(name, delete_data=delete_data)
+            complete, left = manager.uninstall_report(name, delete_data=delete_data)
         except KeyError as exc:
             raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
@@ -2324,6 +2565,10 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}") from e
         if complete:
+            if left is not None:
+                return {"status": "uninstalled", "name": name,
+                        "left_in_place": str(left),
+                        "detail": data_left_in_place_message(name, left)}
             return {"status": "uninstalled", "name": name}
         if not existed:
             raise HTTPException(404, f"No such plugin: {name}")

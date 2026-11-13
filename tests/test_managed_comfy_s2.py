@@ -295,6 +295,53 @@ def test_amd_packages_come_only_from_amd_and_the_rest_only_from_pypi(tmp_path, m
     assert set(pypi_req) == {"numpy==2.4.4", "pillow==12.2.0", "torchsde==0.2.6"}
 
 
+@pytest.mark.parametrize("family", ["gfx103x", "gfx110x", "gfx120x"])
+def test_a_family_libraries_package_selects_that_familys_amd_index(family):
+    from localm import hwdetect
+    from localm.media import managed_comfy_provision as prov
+    freeze = ["numpy==2.4.4", "torch==2.11.0+rocm7.13.0", "rocm==7.13.0",
+              f"rocm-sdk-libraries-{family}-all==7.13.0"]
+    assert prov.torch_index_url_from_freeze(freeze) == hwdetect.amd_rocm_win_index(family)
+
+
+def test_a_family_index_freeze_takes_amd_packages_from_amd_alone(tmp_path, monkeypatch):
+    from localm import hwdetect
+    from localm.media import managed_comfy_provision as prov
+    freeze = ["numpy==2.4.4", "torch==2.11.0+rocm7.13.0", "torchvision==0.26.0+rocm7.13.0",
+              "rocm==7.13.0", "rocm-sdk-core==7.13.0", "rocm-sdk-libraries-gfx110x-all==7.13.0",
+              "pillow==12.2.0"]
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append((cmd, Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8").split()))
+        return True, ""
+
+    monkeypatch.setattr(prov, "_run", _fake_run)
+    index = prov.torch_index_url_from_freeze(freeze)
+    ok, _ = prov._install_freeze(tmp_path / "python.exe", freeze, index, tmp_path, None)
+    assert ok and len(calls) == 2
+    (amd_cmd, amd_req), (pypi_cmd, pypi_req) = calls
+    assert amd_cmd[amd_cmd.index("--index-url") + 1] == hwdetect.amd_rocm_win_index("gfx110x")
+    assert "--no-deps" in amd_cmd and "--extra-index-url" not in amd_cmd
+    assert set(amd_req) == set(freeze) - {"numpy==2.4.4", "pillow==12.2.0"}
+    assert "--index-url" not in pypi_cmd and "--extra-index-url" not in pypi_cmd
+    assert set(pypi_req) == {"numpy==2.4.4", "pillow==12.2.0"}
+
+
+def test_amd_packages_with_no_known_amd_index_are_never_looked_up_on_pypi(tmp_path,
+                                                                          monkeypatch):
+    from localm.media import managed_comfy_provision as prov
+    freeze = ["numpy==2.4.4", "torch==2.11.0+rocm7.13.0", "rocm==7.13.0",
+              "rocm-sdk-libraries-gfx1151-all==7.13.0"]
+    ran = []
+    monkeypatch.setattr(prov, "_run", lambda cmd, **kw: ran.append(cmd) or (True, ""))
+    index = prov.torch_index_url_from_freeze(freeze)
+    assert index is None or not index.startswith("https://repo.amd.com/")
+    ok, why = prov._install_freeze(tmp_path / "python.exe", freeze, index, tmp_path, None)
+    assert ok is False and ran == []
+    assert "rocm==7.13.0" in why and "PyPI" in why
+
+
 def test_torch_index_url_none_for_plain_pypi():
     from localm.media import managed_comfy_provision as prov
     assert prov.torch_index_url_from_freeze(["torch==2.5.1", "numpy==1.26.4"]) is None
@@ -838,3 +885,22 @@ def test_resolve_copy_custom_nodes_interactive_confirm():
         None, n_nodes=2, interactive=True, confirm=lambda: True) is True
     assert prov.resolve_copy_custom_nodes(
         None, n_nodes=2, interactive=True, confirm=lambda: False) is False
+
+
+def test_provision_says_when_the_users_model_locations_are_not_shared(home, fake_user_comfy,
+                                                                     monkeypatch):
+    """An extra_model_paths.yaml of the user's own ComfyUI that cannot be copied is
+    named in the progress log and the success message."""
+    from localm.media import managed_comfy_provision as prov
+
+    monkeypatch.setattr(prov, "read_user_freeze", lambda venv_python: [])
+    (fake_user_comfy.workdir / "extra_model_paths.yaml").write_text(
+        "odd:\n\tbase_path: /somewhere\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+    stack = prov.discover_user_comfy()
+    result = prov.provision_by_copy(stack, copy_custom_nodes=False)
+
+    assert result.ok, result.message
+    assert "not shared with localm's ComfyUI" in result.log
+    assert "tab indentation" in result.log
+    assert "are not shared" in result.message and "tab indentation" in result.message

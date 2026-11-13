@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -171,9 +172,28 @@ def _listed_models(registry: dict) -> dict[str, dict]:
     return out
 
 
+# A parameter count in a model file or folder name: "8B", "0.6B", "8x7B". A
+# letter or digit right before it ("A3B", "E2B") is not one.
+_PARAM_SIZE_RE = re.compile(r"(?i)(?<![a-z0-9.])((?:\d+x)?\d+(?:\.\d+)?)b(?![a-z0-9])")
+
+
+def _entry_file_name(entry: dict) -> str:
+    """The base name of a registry entry's weights path, or ``""``."""
+    raw = str(entry.get("path") or "").replace("\\", "/").rstrip("/")
+    return raw.rsplit("/", 1)[-1]
+
+
 def _entry_details(entry: dict, fmt: str) -> dict[str, Any]:
+    """Ollama ``details`` for a registry entry. ``parameter_size`` and
+    ``quantization_level`` come from the weights' file or folder name and are
+    ``""`` when the name carries none."""
+    from localm.model_manager.gguf import quant_label
     arch = entry.get("architecture")
-    return P.model_details(fmt=fmt, family=arch if isinstance(arch, str) else "")
+    name = _entry_file_name(entry)
+    size = _PARAM_SIZE_RE.search(name)
+    return P.model_details(fmt=fmt, family=arch if isinstance(arch, str) else "",
+                           parameter_size=f"{size.group(1).lower()}B" if size else "",
+                           quantization_level=quant_label(name))
 
 
 def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str]) -> dict:

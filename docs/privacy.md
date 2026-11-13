@@ -55,6 +55,16 @@ Notes:
   mode. The surface's mode applies only to requests made with the owner key (or
   in open mode); a scoped key's requests are recorded under the global mode,
   and the chat page opened with one follows the global mode too.
+- Images, music and video made from the chat page (`/imagine`, `/generate-music`,
+  `/generate-video`) follow the same rule: under `chat_mode = privacy` they get
+  no prompt sidecar and ComfyUI's own copy is removed, even when the global mode
+  keeps them. The automatic diagnostics the server decides on for such a request
+  and its job are off unless you turned on `keep_diagnostics`: the finished job
+  is not kept in the activity record, and a chat model the request or job loads,
+  including the one reloaded after the job, gets no crash trace. A model or
+  media backend already running when the request arrives keeps the crash trace
+  it started with, and the server's hang watchdog follows the global mode.
+  A failed `localm run` follows the chat mode for its bug report.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
@@ -240,6 +250,10 @@ non-interactively), every standalone reporter (Python, PowerShell, and the
 `report-issue.sh` curl fallback used when there is no Python) treats that
 exactly like you said no: nothing is sent. The curl fallback also sends
 nothing when `perl`, which it needs to remove personal details, is missing.
+Every reporter follows Network access: with it off nothing is sent, and when
+the standalone reporter cannot read the setting (no `config.json` in the data
+directory yet, or one it cannot parse) it asks before sending, with no as the
+default, and sends nothing without a terminal.
 
 **What is redacted from a report:**
 - Your home directory, replaced by `~`, and your account name wherever it is

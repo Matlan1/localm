@@ -6,9 +6,9 @@ localm itself is just a model loader + chat (chat being the preinstalled,
 protected plugin #0) + the plugin engine. It knows nothing about the other
 features except this small static catalog, which lets it:
 
-  1. Suggest installing a first-party plugin when the user invokes one of its
-     commands but it is not installed ("that needs the image plugin - install
-     it?"). The suggestion can be turned off (config: suggest_plugins=False).
+  1. Tell a surface which chat commands each first-party plugin provides, so
+     the chat composer can say "/remember needs the memory plugin" for a plugin
+     that is off. The hint can be turned off (config: suggest_plugins=False).
   2. Resolve WHERE to install a first-party plugin from: the bundled store on
      disk. A plugin missing from the store has no source today; install raises
      NotImplementedError when the entry carries a repo URL and KeyError otherwise.
@@ -32,7 +32,7 @@ GITHUB_BASE = ""
 class CatalogEntry:
     name: str
     description: str = ""
-    commands: tuple = ()          # command verbs that imply this plugin
+    commands: tuple = ()          # chat composer commands (and aliases) it provides
     extra: str = ""               # pip extra carrying its heavy dependencies
     github: str = ""              # explicit repo URL (else derived from GITHUB_BASE)
     preinstalled: bool = False    # installed out of the box (chat)
@@ -56,28 +56,25 @@ class CatalogEntry:
 CATALOG: tuple = (
     CatalogEntry("chat", "Chat with your local model",
                  preinstalled=True, protected=True),
-    CatalogEntry("coder", "Offline AI coding agent",
-                 commands=("coder",), extra="coder"),
+    CatalogEntry("coder", "Offline AI coding agent"),
     CatalogEntry("browser", "An automated web browser the model can drive",
                  extra="browser"),
     CatalogEntry("image", "Image generation (built in, or ComfyUI)",
-                 commands=("generate-image",)),
+                 commands=("generate-image", "imagine")),
     CatalogEntry("music", "Music generation (ACE-Step, native or through ComfyUI)",
-                 commands=("generate-music",)),
+                 commands=("generate-music", "music")),
     CatalogEntry("video", "Short-video generation (built in, or ComfyUI)",
-                 commands=("generate-video",)),
-    CatalogEntry("rag", "Document collections for retrieval-augmented chat",
-                 commands=("knowledge",)),
+                 commands=("generate-video", "video")),
+    CatalogEntry("rag", "Document collections for retrieval-augmented chat"),
     CatalogEntry("web", "Web search and page fetch for chat",
-                 commands=("search-web",)),
-    CatalogEntry("memory", "Remember durable facts about you across chats"),
+                 commands=("web",)),
+    CatalogEntry("memory", "Remember durable facts about you across chats",
+                 commands=("remember", "memory")),
     CatalogEntry("voice", "Speech-to-text for the chat mic button",
                  extra="voice"),
     CatalogEntry("tts", "Text-to-speech (neural voices) for reading replies aloud"),
-    CatalogEntry("mcp", "Expose your local models to MCP clients",
-                 commands=("mcp",)),
-    CatalogEntry("jobs", "Scheduled recurring tasks",
-                 commands=("job",)),
+    CatalogEntry("mcp", "Expose your local models to MCP clients"),
+    CatalogEntry("jobs", "Scheduled recurring tasks"),
     CatalogEntry("exllama", "Run EXL2 and EXL3 models with ExLlama (NVIDIA GPU, Linux). "
                  "Tested by the project without a GPU so far; bug reports welcome",
                  extra="exllama", opt_in=True, needs_nvidia_linux=True),
@@ -92,31 +89,15 @@ def get(name: str) -> CatalogEntry | None:
 
 
 def for_command(command: str) -> CatalogEntry | None:
-    """The first-party plugin that provides *command*, if any (for the
-    'that needs the X plugin - install it?' hint)."""
+    """The first-party plugin that provides the chat command *command*, if any."""
     return _BY_COMMAND.get(command)
 
 
 def commands() -> dict:
-    """Map of command verb -> providing plugin name, across the whole catalog.
-    Lets a command surface (CLI REPL, GUI) recognise a command that belongs to a
-    known-but-inactive plugin instead of treating it as unknown."""
+    """Map of chat command -> providing plugin name, across the whole catalog.
+    Lets the chat composer recognise a command that belongs to a known but
+    inactive plugin instead of treating it as unknown."""
     return {cmd: e.name for cmd, e in _BY_COMMAND.items()}
-
-
-def suggestion(command: str) -> str | None:
-    """A friendly 'that command needs the X plugin' hint for *command* when it
-    belongs to a known first-party plugin that is not handling it (because the
-    plugin is not installed or not enabled), else None for a truly unknown
-    command. Phrased generically (install) because the catalog alone does not
-    know install/enable state; a surface that knows the state can refine the
-    verb. Callers gate this on the ``suggest_plugins`` config toggle."""
-    entry = for_command(command)
-    if entry is None or entry.preinstalled:
-        return None
-    return (f"/{command} needs the {entry.name} plugin ({entry.description}). "
-            f"Install it from the Plugins page, or run: "
-            f"localm plugin install {entry.name}")
 
 
 def names() -> tuple:
