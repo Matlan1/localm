@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional, TypeVar, cast
 
-from localm import mgmt_events
+from localm import _home_cfg, mgmt_events
 from localm.storekit import (  # noqa: F401  (re-exported: callers use config.<name>)
     READ_ABSENT,
     READ_CURRENT,
@@ -148,29 +148,6 @@ def _warn_unconfigured_home(path: Path) -> None:
           "or set LOCALM_HOME to choose where data lives.", file=sys.stderr)
 
 
-def _read_home_cfg(path: Path) -> str:
-    """The first line of ``localm-home.cfg``: read as UTF-8 (with or without a
-    BOM), or on Windows, when that fails, in the console (OEM) code page that
-    cmd.exe's ``echo`` writes. Raises ValueError when neither decodes."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
-def _home_from_cfg_line(line: str, repo_root: Path) -> Path:
-    """The data folder a ``localm-home.cfg`` line names: ``~`` expanded, and a
-    relative path taken relative to *repo_root*."""
-    home = Path(line).expanduser()
-    return home if home.is_absolute() else repo_root / home
-
-
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -204,12 +181,12 @@ def _detect_home() -> Path:
 
     repo_root = Path(__file__).resolve().parents[1]
     if (repo_root / "pyproject.toml").is_file():       # source checkout only
-        cfg_marker = repo_root / "localm-home.cfg"
+        cfg_marker = repo_root / _home_cfg.NAME
         if cfg_marker.is_file():
             try:
-                line = _read_home_cfg(cfg_marker)
+                line = _home_cfg.read_line(cfg_marker)
                 if line:
-                    return _home_from_cfg_line(line, repo_root)
+                    return _home_cfg.data_dir(line, repo_root)
             except (OSError, ValueError, LookupError) as e:
                 # The marker EXISTS but could not be read: warn and fall back to
                 # the default data dir rather than silently switching. stderr
@@ -1760,11 +1737,9 @@ def instance_id() -> str:
     Served to the GUI over ``/v1/config``, which compares it against the id it
     last saw for this browser origin to tell a restart of the same install
     apart from a different install sharing that origin's localStorage. The
-    value is kept in memory per data folder after the first call.
-
-    A file that exists but cannot be read is never overwritten. When the file
-    cannot be read or written, one in-memory id serves every call of this
-    process."""
+    value is kept in memory per data folder after the first call, so a file
+    that cannot be read or written still gives one id for the whole process.
+    A file that exists but cannot be read is never overwritten."""
     home = HOME_DIR
     val = _instance_ids.get(home)
     if val is None:
@@ -1780,40 +1755,26 @@ def _instance_id_now() -> str:
     ensure_dirs()
     path = HOME_DIR / "instance_id.txt"
     with _io_lock:
-        held = _RUN_INSTANCE_IDS.get(str(path))
         if path.is_file():
             try:
                 val = path.read_text(encoding="utf-8").strip()
                 if val:
                     return val
             except OSError as e:
-                # The file exists but cannot be read: it is left as it is, and
-                # this run uses one in-memory id for every call.
-                if held:
-                    return held
-                val = uuid.uuid4().hex
-                _RUN_INSTANCE_IDS[str(path)] = val
+                # The file exists but cannot be read: it is left as it is and
+                # a fresh id is used in memory.
                 print(f"[localm] WARNING: cannot read {path} ({e}); using an "
                       "in-memory id for this run; the file is left unchanged.",
                       file=sys.stderr)
-                return val
-        if held:
-            return held
+                return uuid.uuid4().hex
         val = uuid.uuid4().hex
         try:
             path.write_text(val, encoding="utf-8")
         except OSError as e:
-            # Cannot persist: one in-memory id serves every call of this run.
-            _RUN_INSTANCE_IDS[str(path)] = val
             print(f"[localm] WARNING: cannot persist instance id to {path} "
                   f"({e}); using an in-memory-only id for this run (it will "
                   "change on the next start).", file=sys.stderr)
         return val
-
-
-# Per-run instance ids for data folders whose instance_id.txt cannot be read
-# or written, keyed by the file's path.
-_RUN_INSTANCE_IDS: dict[str, str] = {}
 
 
 def _drop_stray_credentials(stored: dict) -> None:

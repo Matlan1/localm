@@ -40,38 +40,31 @@ _COMPONENTS_STATUS = "components-update.json"
 _PARTS_LEFT = (("comfyui", "ComfyUI"), ("uv", "the uv inside localm"))
 
 
-def _read_cfg_line(marker: Path) -> str:
-    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM), or
-    on Windows, when that fails, the console (OEM) code page that cmd.exe's ``echo``
-    writes. Raises OSError, ValueError or LookupError when it cannot be read."""
-    raw = marker.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _detect_home(install_root: Path) -> Path:
     """The localm data dir, resolved WITHOUT importing localm.config (which may live in
     the broken build). Mirrors config._detect_home: LOCALM_HOME, else a portable
-    ``localm-home.cfg`` / ``./home`` in the install, else the contained ``./home``."""
+    ``localm-home.cfg`` (read by ``localm/_home_cfg.py``, loaded by file path; a
+    relative line is relative to the install) / ``./home`` in the install, else the
+    contained ``./home``. A marker that cannot be read, or a reader that cannot be
+    loaded, is reported on stderr and the contained ``./home`` is used."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        return Path(env).expanduser().absolute()
     if (install_root / "pyproject.toml").is_file():
         marker = install_root / "localm-home.cfg"
         if marker.is_file():
-            try:
-                line = _read_cfg_line(marker)
-                if line:
-                    return Path(line).expanduser()
-            except (OSError, ValueError, LookupError):
-                pass   # unreadable marker: fall through to ./home
+            reader = _load_helper(install_root, "_home_cfg")
+            if reader is None:
+                print(f"  Cannot read {marker}: localm/_home_cfg.py could not be "
+                      "loaded; using the folder home in the install.", file=sys.stderr)
+            else:
+                try:
+                    line = reader.read_line(marker)
+                    if line:
+                        return reader.data_dir(line, install_root)
+                except (OSError, ValueError, LookupError) as e:
+                    print(f"  Cannot read {marker} ({e}); using the folder home in "
+                          "the install.", file=sys.stderr)
         portable = install_root / "home"
         if portable.is_dir():
             return portable

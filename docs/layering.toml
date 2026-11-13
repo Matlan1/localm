@@ -114,3 +114,8 @@ units = ["procid", "sysprog"]
 name = "events"
 role = "The management-event log: an append-only record of key, login, update, config and plugin events. Imports nothing from localm and is handed the data directory by its caller, so configuration itself can record a save."
 units = ["mgmt_events"]
+
+[[tier]]
+name = "install-files"
+role = "Files of the clone read before anything else: the localm-home.cfg reader. Stdlib only and free of localm imports, so configuration, the install ledger and the standalone rollback and report scripts share one reader."
+units = ["_home_cfg"]
