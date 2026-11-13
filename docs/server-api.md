@@ -1079,7 +1079,7 @@ and every row it returns carries that `error` instead of a state.
 Scope: `admin`. Off by default.
 
 Prometheus text-format metrics. The route does not exist until you turn on the
-`metrics_enabled` setting (Settings > Server, or `localm config metrics_enabled
+`metrics_enabled` setting (Settings > Server & network, or `localm config metrics_enabled
 true`; `LOCALM_METRICS=1` does the same for one run) and restart. With it off
 nothing is collected and `/metrics` answers 404.
 
