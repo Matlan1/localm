@@ -21,7 +21,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     ActivitySpinner, console, consume_confirm_always, consume_reject_reason,
     offering_session_allow, print_info, print_progress_tool_call,
-    requiring_exact_approval,
+    print_progress_tool_result, requiring_exact_approval,
     print_tool_call, print_tool_error, print_tool_result, reset_diff_preview,
     tool_call_text,
 )
@@ -443,6 +443,12 @@ class _ExecutionMixin:
             self._emit("info", text=msg)
             self._audit.notice("data_guard_error", msg)
             return "localm's data folder (the check could not run)"
+
+    def _prints_progress_results(self) -> bool:
+        """True when a run without a live display prints each tool's result on
+        stderr: ``--verbose`` on a run that prints its tool calls there."""
+        return bool(self.verbose and self.report_progress and self.on_event is None
+                    and self.progress_sink is None)
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
         previous = getattr(_CALL_CONTEXT, "call_id", None)
@@ -1011,6 +1017,9 @@ class _ExecutionMixin:
                 call.name, result, verbose=self.verbose,
                 elapsed=duration_s, args=call.args,
             )
+        elif self._prints_progress_results():
+            print_progress_tool_result(
+                call.name, result, verbose=True, elapsed=duration_s, args=call.args)
         self._emit("tool_result", tool=call.name, ok=result.ok,
                    summary=result.summary, output=result.output[:4000],
                    duration_s=duration_s)

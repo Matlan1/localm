@@ -319,8 +319,11 @@ def print_tool_result(
     *,
     elapsed: float | None = None,
     args: dict | None = None,
+    out: Console | None = None,
 ) -> None:
-    """Print the one-line summary, todo checklist, error excerpt on failure, or verbose output."""
+    """Print the one-line summary, todo checklist, error excerpt on failure, or
+    verbose output, on *out* (stdout's console by default)."""
+    out = out or console
     icon, icon_style = ("✓", "green") if result.ok else ("✗", "red")
     trunc = " (truncated)" if getattr(result, "truncated", False) else ""
     line = Text("    ")
@@ -328,7 +331,7 @@ def print_tool_result(
     line.append(_strip_esc(str(result.summary) + trunc), style="dim")
     if elapsed is not None and elapsed >= 0.05:
         line.append(f" ({elapsed:.1f}s)", style="dim")
-    console.print(line)
+    out.print(line)
 
     if tool_name == "set_todos" and result.ok and isinstance(args, dict):
         from .tools.tasks import DONE, IN_PROGRESS, normalize_todos
@@ -345,7 +348,7 @@ def print_tool_result(
             else:
                 todo_line.append("[ ] ", style="dim")
                 todo_line.append(_strip_esc(task_text), style="dim")
-            console.print(todo_line)
+            out.print(todo_line)
 
     raw_output = getattr(result, "output", "")
     if not isinstance(raw_output, str) or not raw_output.strip():
@@ -358,21 +361,35 @@ def print_tool_result(
             cap = 40 if verbose else 12
             excerpt = cleaned[-cap:] if len(cleaned) > cap else cleaned
             if len(cleaned) > cap:
-                console.print(_sanitized_text(
+                out.print(_sanitized_text(
                     f"      ... ({len(cleaned) - cap} earlier lines omitted)", style="dim"
                 ))
             for out_line in excerpt:
-                console.print(_sanitized_text("      " + out_line, style="red dim"))
+                out.print(_sanitized_text("      " + out_line, style="red dim"))
         return
 
     if verbose and result.ok:
-        console.print(_sanitized_text("    " + "─" * 60, style="dim"))
+        out.print(_sanitized_text("    " + "─" * 60, style="dim"))
         out_lines = raw_output.splitlines()
         for out_line in out_lines[:40]:
-            console.print(_sanitized_text("    " + out_line, style="dim"))
+            out.print(_sanitized_text("    " + out_line, style="dim"))
         if len(out_lines) > 40:
-            console.print(_sanitized_text(
+            out.print(_sanitized_text(
                 "    ... (output capped at 40 lines)", style="dim"))
+
+
+def print_progress_tool_result(
+    tool_name: str,
+    result,
+    verbose: bool = False,
+    *,
+    elapsed: float | None = None,
+    args: dict | None = None,
+) -> None:
+    """The result of a tool call a run without a live display made, on stderr
+    (``print_tool_result`` on ``err_console``)."""
+    print_tool_result(tool_name, result, verbose, elapsed=elapsed, args=args,
+                      out=err_console)
 
 
 def print_tool_error(tool_name: str, message: str) -> None:
