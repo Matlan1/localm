@@ -141,6 +141,7 @@ export const I18N_EN = {
   "common.reasoning.thinking": "Thinking…",
   "common.reasoning.thoughts": "Thoughts",
   "common.reply.empty": "(no reply text)",
+  "common.reply.plainText": "Formatting was skipped for this reply, so it is shown as plain text.",
   "common.toolCall.readPage": "read page: {arg}",
   "common.toolCall.webRequest": "web request: {arg}",
   "common.toolCall.webRequestBare": "web request",

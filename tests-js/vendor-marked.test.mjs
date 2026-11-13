@@ -5,7 +5,7 @@
 //
 // The file has no package.json entry, so no dependency tooling sees it. This
 // test pins the exact artefact (banner plus content hash), checks that it parses
-// real markdown, checks the option set app/helpers.js applies at load, and pins
+// real markdown, checks the options app/markdown-parse.js parses with, and pins
 // the pipeline contract that marked does NOT sanitize: DOMPurify runs on its
 // output.
 //
@@ -55,15 +55,12 @@ function loadVendoredMarked() {
   return dom.window;
 }
 
-test("the vendored marked loads and exposes the entry points helpers.js calls", () => {
+test("the vendored marked loads and exposes the entry point the GUI calls", () => {
   const win = loadVendoredMarked();
   try {
     assert.ok(win.marked, "the vendored file did not define window.marked");
     assert.equal(typeof win.marked.parse, "function",
-      "marked.parse is missing; app/helpers.js renders every message with it");
-    assert.equal(typeof win.marked.setOptions, "function",
-      "marked.setOptions is missing; app/helpers.js calls it at load time, so "
-      + "the whole GUI would throw on startup");
+      "marked.parse is missing; app/markdown-parse.js renders every message with it");
   } finally { win.close(); }
 });
 
@@ -110,13 +107,12 @@ test("the vendored marked actually parses real markdown", () => {
   } finally { win.close(); }
 });
 
-test("marked accepts the exact options helpers.js sets at load", () => {
+test("marked accepts the exact options the GUI parses with", () => {
   const win = loadVendoredMarked();
   try {
-    win.marked.setOptions({ breaks: true });
-    assert.match(win.marked.parse("a\nb"), /<br\s*\/?>/,
-      "breaks:true no longer turns a single newline into a <br>, so helpers.js's "
-      + "load-time options are not taking effect");
+    assert.match(win.marked.parse("a\nb", { breaks: true }), /<br\s*\/?>/,
+      "breaks:true no longer turns a single newline into a <br>, so the options "
+      + "app/markdown-parse.js passes with every parse are not taking effect");
   } finally { win.close(); }
 });
 
@@ -137,7 +133,7 @@ test("marked.parse returns a string synchronously", () => {
   try {
     win.marked.setOptions({ breaks: true });
     assert.equal(typeof win.marked.parse("x"), "string",
-      "helpers.js assigns the result of marked.parse straight into DOMPurify.sanitize");
+      "helpers.js assigns the HTML marked.parse returns straight into DOMPurify.sanitize");
     assert.equal(win.marked.parse(""), "");
   } finally { win.close(); }
 });

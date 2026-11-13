@@ -84,7 +84,7 @@ function installStubs(win, { fetchImpl } = {}) {
 // The app/<name>.js sections, in load order. They share one global lexical
 // environment, so this order must be preserved.
 const APP_SCRIPTS = [
-  "client-log", "helpers", "i18n-en", "i18n", "icons", "picker", "theme", "logo", "tabs", "interrupted-pulls",
+  "client-log", "markdown-parse", "helpers", "i18n-en", "i18n", "icons", "picker", "theme", "logo", "tabs", "interrupted-pulls",
   "models-sidebar",
   "chat", "media-gallery", "native-models", "native-workflows", "image-inputs", "cmdk", "settings-perf",
   "coder", "slash", "init",

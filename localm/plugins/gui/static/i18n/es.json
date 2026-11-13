@@ -717,6 +717,7 @@
   "common.reasoning.thinking": "Pensando…",
   "common.reasoning.thoughts": "Razonamiento",
   "common.reply.empty": "(respuesta sin texto)",
+  "common.reply.plainText": "Se omitió el formato de esta respuesta, por lo que se muestra como texto sin formato.",
   "common.toolCall.readPage": "leer página: {arg}",
   "common.toolCall.webRequest": "solicitud web: {arg}",
   "common.toolCall.webRequestBare": "solicitud web",

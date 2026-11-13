@@ -12,8 +12,8 @@ const readVendored = (n) => fs.readFileSync(new URL(n, VENDOR), "utf8");
 /** loadApp(), then replace harness.mjs's vendor stubs with the real vendored
  *  bytes, loaded as classic scripts in the same realm. helpers.js resolves
  *  `marked` / `DOMPurify` as globals at CALL time, so swapping them after load
- *  is enough. marked.setOptions() ran at load against the stub, so it is
- *  re-applied here with the same options helpers.js uses. */
+ *  is enough. helpers.js passes its marked options with every parse; the
+ *  same options are also set here as marked's defaults. */
 function loadRealPipeline({ withSanitizer = true } = {}) {
   const { window: win } = loadApp();
   for (const f of ["marked.min.js", "purify.min.js", "highlight.min.js",

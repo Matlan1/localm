@@ -707,6 +707,7 @@
   "common.reasoning.thinking": "Denkt nach…",
   "common.reasoning.thoughts": "Gedanken",
   "common.reply.empty": "(kein Antworttext)",
+  "common.reply.plainText": "Die Formatierung dieser Antwort wurde übersprungen, daher wird sie als reiner Text angezeigt.",
   "common.toolCall.readPage": "Seite lesen: {arg}",
   "common.toolCall.webRequest": "Web-Anfrage: {arg}",
   "common.toolCall.webRequestBare": "Web-Anfrage",

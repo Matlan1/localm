@@ -130,6 +130,18 @@ function render(win, text) {
 
 const tex = (el) => [...el.querySelectorAll("annotation")].map((a) => a.textContent);
 
+// No protectMath token of any of *texts* is left in the text or the link and
+// image addresses of *out*.
+function noToken(win, out, ...texts) {
+  const seen = [out.textContent, ...[...out.querySelectorAll("[href], [src]")]
+    .map((e) => e.getAttribute("href") || e.getAttribute("src"))].join("\n");
+  assert.doesNotMatch(seen, /ZZLMATH/);
+  for (const text of texts) {
+    const { open, dollar, escaped } = win._mathTokens(text);
+    for (const tok of [open, dollar, escaped]) assert.ok(!seen.includes(tok), `${JSON.stringify(text)}: token ${tok} left`);
+  }
+}
+
 test("display math keeps its markdown-escapable TeX", () => {
   const win = loadRealPipeline();
   const out = render(win, String.raw`See $$\int_0^1 x^2\,dx = \frac{1}{3}$$ done.`);
@@ -329,7 +341,7 @@ test("a price far from its double dollars leaves no token in the output", () => 
   const src = "Price: $$ for A, " + "word ".repeat(900) + "costs $5, and $$ for B";
   const out = render(win, src);
   noMath(out, "far pair");
-  assert.doesNotMatch(out.innerHTML, /ZZLMATH/);
+  noToken(win, out, src);
   assert.match(out.textContent, /\$\$ for A, .*costs \$5, and \$\$ for B/);
 });
 
@@ -362,9 +374,9 @@ test("a dollar sign in a link or image address is left exactly as written", () =
   const hrefs = [...link.querySelectorAll("a")].map((a) => a.getAttribute("href"));
   assert.deepEqual(hrefs, ["https://example.com/p?price=$5", "https://example.com/a$b/c"]);
   noMath(link, "links");
-  assert.doesNotMatch(link.innerHTML, /ZZLMATH/);
+  noToken(win, link, "[a](https://example.com/p?price=$5) and see https://example.com/a$b/c ok");
   const img = render(win, "![i](https://example.com/i.png?w=$5)");
-  assert.doesNotMatch(img.innerHTML, /ZZLMATH/);
+  noToken(win, img, "![i](https://example.com/i.png?w=$5)");
   assert.match(img.innerHTML, /\$5/);
 });
 
@@ -373,7 +385,7 @@ test("a price between two unprotected double dollars leaves no token in the outp
   for (const src of ["Price: $$ for A, costs $5, and $$ for B", "a $$ b $5 c $$ d", "<think>a $$ b $5 c $$ d</think>ok"]) {
     const out = render(win, src);
     noMath(out, src);
-    assert.doesNotMatch(out.innerHTML, /ZZLMATH/, src);
+    noToken(win, out, src, "a $$ b $5 c $$ d", "ok");
     assert.match(out.textContent, /\$\$.*\$5.*\$\$/, src);
   }
 });

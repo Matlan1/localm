@@ -9,6 +9,7 @@
 import { recordGuiError, setGuiErrorAuth } from "./client-log.js";
 import { t } from "./i18n.js";
 import { I18N_EN } from "./i18n-en.js";
+import { parseMarkdownParts } from "./markdown-parse.js";
 
 export const $ = (id) => document.getElementById(id);
 
@@ -463,8 +464,6 @@ export function renderErrorToasts() {
   if (box.hidden) _setErrorToastHold("hover", false);
   if (!box.contains(document.activeElement)) _setErrorToastHold("focus", false);
 }
-
-marked.setOptions({ breaks: true });
 
 /** Split leading <think>…</think> reasoning from the visible reply.
  *  Handles a still-open block during streaming. */
@@ -972,6 +971,41 @@ const _MATH_SPAN = new RegExp([
 const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<=["'(\[*~])\$\$(?=["')\]*~])|(?<!\$)\$(?!\$)`;
 const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLAR})`, "gm");
 
+const _reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// ASCII letters protectMath picks its one-letter tokens from, in this order.
+// The letters of www, http, https and ftp and the task-list x are not among them.
+const _MATH_TOKEN_LETTERS = "QJZKVYBGUDNRMOLICEAqjzkvybgudnrmolicea";
+
+/** protectMath's tokens for *text*: `{ open, close, dollar, escaped }`. A math
+ *  span becomes `open` + its index + `close`, a literal `$` becomes `dollar`
+ *  and an escaped `\$` becomes `escaped`.
+ *
+ *  Each is one letter of _MATH_TOKEN_LETTERS that occurs neither in *text* nor
+ *  as a numeric character reference in it, so a token is never longer than the
+ *  dollar sign it stands for. When fewer than three such letters are free, or a
+ *  `$` follows `&` or `<` and a run of word characters (where a letter could
+ *  complete a character reference, a tag name or a URI scheme), the tokens are
+ *  words built on a `ZZLMATH` tag that does not occur in *text*. */
+function _mathTokens(text) {
+  if (!/[&<][\w#+./-]*\$/.test(text)) {
+    let refs = "";
+    for (const m of text.matchAll(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}))/g)) {
+      const cp = m[1] !== undefined ? parseInt(m[1], 16) : parseInt(m[2], 10);
+      if (cp < 128) refs += String.fromCharCode(cp);
+    }
+    const free = [];
+    for (const c of _MATH_TOKEN_LETTERS) {
+      if (!text.includes(c) && !refs.includes(c)) free.push(c);
+      if (free.length === 3) return { open: free[0], close: free[0], dollar: free[1], escaped: free[2] };
+    }
+  }
+  let n = 0;
+  while (text.includes(`ZZLMATH${n}Q`)) n++;
+  const tag = `ZZLMATH${n}Q`;
+  return { open: tag, close: "ZZ", dollar: `${tag}DZZ`, escaped: `${tag}EZZ` };
+}
+
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
  *  marks. Returns `{ text, restore, finish }`; `restore(root)` puts the original
@@ -1012,9 +1046,8 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
  *  `pre` and `code`) and runs after it. */
 export function protectMath(text) {
   const spans = [];
-  const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
-  const dollar = `${tag}DZZ`;
-  const escaped = `${tag}EZZ`;
+  const { open: spanOpen, close: spanClose, dollar, escaped } = _mathTokens(String(text || ""));
+  const tagRe = new RegExp([spanOpen, dollar, escaped].map(_reEscape).join("|"));
   const dollarizePricePairs = (part) => {
     let out = "";
     let from = 0;
@@ -1037,22 +1070,24 @@ export function protectMath(text) {
     i % 2 === 1 ? part : dollarizePricePairs(part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
       if (rest[rest.length - 1].lit !== undefined) return src === "\\$" ? escaped : src.replace(/\$/g, dollar);
       spans.push(src);
-      return `${tag}${spans.length - 1}ZZ`;
+      return `${spanOpen}${spans.length - 1}${spanClose}`;
     }))).join("");
   const rewrite = (root, from, to) => {
     const walker = document.createTreeWalker(root, 4);
     const nodes = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
     for (const node of nodes) {
-      if (node.nodeValue.includes(tag)) node.nodeValue = node.nodeValue.replace(from, to);
+      if (tagRe.test(node.nodeValue)) node.nodeValue = node.nodeValue.replace(from, to);
     }
   };
-  const literalRe = new RegExp(`${dollar}|${escaped}`, "g");
+  const literalRe = new RegExp(`${_reEscape(dollar)}|${_reEscape(escaped)}`, "g");
   const restore = (root) => {
-    if (spans.length) rewrite(root, new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, i) => spans[Number(i)]);
+    if (spans.length) {
+      rewrite(root, new RegExp(`${_reEscape(spanOpen)}(\\d+)${_reEscape(spanClose)}`, "g"), (_m, i) => spans[Number(i)]);
+    }
     for (const el of root.querySelectorAll("*")) {
       for (const attr of el.attributes) {
-        if (attr.value.includes(tag)) attr.value = attr.value.replace(literalRe, () => "$");
+        if (tagRe.test(attr.value)) attr.value = attr.value.replace(literalRe, () => "$");
       }
     }
   };
@@ -1061,7 +1096,7 @@ export function protectMath(text) {
     const nodes = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
     for (const node of nodes) {
-      if (!node.nodeValue.includes(tag)) continue;
+      if (!tagRe.test(node.nodeValue)) continue;
       const inCode = !!(node.parentElement && node.parentElement.closest("pre, code"));
       node.nodeValue = node.nodeValue.replace(literalRe, (m) => (m === escaped && inCode ? "\\$" : "$"));
     }
@@ -1095,6 +1130,60 @@ function _rememberThinkChoice(det, key, open) {
   if (_thinkChoices.size > _THINK_CHOICES_MAX) _thinkChoices.delete(_thinkChoices.keys().next().value);
 }
 
+/** Markdown sources of at most this many characters are parsed on the page;
+ *  longer ones in the Markdown worker. */
+export const MARKDOWN_SYNC_MAX_CHARS = 4000;
+/** A worker parse that has not answered after this many milliseconds is
+ *  abandoned, the worker is replaced and the reply is shown as plain text. */
+export let MARKDOWN_PARSE_BUDGET_MS = 2000;
+/** A reply waiting for the worker keeps its plain text hidden for this many
+ *  milliseconds, then shows it until the formatted reply arrives. */
+export let MARKDOWN_PLAIN_REVEAL_MS = 300;
+/** Rendered HTML nested deeper than this is shown as plain text instead. */
+export const MARKDOWN_MAX_DEPTH = 100;
+/** URL of the Markdown worker module. */
+export const MARKDOWN_WORKER_URL = "/app/markdown-worker.js";
+
+// Per render target: { epoch, next, queued }. `epoch` counts the renders applied
+// on the spot; a worker result is applied only while the epoch it was asked at
+// is current. `next` is the latest render waiting for the worker.
+const _mdTargets = new WeakMap();
+// Targets with a render waiting for the worker, oldest first.
+const _mdQueue = [];
+// The one parse the worker is running: { id, target, job, timer }.
+let _mdActive = null;
+let _mdWorker = null;
+let _mdWorkerFailed = false;
+let _mdSeq = 0;
+// Markdown source key -> worker result, oldest first.
+const _mdCache = new Map();
+const _MD_CACHE_MAX = 32;
+
+/** The Markdown sources of one render of *text*: the reply split from its
+ *  reasoning (unless opts.document), each math-protected and delimiter-escaped. */
+function _markdownSource(text, opts) {
+  const { think, open, rest } = opts.document
+    ? { think: null, open: false, rest: text || "" }
+    : (({ think, open, rest }) => ({ think, open, rest: formatToolCalls(rest) }))(splitThink(scrubMarkers(text)));
+  const thinkMath = think ? protectMath(think) : null;
+  const restMath = protectMath(rest || "");
+  const parts = [thinkMath ? escapeDelimiterRuns(thinkMath.text) : null, escapeDelimiterRuns(restMath.text)];
+  return {
+    think, open, rest: rest || "", thinkMath, restMath, parts,
+    size: (parts[0] || "").length + parts[1].length,
+    key: (parts[0] === null ? "\u0001" : parts[0]) + "\u0000" + parts[1],
+  };
+}
+
+/** parseMarkdownParts on this thread; `{ error }` when marked throws. */
+function _parseHere(src) {
+  try {
+    return parseMarkdownParts(marked, src.parts);
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
 /** Render one model reply into *target*.
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
@@ -1107,11 +1196,203 @@ function _rememberThinkChoice(det, key, open) {
  *                      a caller that renders separate conversations must pass a
  *                      different one for each. Omitting it puts the render in
  *                      one shared unnamed scope - correct only where there is a
- *                      single stream of content per page session. */
+ *                      single stream of content per page session.
+ *
+ *  A Markdown source of at most MARKDOWN_SYNC_MAX_CHARS characters, or one the
+ *  worker parsed before, renders before this returns. A longer one is parsed in
+ *  the Markdown worker: *target* keeps what it shows (or, when it shows nothing
+ *  yet, gets the plain text, hidden for MARKDOWN_PLAIN_REVEAL_MS) until the
+ *  formatted reply arrives. One parse per target runs at a time and only the
+ *  latest text of a target is parsed next; a render applied on the spot
+ *  supersedes every earlier one still waiting. Without a usable worker every
+ *  render is parsed on the page. A parse that throws, runs past
+ *  MARKDOWN_PARSE_BUDGET_MS or nests deeper than MARKDOWN_MAX_DEPTH shows the
+ *  reply as plain text with a note. */
 export function renderMarkdown(target, text, opts = {}) {
-  const { think, open, rest } = opts.document
-    ? { think: null, open: false, rest: text || "" }
-    : (({ think, open, rest }) => ({ think, open, rest: formatToolCalls(rest) }))(splitThink(scrubMarkers(text)));
+  const src = _markdownSource(text, opts);
+  let st = _mdTargets.get(target);
+  if (!st) {
+    st = { epoch: 0, next: null, queued: false };
+    _mdTargets.set(target, st);
+  }
+  const cached = _mdCacheGet(src.key);
+  if (cached || src.size <= MARKDOWN_SYNC_MAX_CHARS || !_mdWorkerUsable()) {
+    st.epoch += 1;
+    st.next = null;
+    _applyMarkdown(target, src, cached || _parseHere(src), opts);
+    return;
+  }
+  st.next = { src, opts, epoch: st.epoch };
+  if (!target.querySelector(".md-main")) _applyMarkdown(target, src, { pending: true }, opts);
+  if (!st.queued) {
+    st.queued = true;
+    _mdQueue.push(target);
+    queueMicrotask(_mdPump);
+  }
+}
+
+function _mdCacheGet(key) {
+  const hit = _mdCache.get(key);
+  if (hit) {
+    _mdCache.delete(key);
+    _mdCache.set(key, hit);
+  }
+  return hit;
+}
+
+function _mdCachePut(key, result) {
+  _mdCache.delete(key);
+  _mdCache.set(key, result);
+  if (_mdCache.size > _MD_CACHE_MAX) _mdCache.delete(_mdCache.keys().next().value);
+}
+
+function _mdWorkerUsable() {
+  return !_mdWorkerFailed && typeof Worker === "function";
+}
+
+/** The running Markdown worker, started on first use; null when none can run. */
+function _mdWorkerGet() {
+  if (_mdWorker) return _mdWorker;
+  if (!_mdWorkerUsable()) return null;
+  let worker;
+  try {
+    worker = new Worker(MARKDOWN_WORKER_URL, { type: "module" });
+  } catch (e) {
+    _mdWorkerFail(String((e && e.message) || e));
+    return null;
+  }
+  worker.onmessage = _mdOnMessage;
+  worker.onerror = (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    _mdWorkerFail((e && e.message) || "the worker script did not load");
+  };
+  _mdWorker = worker;
+  return worker;
+}
+
+/** Stop using the worker for this page session, record why, and parse the
+ *  render it was running on the page. */
+function _mdWorkerFail(reason) {
+  _mdWorkerFailed = true;
+  if (_mdWorker) _mdWorker.terminate();
+  _mdWorker = null;
+  recordGuiError(`Markdown worker unavailable, replies are formatted on the page: ${reason}`, "markdown");
+  const a = _mdActive;
+  if (a) {
+    clearTimeout(a.timer);
+    _mdActive = null;
+    _mdDeliver(a.target, a.job, _parseHere(a.job.src));
+  }
+  queueMicrotask(_mdPump);
+}
+
+/** Start the next waiting render, if the worker is idle. */
+function _mdPump() {
+  while (!_mdActive && _mdQueue.length) {
+    const target = _mdQueue.shift();
+    const st = _mdTargets.get(target);
+    const job = st.next;
+    st.next = null;
+    st.queued = false;
+    if (!job || job.epoch !== st.epoch) continue;
+    const cached = _mdCacheGet(job.src.key);
+    if (cached) {
+      _mdDeliver(target, job, cached);
+      continue;
+    }
+    const worker = _mdWorkerGet();
+    if (!worker) {
+      _mdDeliver(target, job, _parseHere(job.src));
+      continue;
+    }
+    const id = ++_mdSeq;
+    _mdActive = { id, target, job, timer: setTimeout(() => _mdAbandon(id), MARKDOWN_PARSE_BUDGET_MS) };
+    worker.postMessage({ id, parts: job.src.parts });
+  }
+}
+
+function _mdOnMessage(e) {
+  const a = _mdActive;
+  const data = (e && e.data) || {};
+  if (!a || data.id !== a.id) return;
+  clearTimeout(a.timer);
+  _mdActive = null;
+  const result = data.error !== undefined ? { error: data.error } : { html: data.html, depth: data.depth };
+  if (result.html) _mdCachePut(a.job.src.key, result);
+  _mdDeliver(a.target, a.job, result);
+  _mdPump();
+}
+
+/** Abandon the worker parse *id* when it is still running: replace the worker
+ *  and show that render as plain text. */
+function _mdAbandon(id) {
+  const a = _mdActive;
+  if (!a || a.id !== id) return;
+  _mdActive = null;
+  if (_mdWorker) _mdWorker.terminate();
+  _mdWorker = null;
+  _mdDeliver(a.target, a.job, { timeout: true });
+  _mdPump();
+}
+
+/** Apply a worker *result* to *target* unless a later render was applied there
+ *  since *job* was asked for. A scroll box that was scrolled to its end stays
+ *  at its end. */
+function _mdDeliver(target, job, result) {
+  const st = _mdTargets.get(target);
+  if (!st || st.epoch !== job.epoch) return;
+  let box = target.parentElement;
+  while (box && !(box.scrollHeight > box.clientHeight
+                  && /(auto|scroll)/.test(getComputedStyle(box).overflowY))) {
+    box = box.parentElement;
+  }
+  const atEnd = !!box && box.scrollHeight - box.scrollTop - box.clientHeight <= 2;
+  _applyMarkdown(target, job.src, result, job.opts);
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+
+/** Replace the children of *box* with *text* as text, a <br> per line break. */
+function _showPlainText(box, text) {
+  box.replaceChildren();
+  String(text).split("\n").forEach((line, i) => {
+    if (i) box.appendChild(document.createElement("br"));
+    box.appendChild(document.createTextNode(line));
+  });
+}
+
+/** Hide *box* while it holds the plain text of a render waiting for the worker
+ *  (*provisional*) and show it after MARKDOWN_PLAIN_REVEAL_MS; otherwise show it
+ *  at once. */
+function _setProvisional(box, provisional) {
+  const show = () => {
+    box.style.removeProperty("visibility");
+    if (!box.getAttribute("style")) box.removeAttribute("style");
+  };
+  if (box._mdReveal) {
+    clearTimeout(box._mdReveal);
+    box._mdReveal = 0;
+  }
+  if (provisional) {
+    box.style.visibility = "hidden";
+    box._mdReveal = setTimeout(() => { box._mdReveal = 0; show(); }, MARKDOWN_PLAIN_REVEAL_MS);
+  } else if (box.style.visibility) {
+    show();
+  }
+}
+
+/** Show one render of *src* in *target*. *result* is a parse result
+ *  (`{ html, depth }`), `{ error }`, `{ timeout: true }` or `{ pending: true }`
+ *  (the plain text, hidden for MARKDOWN_PLAIN_REVEAL_MS, while the worker
+ *  parses). */
+function _applyMarkdown(target, src, result, opts) {
+  const { think, open, rest, thinkMath, restMath } = src;
+  const formatted = !!result.html && result.depth <= MARKDOWN_MAX_DEPTH;
+  if (!formatted && !result.pending) {
+    console.warn("localm: reply shown as plain text:",
+                 result.timeout ? `formatting took over ${MARKDOWN_PARSE_BUDGET_MS} ms`
+                   : result.error ? `formatting failed: ${result.error}`
+                     : `nested deeper than ${MARKDOWN_MAX_DEPTH} levels`);
+  }
 
   // Think block: update IN PLACE rather than rebuild every token. Recreating the
   // <details> per chunk reset its open/closed state each tick, so the reasoning
@@ -1143,11 +1424,15 @@ export function renderMarkdown(target, text, opts = {}) {
     }
     det._thinkKey = think;
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
-    const thinkMath = protectMath(think);
     const thinkBody = det.querySelector("div");
-    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(thinkMath.text)));
-    thinkMath.restore(thinkBody);
-    thinkFinish = () => thinkMath.finish(thinkBody);
+    if (formatted) {
+      thinkBody.innerHTML = DOMPurify.sanitize(result.html[0]);
+      thinkMath.restore(thinkBody);
+      thinkFinish = () => thinkMath.finish(thinkBody);
+    } else {
+      _showPlainText(thinkBody, think);
+    }
+    _setProvisional(thinkBody, !!result.pending);
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
     det.remove();
@@ -1161,8 +1446,13 @@ export function renderMarkdown(target, text, opts = {}) {
     main.className = "md-main";
     target.appendChild(main);
   }
-  const restMath = protectMath(rest || "");
-  main.innerHTML = DOMPurify.sanitize(marked.parse(escapeDelimiterRuns(restMath.text)));
+  _setProvisional(main, !!result.pending);
+  if (!formatted) {
+    _showPlainText(main, rest);
+    if (!result.pending) main.appendChild(el("div", "md-empty md-plain-note", t("common.reply.plainText")));
+    return;
+  }
+  main.innerHTML = DOMPurify.sanitize(result.html[1]);
   restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
