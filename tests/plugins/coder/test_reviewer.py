@@ -723,3 +723,40 @@ def test_the_reviewer_sends_the_ranges_on_the_message_it_hands_the_backend():
     assert spans, "the reviewer sent a message with no untrusted range"
     covered = "".join(str(sent[0]["content"])[a:b] for a, b in spans)
     assert _EXOTIC in covered
+
+
+def test_every_fallback_reaches_the_given_warn(monkeypatch):
+    _cfg(monkeypatch, coder_reviewer="banana")
+    seen = []
+    rv = reviewer_for_agent(_backend_returning(""), SessionMode.FULL, False,
+                            warn=seen.append)
+    assert rv is not None and rv.heterogeneous is False
+    assert len(seen) == 1 and "banana" in seen[0]
+
+
+def test_a_session_event_sink_is_told_about_a_reviewer_fallback(monkeypatch, tmp_path):
+    """A GUI session's feed shows the fallback, not only the server console."""
+    from localm.plugins.coder.agent import Agent
+    _cfg(monkeypatch, coder_reviewer="banana")
+    monkeypatch.setattr("localm.plugins.coder.hook_trust.project_trusted",
+                        lambda cwd: True)
+    events = []
+
+    class _Stub:
+        model_id = "m"
+        native_tools = False
+        supports_grammar = False
+        last_usage = {"total_tokens": 0}
+
+        def chat(self, messages, **kw):
+            return "Done."
+
+    with patch("localm.plugins.coder.agent.ProjectMap") as PM, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        PM.build.return_value.file_count.return_value = 0
+        PM.build.return_value.truncated = False
+        Agent(_Stub(), cwd=tmp_path, self_verify=False, mode=SessionMode.LOG,
+              on_event=events.append)
+    infos = [e["text"] for e in events if e.get("type") == "info"]
+    assert any("unrecognised coder_reviewer 'banana'" in t for t in infos), events
