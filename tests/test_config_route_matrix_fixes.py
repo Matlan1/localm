@@ -135,6 +135,7 @@ def test_a_section_save_sending_the_stored_value_back_is_not_rechecked(app_env, 
     r = c.patch("/v1/config", headers=_owner(),
                 json={"embedding_model": moved, "embedding_gpu_layers": 0})
     assert r.status_code == 200, r.text
+    assert "warnings" not in r.json(), "the unchanged stored value was checked again"
     assert load_config()["embedding_gpu_layers"] == 0
 
 
