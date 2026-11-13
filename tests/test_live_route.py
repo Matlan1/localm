@@ -408,7 +408,8 @@ def test_a_stream_ends_when_its_key_is_revoked(app, server, monkeypatch):
     r = Reader(server.url, _hdr(made["key"]))
     r.start()
     try:
-        assert r.wait_for(lambda: r.frames("stats"))
+        assert r.wait_for(lambda: r.frames("stats")), (
+            r.status, r.dropped, [line for _, line in r.lines[:3]])
         assert auth.revoke_key(made["id"]) is True
         r.join(timeout=5)
         assert not r.is_alive(), "the stream stayed open after its key was revoked"
