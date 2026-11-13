@@ -708,6 +708,14 @@ def _unique_upload_target(base: Path, safe_name: str) -> Path:
         n += 1
 
 
+def _is_api_landing(route) -> bool:
+    """True for the ``GET /`` redirect ``mounting.add_api_landing`` registers."""
+    from localm.inference.app_assembly import mounting
+    endpoint = getattr(route, "endpoint", None)
+    return (getattr(route, "path", None) == "/"
+            and getattr(endpoint, "__module__", None) == mounting.__name__)
+
+
 def attach_gui(
     app: FastAPI,
     *,
@@ -729,7 +737,11 @@ def attach_gui(
         ``activate`` (default True) - see switch_engine's own docstring.
     active_model:
         ``Callable[[], str]`` - name of the currently served model.
+
+    Removes an API-only server's ``GET /`` redirect to /docs (create_app's
+    ``api_landing``) first, so the GUI serves ``/``.
     """
+    app.router.routes[:] = [r for r in app.router.routes if not _is_api_landing(r)]
     manager = SessionManager()
 
     # attach_engine creates the background-job manager, so a headless `localm serve`

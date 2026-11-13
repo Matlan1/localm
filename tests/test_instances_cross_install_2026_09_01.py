@@ -317,3 +317,17 @@ class TestIsolationGate:
             with TestClient(app) as c:
                 resp = c.post("/api/instances/cccc00000000000e/stop")
         assert resp.status_code == 404
+
+    def test_an_isolated_server_lists_no_server_of_its_own_install(
+            self, instances_app, monkeypatch):
+        app, home = instances_app
+        write_home_entry(home, instance_id="aaaa00000000000f")
+        monkeypatch.setattr(instances, "default_probe", lambda e, **k: True)
+        app.state.instance_isolated = True
+        with TestClient(app) as c:
+            listed = c.get("/api/instances").json()["instances"]
+            stop = c.post("/api/instances/aaaa00000000000f/stop")
+        assert listed == []
+        assert stop.status_code == 404
+        assert "--isolated" in stop.json()["detail"]
+        assert [e["instance_id"] for e in instances.list_entries(home)] == ["aaaa00000000000f"]

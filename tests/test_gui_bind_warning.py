@@ -33,3 +33,22 @@ class TestGuiBindWarning:
         # consistent with `localm serve`.
         with patch.dict("os.environ", {"LOCALM_API_KEY": "a-strong-secret"}):
             assert _gui_bind_warning("0.0.0.0") is None
+
+    def test_an_api_only_server_does_not_mention_the_coder_agent(self):
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("LOCALM_API_KEY", None)
+            msg = _gui_bind_warning("0.0.0.0", api_mode=True)
+        assert msg is not None
+        assert "0.0.0.0" in msg
+        assert "coder agent" not in msg
+
+
+def test_a_console_shared_with_a_shell_is_not_hidden(monkeypatch):
+    from localm import winconsole
+    monkeypatch.setattr(winconsole, "_console_process_names",
+                        lambda: ["python.exe", "cmd.exe"])
+    assert winconsole.console_has_a_shell() is True
+    monkeypatch.setattr(winconsole, "_console_process_names",
+                        lambda: ["localm.exe", "python.exe"])
+    assert winconsole.console_has_a_shell() is False

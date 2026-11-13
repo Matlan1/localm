@@ -106,7 +106,7 @@ localm serve mymodel --mode log             # privacy (default) | log | full ses
 localm serve mymodel --new                  # start another server even if one already serves this project
 ```
 
-`serve` takes the same `--project`, `--isolated`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--mmproj` and `--device` options as `gui` (see above), serves the API only, and opens no browser. When a server is already serving the project, `serve` reports it and starts nothing unless `--new` is passed.
+`serve` takes the same `--project`, `--isolated`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--mmproj` and `--device` options as `gui` (see above), serves the API only, and opens no browser; a browser opening its address is sent to the API docs at `/docs`. When a server is already serving the project, `serve` reports it and starts nothing unless `--new` is passed. `localm gui --api-mode --pull SPEC` downloads SPEC, as `localm pull` does, before the API server starts.
 
 localm owns the port range 8642-8741: the default is 8642, and when no `--port` is given the server bumps to the next free port in that range automatically if it is taken. An explicit `--port` is different - it must be free, or startup errors rather than moving you onto another port. Use it with any OpenAI client - set `base_url="http://localhost:8642/v1"` and `api_key="localm"`.
 
