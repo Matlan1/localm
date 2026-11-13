@@ -3,7 +3,7 @@
 
 Scans the string literals and comments of every tracked ``localm/**/*.py`` file,
 the English catalog (app/i18n-en.js) and the text of index.html for
-``Settings > ...`` (also ``->``, the arrow sign, ``&gt;``) and ``(Settings, ...``.
+``Settings > ...`` (also ``->``, the arrow sign, ``›``, ``&gt;``) and ``(Settings, ...``.
 The first segment must be a nav page label from ``SETTINGS_GROUPS`` in
 pages/settings.js. Every later segment must be something that page shows: the
 label of a field rendered there (placed by ``CORE_GROUP_TO_TOP``, labelled as the
@@ -32,8 +32,8 @@ SETTINGS_JS = (STATIC / "pages" / "settings.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 I18N_EN_JS = (STATIC / "app" / "i18n-en.js").read_text(encoding="utf-8")
 
-SEP = re.compile(r"\s*(?:->|>|→)\s*")
-START = re.compile(r"\bSettings\s*(?:->|>|→)\s*|\(Settings,\s*")
+SEP = re.compile(r"\s*(?:->|>|→|›)\s*")
+START = re.compile(r"\bSettings\s*(?:->|>|→|›)\s*|\(Settings,\s*")
 
 # Settings places of another app that the certificate how-to texts walk through:
 # (app the text names, the exact place). A match is skipped only when the text
@@ -333,3 +333,5 @@ def test_the_check_rejects_missing_places_and_accepts_real_ones():
     assert not check_text("Settings > Server & network failed: x", places)
     assert not check_text("Settings > System > Updates > Inference runtime", places)
     assert not check_text("in Settings > Privacy & data.", places)
+    assert check_text("later in Settings › Knowledge.", places)
+    assert not check_text("in Settings › Plugins › Knowledge (RAG) › Allowed folders.", places)
