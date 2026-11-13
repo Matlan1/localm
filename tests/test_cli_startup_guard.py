@@ -76,7 +76,7 @@ def update_calls(monkeypatch):
 
 
 @pytest.mark.parametrize("argv", [
-    ["serve", "-h"], ["gui", "--help"], ["run", "-h"], ["image", "-h"], ["rag", "add", "-h"],
+    ["serve", "-h"], ["gui", "--help"], ["doctor", "-h"], ["image", "-h"], ["rag", "add", "-h"],
 ], ids=lambda a: " ".join(a))
 def test_a_help_request_runs_no_pending_update(update_calls, argv):
     from localm.cli import main
