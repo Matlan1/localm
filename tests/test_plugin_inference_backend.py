@@ -498,3 +498,105 @@ class TestRunnerTypedLoadRefusal:
         assert "The ExLlama model-loading process crashed" in message
         assert "HuggingFace" not in message
         assert not runner.is_alive()
+
+
+LOADABLE_BACKEND_PLUGIN = '''
+from localm.plugins.contract import InferenceBackendDescriptor
+
+class Made:
+    def __init__(self, path, opts):
+        self.path, self.opts = path, opts
+        self.loaded = False
+
+    def load(self):
+        self.loaded = True
+
+    def unload(self):
+        self.loaded = False
+
+def _claims(path):
+    import json, pathlib
+    try:
+        cfg = json.loads((pathlib.Path(path) / "config.json").read_text())
+    except Exception:
+        return False
+    return (cfg.get("quantization_config") or {}).get("quant_method") == "exl2"
+
+def register(host):
+    host.register_inference_backend(InferenceBackendDescriptor(
+        name="fakeexl", claims=_claims, create=lambda p, **o: Made(p, o)))
+
+def unregister():
+    pass
+'''
+
+
+class _BuiltinEngine:
+    backend_plugin = None
+    active_requests = 0
+    cpu_only_load = True
+
+    def __init__(self):
+        self.loaded = True
+
+    def unload(self):
+        self.loaded = False
+
+
+class TestDisableUnloadsItsModels:
+    def test_create_backend_records_the_plugin_that_built_it(self, tmp_path):
+        from localm.inference.engine import backend_plugin_of, create_backend
+        backend_registry.register(_descriptor([], plugin="fakeplug"))
+        made = create_backend(str(_exl2_dir(tmp_path)))
+        assert backend_plugin_of(made) == "fakeplug"
+        plain = create_backend(str(_hf_dir(tmp_path / "plain")))
+        assert backend_plugin_of(plain) is None
+
+    @pytest.mark.parametrize("action", ["disable", "uninstall"])
+    def test_disabling_a_backend_plugin_unloads_the_models_on_it(
+            self, tmp_path, monkeypatch, action):
+        import asyncio
+
+        from localm.inference import http_server as hs
+        from localm.inference.engine import Engine
+        from localm.plugins import engine as plugins_engine
+        from localm.plugins.engine import PluginManager
+        root = tmp_path / "installed"
+        _make_backend_plugin(root, source=LOADABLE_BACKEND_PLUGIN)
+        mgr = PluginManager(FastAPI(), installed_root=root, builtin_root=None)
+        mgr.install("fakeexl")
+        exl = Engine(str(_exl2_dir(tmp_path)))
+        exl.cpu_only_load = True
+        exl._backend.load()
+        assert exl.backend_plugin == "fakeexl"
+        other = _BuiltinEngine()
+        monkeypatch.setattr(hs, "_engines", {"exl": exl, "other": other})
+        monkeypatch.setattr(hs, "_engines_lru", ["exl", "other"])
+        monkeypatch.setattr(hs, "_inference_sems", {})
+        monkeypatch.setattr(hs, "_active_model_name", None)
+
+        async def scenario():
+            monkeypatch.setattr(hs, "_server_loop", asyncio.get_running_loop())
+            getattr(mgr, action)("fakeexl")
+            pending = list(plugins_engine._BACKEND_EVICTIONS)
+            assert len(pending) == 1
+            return await pending[0]
+
+        results = asyncio.run(scenario())
+        assert [(r["model"], r["status"]) for r in results] == [("exl", "unloaded")]
+        assert exl.loaded is False
+        assert other.loaded is True
+        assert backend_registry.registered() == []
+
+    def test_no_server_loop_schedules_nothing(self, tmp_path, monkeypatch):
+        from localm.inference import http_server as hs
+        from localm.plugins import engine as plugins_engine
+        from localm.plugins.engine import PluginManager
+        root = tmp_path / "installed"
+        _make_backend_plugin(root, source=LOADABLE_BACKEND_PLUGIN)
+        mgr = PluginManager(FastAPI(), installed_root=root, builtin_root=None)
+        mgr.install("fakeexl")
+        monkeypatch.setattr(hs, "_server_loop", None)
+        mgr.disable("fakeexl")
+        assert plugins_engine._BACKEND_EVICTIONS == set()
+        assert backend_registry.registered() == []

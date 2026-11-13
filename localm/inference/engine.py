@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -259,6 +260,20 @@ def _resolve_ctx_reserve(cfg: dict, override: Optional[int]) -> int:
     return value
 
 
+# Backend object -> name of the plugin whose registered inference backend built
+# it. A built-in backend has no entry.
+_BACKEND_PLUGINS: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+
+
+def backend_plugin_of(backend: Any) -> Optional[str]:
+    """The plugin whose registered inference backend built *backend*
+    (``create_backend``), or None for a built-in backend."""
+    try:
+        return _BACKEND_PLUGINS.get(backend)
+    except TypeError:
+        return None
+
+
 def create_backend(
     model_path: str,
     *,
@@ -302,7 +317,16 @@ def create_backend(
     from localm.inference import backend_registry
     plugin_backend = backend_registry.backend_for(model_path)
     if plugin_backend is not None:
-        return plugin_backend.create(model_path, device=device, n_ctx=n_ctx)
+        backend = plugin_backend.create(model_path, device=device, n_ctx=n_ctx)
+        try:
+            _BACKEND_PLUGINS[backend] = plugin_backend.plugin_name
+        except TypeError as e:
+            logger.warning(
+                "inference backend %r (plugin %r) built a %s that cannot be "
+                "tracked (%s); disabling the plugin will not unload a model "
+                "loaded on it", plugin_backend.name, plugin_backend.plugin_name,
+                type(backend).__name__, e)
+        return backend
 
     if _is_hf_dir(model_path):
         from localm.inference.backends.hf import HFBackend
@@ -502,6 +526,12 @@ class Engine:
     @property
     def loaded(self) -> bool:
         return self._backend.loaded
+
+    @property
+    def backend_plugin(self) -> Optional[str]:
+        """The plugin whose registered inference backend built this engine's
+        current backend, or None for a built-in backend."""
+        return backend_plugin_of(self._backend)
 
     def set_load_cancel(self, event) -> None:
         """Install a cancel event on the backend so an in-flight load() can be

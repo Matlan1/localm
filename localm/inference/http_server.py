@@ -3518,6 +3518,25 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     return result
 
 
+async def unload_models_of_backend_plugin(plugin_name: str) -> list[dict]:
+    """Unload every loaded model whose backend was built by an inference
+    backend that *plugin_name* registered (``Engine.backend_plugin``). Each
+    goes through ``unload_one_model``: it first waits for its requests in
+    flight to finish, and is unloaded with *force* when they do not. Returns
+    one ``unload_one_model`` result per model, in ``_engines`` order."""
+    results = []
+    for name, engine in list(_engines.items()):
+        if not getattr(engine, "loaded", False):
+            continue
+        if getattr(engine, "backend_plugin", None) != plugin_name:
+            continue
+        result = await unload_one_model(name)
+        if result.get("status") == "confirm_required":
+            result = await unload_one_model(name, force=True)
+        results.append(result)
+    return results
+
+
 # Monotonic timestamp of the last inference request, for the optional idle-unload
 # loop (config "idle_unload_seconds"). Touched at the start of each inference
 # endpoint, like Ollama's keep_alive (measured from the last request).

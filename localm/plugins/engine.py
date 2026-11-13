@@ -173,6 +173,59 @@ def _write_store_install(dest: Path, src: Path) -> None:
         json.dumps({"source": "store", "package": True}), encoding="utf-8")
 
 
+# Eviction tasks started on the server loop's own thread, kept until they finish.
+_BACKEND_EVICTIONS: set = set()
+
+
+def _evict_backend_models(plugin_name: str) -> None:
+    """Start, on the HTTP server's event loop, the unload of every loaded model
+    that runs on an inference backend *plugin_name* registered
+    (``http_server.unload_models_of_backend_plugin``), and return without
+    waiting for it. Does nothing in a process with no running server loop,
+    which holds no server engines. Each unloaded model is logged at INFO; a
+    model that stays loaded, or a failed eviction, at WARNING."""
+    import asyncio
+    hs = sys.modules.get("localm.inference.http_server")
+    loop = getattr(hs, "_server_loop", None)
+    if loop is None or not loop.is_running():
+        return
+    coro = hs.unload_models_of_backend_plugin(plugin_name)
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        fut = loop.create_task(coro)
+        _BACKEND_EVICTIONS.add(fut)
+        fut.add_done_callback(_BACKEND_EVICTIONS.discard)
+    else:
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    fut.add_done_callback(lambda f: _log_backend_eviction(plugin_name, f))
+
+
+def _log_backend_eviction(plugin_name: str, fut) -> None:
+    """Log the outcome of an ``_evict_backend_models`` run."""
+    if fut.cancelled():
+        _log.warning("plugin %s: unloading the models on its inference backend "
+                     "was cancelled; they may still be loaded", plugin_name)
+        return
+    exc = fut.exception()
+    if exc is not None:
+        _log.warning("plugin %s: unloading the models on its inference backend "
+                     "failed (%s: %s); they may still be loaded",
+                     plugin_name, type(exc).__name__, exc)
+        return
+    for result in fut.result():
+        model = result.get("model")
+        if result.get("status") in ("unloaded", "already_unloaded"):
+            _log.info("plugin %s: unloaded model %s, which ran on its inference "
+                      "backend", plugin_name, model)
+        else:
+            _log.warning("plugin %s: model %s, which runs on its inference "
+                         "backend, is still loaded (%s)", plugin_name, model,
+                         result.get("status"))
+
+
 def _purge_plugin_modules(uniq: str) -> None:
     """Remove a plugin's module namespace ("<uniq>" and every "<uniq>.*"
     submodule) from sys.modules so the next import reads fresh from disk."""
@@ -602,6 +655,7 @@ class PluginHost:
             from localm.inference import backend_registry
             backend_registry.unregister_plugin(self._spec.name)
             self._backends = []
+            _evict_backend_models(self._spec.name)
         if self._app is None:
             return
         self._app.openapi_schema = None
