@@ -136,7 +136,8 @@ def build() -> dict[str, dict]:
             # from ambient state reports on the WRONG install whenever this
             # server's home came from its own location (source-checkout setup).
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                  env=_child_identity_env())
+                                  env=_child_identity_env(),
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             output = proc.stdout
             if proc.stderr:
                 output += "\n\nStderr:\n" + proc.stderr
