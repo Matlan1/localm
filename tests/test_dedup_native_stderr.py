@@ -664,7 +664,7 @@ def test_debug_file_copy_of_a_trigger_token_record_drops_the_token_text(monkeypa
     ])
     assert b"ZQX" not in data, data
     assert data == (b"Grammar still awaiting trigger after token 1\n"
-                    b"Grammar triggered on token 12\r\n"
+                    b"Grammar triggered on token 12\n"
                     b"llama_decode: ordinary native line\n"), data
 
 
