@@ -571,7 +571,7 @@ async def memory_append(req: MemoryAppend, request: Request = None):
             413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
                  "adding another.")
     if status == "exists":
-        raise HTTPException(409, "Already in memory.")
+        return {"status": "exists", "id": rec.id}
     return {"status": "appended", "id": rec.id}
 
 
@@ -1733,18 +1733,23 @@ def add_user_fact(store, fact: str, embed_fn, *, kind: str = "semantic",
     """Add *fact* as a user-typed record unless the store already holds the same
     text (case and spacing ignored) or is at its cap. Returns ``(status, record)``:
     ``("saved", the new record)``, ``("exists", the stored record)`` or
-    ``("full", None)``. Blocking (embedder). Every place a person adds a fact
-    (the chat's "remember that", ``/remember``, ``localm memory add``) goes
+    ``("full", None)``. A stored record with the same text that a person did not
+    add (synthesised, imported) becomes a user record, and the answer is
+    ``("saved", that record)``. Blocking (embedder). Every place a person adds a
+    fact (the chat's "remember that", ``/remember``, ``localm memory add``) goes
     through here."""
     from localm.memory import MemoryRecord
     from localm.memory import store as _store_mod
-    key = " ".join(fact.casefold().split())
+    key = " ".join(fact[:_store_mod.MAX_TEXT_LEN].casefold().split())
     with store.lock():
         store._load()
         same = next((r for r in store.all()
                      if " ".join(r.text.casefold().split()) == key), None)
         if same is not None:
-            return "exists", same
+            if same.source == "user":
+                return "exists", same
+            return "saved", store.update(same.id, source="user",
+                                         importance=max(same.importance, importance))
         if len(store) >= _store_mod.N_MAX:
             return "full", None
         rec = store.add(MemoryRecord(text=fact, kind=kind, source="user",

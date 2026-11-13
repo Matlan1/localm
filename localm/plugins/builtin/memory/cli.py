@@ -246,6 +246,8 @@ def memory_add(text: str, kind: str, importance: float) -> None:
     _require_writable()
     if not text.strip():
         _fail("Refusing to save an empty memory.")
+    if importance != importance:
+        _fail("--importance must be a number from 0 to 1.")
     from localm.memory.store import N_MAX
     from localm.plugins.builtin.memory.plug import add_user_fact
     status, rec = add_user_fact(_store(), text.strip(), _embed_fn(), kind=kind,
@@ -279,7 +281,9 @@ def memory_forget(mem_id: str, yes: bool) -> None:
                       abort=True)
     if not store.delete(mem_id):
         if _store().get(mem_id) is None:
-            click.echo(f"{mem_id} was already deleted by another localm process.")
+            click.echo(f"{mem_id} is no longer in memory: another localm process "
+                       "removed it first (`localm memory forgotten` lists what can "
+                       "be restored).")
             return
         _fail(f"Could not forget {mem_id}: the store refused the delete. "
               "Nothing was changed.")

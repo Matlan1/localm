@@ -95,10 +95,45 @@ def test_an_empty_edit_is_refused_and_changes_nothing(tmp_path, memhome):
 def test_remember_twice_stores_one_fact(memhome):
     first = asyncio.run(plug.memory_append(plug.MemoryAppend(text="User likes tea"), None))
     assert first["status"] == "appended"
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(plug.memory_append(plug.MemoryAppend(text="  user LIKES   tea"), None))
-    assert exc.value.status_code == 409
+    again = asyncio.run(plug.memory_append(plug.MemoryAppend(text="  user LIKES   tea"), None))
+    assert again == {"status": "exists", "id": first["id"]}
     assert [r.text for r in _store(memhome).all()] == ["User likes tea"]
+
+
+def test_a_fact_longer_than_the_cap_is_still_found_the_second_time(memhome):
+    long_fact = "User likes " + "tea " * 200
+    for _ in range(2):
+        asyncio.run(plug.memory_append(plug.MemoryAppend(text=long_fact), None))
+    assert len(_store(memhome).all()) == 1
+
+
+def test_adding_a_synthesised_fact_yourself_makes_it_yours(memhome):
+    s = _store(memhome)
+    synth = s.add(MemoryRecord(text="User prefers Zig", source="synth", importance=0.4))
+    out = asyncio.run(plug.memory_append(plug.MemoryAppend(text="user prefers zig"), None))
+    assert out == {"status": "appended", "id": synth.id}
+    (rec,) = _store(memhome).all()
+    assert rec.source == "user" and rec.importance == 0.8
+
+
+def test_a_record_with_undecodable_text_is_refused_not_hidden(tmp_path):
+    s = _store(tmp_path)
+    with pytest.raises(UnicodeEncodeError):
+        s.add(MemoryRecord(text="a\udc80b", source="user"))
+    assert _store(tmp_path).all() == []
+    assert not s.path.exists() or b"\x80" not in s.path.read_bytes()
+
+
+def test_unreadable_lines_count_as_something_to_clear(clihome):
+    from localm.plugins.builtin.memory.cli import _store as cli_store
+    path = cli_store().path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"text": "caf\xe9"}\n')
+    assert "unreadable record lines" in cli_store().remnants()
+    res = _run("clear", "--yes")
+    assert res.exit_code == 0, res.output
+    assert "Nothing to clear" not in res.output
+    assert cli_store().remnants() == []
 
 
 def test_the_legacy_file_is_not_shown_once_imported(memhome):
@@ -119,9 +154,10 @@ def test_clear_erases_the_legacy_file_too(clihome):
 
 
 def test_cli_add_refuses_an_importance_outside_0_to_1(clihome):
-    res = _run("add", "User likes tea", "--importance", "5")
-    assert res.exit_code != 0
-    assert "0" in res.output and "1" in res.output
+    for bad in ("5", "nan"):
+        res = _run("add", "User likes tea", "--importance", bad)
+        assert res.exit_code != 0, bad
+        assert "0" in res.output and "1" in res.output
 
 
 def test_cli_add_twice_says_it_is_already_there(clihome):
@@ -151,4 +187,4 @@ def test_forget_of_a_fact_another_process_removed_says_so(clihome, monkeypatch):
     monkeypatch.setattr(cli, "_store", racing_store)
     res = _run("forget", rec.id, "--yes")
     assert res.exit_code == 0, res.output
-    assert "already deleted" in res.output
+    assert "no longer in memory" in res.output

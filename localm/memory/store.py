@@ -587,6 +587,7 @@ class MemoryStore:
         body = "\n".join(json.dumps({"v": FORMAT_VERSION, **r.to_dict()},
                                     ensure_ascii=False)
                          for r in self._records)
+        body.encode("utf-8")      # a record is never written with undecodable bytes
         if self._carried:
             body = "\n".join(part for part in (body, *self._carried) if part)
         _storekit_atomic_write(self._file, body + ("\n" if body else ""),
@@ -756,8 +757,9 @@ class MemoryStore:
 
     def remnants(self) -> list[str]:
         """Names of the parts of this namespace that still hold something on
-        disk: any of "live records", "forgotten archive", "pending
-        corrections", "dismissed corrections". Empty means genuinely nothing
+        disk: any of "live records", "unreadable record lines", "forgotten
+        archive", "pending corrections", "dismissed corrections". Empty means
+        genuinely nothing
         remains.
 
         Checked by FILE PRESENCE for the three sidecars rather than through
@@ -769,6 +771,8 @@ class MemoryStore:
         out = []
         if self._records:
             out.append("live records")
+        if self._carried:
+            out.append("unreadable record lines")
         if self._forgotten_file().is_file():
             out.append("forgotten archive")
         if self._corrections_file().is_file():
