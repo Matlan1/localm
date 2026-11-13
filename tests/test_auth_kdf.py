@@ -476,7 +476,7 @@ def test_an_unpersistable_kdf_record_warns_and_does_not_lock_the_owner_out(
     key = "correct-horse"
     auth.key_file().write_text(key + "\n", encoding="utf-8")
 
-    def boom(records):
+    def boom(records, **kw):
         raise OSError("data dir is read-only")
 
     monkeypatch.setattr(auth, "_save_owner_kdf", boom)
@@ -535,7 +535,7 @@ def test_migration_never_silently_downgrades_to_the_weak_digest(auth,
     key = "correct-horse"
     auth.key_file().write_text(key + "\n", encoding="utf-8")
 
-    def boom(records):
+    def boom(records, **kw):
         raise OSError("nope")
 
     monkeypatch.setattr(auth, "_save_owner_kdf", boom)

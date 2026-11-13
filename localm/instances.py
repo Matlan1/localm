@@ -31,7 +31,6 @@ import os
 import re
 import secrets
 import sys
-import threading
 from contextlib import contextmanager
 from datetime import datetime, UTC
 from pathlib import Path
@@ -231,17 +230,12 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
     return path
 
 
-#: Serialises every write of an entry or hold marker in this process.
-_ENTRY_WRITE_LOCK = threading.Lock()
-
-
 def _write_entry(path: Path, entry: dict) -> None:
-    """Write *entry* to *path* owner-only and atomically. Only the process an
-    entry belongs to writes it, and _ENTRY_WRITE_LOCK serialises those writes,
-    so the replace rides out another process reading the file."""
+    """Write *entry* to *path* owner-only and atomically, riding out another
+    process reading the file. Only the process an entry belongs to writes it;
+    other processes only read or remove it."""
     from localm.config import atomic_write_private
-    with _ENTRY_WRITE_LOCK:
-        atomic_write_private(path, json.dumps(entry, indent=2), retrying=True)
+    atomic_write_private(path, json.dumps(entry, indent=2), retrying=True)
 
 
 def hold_marker_path(home: Path, instance_id: str) -> Path:

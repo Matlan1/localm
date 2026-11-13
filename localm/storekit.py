@@ -234,10 +234,10 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     *retrying* selects the final replace: False (default) is a bare
     ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
     backoff (up to ~1 s) over a transient Windows sharing violation, such as a
-    concurrent reader's open handle. Pass True only when every writer of *path*
-    is serialized: a cross-process lock held for the whole write or
-    read-modify-write, or a file only one process ever writes, under a lock of
-    that process. Every caller passes True: ``auth.set_api_key`` (auth.key),
+    concurrent reader's open handle. Pass True only when no other process
+    writes *path* at the same time: a cross-process lock held for the whole
+    write or read-modify-write, or a file only one process ever writes. Every
+    caller passes True: ``auth.set_api_key`` (auth.key),
     ``auth._save_keystore`` (auth.json), ``model_source_credentials._write_all``,
     ``sessions._save`` and ``issue_tracker.record_filed`` under the file's
     cross-process lock; ``instances._write_entry`` and the job manager's
