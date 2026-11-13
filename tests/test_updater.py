@@ -140,7 +140,12 @@ def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
     assert op.calls["n"] == 0, "a blocked check must not attempt any connection"
     msg = f"{ei.value.summary} {ei.value.reason}".lower()
     assert "network access" in msg and "off" in msg
-    assert "settings" in msg or "net_mode" in msg
+    from localm import config
+    assert ei.value.reason == config.NET_OFF_UPDATE_REMEDY
+    assert ei.value.hint == config.net_off_update_refusal("no update check was made")
+    assert "settings > system > updates" in msg
+    assert "localm config update_ignore_net_policy true" in msg
+    assert "localm config net_mode ask" in msg
 
 
 def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
@@ -556,18 +561,21 @@ def test_apply_deps_refuses_a_build_without_a_lock_before_the_swap(
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
 
 
-def test_apply_deps_refused_by_net_mode_off_before_the_swap(
+def test_apply_under_net_mode_off_is_refused_before_anything_is_downloaded(
         tmp_path, monkeypatch, sig_env, no_uv):
     _config(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     inst = _fake_install(tmp_path, deps=("click",))
     _fake_uv(inst / ".uv")
     ran = []
+    downloads = []
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+        updater.apply(5, installed=inst, signature=sig,
+                      download_opener=lambda *a: downloads.append(a) or op(*a),
                       runner=lambda c: ran.append(c) or 0)
-    assert "net_mode=off" in ei.value.reason
+    assert ei.value.stage == "network_off"
+    assert downloads == []
     assert ran == [] and (inst / "VERSION").read_text().strip() == "0.1.0"
 
 

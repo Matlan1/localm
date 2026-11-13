@@ -169,16 +169,28 @@ def register(app: FastAPI, ctx) -> None:
         if route.routed:
             load_errors = []
             skipped_now = []
+            refused = None
             for _cand in route.candidates or (route.resolved,):
+                routed_status = _hs.loading_routed_status(_cand, route.current,
+                                                          sorted(route.gaps))
+
+                def _say_routed(text, _status=routed_status):
+                    say(_status if text == LOADING_MODEL_STATUS else text)
                 try:
                     # activate=False: answering one request with the routed
                     # model does not make it the model every later unnamed
                     # request resolves to. skip_if_latched: a load that failed
                     # while this request waited for the model is not repeated.
+                    # routed: only models routing loaded may be unloaded for
+                    # it, and a load that would need the user's yes is refused.
                     engine = await _hs.get_engine(_cand, activate=False,
-                                                  skip_if_latched=True, on_status=say)
+                                                  skip_if_latched=True, routed=True,
+                                                  on_status=_say_routed)
                 except _hs.LoadSkipped as e:
                     skipped_now.append(e.skipped)
+                    continue
+                except _hs.RouteRefused as e:
+                    refused = refused or e
                     continue
                 except (HTTPException, OSError, ValueError) as e:
                     detail = getattr(e, "detail", None) or f"{type(e).__name__}: {e}"
@@ -193,7 +205,9 @@ def register(app: FastAPI, ctx) -> None:
                 break
             if skipped_now:
                 route = route.with_skipped(skipped_now)
-            if engine is None:
+            if engine is None and refused is not None:
+                route = route.asked(refused.model, refused.fit, load_errors)
+            elif engine is None:
                 route = route.without_route(load_errors)
         if route.has_gap:
             from localm.debuglog import logger as _dbg
@@ -283,7 +297,7 @@ def register(app: FastAPI, ctx) -> None:
                     detail = vision_input_guidance(
                         mmproj_failed=mmproj_failed,
                         active_model_path=active_model_path,
-                        audio_only=audio_only)
+                        audio_only=audio_only, suggested=route.suggested)
                     if route.load_errors:
                         detail += (" An installed model that can read images "
                                    "could not be loaded: "
@@ -305,7 +319,8 @@ def register(app: FastAPI, ctx) -> None:
                     backend = getattr(engine, "_backend", None)
                     projector_failed = (bool(getattr(backend, "mmproj_path", None))
                                         and engine.supports_images is not True)
-                    detail = audio_input_guidance(projector_failed=projector_failed)
+                    detail = audio_input_guidance(projector_failed=projector_failed,
+                                                  suggested=route.suggested)
                     if route.load_errors:
                         detail += (" An installed model that can take audio "
                                    "could not be loaded: "
@@ -514,7 +529,8 @@ def register(app: FastAPI, ctx) -> None:
                         prompt_tokens, capacity,
                         encoder_decoder=_hs._engine_is_encoder_decoder(engine),
                         reply_reserve=_hs._engine_reply_reserve(engine),
-                        limit=reason))
+                        limit=reason),
+                    headers=_capability_route_header(route))
 
         except BaseException:
             _hs._unpin(engine)

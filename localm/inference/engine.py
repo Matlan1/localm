@@ -739,6 +739,20 @@ class Engine:
         size = getattr(self._backend, "full_offload_vram_bytes", None)
         return size() if callable(size) else None
 
+    def predict_placement(self, free_vram: Optional[int] = None,
+                          total_vram: Optional[int] = None,
+                          ram_available: Optional[int] = None,
+                          ram_total: Optional[int] = None) -> Optional[dict]:
+        """What the next load would place where, as the backend sizes it
+        (``predict_placement`` of a GGUF backend), without loading; None for a
+        backend that cannot predict it or when it cannot answer. Blocking:
+        reads the model file and may take a GPU and a RAM reading."""
+        predict = getattr(self._backend, "predict_placement", None)
+        if not callable(predict):
+            return None
+        answer = predict(free_vram, total_vram, ram_available, ram_total)
+        return answer if isinstance(answer, dict) else None
+
     def worker_vram_bytes(self) -> Optional[int]:
         """Dedicated VRAM the loaded model's worker process holds now
         (``gpu_usage.process_gpu_memory`` of the backend's worker), or None

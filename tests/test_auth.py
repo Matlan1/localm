@@ -1527,3 +1527,17 @@ def test_a_utf8_owner_kdf_file_reads_the_same_under_a_non_utf8_locale(auth, monk
                                 ensure_ascii=False).encode("utf-8"))
     _non_utf8_locale(monkeypatch)
     assert auth._load_owner_kdf() == [{"note": "café"}]
+
+
+def test_memo_key_is_not_an_unsalted_hash_of_the_secret(auth):
+    import hashlib
+    key = "owner-key-123"
+    handle = auth._memo_key(key)
+    assert handle == auth._memo_key(key)
+    assert handle != auth._memo_key(key + "x")
+    assert handle != hashlib.sha256(key.encode()).hexdigest()
+    assert handle != auth._fast_digest(key)
+
+
+def test_memo_key_survives_a_lone_surrogate(auth):
+    assert auth._memo_key("a\ud800b") == auth._memo_key("a\ud800b")
