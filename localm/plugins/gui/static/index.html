@@ -534,13 +534,13 @@
             <div id="img-lora-field"><label data-i18n="images.loraLabel">LoRA</label><select id="img-lora"><option value="" data-i18n="images.loraNone">None</option></select></div>
           </div>
           <label data-i18n="images.inputImageLabel">Input image path (optional, img2img)</label>
-          <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
+          <input type="text" id="img-input" placeholder="a generated image or an uploaded file" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
           <div id="img-native-inputs" class="img-native-extra" hidden></div>
           <!-- Every knob here is placeholder-defaulted: blank already means "use
                the tuned default". "reuse settings" on a history item writes into
                them, so it calls revealFilledAdvanced and this opens itself. -->
           <details class="adv-fold" id="img-advanced">
-            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">size, seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">size, seed, guidance, denoise, CFG and more</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
               <div><label data-i18n="images.sizeLabel">Size</label><input type="text" id="img-size" placeholder="model default, e.g. 768x512" spellcheck="false" data-i18n-placeholder="images.sizePlaceholder"></div>
               <div><label data-i18n="chat.seed">Seed</label><input type="number" id="img-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
@@ -567,8 +567,8 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="img-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
-            <label class="inline-check" title="Applies to image generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="images.reloadCheckboxTitle">
+            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to image generation only. When off, the image backend (ComfyUI or the built-in engine) stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="images.reloadCheckboxTitle">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -635,7 +635,7 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="music-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
             <label class="inline-check" title="Applies to music generation only. When off, the music backend stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="music.reloadCheckboxTitle">
               <input type="checkbox" id="music-reload-llm" checked> reload chat model after generation
             </label>
@@ -689,7 +689,7 @@
           <div class="grid2">
             <div><label data-i18n="mediaGallery.durationLabel">Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
             <div><label data-i18n="video.fpsLabel">FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
-            <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
+            <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="a generated image or an uploaded file" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
           </div>
           <!-- Width and Height are folded even though they look load-bearing: the
                blurb above this form tells you to KEEP the model's native resolution and
@@ -710,8 +710,8 @@
           </details>
           <div class="actions">
             <button class="btn-primary" id="video-generate" data-i18n="mediaGallery.generate">Generate</button>
-            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
-            <label class="inline-check" title="Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="video.reloadCheckboxTitle">
+            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
+            <label class="inline-check" title="Applies to video generation only. When off, the video backend (ComfyUI or the built-in engine) stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="video.reloadCheckboxTitle">
               <input type="checkbox" id="video-reload-llm" checked> reload chat model after generation
             </label>
           </div>
