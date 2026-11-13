@@ -157,6 +157,33 @@ class TestExport:
         agent._audit.close.assert_not_called()
 
 
+class TestRememberAndSystemText:
+    def test_remembering_a_note_already_there_says_so(self, home, tmp_path, monkeypatch):
+        proj = _proj(tmp_path)
+        (proj / "LOCALCODER.md").write_text("# Project Memory\n\n- use tabs\n",
+                                            encoding="utf-8")
+        agent = _agent(proj)
+        from localm.plugins.coder.cli import repl as repl_mod
+        said = []
+        monkeypatch.setattr(repl_mod, "print_success", lambda m: said.append(("ok", m)))
+        monkeypatch.setattr(repl_mod, "print_info", lambda m: said.append(("info", m)))
+        repl_mod._handle_command("/remember use tabs", agent)
+        assert said and said[0][0] == "info" and "Already in" in said[0][1], said
+        repl_mod._handle_command("/remember run ruff", agent)
+        assert said[-1][0] == "ok" and "Remembered" in said[-1][1], said
+
+    def test_an_over_long_system_flag_is_not_called_a_file(self, tmp_path):
+        from localm.plugins.coder.memory import (
+            _MAX_CUSTOM_INSTRUCTIONS_CHARS,
+            cap_user_instructions,
+            custom_instructions_warning,
+        )
+        text = "x " * _MAX_CUSTOM_INSTRUCTIONS_CHARS
+        warning = custom_instructions_warning(tmp_path, override=text)
+        assert "--system" in warning and "file" not in warning
+        assert "whole file" not in cap_user_instructions(text)
+
+
 class TestGoalInTheRepl:
     def test_a_write_is_asked_at_the_terminal_and_runs(self, home, tmp_path,
                                                        monkeypatch):

@@ -637,8 +637,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             print_info("Usage: /remember <text>")
         else:
             try:
+                from ..memory import is_remembered
+                already = is_remembered(agent.cwd, arg)
                 p = agent.remember(arg)
-                print_success(f"Remembered → {p}")
+                if already:
+                    print_info(f"Already in {p}; nothing changed.")
+                else:
+                    print_success(f"Remembered → {p}")
             except Exception as e:
                 print_error(f"remember failed: {e}")
 

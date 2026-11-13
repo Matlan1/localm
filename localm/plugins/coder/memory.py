@@ -283,6 +283,7 @@ def memory_warning(cwd: Path) -> str:
 CUSTOM_INSTRUCTIONS_FILE = ".localcoder/system.md"
 
 _INSTRUCTIONS_REMEDY = "Shorten it so the whole file is followed."
+_SYSTEM_FLAG_REMEDY = "Shorten the --system text so all of it is followed."
 
 
 def custom_instructions_file(cwd: Path) -> Path:
@@ -325,7 +326,7 @@ def cap_user_instructions(text: str) -> str:
     "## User Instructions" section would stay unbounded.
     """
     return _cap_for_injection(text.strip(), _MAX_CUSTOM_INSTRUCTIONS_CHARS,
-                              "user instructions", _INSTRUCTIONS_REMEDY)
+                              "user instructions", _SYSTEM_FLAG_REMEDY)
 
 
 def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> str:
@@ -342,7 +343,7 @@ def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> st
         return (
             f"The --system instructions are {len(raw)} characters; only the first "
             f"{len(kept)} are injected into the system prompt ({omitted} omitted). "
-            f"{_INSTRUCTIONS_REMEDY}"
+            f"{_SYSTEM_FLAG_REMEDY}"
         )
 
     p = _existing_instructions_file(cwd)
@@ -355,6 +356,19 @@ def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> st
                 "without them.")
     return _overflow_warning(p, raw, _MAX_CUSTOM_INSTRUCTIONS_CHARS,
                              "User instructions", _INSTRUCTIONS_REMEDY)
+
+
+def is_remembered(cwd: Path, text: str) -> bool:
+    """True when the memory file already holds the bullet :func:`remember`
+    would add for *text*. Reads only."""
+    p = find_memory_file(cwd)
+    if p is None or not p.is_file():
+        return False
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return f"- {text.strip()}" in lines
 
 
 def remember(cwd: Path, text: str) -> Path:
