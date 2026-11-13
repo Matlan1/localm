@@ -540,10 +540,19 @@ class BraveSearchProvider:
                                 self.label, None, ("search.brave.com",))
 
 
+def is_policy_refusal(exc: BaseException) -> bool:
+    """True for a refusal by the network policy; a host name that did not
+    resolve (``UnresolvableHost``) is a failure to connect, not a refusal."""
+    return (isinstance(exc, netpolicy.NetworkPolicyError)
+            and not isinstance(exc, netpolicy.UnresolvableHost))
+
+
 def _cause(exc: BaseException, url: str) -> str:
     """One service's failure as a plain clause, without the query."""
     if isinstance(exc, RedirectRefusedError):
         return "it answered with a redirect, which localm does not follow"
+    if isinstance(exc, netpolicy.UnresolvableHost):
+        return "its name did not resolve (no network, or a DNS failure)"
     if isinstance(exc, netpolicy.NetworkPolicyError):
         return "blocked by the network policy"
     if isinstance(exc, BotCheckError):
@@ -604,7 +613,7 @@ class DefaultSearchProvider:
         failures = [(self.routes[i], outcomes.get(i))
                     for i in range(len(self.routes))]
         tried = [(r, e) for r, e in failures if e is not None]
-        if tried and all(isinstance(e, netpolicy.NetworkPolicyError)
+        if tried and all(is_policy_refusal(e)
                          for _, e in tried) and len(tried) == len(failures):
             raise tried[0][1]
         parts = []

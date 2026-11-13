@@ -151,13 +151,18 @@ def is_transient(exc: BaseException) -> bool:
 def describe_failure(exc: BaseException, url: str = "") -> str:
     """A plain-language clause (no trailing period) saying why a request to
     *url* failed, naming its host. *url* defaults to the URL the exception
-    carries. A ``NetworkPolicyError`` or ``SearchProviderError`` keeps its own
-    message; an unrecognised exception yields its message, or its type name
+    carries. A host name that did not resolve (``UnresolvableHost``) is told
+    as such; any other ``NetworkPolicyError`` or a ``SearchProviderError`` keeps
+    its own message; an unrecognised exception yields its message, or its type name
     when the message is empty. At most 300 characters."""
-    from localm.netpolicy import NetworkPolicyError
+    from localm.netpolicy import NetworkPolicyError, UnresolvableHost
 
     from .contracts import SearchProviderError
 
+    if isinstance(exc, UnresolvableHost):
+        host = _host_of(url or _exc_url(exc)) or "the site"
+        return (f"could not find {host}: its name did not resolve (no network "
+                "connection, or a DNS failure)")[:_TEXT_CAP]
     if isinstance(exc, (NetworkPolicyError, SearchProviderError)):
         return (str(exc).strip() or type(exc).__name__)[:_TEXT_CAP]
     host = _host_of(url or _exc_url(exc)) or "the site"
