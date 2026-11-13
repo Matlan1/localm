@@ -412,6 +412,11 @@ NO_REFERENCES = ("{model} ({family}) does not take reference images. They work w
 
 CONTROL_STRENGTH = 0.9
 
+FLUX1_REFERENCES = ("Reference images are made for FLUX.1 Kontext. The file of a FLUX.1 model "
+                    "does not say whether it is Kontext, so with any other FLUX.1 model "
+                    "(FLUX.1 dev, schnell) the references may be ignored or followed "
+                    "poorly.")
+
 NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference images reach the "
                  "image model only and the edit follows them less closely. Register the "
                  "matching Qwen2.5-VL mmproj file (type mmproj) and pick it as the LLM vision "
@@ -918,6 +923,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 + ", ".join(unused) + ".")
     if ref_images and _lacks_llm_vision(models):
         say(NO_LLM_VISION)
+    if ref_images and models.get("family") == "flux":
+        say(FLUX1_REFERENCES)
     if mask_image is not None and (models.get("capabilities") or {}).get("inpaint"):
         say("Inpainting with a dedicated inpainting model.")
     if any(c.get("auto") for c in (models.get("components") or {}).values()):

@@ -758,3 +758,15 @@ def test_a_model_with_a_case_sensitive_encoder_gets_the_prompt_unchanged(addon_s
                          prompt="Ein großer ÖLBAUM", width=64, height=64)
     assert ok, msg
     assert runner.generates[-1]["prompt"] == "Ein großer ÖLBAUM"
+
+
+def test_reference_images_on_a_flux1_model_say_they_are_made_for_kontext(addon_set, runner,  # noqa: F811
+                                                                     tmp_path):
+    ok, msg, lines, _ = _gen(runner, tmp_path, {"model": "fluxunchained"}, width=64,
+                             height=64, ref_images=[_png((64, 64))])
+    assert ok, msg
+    assert image_native.FLUX1_REFERENCES in lines
+    ok, msg, lines, _ = _gen(runner, tmp_path, {"model": "fluxunchained"}, width=64,
+                             height=64)
+    assert ok, msg
+    assert image_native.FLUX1_REFERENCES not in lines
