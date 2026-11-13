@@ -1102,7 +1102,10 @@ class _GrammarTraceFolder:
     arrives or at :meth:`flush`. A triggered record is passed to *record* as
     ``Grammar triggered on regex`` or ``Grammar triggered on token``.
 
-    An awaiting or token-triggered record ends at a line ending in "`)" and a
+    A token-triggered record ends at the first "`)" on its line; llama.cpp
+    prints it without a line break, so the text after that "`)" is passed to
+    *forward* as a line of its own. A token-triggered record with no "`)" on its
+    line, and an awaiting record, end at a line ending in "`)", and a
     regex-triggered record at a line ending in "'", but the generated text can
     itself contain that
     delimiter before a newline. So after such a line the following lines are
@@ -1179,9 +1182,18 @@ class _GrammarTraceFolder:
                 return False
             self._record_awaiting()
             self._record("Grammar triggered on token")
+            stub = self._TRIGGERED_TOKEN + opening.group(1)
+            close = text.find(self._AWAITING_CLOSER, opening.end())
+            if close < 0:
+                if self._redacted is not None:
+                    self._redacted(stub + line[len(text):])
+                self._open(text[opening.end():], self._AWAITING_CLOSER)
+                return True
+            rest = line[close + len(self._AWAITING_CLOSER):]
             if self._redacted is not None:
-                self._redacted(self._TRIGGERED_TOKEN + opening.group(1) + line[len(text):])
-            self._open(text[opening.end():], self._AWAITING_CLOSER)
+                self._redacted(stub if rest.rstrip("\r") else stub + rest)
+            if rest.rstrip("\r"):
+                self._forward(line.__class__(rest))
             return True
         if text.startswith(self._TRIGGERED):
             self._record_awaiting()
@@ -1353,9 +1365,10 @@ def dedup_native_stderr(swap_lock=None):
     While the scope redacts, the file copy of a grammar trace record keeps
     only its first line without the generated text, and every other line
     stays byte-identical and in order. The scope redacts from the moment
-    debug_content_enabled() is False when it opens, when another open scope
-    redacts, or at a refresh_native_content_gate() call, until it closes; each
-    line follows the setting in force when the reader takes it.
+    debug_content_enabled() is False before or right after it is registered,
+    when another open scope redacts, or at a refresh_native_content_gate()
+    call, until it closes; each line follows the setting in force when the
+    reader takes it.
     If a persisted-log write itself fails (disk full, a closed fd), the line
     still reaches the console and the ring buffer and a single warning is
     emitted (see the _write_debug latch below) - degraded, never a silent drop.
@@ -1392,6 +1405,8 @@ def dedup_native_stderr(swap_lock=None):
         os.close(write_fd)
         scope = _DedupScope(saved_fd, console_fd, redact=not content_allowed)
         _register_dedup_scope(scope)
+    if content_allowed:
+        refresh_native_content_gate()
 
     debug_fd = native_stderr_target()
 

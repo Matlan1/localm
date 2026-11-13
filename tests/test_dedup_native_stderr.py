@@ -636,7 +636,7 @@ def test_debug_file_copy_of_a_trace_record_drops_the_generated_text(monkeypatch,
 def test_debug_file_keeps_the_raw_trace_when_chat_content_is_allowed(monkeypatch, tmp_path):
     data, calls = _run_with_debug_file(monkeypatch, tmp_path, True, _TRACE_STREAM)
     assert data == b"".join(_TRACE_STREAM), data
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_debug_file_keeps_a_line_held_after_a_record_when_the_stream_ends(monkeypatch, tmp_path):
@@ -666,6 +666,41 @@ def test_debug_file_copy_of_a_trigger_token_record_drops_the_token_text(monkeypa
     assert data == (b"Grammar still awaiting trigger after token 1\n"
                     b"Grammar triggered on token 12\r\n"
                     b"llama_decode: ordinary native line\n"), data
+
+
+def test_debug_file_copy_of_a_trigger_token_line_keeps_the_text_printed_after_it(
+        monkeypatch, tmp_path):
+    data, _ = _run_with_debug_file(monkeypatch, tmp_path, False, [
+        b"Grammar triggered on token 12 (`<ZQXtool>`)",
+        b"llama_perf_context_print: eval time = 1.00 ms\n",
+        b"llama_perf_context_print: total time = 2.00 ms\n",
+    ])
+    assert b"ZQX" not in data, data
+    assert data == (b"Grammar triggered on token 12\n"
+                    b"llama_perf_context_print: eval time = 1.00 ms\n"
+                    b"llama_perf_context_print: total time = 2.00 ms\n"), data
+
+
+def test_folder_forwards_the_text_printed_after_a_trigger_token_record():
+    passed, recorded = _fold(["Grammar triggered on token 12 (`<ZQXtool>`)ggml: next line",
+                              "ggml: following line"])
+    assert passed == ["ggml: next line", "ggml: following line"], passed
+    assert recorded == ["Grammar triggered on token"]
+
+
+def test_privacy_that_starts_while_a_scope_registers_is_seen(monkeypatch, tmp_path):
+    answers = iter([True])
+    log = tmp_path / "debug.log"
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: _Console())
+    monkeypatch.setattr(
+        debuglog, "native_stderr_target",
+        lambda: os.open(str(log), os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                          | getattr(os, "O_BINARY", 0)))
+    monkeypatch.setattr(debuglog, "debug_content_enabled", lambda: next(answers, False))
+    with debuglog.dedup_native_stderr():
+        os.write(2, _awaiting(21, "ZQXlate"))
+    data = log.read_bytes()
+    assert data == b"Grammar still awaiting trigger after token 21\n", data
 
 
 def _debug_file_with_the_real_gate(monkeypatch, tmp_path):
