@@ -460,7 +460,8 @@ WEB_FAILED_INSTRUCTION = (
     "do not present anything as a result of it.")
 
 
-def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> str:
+def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS,
+                      check=None) -> str:
     """Run a scheduled chat *prompt* against *engine*, giving it the web tool when
     network access is on. Returns the model's final answer.
 
@@ -499,6 +500,8 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
             return _complete(engine, messages)
 
     for _ in range(max_rounds):
+        if check is not None:
+            check()
         reply = _turn()
         # Limit 2: we run the first call and only need to know whether ANY further
         # call was present, so it never pays to enumerate the rest.

@@ -85,13 +85,65 @@ def test_a_coder_agent_is_asked_to_stop_when_its_key_is_revoked():
     stopped = threading.Event()
 
     class _Agent:
-        def request_stop(self):
+        def cancel(self, reason):
+            assert reason == runner._REVOKED_DURING_RUN
             stopped.set()
 
     live = runner._LiveRun(_job())
     live.agent = _Agent()
     live.revoke(runner._REVOKED_DURING_RUN)
     assert stopped.is_set() and live.revoked == runner._REVOKED_DURING_RUN
+
+
+def test_a_stop_before_the_coder_loop_starts_is_not_lost(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    from localm.plugins.coder.agent import Agent
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    backend.native_tools = False
+    with patch("localm.plugins.coder.agent.ProjectMap") as pm, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        pm.build.return_value.file_count.return_value = 0
+        agent = Agent(backend=backend, cwd=tmp_path)
+    live = runner._LiveRun(_job())
+    live.agent = agent
+    live.revoke(runner._REVOKED_DURING_RUN)
+    agent.run_task("edit every file")
+    assert backend.chat.call_count == 0 and backend.chat_stream.call_count == 0, (
+        "a cancelled run asks the model nothing")
+    assert agent.stop_pending
+
+
+def test_a_revoked_memory_run_stops_at_its_next_model_call(monkeypatch):
+    live = runner._LiveRun(_job())
+    with runner._LIVE_RUNS_LOCK:
+        runner._LIVE_RUNS[threading.get_ident()] = live
+    try:
+        live.revoke(runner._REVOKED_DURING_RUN)
+        with pytest.raises(PermissionError, match="stopped"):
+            runner._raise_if_revoked()
+    finally:
+        with runner._LIVE_RUNS_LOCK:
+            runner._LIVE_RUNS.pop(threading.get_ident(), None)
+    runner._raise_if_revoked()
+
+
+def test_the_key_watch_keeps_a_run_when_the_keystore_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(runner, "_created_by_owner", lambda job: False)
+    monkeypatch.setattr(runner, "_KEY_WATCH_INTERVAL_S", 0.02)
+    monkeypatch.setattr(runner, "_key_watch_running", False)
+    monkeypatch.setattr(auth, "key_hash_live_checked", lambda h: None)
+    monkeypatch.setattr(runner, "_creator_refusal",
+                        lambda job: pytest.fail("no verdict without a keystore read"))
+    live = runner._register_live_run(_job())
+    try:
+        time.sleep(0.2)
+        assert live.revoked is None
+    finally:
+        with runner._LIVE_RUNS_LOCK:
+            runner._LIVE_RUNS.pop(threading.get_ident(), None)
 
 
 def test_an_owner_keys_job_is_not_tracked(monkeypatch):

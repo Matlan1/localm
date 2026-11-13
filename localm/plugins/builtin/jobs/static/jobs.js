@@ -412,13 +412,15 @@ export function register(ctx) {
       ["cron", "Custom cron (5-field)"],
     ]);
     const schedDetails = el("div", "jobs-sched-details");
-    const schedHint = el("div", "sub",
-      "A new job first runs at the scheduler's next check (within a minute), then on " +
-      "its schedule. Times of day use the clock of the computer the server runs on.");
+    const schedHint = el("div", "sub");
     
     function updateSchedDetails() {
       clear(schedDetails);
       const val = schedKind.querySelector("select").value;
+      schedHint.textContent = (val === "hours" || val === "interval")
+        ? "A new job first runs at the scheduler's next check (within a minute), then on its schedule."
+        : "A new job first runs at its next matching time. Times of day use the clock of the " +
+          "computer the server runs on.";
       if (val === "hours") {
         const wrap = el("div", "");
         wrap.appendChild(el("span", null, "Every "));
@@ -516,7 +518,10 @@ export function register(ctx) {
       } else if (preset === "cron") {
         kind = "cron";
         schedule = document.getElementById("jobs-sched-cron").value.trim();
-        if (!schedule) schedule = "0 8 * * *";
+        if (!schedule) {
+          toast("Enter a 5-field cron expression (e.g. 0 8 * * *).", true);
+          return;
+        }
       }
       const payload = {
         name: name.querySelector("input").value.trim(),

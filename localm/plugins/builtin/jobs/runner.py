@@ -2,8 +2,9 @@
 """Execute a single job and return a result record.
 
 ``run_job(job, *, engine=None)`` runs the job's prompt and returns a dict:
-    {status: "ok"|"error", output: str, error: str|None,
+    {status: "ok"|"error"|"skipped", output: str, error: str|None,
      started: float, finished: float}
+("skipped": the run had nothing to do, e.g. a memory job in privacy mode.)
 
 It NEVER raises - any failure is caught and reported as an ``error`` result, so
 a scheduler tick can safely run many jobs in a row.
@@ -70,9 +71,9 @@ class _LiveRun:
         if self.revoked is None:
             self.revoked = why
             logger.warning("jobs: job %s is being stopped: %s", self.job.id, why)
-        stop = getattr(self.agent, "request_stop", None)
-        if callable(stop):
-            stop()
+        cancel = getattr(self.agent, "cancel", None)
+        if callable(cancel):
+            cancel(why)
 
 
 # Runs of jobs created by a revocable key, keyed by thread id. The revoke
@@ -100,8 +101,10 @@ def _revoke_live_runs(key_hash: Optional[str]) -> None:
 def _watch_live_run_keys() -> None:
     """Every ``_KEY_WATCH_INTERVAL_S`` seconds, re-check the creating key of each
     live run (``_creator_refusal``), so a revoke by another process, an expiry or
-    a narrowed scope also stops the run. Exits when no live run is left."""
+    a narrowed scope also stops the run. A tick on which the keystore cannot be
+    read stops nothing and logs a warning. Exits when no live run is left."""
     global _key_watch_running
+    from localm import auth
     while True:
         time.sleep(_KEY_WATCH_INTERVAL_S)
         with _LIVE_RUNS_LOCK:
@@ -110,15 +113,19 @@ def _watch_live_run_keys() -> None:
                 _key_watch_running = False
                 return
         for r in runs:
-            if r.revoked is not None:
-                continue
             try:
-                refusal = _creator_refusal(r.job)
+                if r.revoked is not None:
+                    continue
+                if auth.key_hash_live_checked(r.job.owner) is None:
+                    logger.warning("jobs: could not read the keystore to re-check the "
+                                   "key of running job %s; it keeps running until "
+                                   "the next check", r.job.id)
+                    continue
+                if _creator_refusal(r.job):
+                    r.revoke(_REVOKED_DURING_RUN)
             except Exception as e:
-                logger.debug("jobs: key re-check of job %s failed: %s", r.job.id, e)
-                continue
-            if refusal:
-                r.revoke(_REVOKED_DURING_RUN)
+                logger.warning("jobs: the key re-check of running job %s failed: %s",
+                               r.job.id, e)
 
 
 def _register_live_run(job: Job) -> Optional[_LiveRun]:
@@ -134,9 +141,22 @@ def _register_live_run(job: Job) -> Optional[_LiveRun]:
         if not _key_watch_running:
             _key_watch_running = start = True
     if start:
-        threading.Thread(target=_watch_live_run_keys, name="jobs-key-watch",
-                         daemon=True).start()
+        try:
+            threading.Thread(target=_watch_live_run_keys, name="jobs-key-watch",
+                             daemon=True).start()
+        except RuntimeError as e:
+            with _LIVE_RUNS_LOCK:
+                _key_watch_running = False
+            logger.warning("jobs: the key watch for running jobs could not start (%s); "
+                           "only a revoke in this process stops a running job", e)
     return run
+
+
+def _raise_if_revoked() -> None:
+    """Raise PermissionError when the run on this thread was revoked."""
+    live = _current_live_run()
+    if live is not None and live.revoked is not None:
+        raise PermissionError(f"{live.revoked}, so it was stopped")
 
 
 def _current_live_run() -> Optional[_LiveRun]:
@@ -332,7 +352,7 @@ def _run_chat(job: Job, *, engine=None) -> str:
     # rounds), not per-round.
     from localm.inference.http_server import driving_engine
     with driving_engine(eng):
-        return webtool.run_chat_with_web(eng, job.prompt)
+        return webtool.run_chat_with_web(eng, job.prompt, check=_raise_if_revoked)
 
 
 # Longest a job waits for the server to load the model it runs on.
@@ -604,6 +624,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
     from localm.textnorm import strip_think
 
     def complete(prompt: str) -> str:
+        _raise_if_revoked()
         raw = background_complete(eng, prompt, yield_to_foreground=True).strip()
         # strip_think: memory must never ingest the reasoning channel.
         return strip_think(raw).strip()
@@ -729,7 +750,8 @@ def _run_rag(job: Job) -> str:
         result = coll.resync(embed_fn=embed_fn,
                              policy=indexing_policy(key_roots=key_roots),
                              model_name=model_name,
-                             on_progress=lambda t, **_: lines.append(t))
+                             on_progress=lambda t, **_: (_raise_if_revoked(),
+                                                         lines.append(t)))
     except CollectionLockedError as e:
         # Another localm process (or a hand-run `localm rag add|resync`) holds this
         # collection. The scheduled tick waits a bounded time and then stands down,
@@ -1059,7 +1081,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
     if live is not None:
         live.agent = agent
         if live.revoked is not None:
-            agent.request_stop()
+            agent.cancel(live.revoked)
     try:
         out = (agent.run_task(job.prompt) or "").strip()
         notes = []

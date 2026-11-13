@@ -134,11 +134,14 @@ Creating a job needs the scope for its task kind as well as `jobs`: `chat`,
 created by a key other than the owner key runs only while that key still exists
 and still holds that scope; a job whose creating key was revoked, expired or
 narrowed is not run and records an error result instead. A run already in
-progress when that happens is stopped (a coder run at its next step) and its
-output is discarded: at once for a revoke in the running server, within about
-five seconds for a revoke from another process, an expiry or a narrowed scope.
-Jobs created with the owner key, or in open mode, are not affected. A memory job
-in privacy mode does nothing and records the result `skipped`.
+progress when that happens is stopped at its next step (a coder tool call, a
+chat or memory model call, a knowledge file) and records an error: at once for
+a revoke in the running server, within about five seconds for a revoke from
+another process, an expiry or a narrowed scope. What the run wrote before it
+stopped (files a coder run edited, facts a memory run saved, documents a
+knowledge run indexed) stays. Jobs created with the owner key, or in open mode,
+are not affected. A run with nothing to do (a memory job in privacy mode, or with
+no new sessions) records the result `skipped`.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job; editing or running an already shell-enabled job needs the same.
