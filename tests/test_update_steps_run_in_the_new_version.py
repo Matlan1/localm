@@ -44,8 +44,23 @@ def test_every_update_path_leaves_the_runtime_and_components_to_the_new_version(
     for where, node in calls:
         kw = {k.arg: k.value for k in node.keywords}
         assert "defer_runtime" in kw, f"{where}:{node.lineno} does not defer the update steps"
-        assert isinstance(kw["defer_runtime"], ast.Constant) and kw["defer_runtime"].value is True, \
-            f"{where}:{node.lineno}"
+        value = kw["defer_runtime"]
+        assert (isinstance(value, ast.Constant) and value.value is True) or (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "_defer_update_steps"), f"{where}:{node.lineno}"
+
+
+@pytest.mark.parametrize("target, running, deferred", [
+    ("0.3.5", "0.3.4", True),
+    ("0.3.4", "0.3.4", True),
+    ("0.3.3", "0.3.4", False),
+    ("nightly", "0.3.4", True),
+])
+def test_a_terminal_downgrade_carries_its_steps_out_itself(monkeypatch, target, running,
+                                                          deferred):
+    from localm.cli import maintenance
+    monkeypatch.setattr(_version, "read_version", lambda: running)
+    assert maintenance._defer_update_steps(target) is deferred
 
 
 def test_the_scan_sees_an_apply_passed_as_an_argument():
@@ -169,6 +184,7 @@ def test_a_runtime_step_that_fails_at_the_new_versions_start_rolls_the_update_ba
 @pytest.mark.parametrize("state, repair, rolls_back", [
     ("failed", False, True),
     ("failed", True, False),
+    ("waiting", False, False),
     ("updated", False, False),
 ])
 def test_a_component_step_that_fails_at_the_new_versions_start_rolls_the_update_back(
@@ -205,3 +221,32 @@ def test_a_deferred_component_update_says_when_it_happens(updates_dir):
         say=None, roll_back=None, when="at the next start of localm")
     assert status is None and note.endswith("at the next start of localm")
     assert updater_components.read_pending() is not None
+
+
+def test_a_catch_up_at_start_is_a_repair_and_never_rolls_an_update_back(at_start,
+                                                                       monkeypatch):
+    monkeypatch.setattr(updater_components, "catch_up", lambda root=None, *, repair=False: (
+        updater_components.write_pending([{"name": "sdcpp", "update": True}], root=".",
+                                         version="9.9.9", repair=repair)
+        or [{"name": "sdcpp", "update": True, "note": "sd.cpp"}]))
+    monkeypatch.setattr(updater_components, "finish_pending",
+                        lambda **kw: {"state": "failed", "note": "components failed"})
+    _core._finish_pending_component_update("gui")
+    assert updater_components.read_pending()["repair"] is True
+    assert at_start["rolled_back"] == 0
+
+
+def test_a_preload_waits_for_the_restart_that_installs_the_update(monkeypatch):
+    from localm.plugins.gui import cli as gui_cli
+    import threading
+    loaded = threading.Event()
+
+    class Engine:
+        def load(self):
+            loaded.set()
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "1")
+    gui_cli._start_preload(None, Engine())
+    assert not loaded.wait(1.0)
+    monkeypatch.delenv("LOCALM_FINISH_UPDATE_AFTER_START")
+    gui_cli._start_preload(None, Engine())
+    assert loaded.wait(10.0)

@@ -322,7 +322,9 @@ def test_deps_and_runtime_both_run_in_that_order(install, tmp_path, monkeypatch)
     assert res["runtime"]["state"] == "updated"
 
 
-def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install):
+def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install, monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(install))
     data, sig = _release()
     with pytest.raises(LocalmError) as ei:
@@ -335,7 +337,10 @@ def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install):
     assert updater_runtime.read_pending() is None
 
 
-def test_a_fallback_to_another_backend_counts_as_failed(install):
+def test_a_fallback_with_a_previous_runtime_that_does_not_load_counts_as_failed(install,
+                                                                                monkeypatch):
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(install))
     data, sig = _release()
     with pytest.raises(LocalmError) as ei:
@@ -584,6 +589,8 @@ def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do
                   defer_runtime=True)
     import localm.inference.http_server as hs
     monkeypatch.setattr(updater, "repo_root", lambda: install)
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     fake = _fake_setup_llama(install, "b1355-cpu-b11908", rc=1)
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
@@ -731,6 +738,8 @@ def test_first_start_adds_missing_kernel_packs_once(tmp_path, cfg, monkeypatch,
 def test_first_start_retries_after_a_failure_and_keeps_the_old_runtime(
         updated_by_an_old_updater, monkeypatch):
     inst = updated_by_an_old_updater
+    monkeypatch.setattr(updater_runtime, "_runtime_loads",
+                        lambda lib, backend, sl: (False, "the restored runtime does not load"))
     before = au._tree_signature(_lib(inst))
     _start(inst, monkeypatch, rc=1)
     assert au._tree_signature(_lib(inst)) == before
@@ -1047,8 +1056,8 @@ def test_the_kept_record_names_the_build_read_from_the_restored_runtime(tmp_path
     assert updater_runtime.plan(inst, inst)["reprovision"] is False
 
 
-def test_a_restored_runtime_with_no_recorded_build_is_kept_and_tried_again(tmp_path, cfg,
-                                                                            monkeypatch):
+def test_a_restored_runtime_with_no_recorded_build_is_kept_and_names_how_to_try_again(
+        tmp_path, cfg, monkeypatch):
     inst = _tree(tmp_path / "inst")
     lib = _provision(inst, "vulkan", None)
     pending = {"backend": "vulkan", "current": None, "target": "b11928",
@@ -1059,5 +1068,7 @@ def test_a_restored_runtime_with_no_recorded_build_is_kept_and_tried_again(tmp_p
         root=inst, runner=_fake_setup_llama(inst, "b11928", backend="cpu"), wait=0)
     assert st["state"] == "kept", st
     assert updater_runtime.kept_runtime(lib) is None
-    assert "did not work here" in st["note"] and "tried again on the next start" in st["note"]
+    assert "did not work here" in st["note"] and "To try it again: " in st["note"]
     assert "could not be installed" not in st["note"]
+    assert "tried again on the next start" not in st["note"]
+    assert updater_runtime.plan(inst, inst)["reprovision"] is False

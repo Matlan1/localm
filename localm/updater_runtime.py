@@ -273,7 +273,7 @@ def kept_runtime(lib) -> Optional[dict]:
     not work here (``why``), else None. Never raises."""
     try:
         data = json.loads((Path(lib) / KEPT_RECORD).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or not all(
             isinstance(data.get(k), str) for k in ("backend", "kept", "target", "why")):
@@ -1023,9 +1023,9 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
                                    backend, e)
             outcome = (f"this release's {target} did not work here ({problem})" if setup_finished
                        else f"this release's {target} could not be installed ({problem})")
-            retry = (f"To try it again: {_manual_command(backend)}" if recorded
-                     else (f"It is tried again on the next start; to try it now: "
-                           f"{_manual_command(backend)}"))
+            retry = (f"It is tried again on the next start; to try it now: "
+                     f"{_manual_command(backend)}" if restored and not recorded
+                     else f"To try it again: {_manual_command(backend)}")
             status.update(state="kept", error=problem,
                           why=f"{outcome}; the previous {backend} runtime {previous} was kept",
                           note=f"kept the {backend} runtime {previous}: {outcome}. {retry}")

@@ -694,7 +694,7 @@ def _finish_pending_runtime_update(command) -> None:
                           f"update ({escape(str(pending.get('backend')))} "
                           f"{escape(str(pending.get('target')))}) ...[/dim]")
         else:
-            found = updater_runtime.catch_up()
+            found = updater_runtime.catch_up(repair=True)
             if found is None:
                 return
             if found.get("kernel_packs"):
@@ -735,7 +735,8 @@ def _finish_pending_component_update(command) -> None:
     process a restart re-executed (see :func:`_finish_pending_runtime_update`).
     A failure is printed, the previous versions stay in use, the command still
     runs, and the next start tries again; when the component update an update
-    left pending fails, the update is rolled back
+    left pending fails (``state`` ``failed``; ``waiting`` keeps it pending), the
+    update is rolled back
     (:func:`_roll_back_update_at_start`), unless a repair recorded it."""
     from localm import updater_components
     if command not in updater_components.COMPONENT_COMMANDS:
@@ -748,15 +749,17 @@ def _finish_pending_component_update(command) -> None:
             console.print("[dim]Finishing the component update from the last localm "
                           "update ...[/dim]")
         else:
-            found = updater_components.catch_up()
+            found = updater_components.catch_up(repair=True)
             if found is None:
                 return
+            pending = updater_components.read_pending()
             console.print(f"[dim]This localm release ships other versions of installed "
                           f"components: {escape(updater_components.summary(found) or '')}"
                           " ...[/dim]")
         status = updater_components.finish_pending(
             say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
-        if status is None and updater_components.catch_up() is not None:
+        if status is None and updater_components.catch_up(repair=True) is not None:
+            pending = updater_components.read_pending()
             status = updater_components.finish_pending(
                 say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except Exception as e:
@@ -766,7 +769,7 @@ def _finish_pending_component_update(command) -> None:
     if status is not None and status.get("note"):
         style = "green" if status["state"] in ("updated", "current") else "yellow"
         console.print(f"[{style}]Components: {escape(status['note'])}[/{style}]")
-    if (status is not None and status["state"] not in ("updated", "current")
+    if (status is not None and status["state"] == "failed"
             and pending is not None and not pending.get("repair")):
         _roll_back_update_at_start("the components of this update could not be installed")
 
