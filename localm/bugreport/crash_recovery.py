@@ -6,7 +6,7 @@ trace, log and exit code, and filing the report on the next start.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from localm.bugreport.logs import _find_run_log, _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import trim_trace_for_report
@@ -198,29 +198,41 @@ def _classify_prior_death(*, native_trace: str, hang_trace: str,
     )
 
 
+def _read_crash_record(path) -> tuple[dict, bool]:
+    """``(record, readable)`` for the crash marker or stopping record at *path*.
+    A record that cannot be read or parsed, or is not a JSON object, comes back
+    as ``({"diagnostics": False}, False)``, so it is handled like a run armed in
+    privacy mode."""
+    import json
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"diagnostics": False}, False
+    if not isinstance(info, dict):
+        return {"diagnostics": False}, False
+    return info, True
+
+
+def _not_reported_reason(readable: bool) -> str:
+    return "privacy mode" if readable else "its record could not be read"
+
+
 def _report_one_crash_marker(d, marker, home, interactive: bool):
     """Report *marker* as a crash IF its recorded pid is no longer alive, then
     clear it (the marker and its trace file). The report is filed only when
     diagnostics are allowed now (``audit.diagnostics_allowed()``) and the
     marker does not record ``"diagnostics": false`` (a run armed in privacy
-    mode); a marker without the key is reported like any other. A dead-pid
+    mode); a marker without the key is reported like any other, and one that
+    cannot be read is not reported (``_read_crash_record``). A dead-pid
     marker that is not reported is still cleared, and logged at INFO. Returns
     the report path, or None if this marker was skipped (a live sibling
     instance, or not reported) or nothing could be filed. Never raises."""
-    import json
     from localm.debuglog import logger
     from localm.instances import pid_alive
     try:
         if not marker.exists():
             return None
-        info = {}
-        try:
-            info = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:
-            # A corrupt/half-written marker (the process may have died mid-write)
-            # still means a crash happened: fall back to empty context and report
-            # it anyway rather than dropping the crash on the floor.
-            pass
+        info, readable = _read_crash_record(marker)
         pid = info.get("pid")
         try:
             if pid_alive(int(pid)):
@@ -232,8 +244,8 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
                 # check to rule it out.
                 return None
         except (TypeError, ValueError):
-            # No/unparseable pid recorded: cannot confirm liveness, so treat it
-            # like the corrupt-marker case above - report rather than drop it.
+            # No or unparseable pid recorded: liveness cannot be confirmed, so
+            # it is handled as a dead run.
             pass
         report = _br._diagnostics_allowed() and info.get("diagnostics") is not False
         trace = ""
@@ -263,10 +275,10 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         exit_record = _read_exit_record(d, marker)
         if not report:
             logger.info(
-                "bugreport: prior hard crash detected (%s); not reported: "
-                "privacy mode", marker.name)
+                "bugreport: prior hard crash detected (%s); not reported: %s",
+                marker.name, _not_reported_reason(readable))
             return None
-        ctx = {"prior_run": info}
+        ctx: dict[str, Any] = {"prior_run": info}
         if exit_record:
             ctx["prior_exit"] = exit_record
         if trace:
@@ -309,19 +321,13 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
     otherwise deleted together with its trace file. When that trace names a
     fatal fault (see _fatal_fault_line), diagnostics are allowed now and the
     run did not arm in privacy mode (``"diagnostics": false``), it is reported
-    as a crash during the stop. Returns the report path, or None. Never
-    raises."""
-    import json
+    as a crash during the stop; a record that cannot be read is handled as a
+    dead privacy-mode run (``_read_crash_record``). Returns the report path, or
+    None. Never raises."""
     from localm.debuglog import logger
     from localm.instances import pid_alive
     try:
-        info = {}
-        try:
-            info = json.loads(record.read_text(encoding="utf-8"))
-        except Exception:
-            # A corrupt record still pairs with its trace: handled like one
-            # whose pid is gone.
-            pass
+        info, readable = _read_crash_record(record)
         try:
             if pid_alive(int(info.get("pid"))):
                 return None
@@ -349,9 +355,9 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
         if not (_br._diagnostics_allowed() and info.get("diagnostics") is not False):
             logger.info(
                 "bugreport: native fault during a prior clean stop detected (%s); "
-                "not reported: privacy mode", record.name)
+                "not reported: %s", record.name, _not_reported_reason(readable))
             return None
-        ctx = {"prior_run": dict(info, stage="stopping"),
+        ctx: dict[str, Any] = {"prior_run": dict(info, stage="stopping"),
                "native_trace": trim_trace_for_report(text)}
         tail, log_unavailable = _recent_log_tail_result(home, pid=info.get("pid"))
         if tail:

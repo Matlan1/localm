@@ -384,7 +384,7 @@ def test_a_clip_whose_attention_job_outlasts_the_driver_is_refused_before_sampli
     assert f"{frames} frames at 832x480" in msg
     assert "at most 17 frames (1.1 s at 16 fps)" in msg
     assert "Windows resets this GPU when one job runs longer than 2 s" in msg
-    assert msg.endswith("or pick the ROCm runtime in Settings > Video.")
+    assert msg.endswith("or pick the ROCm runtime in Settings > Media > Video > Native runtime.")
 
 
 def test_a_clip_just_over_the_bound_names_its_time_and_the_bound(monkeypatch, tmp_path):
@@ -419,7 +419,8 @@ def test_an_unmeasured_rate_refuses_on_vulkan(monkeypatch, tmp_path, rate):
     ok, msg, params, _said, _asked = _video(monkeypatch, tmp_path, 17, rate=rate)
     assert not ok
     assert params == []
-    assert "could not measure" in msg and "Pick the ROCm runtime in Settings > Video." in msg
+    assert "could not measure" in msg
+    assert "Pick the ROCm runtime in Settings > Media > Video > Native runtime." in msg
     if isinstance(rate, Exception):
         assert "worker died" in msg
 
@@ -623,9 +624,10 @@ def test_a_model_planned_on_the_cpu_is_not_limited(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("runtimes,hint", [
-    (["ROCm"], ", or pick the ROCm runtime in Settings > Video."),
-    (["CUDA"], ", or pick the CUDA runtime in Settings > Video."),
-    (["CUDA", "ROCm"], ", or pick the CUDA or ROCm runtime in Settings > Video."),
+    (["ROCm"], ", or pick the ROCm runtime in Settings > Media > Video > Native runtime."),
+    (["CUDA"], ", or pick the CUDA runtime in Settings > Media > Video > Native runtime."),
+    (["CUDA", "ROCm"],
+     ", or pick the CUDA or ROCm runtime in Settings > Media > Video > Native runtime."),
 ])
 def test_the_refusal_names_only_the_runtimes_this_machine_has(monkeypatch, tmp_path, runtimes,
                                                              hint):

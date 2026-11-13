@@ -40,7 +40,8 @@ def patched(monkeypatch):
         switches.append((base_url, model))
         return outcome["result"] or (model, None)
 
-    monkeypatch.setattr("localm.cli.chat._switch_server_model", fake_switch)
+    monkeypatch.setattr("localm.inference.server_switch.switch_server_model",
+                        fake_switch)
 
     def set_status(state, active):
         monkeypatch.setattr("localm.inference.http_engine.remote_model_status",

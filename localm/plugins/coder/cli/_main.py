@@ -911,6 +911,35 @@ def _url_typed_on_command_line() -> bool:
             and ctx.get_parameter_source("url") == ParameterSource.COMMANDLINE)
 
 
+def _serve_on_attached(base_url: str, token, model: str, *, machine_output: bool,
+                       starting: bool = False) -> str:
+    """Make the localm server at *base_url* (its ``/v1`` root) answer with
+    *model* through server_switch.serve_requested_model (the same model is
+    reused, another one is loaded through the server's load route). Returns the
+    name to address the model by: the name the server reports, or *model* when
+    the server was not switched, after a warning naming the reason (requests
+    name *model*, so the server loads it on the first one or answers with why
+    it cannot). Lines go to stderr when *machine_output* is set."""
+    from rich.markup import escape
+
+    from localm.inference.server_switch import serve_requested_model
+
+    def _say(line: str) -> None:
+        if machine_output:
+            click.echo(line, err=True)
+        else:
+            console.print(f"[dim]{escape(line)}[/dim]")
+
+    served = serve_requested_model(base_url, token, model, starting=starting,
+                                   say=_say)
+    if served.name is not None:
+        return served.name
+    print_warning(f"{served.note} Requests name {model}, so the server loads it "
+                  f"when the first one is sent, or answers with why it cannot.",
+                  to_stderr=machine_output)
+    return model
+
+
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                    force_new, work_dir, ci, probe_only=False, machine_output=False,
                    session_mode=None):
@@ -1018,14 +1047,19 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                 if not _api_key_explicit:
                     from localm.auth import resolve_bearer_token
                     attach_key = resolve_bearer_token(_tgt.get("token")) or api_key
-                attached = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
+                served = model if probe_only else _serve_on_attached(
+                    _tgt["base_url"], attach_key, model, machine_output=machine_output)
+                attached = HTTPBackend(_tgt["base_url"], served, api_key=attach_key,
                                        native_tools=native_tools,
                                        localm_server=True)   # discovered localm instance
                 if not machine_output:
+                    from rich.markup import escape
+                    _how = ("sharing its loaded model" if probe_only
+                            else f"answering with {escape(served)}")
                     console.print(
                         f"[dim]Using the localm already running for[/dim] "
                         f"[cyan]{_root}[/cyan] [dim](port {_tgt['port']}, "
-                        f"mode {_tgt.get('mode')}) - sharing its loaded model.[/dim]")
+                        f"mode {_tgt.get('mode')}) - {_how}.[/dim]")
 
         if attached is not None:
             backend = attached
@@ -1168,7 +1202,10 @@ def _build_backend_gated(provider, url, model, api_key, native_tools, port,
                             from localm.auth import resolve_bearer_token
                             attach_key = (resolve_bearer_token(_tgt.get("token"))
                                          or api_key)
-                        backend = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
+                        served = _serve_on_attached(
+                            _tgt["base_url"], attach_key, model,
+                            machine_output=machine_output, starting=True)
+                        backend = HTTPBackend(_tgt["base_url"], served, api_key=attach_key,
                                               native_tools=native_tools,
                                               localm_server=True)
                         from localm.console import show_url

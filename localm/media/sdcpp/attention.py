@@ -34,13 +34,14 @@ def limit_sentence(limit: gpureset.ResetLimit) -> str:
     return f"{limit.reason}, so localm keeps each job under {limit.safe_seconds:g} s."
 
 
-def runtime_hint(settings: str, runtimes: list) -> str:
-    """``", or pick the ROCm runtime in Settings > Images"`` for the runtime
-    names in *runtimes* and the Settings page *settings*; empty without any."""
+def runtime_hint(place: str, runtimes: list) -> str:
+    """``", or pick the ROCm runtime in <place>"`` for the runtime names in
+    *runtimes* and the settings field *place* (for example
+    ``"Settings > Media > Image > Native runtime"``); empty without any."""
     if not runtimes:
         return ""
     names = " or ".join(runtimes)
-    return f", or pick the {names} runtime in Settings > {settings}"
+    return f", or pick the {names} runtime in {place}"
 
 _WAN_SIZES = (("-1.3B", 1536), ("-5B", 3072), ("-14B", 5120))
 _WAN_LARGEST_DIM = 5120
