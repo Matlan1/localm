@@ -150,6 +150,10 @@ class Reader(threading.Thread):
             if not self.stop.is_set():
                 self.dropped = e
 
+    def __repr__(self):
+        return (f"<Reader alive={self.is_alive()} status={self.status!r} "
+                f"dropped={self.dropped!r} first_lines={[ln for _, ln in self.lines[:3]]!r}>")
+
     def frames(self, kind):
         out = []
         for at, line in list(self.lines):
