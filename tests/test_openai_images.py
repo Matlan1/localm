@@ -150,7 +150,7 @@ class TestPrivacyMode:
             self, client, backend, home):
         client.post(URL, json={"prompt": "a cat"})
         assert backend.calls[0]["write_sidecar"] is False
-        assert backend.calls[0]["delete_outputs"] is True
+        assert backend.calls[0]["privacy"] is True
         assert not (home / "gui_images").exists() or _gallery(home) == []
 
     def test_a_temp_folder_that_does_not_exist_yet_is_created(

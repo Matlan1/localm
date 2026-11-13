@@ -162,7 +162,8 @@ def register(app: FastAPI, ctx) -> None:
         if (_hs.network_bind_needs_key(request.app)
                 and removal_leaves_no_key(clear_all=True)):
             raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
-        failed = clear_api_key()
+        from fastapi.concurrency import run_in_threadpool
+        failed = await run_in_threadpool(clear_api_key)
         # The key that minted every current session is gone; those sessions carry
         # their own ADMIN scope snapshot, so they MUST be revoked or a leftover
         # cookie would keep full access after the key was cleared. Sign out

@@ -552,7 +552,9 @@ jobs:
   # Runs the python-pr-gate affected-test selection on windows-latest, with the
   # same `if`, install and test command; tests that skip on Linux (skipif not
   # win32) run here. The lock, hygiene and ruff checks run on the Linux job only.
-  # See test_the_windows_gate_runs_the_linux_gate_selection_on_windows.
+  # pytest runs under the runner's default shell and the venv goes on PATH the
+  # way the Windows test-shard does it. See
+  # test_the_windows_gate_runs_the_linux_gate_selection_on_windows.
   python-pr-gate-windows:
     name: Python PR gate, Windows (affected tests)
     runs-on: windows-latest
@@ -560,9 +562,6 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       !contains(github.event.pull_request.labels.*.name, 'full-ci')
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -579,8 +578,10 @@ jobs:
       - name: Create the project venv
         run: python -m venv .venv
       - name: Put the venv on PATH
-        run: echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\.venv\Scripts"
       - name: Install
+        shell: bash
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/editable.txt
           uv export --quiet --locked --no-emit-project --extra dev --extra rag -o "$RUNNER_TEMP/requirements.txt"
