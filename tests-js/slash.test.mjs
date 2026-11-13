@@ -163,3 +163,29 @@ test("an unrecognised command reports 'Unknown command: /<cmd>'", () => {
   window.handleSlashSubmit("/totally-bogus-cmd", window.execChatCommand);
   assert.equal(toastText(window), "Unknown command: /totally-bogus-cmd");
 });
+
+/* ================================================================ */
+/*  Media commands name the chat surface                             */
+/* ================================================================ */
+
+for (const [runner, route, arg] of [
+  ["runImagineInChat", "/api/imagine", "a cat"],
+  ["runMusicInChat", "/api/music", "lo-fi"],
+  ["runVideoInChat", "/api/video", "a cat"],
+]) {
+  test(`${runner} sends X-Client-Id: chat with ${route}`, async () => {
+    const calls = [];
+    const fetchImpl = async (url, init = {}) => {
+      calls.push({ url: String(url), headers: init.headers || {} });
+      if (String(url) === route) {
+        return { ok: false, status: 500, json: async () => ({ detail: "stop here" }), text: async () => "" };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    };
+    const { window } = loadApp({ fetchImpl });
+    await window[runner](arg);
+    const sent = calls.filter((c) => c.url === route);
+    assert.equal(sent.length, 1, `${route} was requested once`);
+    assert.equal(sent[0].headers["X-Client-Id"], "chat");
+  });
+}
