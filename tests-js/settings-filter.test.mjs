@@ -138,21 +138,25 @@ test("filter matches a field by LABEL and shows it across groups at once", async
 });
 
 test("a filtered field still saves its own section", async () => {
-  const { type, unit } = await setup();
+  const { win, type, unit } = await setup();
 
+  const layers = unit("n_gpu_layers").querySelector("input");
+  layers.value = "40";
+  layers.dispatchEvent(new win.Event("input", { bubbles: true }));
   type("context window");
   const nctx = unit("n_ctx").querySelector("input");
   nctx.value = "8192";
+  nctx.dispatchEvent(new win.Event("input", { bubbles: true }));
   const sec = unit("n_ctx").closest(".settings-section");
   sec.querySelector(".settings-section-save").click();
   await drain();
 
   assert.equal(PATCHES.length, 1, "the section saved while filtered");
   assert.equal(PATCHES[0].n_ctx, 8192, "the edited value was sent");
-  // The filter hides fields, it never removes them, so the section's other
-  // values are still read back rather than silently dropped from the PATCH.
-  assert.equal(PATCHES[0].n_gpu_layers, 999,
-    "a filter-hidden field in the same section is still saved, not dropped");
+  // The filter hides fields, it never removes them, so an edit made before
+  // filtering is still read back rather than silently dropped from the PATCH.
+  assert.equal(PATCHES[0].n_gpu_layers, 40,
+    "an edited filter-hidden field in the same section is still saved, not dropped");
 });
 
 test("filter matches by config KEY and by HELP text", async () => {

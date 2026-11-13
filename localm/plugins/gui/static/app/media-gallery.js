@@ -225,7 +225,7 @@ export function createGallery(cfg) {
         catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
       }
       lsSetScoped(cfg.moveDestKey, dest);
-      toast(t("mediaGallery.movedCount", { moved, plural: t(`${cfg.itemKey}.other`) })
+      toast(t("mediaGallery.movedCount", { moved, plural: tn(cfg.itemKey, moved) })
         + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
       state.selected.clear();
       refresh();
@@ -240,7 +240,7 @@ export function createGallery(cfg) {
             try { await apiDelete(name); deleted++; }
             catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
           }
-          toast(t("mediaGallery.deletedCount", { deleted, plural: t(`${cfg.itemKey}.other`) })
+          toast(t("mediaGallery.deletedCount", { deleted, plural: tn(cfg.itemKey, deleted) })
             + (failed ? t("mediaGallery.andFailedSuffix", { failed }) : ""));
           state.selected.clear();
           refresh();
@@ -311,14 +311,19 @@ export function createGallery(cfg) {
         const dest = await pickDirectory(
           t("mediaGallery.moveSingleTitle", { noun: tn(cfg.itemKey, 1) }),
           localStorage.getItem(cfg.moveDestKey) || "");
-        if (!dest) return;
+        // pickDirectory() reuses the shared #modal, so a cancel or a failure
+        // re-opens this detail view.
+        if (!dest) { showDetail(item); return; }
         try {
           const path = await apiMove(item.name, dest);
           lsSetScoped(cfg.moveDestKey, dest);
           toast(t("mediaGallery.movedTo", { path }));
           closeModal();
           refresh();
-        } catch (e) { toast(t("mediaGallery.moveFailed", { message: e.message }), true); }
+        } catch (e) {
+          toast(t("mediaGallery.moveFailed", { message: e.message }), true);
+          showDetail(item);
+        }
       };
       actions.appendChild(move);
 
@@ -434,7 +439,7 @@ export function musicPreview(item, ctx) {
       _cardURLs.add(url);
       player.className = "audio-inline";
       player.onclick = (ev) => ev.stopPropagation();
-      reportMediaLoadFailure(player, "the track", stop);
+      reportMediaLoadFailure(player, t("music.mediaWhat"), stop);
       player.src = url;
       wrap.appendChild(player);
       play.replaceChildren(iconEl("stop", "btn-ic"));
@@ -474,9 +479,12 @@ export function releaseDetailURL() {
   _cardURLs.clear();
 }
 
-/** Modal preview for a playable medium: a real, controllable player. */
-export function playerDetail(tag, what) {
+/** Modal preview for a playable medium: a real, controllable player.
+ *  *whatKey* is the catalog key of the medium's noun with its article
+ *  ("the track"), read each time the detail opens. */
+export function playerDetail(tag, whatKey) {
   return (item, body, ctx) => {
+    const what = t(whatKey);
     const player = document.createElement(tag);
     player.controls = true;
     player.style.width = "100%";
@@ -490,6 +498,49 @@ export function playerDetail(tag, what) {
       .catch((e) => toast(t("mediaGallery.mediaLoadFailedGeneric", { what, message: e.message }), true));
     body.appendChild(player);
   };
+}
+
+/* ---- a running job started elsewhere (the chat's /generate-* commands) ---- */
+
+/** The newest running job of *kind* ("imagine", "music", "video") that this
+ *  caller may see, from GET /api/activity, or null when there is none or the
+ *  list cannot be read. */
+export async function runningJobOf(kind) {
+  try {
+    const r = await fetch("/api/activity", { headers: authHeaders() });
+    if (!r.ok) return null;
+    const ops = ((await r.json()) || {}).operations || [];
+    const running = ops.filter((o) => o && o.kind === kind && o.status === "running" && o.id);
+    running.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    return running[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** A page's one followed job. `run(work)` marks the page busy for *work* (an
+ *  async function) and returns its result; `adopt(kind, follow)` follows the
+ *  newest running job of *kind* through `follow(jobId)` when the page follows
+ *  none, so a job started from the chat shows on its page too. A job id is
+ *  adopted at most once per page load. */
+export function createJobFollower() {
+  let busy = false;
+  let looking = false;
+  const followed = new Set();
+  async function run(work) {
+    busy = true;
+    try { return await work(); } finally { busy = false; }
+  }
+  async function adopt(kind, follow) {
+    if (busy || looking) return;
+    looking = true;
+    let job;
+    try { job = await runningJobOf(kind); } finally { looking = false; }
+    if (!job || busy || followed.has(job.id)) return;
+    followed.add(job.id);
+    await run(() => follow(job.id));
+  }
+  return { run, adopt, get busy() { return busy; } };
 }
 
 /* ---- per-plugin "reload chat model after generating" toggle ------------- */
