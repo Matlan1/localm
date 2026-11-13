@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
@@ -36,6 +36,7 @@ from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
 from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
 from localm.inference.protocol import ChatRequest, CompletionRequest, EmbeddingRequest
+from localm.streaming_response import StreamingResponse
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
 )

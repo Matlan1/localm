@@ -4,6 +4,8 @@ the streaming responses it opened, not only its next request."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import threading
 import time
 
@@ -407,3 +409,178 @@ def test_two_revokes_at_once_cannot_remove_a_network_server_s_last_key(monkeypat
     assert len(auth.list_keys()) == 1
     assert sorted(s for s, _ in statuses.values()) == [200, 409]
     assert hs.LAST_KEY_NETWORK_DETAIL in [d for _, d in statuses.values()]
+
+
+def _app_with_recorder(app, path, order):
+    """*app* behind an ASGI wrapper that appends "app returned" to *order* once
+    a request to *path* has been fully handled."""
+    async def outer(scope, receive, send):
+        await app(scope, receive, send)
+        if scope["type"] == "http" and scope["path"] == path:
+            order.append("app returned")
+    return outer
+
+
+def test_a_revoked_stream_s_body_is_closed_before_its_response_returns(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi import Depends
+
+    from localm.inference.http_server import _require_auth, create_app
+    from localm.streaming_response import StreamingResponse
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret-ownersecret")
+    created = auth.create_key("S", [scopes.CHAT])
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+    order = []
+    sent = []
+
+    async def _gen():
+        try:
+            for i in range(200):
+                await asyncio.sleep(0.005)
+                sent.append(i)
+                yield f"data: {i}\n\n"
+                if i == 2:
+                    auth.revoke_key(created["id"])
+        finally:
+            order.append("body closed")
+
+    @app.post("/v1/test-stream", dependencies=[Depends(_require_auth)])
+    async def _stream(payload: dict):
+        assert payload == {"hello": "world"}
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    with TestClient(_app_with_recorder(app, "/v1/test-stream", order)) as c:
+        r = c.post("/v1/test-stream", json={"hello": "world"},
+                   headers={"Authorization": f"Bearer {created['key']}"})
+    assert r.status_code == 200
+    assert "data: 2" in r.text
+    assert "data: 4" not in r.text
+    assert order == ["body closed", "app returned"]
+    assert len(sent) < 10
+
+
+class _EndlessEngine:
+    """A model whose generation never ends on its own and holds a lock while
+    it runs, as the llama.cpp runner holds its inference lock; closing its
+    generator sets ``cancelled``."""
+
+    def __init__(self):
+        self.display_name = "endless-model"
+        self.last_finish_reason = "stop"
+        self.inference_lock = threading.Lock()
+        self.entered = threading.Event()
+        self.cancelled = threading.Event()
+
+    def count_messages_tokens(self, messages):
+        return 3
+
+    def count_tokens(self, text):
+        return len(str(text).split())
+
+    def context_capacity(self):
+        return None
+
+    def chat_stream(self, messages, **kwargs):
+        return self._stream()
+
+    def _stream(self):
+        with self.inference_lock:
+            self.entered.set()
+            i = 0
+            try:
+                while True:
+                    yield f"t{i} "
+                    i += 1
+                    time.sleep(0.005)
+            except GeneratorExit:
+                self.cancelled.set()
+                raise
+
+
+def test_a_revoked_chat_stream_stops_its_generation(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi import Depends
+
+    from localm.inference.http_server import (
+        _pin_engine,
+        _require_auth,
+        _stream_sse,
+        create_app,
+    )
+    from localm.streaming_response import StreamingResponse
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret-ownersecret")
+    created = auth.create_key("S", [scopes.CHAT])
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    app = create_app(engine)
+    model = _EndlessEngine()
+    order = []
+
+    async def _watched(body):
+        try:
+            async for chunk in body:
+                yield chunk
+        finally:
+            await body.aclose()
+            order.append("body closed")
+
+    @app.get("/v1/test-chat", dependencies=[Depends(_require_auth)])
+    async def _chat():
+        sem = asyncio.Semaphore(1)
+        body = _pin_engine(model, _stream_sse(
+            model, [{"role": "user", "content": "hi"}], "endless-model", sem))
+        return StreamingResponse(_watched(body), media_type="text/event-stream")
+
+    def _revoke_once_generating():
+        if model.entered.wait(10):
+            time.sleep(0.05)
+            auth.revoke_key(created["id"])
+
+    revoker = threading.Thread(target=_revoke_once_generating, daemon=True)
+    revoker.start()
+    with TestClient(_app_with_recorder(app, "/v1/test-chat", order)) as c:
+        r = c.get("/v1/test-chat",
+                  headers={"Authorization": f"Bearer {created['key']}"})
+    revoker.join(10)
+    assert r.status_code == 200
+    assert "t0" in r.text
+    assert order == ["body closed", "app returned"]
+    assert model.cancelled.wait(5)
+    deadline = time.monotonic() + 5
+    while model.inference_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not model.inference_lock.locked()
+
+
+def test_an_unreadable_keystore_warns_once_per_outage(monkeypatch, caplog):
+    mgr = SessionManager()
+    monkeypatch.setattr(mgr, "_start_key_watch", lambda: None)
+    s = mgr.create(_Session("s1", "h1"))
+    answers = [None, None, None, True, None, True]
+    monkeypatch.setattr(auth, "key_hash_live_checked", lambda h: answers.pop(0))
+
+    def _lines(level):
+        return [r.getMessage() for r in caplog.records
+                if r.levelno == level and "keystore" in r.getMessage()]
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        for _ in range(3):
+            assert mgr.end_sessions_of_dead_keys() == []
+        assert len(_lines(logging.WARNING)) == 1
+        assert _lines(logging.INFO) == []
+        assert mgr.end_sessions_of_dead_keys() == []
+        assert len(_lines(logging.INFO)) == 1
+        assert "read again" in _lines(logging.INFO)[0]
+        assert mgr.end_sessions_of_dead_keys() == []
+        assert len(_lines(logging.WARNING)) == 2
+        assert mgr.end_sessions_of_dead_keys() == []
+        assert len(_lines(logging.INFO)) == 2
+    assert answers == []
+    assert not s.closed and mgr.get("s1") is s
+    mgr.close_all()

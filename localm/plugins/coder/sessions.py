@@ -1114,6 +1114,7 @@ class SessionManager:
         self._lock = threading.Lock()
         self._reaping = False
         self._watching = False
+        self._keystore_unreadable = False
         with _live_managers_lock:
             _live_managers.add(self)
         from localm import auth
@@ -1147,18 +1148,27 @@ class SessionManager:
         """Close and remove every session whose creating keystore key is no
         longer live (revoked, removed or expired,
         ``auth.key_hash_live_checked``). A keystore that cannot be read ends
-        nothing and is logged at WARNING. Returns the ids ended."""
+        nothing; the first such call is logged at WARNING, later ones are not,
+        and the first call after that reads the keystore again logs one INFO
+        line. Returns the ids ended."""
         from localm import auth
+        from localm.debuglog import logger
         with self._lock:
             hashes = {s.key_hash for s in self._sessions.values() if s.key_hash}
         ended = []
         for h in hashes:
             live = auth.key_hash_live_checked(h)
             if live is None:
-                from localm.debuglog import logger
-                logger.warning("coder: the keystore could not be read, so the keys "
-                               "of live sessions were not checked this time")
+                if not self._keystore_unreadable:
+                    self._keystore_unreadable = True
+                    logger.warning("coder: the keystore could not be read, so the "
+                                   "keys of live sessions are not checked until it "
+                                   "can be read again")
                 return ended
+            if self._keystore_unreadable:
+                self._keystore_unreadable = False
+                logger.info("coder: the keystore can be read again; the keys of "
+                            "live sessions are checked again")
             if not live:
                 ended.extend(self.end_sessions_of_key(h))
         return ended

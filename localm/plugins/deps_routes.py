@@ -17,11 +17,11 @@ import asyncio
 import json
 
 from fastapi import Depends, HTTPException
-from fastapi.responses import StreamingResponse
 
 from localm import scopes
 from localm.inference.http_server import require_scope
 from localm.plugins import deps_task
+from localm.streaming_response import StreamingResponse
 
 
 def register_dep_routes(app, manager) -> None:
