@@ -14,12 +14,19 @@ import { gotoSettingsSection } from "../pages/settings.js";
 /*  Command palette (Ctrl/Cmd+K)                                     */
 /* ================================================================ */
 
+/** True when the nav button of view *v* is hidden for this key. */
+function navHidden(v) {
+  const nav = $("nav-" + v);
+  return !!nav && (nav.hidden || nav.style.display === "none");
+}
+
 // Built fresh on each open, including runtime-added plugin views. View labels
-// are read from the live nav buttons.
+// are read from the live nav buttons. A view whose nav button is hidden for
+// this key is not offered.
 export function cmdkCommands() {
   const cmds = [];
   for (const v of VIEWS) {
-    if (!$("view-" + v)) continue;
+    if (!$("view-" + v) || navHidden(v)) continue;
     const nav = $("nav-" + v);
     const label = ((nav ? nav.textContent : v) || v).trim() || v;
     cmds.push({ label: t("cmdk.goTo", { view: label }), run: () => showView(v) });
@@ -27,10 +34,10 @@ export function cmdkCommands() {
   cmds.push({ label: t("topbar.newChat"), run: () => { newConversation(); showView("chat"); } });
   cmds.push({ label: t("cmdk.toggleTheme"), run: () => $("theme-toggle").click() });
   cmds.push({ label: t("cmdk.exportConversation"), run: () => exportConversation() });
-  // Jump to the Keys & devices manager. Offered only while its panel is not
-  // gated-hidden for this key.
+  // Jump to the Keys & devices manager. Offered only while Settings is shown
+  // for this key and the panel is not gated-hidden.
   const keysCard = $("keys-card");
-  if (keysCard && !keysCard.classList.contains("sec-hidden")) {
+  if (keysCard && !keysCard.classList.contains("sec-hidden") && !navHidden("settings")) {
     cmds.push({ label: t("cmdk.manageKeys"), run: () => {
       showView("settings");
       if (typeof gotoSettingsSection === "function") gotoSettingsSection("keys-card");
@@ -51,6 +58,12 @@ export function renderCmdk(query) {
   if (_cmdkSel >= _cmdkShown.length) _cmdkSel = Math.max(0, _cmdkShown.length - 1);
   const list = $("cmdk-list");
   list.replaceChildren();
+  if (!_cmdkShown.length) {
+    const empty = el("div", "cmdk-item cmdk-empty", t("cmdk.noMatch"));
+    empty.setAttribute("aria-disabled", "true");
+    list.appendChild(empty);
+    return;
+  }
   _cmdkShown.forEach((c, i) => {
     const item = el("div", "cmdk-item" + (i === _cmdkSel ? " sel" : ""), c.label);
     item.onclick = () => runCmdk(i);
@@ -76,10 +89,13 @@ export function closeCommandPalette() {
   $("cmdk").style.display = "none";
 }
 
+/** Run the shown command at *index* and close the palette. With no command
+ *  there (nothing matches the filter) the palette stays open. */
 export function runCmdk(index) {
   const cmd = _cmdkShown[index];
+  if (!cmd) return;
   closeCommandPalette();
-  if (cmd) cmd.run();
+  cmd.run();
 }
 
 $("cmdk-input").addEventListener("input", (e) => { _cmdkSel = 0; renderCmdk(e.target.value); });

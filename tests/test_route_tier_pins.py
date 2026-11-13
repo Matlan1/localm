@@ -23,6 +23,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.test_create_app_characterization import _expected_routes, _route_table
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 # (kind, method, path) -> gate chain, for the GUI surface attach_gui adds to
 # create_app, then one table per bundled plugin.

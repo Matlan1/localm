@@ -675,6 +675,9 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
                           None)
             if inside:
                 reason = f"it is inside {root / inside}, which uninstall removes"
+        if reason == HOME_UNKNOWN:
+            raise ValueError(f"{HOME_UNKNOWN}, so no data folder can be checked against "
+                             "it; set HOME (USERPROFILE on Windows) and try again")
         if reason:
             raise ValueError(f"{target} cannot be the data folder ({reason}); "
                              "choose a folder of its own")
@@ -724,6 +727,9 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
 #  Guards                                                                      #
 # --------------------------------------------------------------------------- #
 
+HOME_UNKNOWN = "your home folder could not be found"
+
+
 def _unsafe_data_dir(path: str, repo: Path, *, allow_link: bool = False) -> Optional[str]:
     """A reason string if *path* is too dangerous for ``rm -rf``, else None.
     Refuses empty/relative paths, symlinks (unless *allow_link*), the
@@ -745,7 +751,7 @@ def _unsafe_data_dir(path: str, repo: Path, *, allow_link: bool = False) -> Opti
         if rp == Path.home().resolve():
             return "user home directory"
     except Exception:
-        return "cannot resolve home directory"
+        return HOME_UNKNOWN
     repo_r = repo.resolve()
     if rp == repo_r:
         return "repository root"
@@ -1551,6 +1557,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         where = shutil.which("uv") or "your user profile"
         items.append(_Item(where, "report", "keep",
                            "uv was installed by LocaLM setup; other programs may use it"))
+        items.extend(_shared_uv_pointers())
     if m and m.get("uv_exe") and not m.get("uv_shared_installed"):
         items.append(_Item(m["uv_exe"], "report", "keep",
                            "your own uv, which LocaLM setup used but did not install"))
@@ -1577,15 +1584,8 @@ def _pointers_into(root: Path) -> list[_Item]:
     startup files for a uv in ``<root>/.uv``, and its install receipt."""
     out: list[_Item] = []
     if sys.platform == "win32":
-        try:
-            from localm import globalcmd
-            value, _ = globalcmd._win_read_user_path()
-        except Exception:
-            value = ""
-        for entry in value.split(os.pathsep):
-            e = entry.strip().strip('"')
-            x = os.path.expandvars(e)
-            if e and _is_full_path(x) and _inside(x, root):
+        for e, x in _user_path_entries():
+            if _inside(x, root):
                 out.append(_Item(e, "path-entry", "remove", "points into this folder"))
     else:
         for rc in _rc_files():
@@ -1676,7 +1676,12 @@ def _rc_files() -> list[Path]:
 
 
 def _uv_line_forms(root: Path) -> set:
-    uvdir = root / ".uv"
+    return _env_line_forms(root / ".uv")
+
+
+def _env_line_forms(uvdir: Path) -> set:
+    """The lines Astral's uv installer adds to a shell startup file to load the
+    uv in *uvdir*."""
     exprs = {uvdir.as_posix(), str(uvdir)}
     try:
         exprs.add("$HOME/" + uvdir.relative_to(Path.home()).as_posix())
@@ -1691,12 +1696,53 @@ def _uv_line_forms(root: Path) -> set:
 
 
 def _uv_lines_in(rc: Path, root: Path) -> int:
+    return _env_lines_in(rc, _uv_line_forms(root))
+
+
+def _env_lines_in(rc: Path, forms: set) -> int:
     try:
         text = rc.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return 0
-    forms = _uv_line_forms(root)
     return sum(1 for line in text.splitlines() if line.strip() in forms)
+
+
+def _user_path_entries() -> list:
+    """``(entry, expanded)`` for each full-path entry of the Windows user PATH,
+    or [] when it cannot be read."""
+    try:
+        from localm import globalcmd
+        value, _ = globalcmd._win_read_user_path()
+    except Exception:
+        value = ""
+    out = []
+    for entry in value.split(os.pathsep):
+        e = entry.strip().strip('"')
+        x = os.path.expandvars(e)
+        if e and _is_full_path(x):
+            out.append((e, x))
+    return out
+
+
+def _shared_uv_pointers() -> list:
+    """Report items (kept) for what Astral's uv installer added outside this
+    folder for a uv in the user profile: the user PATH entry for
+    ``~/.local/bin`` (Windows) or the lines that load it in shell startup
+    files (Linux, macOS)."""
+    bindir = Path.home() / ".local" / "bin"
+    why = "added by uv's installer for the shared uv; other programs may use it"
+    out = []
+    if sys.platform == "win32":
+        for e, x in _user_path_entries():
+            if _same(x, bindir):
+                out.append(_Item(f"{e} on your user PATH", "report", "keep", why))
+        return out
+    forms = _env_line_forms(bindir)
+    for rc in _rc_files():
+        if _env_lines_in(rc, forms):
+            out.append(_Item(rc, "report", "keep", "a line that loads uv from "
+                             f"{bindir}, {why}"))
+    return out
 
 
 def _strip_uv_lines(rc: Path, root: Path) -> int:

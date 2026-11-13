@@ -429,6 +429,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .cmdk-item { padding: 10px 16px; cursor: pointer; font-size: 14px; color: var(--text); }
 .cmdk-item:hover { background: var(--accent-soft); }
 .cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
+.cmdk-item.cmdk-empty, .cmdk-item.cmdk-empty:hover { background: none; color: var(--text-dim); cursor: default; }
 
 /* Settings: performance sliders + VRAM estimate */
 #sec-performance input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
@@ -2349,6 +2350,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.routed-suggest:hover { color: var(--accent); border-color: var(--accent); }
+.media-offer-why { margin-top: 4px; font-size: 0.85em; color: var(--text-dim); }
 
 /* file/folder picker modal (app/picker.js) - replaces the old .dir-picker-*
    modal list. The .dir-picker-row/-btn rules below are a separate thing (the

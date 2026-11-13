@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The pure-ASGI transport middleware. Three are added after every
 BaseHTTPMiddleware handler so they wrap them all: the request-body cap, the
-disconnect signal and, outermost, the hang alarm's in-flight bookkeeping. Two
+disconnect signal and, outermost, the hang alarm's in-flight bookkeeping. Three
 are added before every other middleware, so they are the innermost: the request
-privacy scope, then the client-left answer around it."""
+privacy scope, the client-left answer around it, and the credential recheck of
+streaming responses around both."""
 
 from __future__ import annotations
 
@@ -54,6 +55,112 @@ class ClientLeftMiddleware:
             await send({"type": "http.response.start", "status": 499,
                         "headers": [(b"content-length", b"0")]})
             await send({"type": "http.response.body", "body": b""})
+
+
+#: Seconds between two checks of a streaming response's credential while no
+#: credential changed in this process.
+CREDENTIAL_RECHECK_S = 5.0
+
+
+class _CredentialGone(Exception):
+    """Raised through a streaming response's send when its credential is no
+    longer accepted."""
+
+
+class CredentialRecheckMiddleware:
+    """End a streaming response whose request presented a key or a session
+    cookie once that credential is no longer accepted (revoked, expired,
+    cleared, replaced).
+
+    Before each body chunk, the credential is checked again with the
+    request-start check (``http_server._require_auth``) when
+    :func:`localm.auth.revocation_epoch` moved since the request started or
+    was last checked, or :data:`CREDENTIAL_RECHECK_S` seconds passed. When it is refused, the
+    response is closed with an empty final chunk and the handler is cancelled
+    the way a client disconnect cancels it. A response that presented no
+    credential, or whose first body chunk came while no key was configured and
+    ``require_auth`` was off (open mode, where the GUI's shell token is not a
+    key), is not checked.
+    Whether to check is decided once, off the event loop, at the first body
+    chunk that has more to follow; a response sent in one chunk never asks."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    @staticmethod
+    def _has_credential(scope) -> bool:
+        from starlette.requests import Request
+
+        from localm import auth
+        token, _source = _hs._request_token(Request(scope))
+        return bool(token and token.strip()) and (
+            auth.any_key_configured() or auth.require_auth_enabled())
+
+    @staticmethod
+    def _accepted(scope) -> bool:
+        from fastapi import HTTPException
+        from starlette.requests import Request
+        try:
+            _hs._require_auth(Request(scope))
+        except HTTPException:
+            return False
+        return True
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from fastapi.concurrency import run_in_threadpool
+
+        from localm import auth
+        loop = asyncio.get_running_loop()
+        state = {"epoch": auth.revocation_epoch(), "at": loop.time(),
+                 "gone": False, "checked_cred": None}
+
+        async def _send(message):
+            if state["gone"]:
+                raise _CredentialGone()
+            if (message["type"] == "http.response.body" and message.get("more_body")
+                    and state["checked_cred"] is None):
+                state["checked_cred"] = await run_in_threadpool(
+                    self._has_credential, scope)
+            if (message["type"] == "http.response.body" and message.get("more_body")
+                    and state["checked_cred"]):
+                epoch = auth.revocation_epoch()
+                if (epoch != state["epoch"]
+                        or loop.time() - state["at"] >= CREDENTIAL_RECHECK_S):
+                    state["epoch"], state["at"] = epoch, loop.time()
+                    if not await run_in_threadpool(self._accepted, scope):
+                        state["gone"] = True
+                        from localm.debuglog import logger as _dbg
+                        _dbg.info("%s %s: the credential of this stream is no longer "
+                                  "accepted; the stream was ended",
+                                  scope.get("method"), scope.get("path"))
+                        await send({"type": "http.response.body", "body": b"",
+                                    "more_body": False})
+                        raise _CredentialGone()
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except BaseException as e:
+            if not state["gone"] or not _only_credential_gone(e):
+                raise
+
+
+def _only_credential_gone(e: BaseException) -> bool:
+    """True when *e* is :class:`_CredentialGone`, or an exception group (any
+    depth) holding nothing else."""
+    if isinstance(e, _CredentialGone):
+        return True
+    inner = getattr(e, "exceptions", None)
+    return bool(inner) and all(_only_credential_gone(x) for x in inner)
+
+
+def add_credential_recheck(app: FastAPI) -> None:
+    """Add :class:`CredentialRecheckMiddleware`. Call before any
+    BaseHTTPMiddleware handler is added, so it wraps the route's own send."""
+    app.add_middleware(CredentialRecheckMiddleware)
 
 
 class RequestPrivacyMiddleware:

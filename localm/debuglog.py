@@ -22,6 +22,7 @@ log file path so every process in the tree appends to the same file.
 
 from __future__ import annotations
 
+import atexit
 import collections
 import contextlib
 import itertools
@@ -225,14 +226,282 @@ class _RingBufferHandler(logging.Handler):
         return list(self._buf)
 
 
-def flush_log_handlers() -> None:
-    """Flush all file handlers on the localm logger.
+# Most records one log writer holds before it drops new ones.
+# See test_a_blocked_stream_holds_at_most_the_bound.
+_MAX_QUEUED_RECORDS = 10_000
 
-    Call immediately before os.execv() so no buffered log lines are lost
-    when the process image is replaced. The file handlers use buffering=1
-    (line-buffered), so this is a guard against any remaining buffer; it
-    never raises."""
+
+class _LogWriter:
+    """The thread that writes one handler's log records to its stream.
+
+    A handler built on ``_OffThreadEmit`` formats a record on the thread that
+    logged it and queues the text on its own writer, so a slow or blocked stream
+    (a disk saturated by a model load, a paused console) never blocks the
+    logging thread, the server's event loop included, nor another handler's
+    stream. Records are written in the order they were queued. ``drain`` waits
+    until everything queued before it is written.
+
+    At most ``_MAX_QUEUED_RECORDS`` records wait at once; a record logged
+    beyond that is dropped and counted, and once every queued record is written
+    one line says how many were dropped."""
+
+    def __init__(self, handler: _OffThreadEmit) -> None:
+        import queue
+        self.handler = handler
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._count_lock = threading.Lock()
+        self._queued = 0
+        self._dropped = 0
+        self._thread: Optional[threading.Thread] = None
+        self._start_lock = threading.Lock()
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        with self._start_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, name="localm-log-writer",
+                                            daemon=True)
+            self._thread.start()
+
+    def on_writer_thread(self) -> bool:
+        return threading.current_thread() is self._thread
+
+    def put(self, text: str, record: logging.LogRecord) -> None:
+        if self.on_writer_thread():
+            self.handler._write(text, record)
+            return
+        self._ensure_thread()
+        with self._count_lock:
+            if self._queued >= _MAX_QUEUED_RECORDS:
+                self._dropped += 1
+                return
+            self._queued += 1
+        self._queue.put((text, record))
+
+    def pending(self) -> int:
+        """How many records are queued and not yet written."""
+        with self._count_lock:
+            return self._queued
+
+    def dropped(self) -> int:
+        """How many records were dropped since the last drop line."""
+        with self._count_lock:
+            return self._dropped
+
+    def drain(self, timeout: float = 5.0) -> bool:
+        """Wait until every record queued before this call is written, up to
+        *timeout* seconds. True when it was; True at once on the writer thread
+        itself or when nothing was ever queued."""
+        done = self.mark()
+        return done is None or done.wait(timeout)
+
+    def mark(self) -> Optional[threading.Event]:
+        """An event set once every record queued before this call is written;
+        None when there is nothing to wait for (on the writer thread itself, or
+        nothing was ever queued)."""
+        if self.on_writer_thread() or self._thread is None:
+            return None
+        self._ensure_thread()
+        done = threading.Event()
+        self._queue.put(done)
+        return done
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if isinstance(item, threading.Event):
+                item.set()
+                continue
+            text, record = item
+            with self._count_lock:
+                self._queued -= 1
+            self._write(text, record)
+            with self._count_lock:
+                dropped = self._dropped if self._queued == 0 else 0
+                self._dropped -= dropped
+            if dropped:
+                self._write_drop_line(dropped)
+
+    def _write(self, text: str, record: logging.LogRecord) -> None:
+        try:
+            self.handler._write(text, record)
+        except RecursionError:
+            self.handler.handleError(record)
+
+    def _write_drop_line(self, dropped: int) -> None:
+        record = logger.makeRecord(
+            logger.name, logging.WARNING, __file__, 0,
+            "debug log: %d records were dropped while %s did not accept writes",
+            (dropped, _describe_handler(self.handler)), None)
+        try:
+            text = self.handler.format(record) + self.handler.terminator
+        except Exception:
+            self.handler.handleError(record)
+            return
+        self._write(text, record)
+
+
+class _Writers:
+    """Every ``_LogWriter`` in this process."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._all: list[_LogWriter] = []
+
+    def add(self, writer: _LogWriter) -> None:
+        with self._lock:
+            self._all.append(writer)
+
+    def all(self) -> list[_LogWriter]:
+        with self._lock:
+            return list(self._all)
+
+    def drain(self, timeout: float = 5.0) -> bool:
+        """``_LogWriter.drain`` on every writer, sharing one *timeout*; True
+        when all of them were drained."""
+        return not self.stuck(timeout)
+
+    def stuck(self, timeout: float = 5.0, *, files_only: bool = False) -> list[_LogWriter]:
+        """The writers that did not drain within *timeout* seconds; every
+        writer (with *files_only*, every debug log file writer) is drained at
+        once against the same deadline."""
+        deadline = time.monotonic() + timeout
+        marks = [(writer, writer.mark()) for writer in self.all()
+                 if not files_only or isinstance(writer.handler, logging.FileHandler)]
+        return [writer for writer, done in marks
+                if done is not None
+                and not done.wait(max(0.0, deadline - time.monotonic()))]
+
+
+_log_writer = _Writers()
+_writer_create_lock = threading.Lock()
+
+
+class _OffThreadEmit(logging.StreamHandler):
+    """A ``logging.StreamHandler`` whose ``emit`` formats the record on the
+    calling thread and hands the text to the handler's own ``_LogWriter``; the
+    stream write and flush run on that writer's thread. A write that fails is
+    reported through ``handleError`` there, as a synchronous handler would.
+    The handler's own lock, which ``Handler.handle`` holds around ``emit``, is
+    never held during a write. ``flush`` waits up to two seconds for the queued
+    records to be written. See test_a_blocked_log_stream_does_not_stall_a_request."""
+
+    _writer: Optional[_LogWriter] = None
+
+    def writer(self) -> _LogWriter:
+        writer = self._writer
+        if writer is None:
+            with _writer_create_lock:
+                writer = self._writer
+                if writer is None:
+                    writer = self._writer = _LogWriter(self)
+                    _log_writer.add(writer)
+        return writer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = self.format(record) + self.terminator
+            self.writer().put(text, record)
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+    def flush(self) -> None:
+        writer = self._writer
+        if writer is not None:
+            writer.drain(2.0)
+
+    def _write(self, text: str, record: logging.LogRecord) -> None:
+        try:
+            stream = self.stream
+            if stream is None and isinstance(self, logging.FileHandler):
+                # As FileHandler.emit: a closed file handler reopens its file.
+                # See test_a_closed_file_handler_reopens_its_file.
+                self.stream = stream = self._open()
+            if stream is None:
+                raise ValueError("log handler has no stream")
+            stream.write(text)
+            stream.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
+class _OffThreadFileHandler(_OffThreadEmit, logging.FileHandler):
+    """The debug log file handler; writes on its log writer thread."""
+
+
+class _OffThreadStreamHandler(_OffThreadEmit, logging.StreamHandler):
+    """The console mirror; writes on its log writer thread."""
+
+
+def drain_debug_log(timeout: float = 1.0) -> bool:
+    """Wait up to *timeout* seconds until every record queued for a debug log
+    FILE in this process is written, so a reader of the file sees them. True
+    when they all were; a file writer that was not is named in a WARNING
+    written to the other handlers (``_report_stuck``). Call before reading,
+    copying or appending to the debug log file. Never raises."""
+    try:
+        stuck = _log_writer.stuck(timeout, files_only=True)
+    except Exception:
+        return False
+    _report_stuck(stuck, "before the debug log file was read")
+    return not stuck
+
+
+def _report_stuck(stuck: list, when: str) -> None:
+    """A WARNING, written to every handler other than the stuck one, naming
+    each writer in *stuck* with its pending and dropped record counts and
+    *when* it was found stuck. Never raises."""
+    for writer in stuck:
+        try:
+            record = logger.makeRecord(
+                logger.name, logging.WARNING, __file__, 0,
+                "debug log: %d records for %s were not written %s, and %d were "
+                "dropped (its stream did not accept writes)",
+                (writer.pending(), _describe_handler(writer.handler), when,
+                 writer.dropped()),
+                None)
+            for h in list(logger.handlers):
+                if h is not writer.handler and record.levelno >= h.level:
+                    h.handle(record)
+        except Exception:
+            pass
+
+
+def _describe_handler(handler: logging.Handler) -> str:
+    name = getattr(handler, "baseFilename", None)
+    return f"the debug log file {name}" if name else "the console"
+
+
+def _drain_at_exit() -> None:
+    _log_writer.drain(2.0)
+
+
+atexit.register(_drain_at_exit)
+
+
+def flush_log_handlers(timeout: float = 5.0) -> None:
+    """Write every queued log record, then flush all handlers on the localm
+    logger. A handler whose records could not all be written within *timeout*
+    seconds (its stream blocks) is named in a WARNING written to the other
+    handlers, and is not flushed.
+
+    Call immediately before os.execv() or os._exit() so no log line is lost
+    when the process image is replaced or ends. Never raises."""
+    try:
+        stuck = _log_writer.stuck(timeout)
+    except Exception:
+        stuck = []
+    _report_stuck(stuck, "before this process restarted or stopped")
+    stuck_handlers = {id(writer.handler) for writer in stuck}
     for h in list(logger.handlers):
+        if id(h) in stuck_handlers:
+            continue
         try:
             h.flush()
         except Exception:
@@ -374,7 +643,7 @@ def _add_console_handler(level: int = logging.NOTSET) -> None:
         # live stream. No worse than before, and the file handler still carries
         # every record - this fallback never silences anything.
         stream = sys.stderr
-    handler = logging.StreamHandler(stream)
+    handler = _OffThreadStreamHandler(stream)
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
@@ -418,6 +687,8 @@ def suppress_console_mirror():
     if mirror is None:
         yield
         return
+    if isinstance(mirror, _OffThreadEmit):
+        mirror.writer().drain(1.0)
     logger.removeHandler(mirror)
     try:
         yield
@@ -533,7 +804,7 @@ def enable_debug() -> Optional[Path]:
     global _debug_console_only
     existing = log_file_path()
     if existing is not None:
-        attach_child_logging()
+        attach_child_logging(off_thread=True)
         _flush_deferred()
         return existing
     if _debug_console_only:
@@ -563,7 +834,7 @@ def enable_debug() -> Optional[Path]:
     # set stream to the line-buffered handle opened above so baseFilename is
     # preserved (used by attach_child_logging to deduplicate) while the fd is
     # opened exactly once with the correct buffer mode.
-    handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
+    handler = _OffThreadFileHandler(path, mode="a", encoding="utf-8", delay=True)
     handler.stream = stream
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
@@ -611,10 +882,13 @@ def _install_thread_hook() -> None:
 _unopenable_child_logs: set[str] = set()
 
 
-def attach_child_logging() -> None:
+def attach_child_logging(*, off_thread: bool = False) -> None:
     """
     In a child process that inherited LOCALM_DEBUG: attach the file handler
-    so this process's logger writes to the shared log file too.
+    so this process's logger writes to the shared log file too. The handler
+    writes each record before the logging call returns, unless *off_thread*
+    (a server process that inherited the log file), where it writes on its log
+    writer thread.
 
     Never raises OSError: when the log file cannot be opened (its folder is
     gone, or it is not writable), the console mirror and the ring buffer are
@@ -638,7 +912,8 @@ def attach_child_logging() -> None:
         stream, open_error = None, exc
     if stream is not None:
         # delay=True + manual stream avoids opening the file twice.
-        handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
+        handler_cls = _OffThreadFileHandler if off_thread else logging.FileHandler
+        handler = handler_cls(path, mode="a", encoding="utf-8", delay=True)
         handler.stream = stream
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
@@ -657,13 +932,15 @@ def native_stderr_target() -> Optional[int]:
     """
     File descriptor that native (llama.cpp) stderr should be redirected to
     during suppression windows: the debug log in debug mode, else None
-    (caller falls back to devnull).
+    (caller falls back to devnull). Records already queued for the file are
+    written first (``drain_debug_log``).
 
     The caller owns the descriptor and must close it after dup2.
     """
     path = log_file_path()
     if path is None:
         return None
+    drain_debug_log()
     try:
         return os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     except OSError:
