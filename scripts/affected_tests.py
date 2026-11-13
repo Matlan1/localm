@@ -238,6 +238,7 @@ _NOT_TREE_SCANNERS: dict[str, str] = {
     "tests/test_check_hygiene_no_child_console_print.py": "reads the fixed module list check_hygiene names",
     "tests/test_conftest_isolation_guards.py": "runs one named test file",
     "tests/test_confirm_sdcpp_runtime.py": "reads the sd.cpp pin file only",
+    "tests/test_confirm_comfyui_runtime.py": "writes a source record into a ComfyUI tree in tmp_path",
     "tests/test_bump_gguf_node_pin.py": "runs the pin scan on a copy in tmp_path",
     "tests/test_dependabot_groups.py": "uses the selector's requirement parsing only",
     "tests/test_run_affected_tests.py": "runs the selector with a stand-in or for one named file",
