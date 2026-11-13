@@ -140,7 +140,9 @@ def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
     assert op.calls["n"] == 0, "a blocked check must not attempt any connection"
     msg = f"{ei.value.summary} {ei.value.reason}".lower()
     assert "network access" in msg and "off" in msg
-    assert "settings" in msg or "net_mode" in msg
+    assert "settings > system > updates" in msg
+    assert "localm config update_ignore_net_policy true" in msg
+    assert "localm config net_mode ask" in msg
 
 
 def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):

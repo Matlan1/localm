@@ -89,10 +89,8 @@ def test_update_check_blocked_by_net_policy_is_not_up_to_date(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
 
     def boom():
-        raise LocalmError(
-            "update checks are off because network access is set to off",
-            reason='turn on "Check for updates even when network access is off" '
-                   "in Settings, or set network access to ask or allow")
+        raise LocalmError(updater.UPDATE_CHECK_NET_OFF,
+                          reason=updater.UPDATE_CHECK_NET_OFF_REASON)
 
     monkeypatch.setattr(updater, "check", boom)
     data = _get(create_app(_engine()), "/api/update/check").json()
