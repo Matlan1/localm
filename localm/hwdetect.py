@@ -590,7 +590,11 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
         if fam in ("gfx110x", "gfx120x"):
             torch, torchvision, _ = amd_rocm_win_torch_packages()
             sdk = " ".join(amd_rocm_win_sdk_packages(fam))
-            return f"{torch} {torchvision} {sdk} --index-url {amd_rocm_win_index(fam)}"
+            # uv reads no project configuration here: the project's setuptools
+            # override cannot be met from AMD's index. See
+            # test_the_amd_torch_args_resolve_without_the_project_configuration.
+            return (f"{torch} {torchvision} {sdk} --index-url {amd_rocm_win_index(fam)} "
+                    "--no-config")
         return ""                        # unknown AMD on Windows: no verified prebuilt
     return ""
 

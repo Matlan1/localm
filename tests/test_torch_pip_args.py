@@ -159,7 +159,8 @@ def test_amd_rocm_on_windows_rdna3_4_uses_its_family_index(monkeypatch, name, fa
     torch, torchvision, _ = hwdetect.amd_rocm_win_torch_packages()
     sdk = " ".join(hwdetect.amd_rocm_win_sdk_packages(family))
     assert args == (f"{torch} {torchvision} {sdk} --index-url "
-                    f"https://repo.amd.com/rocm/whl/{family[:5]}{family[5:].upper()}-all/")
+                    f"https://repo.amd.com/rocm/whl/{family[:5]}{family[5:].upper()}-all/ "
+                    "--no-config")
     assert "--find-links" not in args and "--torch-backend" not in args
 
 

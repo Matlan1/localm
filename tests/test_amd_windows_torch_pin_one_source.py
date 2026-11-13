@@ -156,6 +156,18 @@ def test_every_amd_package_comes_from_its_family_index_alone(monkeypatch):
         and ("torch-args", "gfx120x") in seen, seen
 
 
+@pytest.mark.parametrize("card", ["amd radeon rx 7900 xtx", "amd radeon rx 9070 xt"])
+def test_the_amd_torch_args_resolve_without_the_project_configuration(monkeypatch, card):
+    import shlex
+    monkeypatch.setattr(sys, "platform", "win32")
+    det = hwdetect.Detection(vendors=["amd"], gpu_names=card, probe_ok=True)
+    args = shlex.split(hwdetect.torch_pip_args("amd-rocm", det), posix=True)
+    assert "--no-config" in args, args
+    overrides = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["uv"]
+    assert any(o.startswith("setuptools>=") for o in overrides.get("override-dependencies", [])), \
+        "the project no longer overrides setuptools; --no-config may no longer be needed"
+
+
 def test_the_manual_amd_commands_in_the_docs_use_the_family_index_alone():
     doc = (ROOT / "docs" / "gpu-setup.md").read_text(encoding="utf-8")
     for family in ("gfx110x", "gfx120x"):
