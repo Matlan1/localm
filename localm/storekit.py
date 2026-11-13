@@ -177,12 +177,16 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     *retrying* selects the final replace: False (default) is a bare
     ``os.replace``, which never sleeps; True uses ``replace_atomic``'s bounded
     backoff (up to ~1 s) over a transient Windows sharing violation, such as a
-    concurrent reader's open handle. Pass True only when the caller serializes
-    every writer of *path* across processes (a cross-process lock held for the
-    whole write or read-modify-write). The callers that pass True are
-    ``auth.set_api_key`` (auth.key), ``auth._save_keystore`` (auth.json) and
-    ``model_source_credentials._write_all`` (model_source_credentials.json);
-    every other caller uses the bare replace.
+    concurrent reader's open handle. Pass True only when every writer of *path*
+    is serialized: a cross-process lock held for the whole write or
+    read-modify-write, or a file only one process ever writes, under a lock of
+    that process. Every caller passes True: ``auth.set_api_key`` (auth.key),
+    ``auth._save_keystore`` (auth.json), ``model_source_credentials._write_all``,
+    ``sessions._save`` and ``issue_tracker.record_filed`` under the file's
+    cross-process lock; ``instances._write_entry`` and the job manager's
+    activity store, whose files only their own process writes; the owner-KDF
+    writer while it holds its cross-process lock (False when that lock could not
+    be taken). See test_every_private_store_write_rides_out_a_reader.
 
     TWO steps are needed and NEITHER covers both platforms alone:
 
@@ -215,9 +219,9 @@ def atomic_write_private(path: Path, text: str, *, retrying: bool = False) -> bo
     Best-effort by contract: a tightening that fails is reported by
     ``restrict_file_perms`` (which warns) and retried, never raised.
 
-    With *retrying* False the replace is a bare ``os.replace``; some of those
-    callers (``sessions._save``, reached from session_login, create_key_ep and
-    _gui_index) run on the asyncio event loop.
+    Some callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run on the asyncio event loop, where a retry sleeps on the
+    loop while another handle holds *path*.
 
     ``os.open`` is called WITHOUT ``os.O_BINARY``: on Windows it then opens in
     TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` and the resulting
