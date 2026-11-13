@@ -429,6 +429,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .cmdk-item { padding: 10px 16px; cursor: pointer; font-size: 14px; color: var(--text); }
 .cmdk-item:hover { background: var(--accent-soft); }
 .cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
+.cmdk-item.cmdk-empty, .cmdk-item.cmdk-empty:hover { background: none; color: var(--text-dim); cursor: default; }
 
 /* Settings: performance sliders + VRAM estimate */
 #sec-performance input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
@@ -2604,6 +2605,7 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .img-blocked-label { font-size: .9em; opacity: .85; }
 .img-blocked-why { font-size: .8em; opacity: .65; overflow-wrap: anywhere; }
+.img-blocked-retry { align-self: flex-start; margin-top: 4px; }
 
 /* promptText()'s text input (helpers.js) - same chrome as .card's fields. */
 .modal-body input[type="text"] {
@@ -2829,6 +2831,7 @@ div:has(> .data-table) { overflow-x: auto; }
 .adapter-badge.adapter-idle { border-style: dashed; border-color: var(--border); }
 .adapter-badge.adapter-warn { color: var(--warn, #f59e0b); border-color: var(--warn, #f59e0b); }
 .adapter-error { color: var(--red); margin: 8px 0; }
+.key-gate-error { color: var(--red); margin: 8px 0 0; }
 .modal-body .adapter-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .modal-body .adapter-field label { color: var(--text-dim); }
 .modal-body .adapter-field select, .modal-body .adapter-field input {
