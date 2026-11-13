@@ -22,6 +22,13 @@ import uvicorn
 import localm.inference.http_server as hs
 from localm.inference import capability_routing as cr
 from tests.conftest import free_loopback_port
+from tests import _routing_fit as _rf
+
+@pytest.fixture(autouse=True)
+def _every_candidate_fits(monkeypatch):
+    """Routing fit is not this file's subject: every candidate fits the GPU."""
+    _rf.make_every_candidate_fit(monkeypatch)
+
 
 
 @pytest.fixture(autouse=True)

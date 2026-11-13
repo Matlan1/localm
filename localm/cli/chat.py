@@ -84,16 +84,21 @@ class _TurnRouter:
     Attached to a server (*build* is None) the server routes the request
     itself; this only works out the context window to ask for, so the
     conversation is not compacted when a roomier model can hold it. Loaded in
-    this process, it swaps engines: the current one is unloaded before another
-    is loaded."""
+    this process, candidates are sized against what is loaded here
+    (``routing_fit``): one that fits beside MODEL is loaded beside it; one that
+    would unload MODEL, run on the CPU only, read its weights from disk or
+    cannot be sized is used only after *confirm* (called with the decision,
+    returning True for yes) agrees, and is otherwise only suggested
+    (``suggestion``). Without *confirm* nothing is asked and MODEL answers."""
 
     def __init__(self, engine, model_name: str, *, pinned: bool, build=None,
-                 known: Optional[dict] = None):
+                 known: Optional[dict] = None, confirm=None):
         self.primary = engine
         self._known = dict(known or {})
         self.model_name = model_name
         self.pinned = pinned
         self._build = build
+        self._confirm = confirm
         self._engines = {model_name: engine}
         self.current = model_name
         self.min_context: Optional[int] = None
@@ -129,13 +134,37 @@ class _TurnRouter:
                 known[caps.VISION] = True
             if getattr(cur, "supports_audio", False) is True:
                 known[caps.AUDIO] = True
+        loaded = [n for n, e in self._engines.items() if getattr(e, "loaded", False)]
+        fit = self._fit if self.in_process else cr.fit_resident_only(loaded)
         decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
-                                 resident=[self.current], reg=reg,
+                                 fit=fit, resident=loaded, reg=reg,
                                  current_known=known, mode=cr.configured_mode())
         self.last_decision = decision
-        self.min_context = (comp if decision.routed
+        self.min_context = (comp if not self.pinned
                             and caps.CONTEXT_LENGTH in decision.gaps else None)
         return decision
+
+    def _fit(self, names):
+        """``routing_fit.assess`` for *names* against this process's loaded
+        engines: MODEL is the user's choice, any other loaded engine is one
+        routing loaded."""
+        from localm.inference import http_server as hs
+        from localm.inference import routing_fit
+        from localm.inference.backends.llamacpp._sizing import ram_reading
+        from localm.inference.capability_routing import fit_resident_only as cr_fit_resident_only
+        residents = {
+            n: routing_fit.Resident(name=n, hold=hs._resident_vram_hold(e),
+                                    user_chosen=n == self.model_name)
+            for n, e in self._engines.items() if getattr(e, "loaded", False)}
+        ram_total, ram_available = ram_reading()
+        build = self._build
+        if build is None:
+            return cr_fit_resident_only(list(residents))(names)
+        return routing_fit.assess(
+            names, residents=residents,
+            build=lambda n: self._engines.get(n) or build(n),
+            reading=hs.routing_vram_reading(), ram_available=ram_available,
+            ram_total=ram_total, unload_policy=routing_fit.UNLOAD_ALWAYS)
 
     def engine_for(self, messages: list):
         """The engine to answer a turn with *messages*: MODEL's, or in this
@@ -143,39 +172,74 @@ class _TurnRouter:
         fails to load is skipped for the next capable one, then MODEL. Each
         failure is printed; ``failed_to_load`` names the routed models MODEL
         answers in place of, else is empty. Raises what MODEL's own load raised
-        when that fails too."""
+        when that fails too.
+
+        A routed candidate is loaded beside MODEL; one the user agreed to
+        through *confirm* is loaded after unloading every other engine."""
         decision = self.plan(messages)
         self.failed_to_load = ()
         if not self.in_process:
             return self.primary
+        from rich.markup import escape
         names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
+        beside = bool(names)
+        if not names and decision.suggested and self._confirm is not None:
+            if self._confirm(decision):
+                names = [decision.suggested]
+        elif not names and decision.suggested:
+            console.print(f"[yellow]{escape(self.suggestion() or '')}[/yellow]")
         failed = []
         for name in names:
             try:
-                return self._use(name)
+                return self._use(name, keep_model=beside)
             except Exception as e:
-                from rich.markup import escape
                 console.print(f"[yellow]Could not load {escape(name)}: "
                               f"{escape(str(e))}[/yellow]")
                 failed.append(name)
-        eng = self._use(self.model_name)
+        eng = self._use(self.model_name, keep_model=True)
         self.failed_to_load = tuple(failed)
         return eng
 
-    def _use(self, name: str):
-        if name == self.current:
-            eng = self._engines[name]
-            if not getattr(eng, "loaded", True):
-                eng.load()
-            return eng
-        prev = self._engines[self.current]
-        if getattr(prev, "loaded", True):
-            prev.unload()
+    def _use(self, name: str, *, keep_model: bool):
+        """Load *name* (when it is not loaded) and make it current. Every other
+        loaded engine is unloaded first, except MODEL's when *keep_model*."""
         eng = self._engines.get(name) or self._build(name)
         self._engines[name] = eng
+        for other, e in self._engines.items():
+            if other == name or (keep_model and other == self.model_name):
+                continue
+            if getattr(e, "loaded", False):
+                e.unload()
+        if not getattr(eng, "loaded", False):
+            eng.load()
         self.current = name
-        eng.load()
         return eng
+
+    def suggested_model(self) -> Optional[str]:
+        """The model routing suggested for the last planned turn, or None."""
+        decision = self.last_decision
+        return decision.suggested if decision is not None else None
+
+    def suggestion(self) -> Optional[str]:
+        """One line naming the model routing would use for the last planned
+        turn and why it did not, when it suggested one; else None."""
+        decision = self.last_decision
+        if decision is None or not decision.suggested:
+            return None
+        gaps = ", ".join(sorted(decision.gaps)) or "this request"
+        why = f" ({decision.ask_reason})" if decision.ask_reason else ""
+        return (f"{decision.suggested} can answer this ({self.model_name} lacks {gaps}); "
+                f"it was not loaded{why}. Run  localm run {decision.suggested}  to use it.")
+
+    def ask(self, decision) -> bool:
+        """Ask on the terminal whether to use ``decision.suggested`` for this
+        turn; True for yes. The question names the reason it was not used on its
+        own."""
+        from rich.prompt import Confirm
+        why = f" ({decision.ask_reason})" if decision.ask_reason else ""
+        gaps = ", ".join(sorted(decision.gaps)) or "this request"
+        return Confirm.ask(f"{self.model_name} lacks {gaps}. Use {decision.suggested} "
+                           f"for this turn{why}?", default=False, console=console)
 
     def answered_by(self, engine) -> str:
         """The model that answered the last turn on *engine*."""
@@ -548,6 +612,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             build=lambda name: _build_cli_engine(
                 name, n_gpu_layers=gpu_layers, device=device),
             known=_projector_known(mmproj_path))
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            router._confirm = router.ask
     else:
         router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
                              pinned=pin_model)
@@ -582,7 +648,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if system:
             _first.append({"role": "system", "content": system})
         _first.append(_build_user_message(prompt, list(images), list(audios)))
-        if router.plan(_first).routed:
+        _decision = router.plan(_first)
+        if _decision.routed or _decision.suggested:
             engine = router.engine_for(_first)
             if router.current != model:
                 is_registered = False
@@ -606,7 +673,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     router.plan(messages)
                     if router.min_context:
                         stream_opts["min_context"] = router.min_context
-                response = _stream_once(engine, messages, **stream_opts)
+                response = _stream_once(engine, messages, suggested=router.suggested_model(),
+                                        **stream_opts)
                 note = _routed_note or router.note(engine)
                 if note and response:
                     console.print(f"[dim]({escape(note)})[/dim]")
@@ -685,7 +753,8 @@ def _projector_known(mmproj_path: Optional[str]) -> Optional[dict]:
     return known or None
 
 
-def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
+def _input_refusal_text(engine, messages: list, exc: Exception, *,
+                        suggested: Optional[str] = None) -> str:
     """What to tell the user when *engine* refused *messages* with the
     ``UnsupportedInputError`` *exc*: the error itself for an audio clip that
     could not be used, or for audio a model that takes audio could not process;
@@ -704,11 +773,12 @@ def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
             (hears or not has_audio) and (sees or not has_image)):
         return str(exc)
     if has_audio and not hears:
-        return audio_input_guidance(projector_failed=has_projector and not sees)
+        return audio_input_guidance(projector_failed=has_projector and not sees,
+                                    suggested=suggested)
     return vision_input_guidance(
         mmproj_failed=has_projector and not hears,
         active_model_path=getattr(backend, "model_path", None),
-        audio_only=hears and has_projector)
+        audio_only=hears and has_projector, suggested=suggested)
 
 
 
@@ -848,8 +918,11 @@ def _log_worker_death(exc: BaseException) -> None:
                   (str(exc).splitlines() or [""])[0])
 
 
-def _stream_once(engine, messages: list, **kwargs) -> str:
-    """Stream response to stdout, print tok/s on completion, and return the full text."""
+def _stream_once(engine, messages: list, *, suggested: Optional[str] = None,
+                 **kwargs) -> str:
+    """Stream response to stdout, print tok/s on completion, and return the full text.
+    *suggested* (the model capability routing suggests) is named first in the
+    guidance printed when the engine refuses an image or audio clip."""
     import time as _time
     from rich.markup import escape
 
@@ -890,7 +963,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     except UnsupportedInputError as e:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # model this install has that can take the input, or how to get one.
-        guidance = _input_refusal_text(engine, messages, e)
+        guidance = _input_refusal_text(engine, messages, e, suggested=suggested)
         console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
@@ -1065,8 +1138,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         except UnsupportedInputError as e:
             # The answering model cannot take the attached image or audio. The
             # message is withdrawn from the conversation.
-            console.print("\n[yellow]" + escape(_input_refusal_text(engine, messages, e))
-                          + "[/yellow]")
+            console.print("\n[yellow]" + escape(_input_refusal_text(
+                engine, messages, e, suggested=router.suggested_model())) + "[/yellow]")
             _withdraw(messages, msg)
             continue
         except Exception as e:
@@ -1171,8 +1244,7 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     _ok, message, _path = media_backend.generate_media(
         arg, out, before_generate=_unload_chat,
         on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
-        write_sidecar=not is_privacy, delete_outputs=is_privacy,
-        privacy=is_privacy)
+        write_sidecar=not is_privacy, privacy=is_privacy)
     console.print(escape(message))
 
 

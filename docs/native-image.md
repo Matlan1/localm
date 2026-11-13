@@ -7,7 +7,7 @@ CUDA, ROCm and Metal GPUs.
 
 ## Which backend runs
 
-Settings > Images > **Generation backend** (config `plugins.image.backend`):
+Settings > Media > Image > **Generation backend** (config `plugins.image.backend`):
 
 | Value | Behaviour |
 |---|---|
@@ -250,7 +250,7 @@ saved anywhere else.
 ## Parameters in the PNG
 
 By default a generated PNG carries no metadata, so a shared or moved image reveals nothing.
-Settings > Images > **Embed generation parameters in the PNG** (`plugins.image.native.embed_params`,
+Settings > Media > Image > **Embed generation parameters in the PNG** (`plugins.image.native.embed_params`,
 off by default) writes the prompt, negative prompt, seed, steps, CFG, guidance, size, model,
 model parts and LoRAs into each new native image, as an A1111-style `parameters` text chunk (other
 tools can read it) and a `localm` chunk with the full record. The init-image path, timings and

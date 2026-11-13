@@ -460,8 +460,13 @@ def _install_routing_registry(monkeypatch):
 
 def test_headless_web_enabled_job_without_a_model_routes_to_a_tool_capable_model(
         home, monkeypatch):
+    """The tool-capable model fits on the GPU, so the job runs on it."""
+    from localm.inference import capability_routing as cr
+    from localm.inference import http_server as hs
     from localm.plugins.builtin.jobs import runner
     _install_routing_registry(monkeypatch)
+    monkeypatch.setattr(hs, "routing_fit_assessor",
+                        lambda **kw: lambda names: {n: cr.Fit(cr.FIT_GPU) for n in names})
     monkeypatch.setattr("localm.inference.capability_routing.configured_mode",
                         lambda: "auto")
     monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)

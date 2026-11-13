@@ -121,11 +121,8 @@ async def voice_model_download(request: Request):
         return {"status": "already_cached", "model": name}
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():
-        raise HTTPException(
-            409, "Network access is disabled (net_mode=off), which blocks even "
-                 "an explicitly requested model download. Set net_mode to ask "
-                 "or allow, or turn on \"Allow model downloads while network "
-                 "access is off\", first.")
+        from localm.config import net_off_download_refusal
+        raise HTTPException(409, net_off_download_refusal("the voice model was not downloaded"))
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
         raise HTTPException(503, "This server has no background job registry, "
