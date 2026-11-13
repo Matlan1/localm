@@ -163,6 +163,81 @@ def test_the_coder_resolves_its_attach_credential_in_one_function():
     assert where == ["_attach_credential"]
 
 
+SWITCH_CALLS = {"serve_requested_model", "_serve_requested_model", "_serve_on_attached"}
+CREDENTIAL_SOURCES = {"resolve_bearer_token", "_attach_credential"}
+
+
+def _call_name(node):
+    fn = getattr(node, "func", None)
+    return getattr(fn, "attr", None) or getattr(fn, "id", None)
+
+
+def _credential_arg(call):
+    if len(call.args) > 1:
+        return call.args[1]
+    for kw in call.keywords:
+        if kw.arg == "token":
+            return kw.value
+    return None
+
+
+def _unresolved_switch_credentials(tree):
+    """(function, line) of every call into the switch path whose credential is
+    not a resolve_bearer_token(...) or _attach_credential(...) result: passed
+    directly, or a name whose last assignment before the call, in the same
+    function, is one; a parameter of a switch-path wrapper passing its own
+    argument on is accepted."""
+    bad = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        assigned = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                source = (isinstance(node.value, ast.Call)
+                          and _call_name(node.value) in CREDENTIAL_SOURCES)
+                assigned += [(node.lineno, t.id, source)
+                             for t in node.targets if isinstance(t, ast.Name)]
+        params = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call) and _call_name(node) in SWITCH_CALLS):
+                continue
+            arg = _credential_arg(node)
+            if isinstance(arg, ast.Call):
+                ok = _call_name(arg) in CREDENTIAL_SOURCES
+            elif isinstance(arg, ast.Name):
+                before = [a for a in assigned if a[1] == arg.id and a[0] < node.lineno]
+                if before:
+                    ok = max(before)[2]
+                else:
+                    ok = arg.id in params and fn.name in SWITCH_CALLS
+            else:
+                ok = False
+            if not ok:
+                bad.append((fn.name, node.lineno))
+    return bad
+
+
+@pytest.mark.parametrize("rel", sorted(SERVES_A_MODEL))
+def test_every_switch_credential_is_resolved_by_its_command(rel):
+    tree = ast.parse((LOCALM / rel).read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and _call_name(n) in SWITCH_CALLS]
+    assert calls, rel
+    assert _unresolved_switch_credentials(tree) == [], rel
+
+
+def test_the_credential_scan_sees_a_raw_instance_token():
+    tree = ast.parse(
+        'def attach(tgt):\n'
+        '    key = _attach_credential(api_key, explicit, tgt.get("token"))\n'
+        '    _serve_on_attached(tgt["base_url"], key, model)\n'
+        '    _serve_on_attached(tgt["base_url"], tgt.get("token"), model)\n'
+        '    key = tgt.get("token")\n'
+        '    _serve_on_attached(tgt["base_url"], key, model)\n')
+    assert _unresolved_switch_credentials(tree) == [("attach", 4), ("attach", 6)]
+
+
 def test_the_scan_sees_a_planted_attach_and_load_request():
     tree = ast.parse(
         'def f():\n'
