@@ -512,7 +512,7 @@ test("clearImageProxyCache forgets consent, so a settings save re-asks", async (
 });
 
 test("dismissing the dialog through the modal chrome counts as declining", async () => {
-  // The x and the backdrop are not our handlers - they just hide the modal. A
+  // The x and Escape are not our handlers - they just hide the modal. A
   // dismissal that resolved as "allowed" would load the very image the reader
   // was getting away from.
   const { win, calls } = loadAsking();

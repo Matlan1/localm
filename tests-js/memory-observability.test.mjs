@@ -32,7 +32,7 @@ test("F11: parseMemoryHeader returns null when absent or unparseable", () => {
   assert.equal(window.parseMemoryHeader(headerResp({ degrade: "x" })), null);
 });
 
-test("F11: buildMemoryChip shows count + facts + degrade reason and opens the modal", () => {
+test("F11: buildMemoryChip shows count + facts + degrade reason and opens the modal", async () => {
   const { window } = loadApp({});
   const chip = window.buildMemoryChip({
     n: 2, degrade: "no_embedder",
@@ -47,7 +47,7 @@ test("F11: buildMemoryChip shows count + facts + degrade reason and opens the mo
   // Clicking opens the memory modal.
   const modal = window.document.getElementById("modal");
   assert.equal(modal.style.display, "none");
-  chip.onclick();
+  await chip.onclick();
   assert.equal(modal.style.display, "flex");
   assert.match(window.document.getElementById("modal-title").textContent, /Memory/);
 });

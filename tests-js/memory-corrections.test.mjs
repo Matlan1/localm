@@ -42,7 +42,7 @@ test("F12b: modal renders a pending correction and Apply POSTs accept", async ()
     confidence: 0.9, target_updated: Date.now() / 1000 - 86400 * 5 }] };
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(calls, state) });
   await window.refreshMemory();
-  window.openMemoryModal();
+  await window.openMemoryModal();
 
   const body = window.document.getElementById("modal-body");
   assert.match(body.textContent, /User lives in Berlin/);   // was
@@ -68,7 +68,7 @@ test("F12b: Keep as is POSTs reject", async () => {
     confidence: 0.9, target_updated: 0 }] };
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(calls, state) });
   await window.refreshMemory();
-  window.openMemoryModal();
+  await window.openMemoryModal();
 
   const reject = modalButtons(window).find((b) => b.textContent === "Keep as is");
   assert.ok(reject, "Reject button present");
@@ -85,7 +85,7 @@ test("F12b: a delete proposal renders as Forget it", async () => {
     target_updated: 0 }] };
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([], state) });
   await window.refreshMemory();
-  window.openMemoryModal();
+  await window.openMemoryModal();
 
   const body = window.document.getElementById("modal-body");
   assert.match(body.textContent, /suggest forgetting it/);
@@ -96,7 +96,7 @@ test("F12b: a delete proposal renders as Forget it", async () => {
 test("F12b: no corrections -> no suggestions section", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([], { pending: [] }) });
   await window.refreshMemory();
-  window.openMemoryModal();
+  await window.openMemoryModal();
   const body = window.document.getElementById("modal-body");
   assert.doesNotMatch(body.textContent, /Suggested corrections/);
 });

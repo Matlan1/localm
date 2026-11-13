@@ -84,7 +84,7 @@ def commands_digest(raw: dict) -> str:
 _PROJECT_PREFIX = b"localm-coder-project-v1\0"
 
 # Config keys that take effect only once the project is trusted.
-GATED_KEYS: tuple[str, ...] = ("auto_approve", "verify", "model", "mode")
+GATED_KEYS: tuple[str, ...] = ("auto_approve", "verify", "model", "mode", "memory_file")
 
 # Files under a project's .localcoder folder that take effect only once the
 # project is trusted, relative to that folder.
@@ -218,8 +218,22 @@ def trust_subject(cwd: Path):
         config_folder = Path(config).resolve().parent
         if config_folder == local or not local_content:
             content = local_content if config_folder == local else folder_content(config_folder)
-            return config, raw, Path(config), content
-    return config, raw, local / "config.toml", local_content
+            return config, raw, Path(config), content + _memory_file_content(config, raw)
+    extra = _memory_file_content(config, raw) if config is not None else []
+    return config, raw, local / "config.toml", local_content + extra
+
+
+def _memory_file_content(config: Path, raw: dict) -> list[tuple[str, str]]:
+    """The ``memory_file`` the project config names, as one ``(name,
+    fingerprint)`` pair, so a change to the file's bytes changes the digest.
+    Empty when the key is absent or its value is refused (memory.py)."""
+    if "memory_file" not in raw:
+        return []
+    from .memory import configured_memory_path
+    path, _ = configured_memory_path(Path(config).resolve().parent.parent)
+    if path is None:
+        return []
+    return [("memory_file:" + str(raw["memory_file"]), _file_fingerprint(path))]
 
 
 def trust_path(cwd: Path, config_path: Path | None = None) -> Path:
@@ -241,6 +255,9 @@ def gated_items(raw: dict, content: list[tuple[str, str]]) -> list[str]:
                      "run as a shell command after every turn that changed files")
     if raw.get("model") is not None:
         lines.append(f"model = {json.dumps(str(raw['model']), ensure_ascii=True)}")
+    if raw.get("memory_file"):
+        lines.append(f"memory_file = {json.dumps(str(raw['memory_file']), ensure_ascii=True)}: "
+                     "project memory the agent reads")
     if raw.get("mode") is not None and _mode_widens(raw.get("mode")):
         lines.append(f"mode = {json.dumps(str(raw['mode']), ensure_ascii=True)}: "
                      "records more of the session than your own coder mode")

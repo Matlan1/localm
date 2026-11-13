@@ -102,6 +102,6 @@ test("a zero-content chat failure does not touch vision-reject recovery", async 
   await window.runCompletion(conv);
 
   assert.equal(conv.messages.length, 1, "no blank assistant turn was persisted");
-  assert.match(conv.messages[0].content, /\[Image removed/,
-    "the vision-reject recovery path still strips the image as before");
+  assert.equal(window.msgImages(conv.messages[0]).length, 1,
+    "the vision-reject recovery path keeps the image in the conversation");
 });

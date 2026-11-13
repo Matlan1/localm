@@ -177,6 +177,33 @@ RESTRICTED_UNWRITABLE_FILE_MESSAGE = (
     "restricted session cannot create or change it")
 
 
+RESTRICTED_CONFIGURED_MEMORY_MESSAGE = (
+    "this file is the project memory named by memory_file in the project "
+    "config, which later coder sessions read, and a restricted session cannot "
+    "create or change it")
+
+
+def _is_configured_memory(cwd: Path, resolved: Path,
+                          walk_memo: Optional[dict]) -> bool:
+    """Whether *resolved* is the project config's ``memory_file`` (configured,
+    trusted or not; a refused value names no file)."""
+    if walk_memo is not None and "memory" in walk_memo:
+        configured = walk_memo["memory"]
+    else:
+        from ..memory import configured_memory_path
+        configured, _ = configured_memory_path(cwd)
+        if walk_memo is not None:
+            walk_memo["memory"] = configured
+    if configured is None:
+        return False
+    if os.path.normcase(str(resolved)) == os.path.normcase(str(configured)):
+        return True
+    try:
+        return os.path.samefile(resolved, configured)
+    except OSError:
+        return False
+
+
 def unwritable_file_name(name: str) -> bool:
     """Whether the file name *name* folds onto a ``RESTRICTED_UNWRITABLE_FILES``
     entry (case-insensitively, ignoring trailing dots and spaces)."""
@@ -368,7 +395,8 @@ def restricted_write_refusal(cwd: Path, path: str, *,
     resolving to a file named, a ``RESTRICTED_UNWRITABLE_FILES`` entry; a location
     :func:`_confine` resolves inside one, or inside a folder such an entry
     anywhere in the project redirects to; an existing file with another hard
-    link; and any path when the project walk itself fails. A path ``_confine``
+    link; the file the project config's ``memory_file`` names; and any path when
+    the project walk itself fails. A path ``_confine``
     refuses is not reported here: the write tool refuses it on its own.
 
     *walk_memo*, when given, holds the outcome of the project walk, so the
@@ -394,6 +422,8 @@ def restricted_write_refusal(cwd: Path, path: str, *,
         return None
     if unwritable_file_name(resolved.name):
         return RESTRICTED_UNWRITABLE_FILE_MESSAGE
+    if _is_configured_memory(cwd, resolved, walk_memo):
+        return RESTRICTED_CONFIGURED_MEMORY_MESSAGE
     cwd_resolved = cwd.resolve()
     if walk_memo is not None and "outcome" in walk_memo:
         outcome = walk_memo["outcome"]

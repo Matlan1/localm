@@ -1518,7 +1518,7 @@ function confirmEmbeddingModelSwitch(model, report) {
       row.append(cancel, ok);
       body.appendChild(row);
     });
-    // The shared modal chrome (x / backdrop) only sets display:none; treat that
+    // The shared modal chrome (x / Escape) only sets display:none; treat that
     // as a decline.
     watch = setInterval(() => {
       if ($("modal").style.display === "none") finish(false);
@@ -1568,19 +1568,27 @@ export async function saveSettingsSection(secId) {
     updates[field.key] = value;
   }
   if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return false; }
-  let r = await fetch("/v1/config", {
-    method: "PATCH", headers: authHeaders(),
-    body: JSON.stringify(updates),
-  });
-  let data = await r.json().catch(() => ({}));
+  // A request that cannot reach the server says so and saves nothing.
+  const patch = async (body) => {
+    try {
+      const resp = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(), body: JSON.stringify(body),
+      });
+      return { r: resp, data: await resp.json().catch(() => ({})) };
+    } catch (e) {
+      toast(`${t("settings.toast.saveFailed")} (${e.message || e})`, true);
+      return null;
+    }
+  };
+  let sent = await patch(updates);
+  if (!sent) return false;
+  let { r, data } = sent;
   if (r.ok && data.needs_confirm) {
     const proceed = await confirmEmbeddingModelSwitch(data.model, data);
     if (!proceed) { toast(t("settings.toast.cancelled")); return false; }
-    r = await fetch("/v1/config", {
-      method: "PATCH", headers: authHeaders(),
-      body: JSON.stringify({ ...updates, confirm: true }),
-    });
-    data = await r.json().catch(() => ({}));
+    sent = await patch({ ...updates, confirm: true });
+    if (!sent) return false;
+    ({ r, data } = sent);
   }
   if (r.ok) {
     toast(t(savedToastKey(updates)));
