@@ -7185,6 +7185,36 @@ def release_prepared_on_done(task: asyncio.Future, engine_of) -> None:
         task.add_done_callback(_release)
 
 
+class _StatusRun:
+    """The status text a stream last sent, so the same status is never sent
+    twice in a row: a phase reported by the preparation and again by the reply,
+    or by the reply and again by the backend."""
+
+    def __init__(self, shown: Optional[str] = None) -> None:
+        self.last = shown
+
+    def fresh(self, text: str) -> bool:
+        """True (and *text* becomes the last status) unless *text* is the
+        status sent last."""
+        if text == self.last:
+            return False
+        self.last = text
+        return True
+
+
+def _status_of_line(line: str) -> Optional[str]:
+    """The ``delta.status`` of one SSE status-chunk line, else ``None``."""
+    if not line.startswith("data: {") or '"status"' not in line:
+        return None
+    try:
+        choices = json.loads(line[len("data: "):]).get("choices") or []
+        delta = ((choices[0] or {}).get("delta") or {}) if choices else {}
+    except (ValueError, AttributeError, TypeError, RecursionError):
+        return None
+    status = delta.get("status")
+    return status if isinstance(status, str) and status else None
+
+
 async def stream_after_prep(
     task: asyncio.Future,
     progress: PrepProgress,
@@ -7197,7 +7227,8 @@ async def stream_after_prep(
 ) -> AsyncIterator[str]:
     """SSE body for a chat request whose preparation outlasted
     ``PREP_STATUS_GRACE_S``: a role chunk, a status chunk for every change of
-    *progress*, then the reply.
+    *progress*, then the reply. A status the reply would repeat right after the
+    last one sent here is left out.
 
     *task* resolves to the prepared request, which holds an engine pin.
     ``start_stream(prepared, chunk_id)`` returns the reply's SSE lines and
@@ -7257,8 +7288,12 @@ async def stream_after_prep(
             }) + "\n\n"
         handed = True
         inner = start_stream(prepared, chunk_id)
+        statuses = _StatusRun(shown)
         try:
             async for line in inner:
+                status = _status_of_line(line)
+                if status is not None and not statuses.fresh(status):
+                    continue
                 yield line
         finally:
             await inner.aclose()
@@ -7363,7 +7398,9 @@ async def _stream_sse_body(
         )
         yield f"data: {role_chunk.model_dump_json()}\n\n"
 
+    statuses = _StatusRun()
     if compact:
+        statuses.fresh(COMPACTING_STATUS)
         compacting = ChatChunk.status_chunk(COMPACTING_STATUS, model_id, chunk_id, ts)
         yield f"data: {compacting.model_dump_json()}\n\n"
         new_messages, changed, _gone = await _compact_for_capacity(engine, messages)
@@ -7404,7 +7441,7 @@ async def _stream_sse_body(
             return
 
     _admit_generation(sem, engine)
-    if sem.locked():
+    if sem.locked() and statuses.fresh(WAITING_FOR_MODEL_STATUS):
         waiting_chunk = ChatChunk.status_chunk(
             WAITING_FOR_MODEL_STATUS, model_id, chunk_id, ts)
         yield f"data: {waiting_chunk.model_dump_json()}\n\n"
@@ -7511,8 +7548,9 @@ async def _stream_sse_body(
     _admit_generation(sem, engine)
     async with sem:
         # The backend reports image encoding itself, only when an image is encoded.
-        status_chunk = ChatChunk.status_chunk(PROCESSING_PROMPT_STATUS, model_id, chunk_id, ts)
-        yield f"data: {status_chunk.model_dump_json()}\n\n"
+        if statuses.fresh(PROCESSING_PROMPT_STATUS):
+            status_chunk = ChatChunk.status_chunk(PROCESSING_PROMPT_STATUS, model_id, chunk_id, ts)
+            yield f"data: {status_chunk.model_dump_json()}\n\n"
 
         gen_start = time.perf_counter()
         first_token_at: float | None = None
@@ -7530,8 +7568,9 @@ async def _stream_sse_body(
                     if token is _DONE:
                         break
                     if isinstance(token, _StatusSignal):
-                        chunk = ChatChunk.status_chunk(token.text, model_id, chunk_id, ts)
-                        yield f"data: {chunk.model_dump_json()}\n\n"
+                        if statuses.fresh(str(token.text)):
+                            chunk = ChatChunk.status_chunk(token.text, model_id, chunk_id, ts)
+                            yield f"data: {chunk.model_dump_json()}\n\n"
                         continue
                     if isinstance(token, _Records):
                         if lp_stream is not None:
