@@ -101,7 +101,9 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `processing_progress` (a long prompt is still being read; its delta also carries
 `status_args` with `done` and `total`, the prompt tokens read so far and in all),
-`encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
+`processing_layers` (a HuggingFace-format model is still reading a long prompt;
+`status_args` `done` and `total` are the model layers the prompt has passed so far and
+in all), `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
 `audio_cpu_retry`, `loading_model`, `growing_context`, `recalling_memory`,
 `downloading_embedder` (the embedding model memory recall needs, on its first
