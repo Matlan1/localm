@@ -25,7 +25,11 @@ function iinReadFile(file) {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => { toast(t("imageInputs.badFile", { name: file.name }), true); resolve(null); };
+    reader.onerror = () => {
+      toast(t("imageInputs.readFailed", {
+        name: file.name, message: (reader.error && reader.error.message) || reader.error || "" }), true);
+      resolve(null);
+    };
     reader.readAsDataURL(file);
   });
 }
@@ -116,6 +120,10 @@ export function iinExtendMask(mask, pad) {
 async function iinOpenMaskEditor({ base, mask, onDone }) {
   let img;
   try { img = await iinLoadImage(base); } catch (e) { toast(e.message, true); return; }
+  if (img.naturalWidth > IIN_MAX_SIDE || img.naturalHeight > IIN_MAX_SIDE) {
+    toast(t("imageInputs.tooBig", { max: IIN_MAX_SIDE }), true);
+    return;
+  }
   let baseC = iinCanvas(img.naturalWidth, img.naturalHeight);
   const probe = baseC.getContext("2d");
   if (!probe) { toast(t("imageInputs.noCanvas"), true); return; }
@@ -386,11 +394,13 @@ export function createImageInputs({ mountId, promptId, negativeId, inputId, deno
       const add = el("button", "btn-secondary btn-sm", t("imageInputs.addRefs"));
       add.type = "button";
       const picker = iinFilePicker(true, async (files) => {
+        let left = 0;
         for (const f of files) {
-          if (state.refs.length >= IIN_MAX_REFS) break;
+          if (state.refs.length >= IIN_MAX_REFS) { left++; continue; }
           const url = await iinReadFile(f);
           if (url) state.refs.push(url);
         }
+        if (left) toast(t("imageInputs.refsLimit", { max: IIN_MAX_REFS, count: left }), true);
         render();
       });
       add.onclick = () => picker.click();
