@@ -1566,8 +1566,11 @@ class PluginManager:
 
     def _plugin_dir(self, spec: PluginSpec) -> Path:
         """The installed folder of *spec*: the marker folder of a store install,
-        the copied folder of a third-party one."""
-        return self._installed_dir(spec.name) if spec.builtin else Path(spec.path)
+        the copied folder of a third-party one (its installed folder when that
+        spec has no path)."""
+        if spec.builtin or not spec.path:
+            return self._installed_dir(spec.name)
+        return Path(spec.path)
 
     def _manifest_gone(self, spec: PluginSpec) -> bool:
         """True when *spec*'s installed manifest is known to be absent; False
