@@ -3,6 +3,7 @@
 issue_tracker so no network). Apply is user-initiated; failures are surfaced, not
 faked."""
 
+import pytest
 from click.testing import CliRunner
 
 from localm import config, issue_tracker, updater
@@ -36,6 +37,30 @@ def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkey
     out = " ".join(r.output.split())
     assert "Could not tell" in out
     assert "localm is up to date" not in out
+
+
+@pytest.mark.parametrize("current,latest,says,never", [
+    ("0.1.4", "nightly", "Could not tell", "localm is up to date"),
+    ("0.2.0", "v0.2.0", "up to date", "Could not tell"),
+])
+def test_update_check_reads_what_the_real_check_returns(monkeypatch, current, latest, says, never):
+    """`localm update --check` on the real updater.check(), with only the proxy
+    reply faked: the CLI and check() agree on the fields they share."""
+    import json
+
+    from localm import _version
+    from tests._net_config import set_config
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: current)
+
+    def opener(method, url, data, headers, timeout):
+        return 200, json.dumps({"version": latest}).encode("utf-8")
+    real_check = updater.check
+    monkeypatch.setattr(updater, "check", lambda **kw: real_check(opener=opener, **kw))
+    r = CliRunner().invoke(main, ["update", "--check"])
+    out = " ".join(r.output.split())
+    assert says in out, out
+    assert never not in out, out
 
 
 def test_update_check_blocked_by_net_policy(monkeypatch):
