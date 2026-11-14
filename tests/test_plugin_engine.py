@@ -1149,7 +1149,8 @@ def test_external_plugin_http_lifecycle(env):
 
         r = c.post("/api/plugins/install-external", json={"source": str(src)})
         assert r.status_code == 200, r.text
-        assert r.json() == {"status": "installed", "name": "myext", "version": "1.2.3"}
+        assert r.json() == {"status": "installed", "name": "myext", "version": "1.2.3",
+                            "enabled": True}
 
         e = _entry()
         assert e is not None, "an installed external plugin must be listed"

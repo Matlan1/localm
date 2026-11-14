@@ -176,19 +176,37 @@ def test_a_pending_plugin_is_registered_on_the_loop_thread(env, build, path):
     assert mgr._loaded["webx"][1].SEEN == ["loop"]
 
 
+async def _disable_while_blocked(app, blocker, name):
+    """GET /api/plugins; once *blocker* is entered, POST the disable route for
+    *name* and check it waits, then release. Returns (plugins response, whether
+    the disable was still waiting while the GET was blocked, disable
+    response)."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as c:
+        slow = asyncio.ensure_future(c.get("/api/plugins"))
+        for _ in range(500):
+            if blocker.entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        disabling = asyncio.ensure_future(c.post(f"/api/plugins/{name}/disable"))
+        await asyncio.sleep(0.2)
+        waited = not disabling.done()
+        blocker.release.set()
+        return await slow, waited, await disabling
+
+
 def test_a_plugin_disabled_while_discovery_runs_is_not_loaded(env):
     app = _engine_app()
     mgr = app.state.plugin_manager
     _install_from_cli(env, "webd")
     blocker = _Blocker(mgr._enabled_set, after=True)
     mgr._enabled_set = blocker
-    slow, _, answered = asyncio.run(_while_blocked(
-        app, "/api/plugins", blocker, during=lambda: mgr.disable("webd")))
-    assert answered is True
+    slow, waited, disabled = asyncio.run(_disable_while_blocked(app, blocker, "webd"))
     assert slow.status_code == 200
+    assert waited is True
+    assert disabled.status_code == 200, disabled.text
     assert "webd" not in mgr._loaded
-    entry = next(p for p in slow.json()["plugins"] if p["name"] == "webd")
-    assert entry["enabled"] is False and entry["loaded"] is False
+    assert mgr.is_enabled("webd") is False
 
 
 def _two_installed(env):
