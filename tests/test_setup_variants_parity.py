@@ -65,7 +65,7 @@ def _is_prompt(name: str, line: str) -> bool:
         return bool(re.search(r"\bset /p\b", s, re.I))
     if s.startswith(("ask()", "ask() {", "ask_pick()")):
         return False
-    if 'read -r -p "$prompt"' in s:
+    if 'read -r -p "$prompt"' in s or 'ask "$prompt"' in s:
         return False
     return bool(re.search(r'\bask(?:_pick)? "', s)) or "read -r -p" in s
 
