@@ -74,6 +74,8 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.',
         'echo  [^^!] These programs could not be stopped:',
         'if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.',
+        'echo  [^^!] Type a number from 1 to %~2.',
+        'echo  [^^!] uv was not installed under .\\.uv, so Portable cannot go on (another uv on',
     ]
     for site in sites:
         assert site in bat, site
@@ -134,6 +136,11 @@ class TestBangSurvivesEveryStructuralShape:
         out = self._run(tmp_path, "", line)
         assert "[!] uv (the Python package manager localm builds on) is not installed." \
             in out.stdout, (out.stdout, out.stderr)
+
+    def test_marker_line_carrying_a_subroutine_argument(self, bat, tmp_path):
+        line = _line_containing(bat, "Type a number from 1 to %~2.")
+        out = self._run(tmp_path, "call :sub pick 3\r\nexit /b 0\r\n:sub\r\n", line)
+        assert "[!] Type a number from 1 to 3." in out.stdout, (out.stdout, out.stderr)
 
     def test_single_line_if_errorlevel_no_parens(self, bat, tmp_path):
         line = _line_containing(bat, "Could not build LocaLM.exe")

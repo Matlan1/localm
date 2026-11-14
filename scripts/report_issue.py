@@ -747,13 +747,66 @@ def _timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
+#: The start of the line ``--save-only`` ends with, followed by the saved path.
+SAVED_REPORT_PREFIX = "SAVED_REPORT="
+
+
+def send_saved(path: Path, summary: str) -> int:
+    """Send the report saved at *path* as it is, titled *summary*: the second
+    step of a caller that first had the report saved (no terminal) and then
+    asked whether to send it. Nothing new is built or saved. Network access off,
+    or a setting that cannot be read (no one here can confirm), sends nothing.
+    Returns 0 when it was sent, else 1."""
+    try:
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"  The saved report could not be read ({e.__class__.__name__}), so "
+              f"nothing was sent: {path}")
+        return 1
+    url, token = read_proxy()
+    if not url:
+        print(f"  No bug-report endpoint is configured. The report is saved at {path}; "
+              f"email it to {MAINTAINER_EMAIL}.")
+        return 1
+    mode, why = network_mode()
+    if mode == "off":
+        print(f"  {NET_OFF_REFUSAL}")
+        print(f"  The report is saved at {path}; email it to {MAINTAINER_EMAIL} if you "
+              "prefer.")
+        return 1
+    if mode is None:
+        print(f"  localm's Network access setting could not be read: {why}. No one can "
+              f"confirm sending here, so nothing was sent. The report is saved at {path}; "
+              f"email it to {MAINTAINER_EMAIL}.")
+        return 1
+    try:
+        res = post_report(url, token, scrub(summary or "localm bug report"), body)
+    except Exception as e:
+        print(f"  Could not send it ({e}). The report is saved at {path} - email it "
+              f"to {MAINTAINER_EMAIL} instead.")
+        return 1
+    link = res.get("url") if isinstance(res, dict) else None
+    print("  Sent to the maintainer. Thank you!"
+          + (f" Tracking issue: {link}" if link else ""))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(add_help=True, description=__doc__)
     ap.add_argument("--summary", default="")
     ap.add_argument("--detail", default="")
     ap.add_argument("--log", default="")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--save-only", action="store_true",
+                    help="save the report and send nothing; the last line of the "
+                         f"output is {SAVED_REPORT_PREFIX}<path>")
+    ap.add_argument("--send-saved", default="",
+                    help="send the report already saved at this path, without "
+                         "building or saving another one")
     args = ap.parse_args(argv)
+
+    if args.send_saved:
+        return send_saved(Path(args.send_saved), args.summary.strip())
 
     interactive = stdin_is_interactive()
 
@@ -799,6 +852,15 @@ def main(argv=None) -> int:
     print()
 
     when = _timestamp()
+
+    if args.save_only:
+        path = save_report(body, when)
+        if path is None:
+            print("  The report could not be saved.")
+            return 1
+        print(f"  The report is saved at {path}.")
+        print(f"{SAVED_REPORT_PREFIX}{path}")
+        return 0
 
     mode, why = network_mode() if url else ("ask", "")
     if mode == "off":

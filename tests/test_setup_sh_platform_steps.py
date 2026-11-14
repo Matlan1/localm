@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_setup_gpu_detect import SETUP_SH, _bash, _make_uname_stub, _mark_executable
+from tests.test_setup_gpu_detect import (SETUP_SH, _bash, _function_body, _make_uname_stub,
+                                         _mark_executable)
 
 pytestmark = pytest.mark.skipif(_bash() is None, reason="no bash on PATH")
 
@@ -101,7 +102,7 @@ def test_platform_flags_follow_uname(tmp_path, os_name, arch, is_macos, is_apple
 
 def test_every_provision_later_hint_uses_the_offered_list():
     assert "<vulkan|cuda|hip|sycl|cpu>" not in SRC
-    assert SRC.count("setup-llama --backend $SL_BACKENDS") == 3
+    assert SRC.count("setup-llama --backend $SL_BACKENDS") == 4
 
 
 # ------------------------------ plugin picker ------------------------------ #
@@ -111,7 +112,7 @@ def _plugin_block() -> str:
 
 
 @pytest.mark.parametrize("yes, expected", [
-    (1, "localm plugin setup --defaults"),
+    (1, "localm plugin setup --defaults --with-deps"),
     (0, "localm plugin setup"),
 ])
 def test_yes_installs_the_default_plugin_set(tmp_path, yes, expected):
@@ -171,7 +172,8 @@ def _run_menu_entry(tmp_path: Path, *, answer: str, is_macos: int = 0,
     script = (
         'say() { printf "%s\\n" "$*"; }\n'
         f'ask() {{ printf "%s" "$1" >&2; a="{answer}"; echo "${{a:-$2}}"; }}\n'
-        'jr() { :; }\nstep_begin() { :; }\nstep_done() { :; }\n'
+        + _function_body("ask_pick")
+        + 'jr() { :; }\nstep_begin() { :; }\nstep_done() { :; }\n'
         f'HOME="{home.as_posix()}"\nIS_MACOS={is_macos}\nWINMODE="{winmode}"\n'
         + _menu_entry_block()
         + '\nprintf "SHORTCUT=%s\\n" "$SHORTCUT"\n'
@@ -309,7 +311,7 @@ def test_an_entry_for_a_folder_that_only_shares_the_prefix_is_left_alone(tmp_pat
 @pytest.mark.parametrize("answer", ["y", "Y", "yes"])
 def test_a_habitual_yes_at_the_menu_entry_question_takes_the_default(tmp_path, answer):
     result, apps = _run_menu_entry(tmp_path, answer=answer)
-    assert "  (y taken as [1])" in result.stdout.splitlines()
+    assert "(y taken as [1])" in result.stderr
     assert _exec_line(apps).endswith("/localm-launcher.sh")
 
 
