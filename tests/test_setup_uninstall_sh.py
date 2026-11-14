@@ -290,11 +290,11 @@ def test_a_data_folder_that_is_not_deleted_is_not_reported_as_removed(tmp_path, 
 
 
 def _data_probe(clone: Path) -> Path:
-    """setup.sh's say/ask helpers and its data-folder section, verbatim."""
+    """setup.sh's say/ask/ask_pick helpers and its data-folder section, verbatim."""
     text = (ROOT / "setup.sh").read_text(encoding="utf-8")
     start = text.index("say() {")
-    ask = re.search(r"(?m)^ask\(\) \{", text)
-    helpers = text[start:text.index("\n}\n", ask.start()) + 3]
+    last = re.search(r"(?m)^ask_pick\(\) \{", text)
+    helpers = text[start:text.index("\n}\n", last.start()) + 3]
     block = text[text.index("# ---- data directory"):
                  text.index("# ---- browser tab or standalone app window?")]
     probe = clone / "probe.sh"
