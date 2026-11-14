@@ -311,7 +311,7 @@ def test_an_entry_for_a_folder_that_only_shares_the_prefix_is_left_alone(tmp_pat
 @pytest.mark.parametrize("answer", ["y", "Y", "yes"])
 def test_a_habitual_yes_at_the_menu_entry_question_takes_the_default(tmp_path, answer):
     result, apps = _run_menu_entry(tmp_path, answer=answer)
-    assert "  (y taken as [1])" in result.stdout.splitlines()
+    assert "(y taken as [1])" in result.stderr
     assert _exec_line(apps).endswith("/localm-launcher.sh")
 
 
