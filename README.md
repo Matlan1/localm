@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey" alt="Platform: Windows | Linux">
 </p>
 
-At its core LocaLM is a **model loader plus a plugin engine**: GGUF and HuggingFace models ([which ones](docs/models.md)) through an OpenAI-compatible server, with chat always on and everything else - the coder agent, image/music/video generation, Knowledge (RAG), durable memory, voice, scheduled jobs, and MCP - a plugin you install when you want it. See [Offline first](#features) for exactly what does and does not touch the network.
+Run GGUF and HuggingFace models ([supported models](docs/models.md)) in a desktop app or behind an OpenAI-compatible server. Chat works out of the box; the coding agent, image, music and video generation, Knowledge (RAG), memory, voice, scheduled jobs and MCP are add-ons you install when you want them. [Offline first](#features) explains exactly what touches the network.
 
 <p align="center">
   <a href=".github/images/chat.png"><img src=".github/images/chat.png" width="560" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"></a><br>
