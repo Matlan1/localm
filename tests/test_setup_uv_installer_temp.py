@@ -209,7 +209,8 @@ def _setup_bat_installs_uv(tmp_path, clone_name, pick, step, uv_exe, fails):
     rc, out = _cmd(clone / "setup.bat", clone, env, f"{pick}\nY\n\n\n")
     installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
     if fails:
-        assert rc == 1 and "uv still is not callable" in out, out
+        stop = "Portable cannot go on" if step == "uv-portable" else "uv still is not callable"
+        assert rc == 1 and stop in out, out
         assert not installed.exists(), out
     else:
         assert rc == 99 and f"stopping after '{step}'" in out, out
