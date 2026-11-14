@@ -2072,23 +2072,105 @@ def _is_managed_target(api_url: str, cfg: Optional[dict] = None) -> bool:
 # ComfyUI was launched with by this process.
 _launched_model_folders: dict[str, list] = {}
 
+# (api_url, model paths file) -> (listener pid, registered-model section of
+# that file as it was before this process first rewrote it) for localm's own
+# ComfyUI started by another process.
+_observed_model_folders: dict[tuple[str, str], tuple[Optional[int], list]] = {}
+
+# Beside the model paths file: the registered-model section it held when a
+# localm process last launched its own ComfyUI, and when.
+LAUNCH_RECORD = ".localm-launched-folders.json"
+
 STALE_MODEL_FOLDERS = ("Models registered with localm since localm's ComfyUI started are "
                        "listed by it after a restart (run: localm comfy restart).")
+
+
+def _write_launch_record(paths_file: Path, folders: list) -> None:
+    """Record *folders* and the current time in :data:`LAUNCH_RECORD` beside
+    *paths_file*. A write that fails is logged at WARNING. Never raises."""
+    from localm.storekit import atomic_write
+    record = paths_file.with_name(LAUNCH_RECORD)
+    try:
+        atomic_write(record, json.dumps({"time": time.time(), "folders": folders}))
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("managed ComfyUI: %s could not be written (%s); a localm process "
+                       "that did not launch ComfyUI may not say when it needs a restart",
+                       record, e)
+
+
+def _read_launch_record(paths_file: Path) -> Optional[tuple[float, list]]:
+    """``(time, folders)`` from :data:`LAUNCH_RECORD` beside *paths_file*, or
+    None when it is missing or unreadable. Never raises."""
+    try:
+        data = json.loads(paths_file.with_name(LAUNCH_RECORD).read_text(encoding="utf-8"))
+        when, folders = float(data["time"]), data["folders"]
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return None
+    if not isinstance(folders, list) or not all(isinstance(f, str) for f in folders):
+        return None
+    return when, folders
+
+
+def _process_start_time(pid: Optional[int]) -> Optional[float]:
+    """When process *pid* started (seconds since the epoch), or None when that
+    cannot be read. Never raises."""
+    if not pid:
+        return None
+    try:
+        import psutil
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _started_with_folders(api_url: str, paths_file: Path, on_disk: list) -> list:
+    """The registered-model folders the running ComfyUI at *api_url* was
+    started with:
+
+    * the ones this process launched it with, while that process still runs;
+    * else the ones in :data:`LAUNCH_RECORD`, when the process listening on the
+      port started after a localm process wrote it;
+    * else *on_disk* (the model paths file *paths_file* before this call
+      rewrote it) as first seen for the listening process, recorded again when
+      that process changes (a listener whose pid could not be read keeps the
+      first record).
+
+    Never raises."""
+    if spawned_pid(api_url) is not None and api_url in _launched_model_folders:
+        return _launched_model_folders[api_url]
+    holder = comfy_port_holder(api_url)
+    pid = holder.get("pid") if holder else None
+    record = _read_launch_record(paths_file)
+    started_at = _process_start_time(pid)
+    if record is not None and started_at is not None and started_at >= record[0] - 2.0:
+        return record[1]
+    key = (api_url, str(paths_file))
+    seen = _observed_model_folders.get(key)
+    if seen is None:
+        seen = (pid, on_disk)
+    elif pid is not None and seen[0] is None:
+        seen = (pid, seen[1])
+    elif pid is not None and seen[0] != pid:
+        seen = (pid, on_disk)
+    _observed_model_folders[key] = seen
+    return seen[1]
 
 
 def _running_note(api_url: str) -> str:
     """``"ComfyUI is running."``, plus ``STALE_MODEL_FOLDERS`` when *api_url* is
     localm's own ComfyUI and the folders of the registered models differ from
-    the ones it was started with (known when this process started it; otherwise
-    from the file it last read). The file is rewritten for its next start."""
+    the ones it was started with (:func:`_started_with_folders`), on every call
+    until it restarts. The file is rewritten for its next start."""
     if _is_managed_target(api_url):
-        from localm.media.managed_comfy import (refresh_extra_model_paths,
+        from localm.media.managed_comfy import (managed_comfy_paths,
+                                                refresh_extra_model_paths,
                                                 registered_folders_in_file)
-        folders_changed, _problems = refresh_extra_model_paths()
-        launched = _launched_model_folders.get(api_url)
-        if launched is not None:
-            folders_changed = launched != registered_folders_in_file()
-        if folders_changed:
+        on_disk = registered_folders_in_file()
+        refresh_extra_model_paths()
+        started = _started_with_folders(
+            api_url, managed_comfy_paths().extra_model_paths, on_disk)
+        if started != registered_folders_in_file():
             return "ComfyUI is running. " + STALE_MODEL_FOLDERS
     return "ComfyUI is running."
 
@@ -2328,12 +2410,15 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
         return False, comfy_port_held_message(api_url, holder)
 
     if _is_managed_target(api_url, cfg):
-        from localm.media.managed_comfy import (refresh_extra_model_paths,
+        from localm.media.managed_comfy import (managed_comfy_paths,
+                                                refresh_extra_model_paths,
                                                 registered_folders_in_file)
         _changed, problems = refresh_extra_model_paths(cfg)
         for problem in problems:
             _say(f"Warning: {problem}; ComfyUI may not list every registered model.")
         _launched_model_folders[api_url] = registered_folders_in_file()
+        _write_launch_record(managed_comfy_paths().extra_model_paths,
+                             _launched_model_folders[api_url])
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:

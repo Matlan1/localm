@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, markNotSent, markRefusedBy, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, pinnedModelName, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, resolvePinnedModel, saveConversations, scopedKeyPrivate, setConversationPin, showPinnedGone, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, localizeServerNotes, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setCanvasNavigationAllowed, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { isPeerSelected, modelCache, modelSelect, refreshModels, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -1598,9 +1598,9 @@ export function blobToB64(blob) {
  *  net_mode=off; nothing is persisted - net_mode stays as configured for
  *  everything else. On success the mic un-greys via refreshVoiceStatus. */
 export async function downloadVoiceModel() {
-  if (!confirm(
+  if (!(await confirmDangerAsync(t("voice.downloadTitle"),
       (voice.reason ? voice.reason + "\n\n" : "") +
-      t("voice.downloadConfirm", { model: voice.model })))
+      t("voice.downloadConfirm", { model: voice.model }), t("common.modelDownload.download"))))
     return;
   const btn = $("chat-mic");
   if (btn) btn.disabled = true;
@@ -1647,8 +1647,8 @@ export async function toggleMic() {
     // model from HuggingFace - make that one network access explicit. (Only
     // reachable under net_mode=allow: any other mode already reports
     // available=false + can_download above.)
-    if (!confirm(
-        t("voice.firstUseConfirm", { model: voice.model }))) return;
+    if (!(await confirmDangerAsync(t("voice.downloadTitle"),
+        t("voice.firstUseConfirm", { model: voice.model }), t("common.modelDownload.download")))) return;
     voice.modelCached = true;   // consent given - don't re-ask this session
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -2224,7 +2224,8 @@ export function reconcileActiveView() {
 /* ---- assistant memory ---- */
 
 export const memory = { text: "", writable: false, corrections: [],
-                         canDownloadEmbedder: false, embedderModel: null };
+                         canDownloadEmbedder: false, embedderModel: null,
+                         embedderMissing: null };
 
 export async function refreshMemory() {
   try {
@@ -2240,6 +2241,7 @@ export async function refreshMemory() {
     // embedding model, and this caller could fetch it in one click.
     memory.canDownloadEmbedder = !!data.can_download_embedder;
     memory.embedderModel = data.embedder_model || null;
+    memory.embedderMissing = data.embedder_missing || null;
   } catch { /* server unreachable */ }
 }
 
@@ -2389,6 +2391,12 @@ export async function openMemoryModal() {
         if (await downloadMemoryEmbedder(dlBtn)) { hint.remove(); dlBtn.remove(); }
       };
       body.appendChild(dlBtn);
+    } else if (memory.embedderMissing) {
+      const hint = el("div", "sub",
+        t("memory.embedder.setupHint", { model: memory.embedderMissing }));
+      hint.id = "mem-embed-setup-hint";
+      hint.style.marginTop = "6px";
+      body.appendChild(hint);
     }
     const ta = document.createElement("textarea");
     ta.value = memory.text;

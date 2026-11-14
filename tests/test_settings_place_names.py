@@ -2,7 +2,8 @@
 """Every "Settings > Page > Place" a text names exists on the GUI Settings page.
 
 Scans the string literals and comments of every tracked ``localm/**/*.py`` file,
-the paragraphs of README.md and every tracked docs/*.md, the English catalog
+every string of each tracked ``localm/**/*.example.json`` file, the paragraphs
+of README.md and every tracked docs/*.md, the English catalog
 (app/i18n-en.js) and the text of index.html for
 ``Settings > ...`` (also ``->``, the arrow sign, ``›``, ``&gt;``) and ``(Settings, ...``.
 The first segment must be a nav page label from ``SETTINGS_GROUPS`` in
@@ -249,6 +250,36 @@ def _html_texts() -> list:
     return out
 
 
+def _tracked_example_json() -> list:
+    """Every tracked ``localm/**/*.example.json``."""
+    try:
+        r = subprocess.run(["git", "ls-files", "localm"], cwd=ROOT,
+                           capture_output=True, text=True, check=True)
+        files = [ROOT / p for p in r.stdout.splitlines() if p.endswith(".example.json")]
+    except (OSError, subprocess.CalledProcessError):
+        files = sorted((ROOT / "localm").rglob("*.example.json"))
+    return [p for p in files if p.is_file()]
+
+
+def _json_texts(path: Path) -> list:
+    """(key path, text) for each string in a JSON file, keys included."""
+    out = []
+
+    def walk(value, where):
+        if isinstance(value, str):
+            out.append((where, value))
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                out.append((f"{where}/{k}", str(k)))
+                walk(v, f"{where}/{k}")
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                walk(v, f"{where}/{i}")
+
+    walk(json.loads(path.read_text(encoding="utf-8")), "")
+    return out
+
+
 def _tracked_docs() -> list:
     """README.md and every tracked docs/*.md."""
     try:
@@ -286,6 +317,9 @@ def all_texts() -> list:
     for path in _tracked_py():
         rel = path.relative_to(ROOT).as_posix()
         out += [(f"{rel}:{line}", text) for line, text in _py_texts(path)]
+    for path in _tracked_example_json():
+        rel = path.relative_to(ROOT).as_posix()
+        out += [(f"{rel}:{where}", text) for where, text in _json_texts(path)]
     for path in _tracked_docs():
         rel = path.relative_to(ROOT).as_posix()
         out += [(f"{rel}:{line}", text) for line, text in _md_texts(path)]
@@ -358,6 +392,8 @@ def test_the_check_reads_every_kind_of_text():
     assert any(w.startswith("localm/plugins/gui/static/index.html:") for w in wheres)
     assert any(w.startswith("README.md:") for w in wheres)
     assert any(w.startswith("docs/phone.md:") for w in wheres)
+    assert any(w.startswith("localm/plugins/builtin/tts/tts.example.json:/_comment")
+               for w in wheres)
 
 
 def test_a_markdown_mention_is_read_through_its_emphasis_and_links(tmp_path):

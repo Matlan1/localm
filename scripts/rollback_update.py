@@ -29,6 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # The install root is the parent of this script's scripts/ dir, derived from __file__.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
@@ -40,38 +41,31 @@ _COMPONENTS_STATUS = "components-update.json"
 _PARTS_LEFT = (("comfyui", "ComfyUI"), ("uv", "the uv inside localm"))
 
 
-def _read_cfg_line(marker: Path) -> str:
-    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM), or
-    on Windows, when that fails, the console (OEM) code page that cmd.exe's ``echo``
-    writes. Raises OSError, ValueError or LookupError when it cannot be read."""
-    raw = marker.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _detect_home(install_root: Path) -> Path:
     """The localm data dir, resolved WITHOUT importing localm.config (which may live in
     the broken build). Mirrors config._detect_home: LOCALM_HOME, else a portable
-    ``localm-home.cfg`` / ``./home`` in the install, else the contained ``./home``."""
+    ``localm-home.cfg`` (read by ``localm/_home_cfg.py``, loaded by file path; a
+    relative line is relative to the install) / ``./home`` in the install, else the
+    contained ``./home``. A marker that cannot be read, or a reader that cannot be
+    loaded, is reported on stderr and the contained ``./home`` is used."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        return Path(env).expanduser().absolute()
     if (install_root / "pyproject.toml").is_file():
         marker = install_root / "localm-home.cfg"
         if marker.is_file():
-            try:
-                line = _read_cfg_line(marker)
-                if line:
-                    return Path(line).expanduser()
-            except (OSError, ValueError, LookupError):
-                pass   # unreadable marker: fall through to ./home
+            reader = _load_helper(install_root, "_home_cfg")
+            if reader is None:
+                print(f"  Cannot read {marker}: localm/_home_cfg.py could not be "
+                      "loaded; using the folder home in the install.", file=sys.stderr)
+            else:
+                try:
+                    line = reader.read_line(marker)
+                    if line:
+                        return reader.data_dir(line, install_root)
+                except (OSError, ValueError, LookupError) as e:
+                    print(f"  Cannot read {marker} ({e}); using the folder home in "
+                          "the install.", file=sys.stderr)
         portable = install_root / "home"
         if portable.is_dir():
             return portable
@@ -135,16 +129,20 @@ def _left_note(left: list) -> str:
             "start of localm with an internet connection returns them to this version's pins")
 
 
-def _record_rollback(updates_dir: Path, install_root: Path, left: list) -> None:
+def _record_rollback(updates_dir: Path, install_root: Path, left: list,
+                     why: Optional[str] = None) -> None:
     """Record the rollback as the last runtime and component update result, the way
     ``localm.updater._record_rollback`` does, so Settings > Updates and ``localm
-    doctor`` do not go on reporting what the rolled-back update did. A file that
-    cannot be written is reported on stderr and does not fail the rollback."""
+    doctor`` do not go on reporting what the rolled-back update did. *why*, when
+    given, is named in the note as the reason. A file that cannot be written is
+    reported on stderr and does not fail the rollback."""
     try:
         version = (install_root / "VERSION").read_text(encoding="utf-8").strip() or None
     except (OSError, ValueError):
         version = None
     note = f"the update was rolled back to localm {version or '(unknown version)'}"
+    if why:
+        note += f" because {why}"
     if left:
         note += "; " + _left_note(left)
     common = {"state": "rolled_back", "note": note, "error": None, "version": version,
@@ -253,10 +251,12 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
     return [p.name for p in backup_dir.iterdir()]
 
 
-def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int:
+def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None,
+         why: Optional[str] = None) -> int:
     """Run the rollback. *code_root*, when given, is the localm tree of the build
     that applied the update (its update backup); the restore helpers are loaded
-    from it before the install's own."""
+    from it before the install's own. *why*, when given, is the reason recorded
+    with the rollback (:func:`_record_rollback`) and printed."""
     ap = argparse.ArgumentParser(
         description="Restore the previous localm build after a bad update.")
     ap.add_argument("-y", "--yes", action="store_true",
@@ -320,7 +320,9 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
         import shutil
         shutil.rmtree(undo.keep, ignore_errors=True)
     left = _parts_left(updates_dir)
-    _record_rollback(updates_dir, install_root, left)
+    _record_rollback(updates_dir, install_root, left, why)
+    if why:
+        print(f"Rolled back because {why}.")
     print("Rolled back to the previous version" + (" and its packages" if undo else "")
           + ". Start localm again to use it; Settings > Updates shows any other part that "
             "still differs.")

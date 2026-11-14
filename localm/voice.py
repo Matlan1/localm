@@ -378,9 +378,10 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     cached, name = stt_model_cached()
     if cached:
         return True, ""
-    from localm.netpolicy import download_refusal, downloads_allowed_when_off, network_mode
+    from localm.netpolicy import (automatic_download_allowed, download_refusal,
+                                  downloads_allowed_when_off, network_mode)
     if allow_download is None:
-        allow_download = network_mode() == "allow"
+        allow_download = automatic_download_allowed()
     if not allow_download:
         # Expected states (an unset policy, an offline box), not defects: INFO.
         reason = _stt_download_blocked_reason(name, network_mode())

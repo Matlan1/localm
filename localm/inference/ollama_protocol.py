@@ -26,6 +26,7 @@ INFERENCE_POST_PATHS = frozenset(
 SHOW_PATH = "/api/show"
 READ_GET_PATHS = frozenset({"/api/tags", "/api/ps", "/api/version"})
 COPY_PATH = "/api/copy"
+MANAGEMENT_PATHS = frozenset({"/api/pull", "/api/push", "/api/create", "/api/delete"})
 BLOBS_PREFIX = "/api/blobs/"
 
 # Full route paths, matched with ``in``: a prefix would also exempt the GUI's

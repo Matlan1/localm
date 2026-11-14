@@ -41,12 +41,11 @@ localm plugin uninstall <name>  # remove from the installed folder (keeps data u
 localm plugin refresh [<name>]  # re-copy installed builtins whose store code changed
 ```
 
-A plugin installed or enabled from the terminal while a server is running is
-mounted the next time the GUI reads the plugin list (reload the page);
-toggling a plugin while the server runs (via the GUI Plugins page or the
-`/api/plugins/{name}/...` routes) mounts/unmounts it without a restart.
-A plugin disabled or uninstalled from the terminal stays loaded in a running
-server until that server restarts.
+A plugin installed, enabled, disabled or uninstalled from the terminal while a
+server is running is mounted or unmounted the next time the GUI reads the
+plugin list (reload the page); toggling a plugin while the server runs (via
+the GUI Plugins page or the `/api/plugins/{name}/...` routes) mounts/unmounts
+it without a restart.
 
 ### Upgrades: refreshing a stale installed copy
 
@@ -93,7 +92,7 @@ a few routes) are two small worked examples in `localm/plugins/builtin/`.
 
 ```toml
 [plugin]
-name = "myplugin"            # required; CLI name, must be a valid identifier (hyphens allowed)
+name = "myplugin"            # required; must be a valid identifier (hyphens allowed)
 version = "1.0.0"
 api_version = 1              # contract version the engine must support (default 1)
 description = "What it does"
@@ -106,7 +105,8 @@ capabilities = ["feature"]   # declared capabilities; "inference-backend" is the
 data_subdir = "my_data"      # one folder name; "" = none. Get the folder from host.data_dir() (third-party: <data dir>/plugin-data/<name>/my_data)
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
-cli = "module:attr"          # optional legacy Click command entry point
+cli = "module:attr"          # optional Click command, added to `localm` under its own name;
+                             # first-party (bundled) plugins only, ignored for any other
 
 [surface]                    # optional GUI/SPA contribution
 tab_id = "mytab"             # "" = no tab (settings-only or headless plugin)
@@ -174,7 +174,7 @@ at that moment, that is for an active plugin uninstalled through the GUI or
 
 | Method | Purpose |
 |--------|---------|
-| `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. Every route path must start with `/api/` or `/v1/`: any other path makes `register()` raise `ValueError` and the plugin fails to load. With no server app (a backend-only load) nothing is mounted. |
+| `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. Every route path must start with `/api/` or `/v1/`: any other path makes `register()` raise `ValueError` and the plugin fails to load. A third-party plugin's route that localm or another plugin already answers does the same. With no server app (a backend-only load) nothing is mounted. |
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
 | `data_dir()` | The plugin's own data folder as a `Path`, created on first call: `<data dir>/plugin-data/<name>/<data_subdir>` for a third-party plugin. Keep the plugin's data there and never build `<data dir>/<data_subdir>` yourself: an uninstall that deletes the plugin's data removes this folder and nothing else. Raises `ValueError` when the manifest declares no `data_subdir`. |
@@ -534,8 +534,9 @@ def register(host):
   **Install dependencies** button). Plugins with no Python dependency
   (like `tts`, which runs in the browser) declare no extra.
 - **`requires`** - other plugins that must be installed first. `missing_requires`
-  surfaces these at install time, and enabling a plugin whose required plugins
-  are not installed is refused. Uninstalling a plugin disables and unloads every
+  surfaces these at install time: a plugin whose required plugins are not
+  installed is installed but left disabled, and enabling it is refused until
+  they are. Uninstalling a plugin disables and unloads every
   plugin that requires it.
 
 ## Per-plugin config and privacy

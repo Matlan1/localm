@@ -160,6 +160,7 @@ class TestTerminalBar:
     def test_a_terminal_shows_a_bar_with_size_speed_and_time_left(self, monkeypatch):
         from rich.console import Console
         buf = io.StringIO()
+        monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setattr(pull_mod, "console",
                             Console(file=buf, force_terminal=True, width=110))
         monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
@@ -202,6 +203,7 @@ class TestTerminalBar:
             "m.gguf: 59% (1.5 GB / 2.5 GB) at 50.0 MB/s, 21s left, 269.0 MB saved to disk\n")
 
         buf = io.StringIO()
+        monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setattr(pull_mod, "console",
                             Console(file=buf, force_terminal=True, width=140))
         run = pull_mod._ProgressRun(lambda: 269_000_000, 2_500_000_000, label="m.gguf")

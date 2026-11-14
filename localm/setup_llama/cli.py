@@ -206,7 +206,7 @@ def _restore_pin(before: Optional[str]) -> None:
         config.update_config(_put)
         console.print("[yellow]The llama.cpp pin is back to what it was before.[/yellow]")
     except Exception as e:
-        console.print(f"[red]Could not put the llama.cpp pin back:[/red] {e}")
+        console.print(f"[red]Could not put the llama.cpp pin back:[/red] {escape(str(e))}")
 
 
 def _refuse_when_net_off() -> None:
@@ -216,7 +216,7 @@ def _refuse_when_net_off() -> None:
     try:
         _require_network_allowed()
     except netpolicy.NetworkPolicyError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -257,10 +257,10 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     except RuntimeInUseError as e:
         _exit_runtime_in_use(e)
     except click.ClickException as e:
-        console.print(f"[red]Staging {cuda_line} failed:[/red] {e.message}")
+        console.print(f"[red]Staging {cuda_line} failed:[/red] {escape(e.message)}")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[red]Staging {cuda_line} failed:[/red] {e}")
+        console.print(f"[red]Staging {cuda_line} failed:[/red] {escape(str(e))}")
         sys.exit(1)
     if not (target / lib_name).exists():
         console.print(f"[red]The {cuda_line} archive did not contain {lib_name}.[/red]")
@@ -273,9 +273,10 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     try:
         _sl.record_staged_cuda(target, cuda_line)
     except OSError as e:
-        console.print(f"[red]Could not record the staged runtime in {target}:[/red] {e}")
+        console.print(f"[red]Could not record the staged runtime in "
+                      f"{escape(str(target))}:[/red] {escape(str(e))}")
         sys.exit(1)
-    console.print(f"[yellow]Staged the {cuda_line} CUDA runtime in {target}. It has NOT "
+    console.print(f"[yellow]Staged the {cuda_line} CUDA runtime in {escape(str(target))}. It has NOT "
                   "been load-tested: a container started from this image tests it on "
                   "the GPU host before serving.[/yellow]")
 
@@ -435,7 +436,7 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
                       f"Point --from at the build output containing {lib_name}. "
                       "The installed runtime was left as it was.")
         sys.exit(1)
-    console.print(f"[green]Copied {n} file(s)[/green] into {target}")
+    console.print(f"[green]Copied {n} file(s)[/green] into {escape(str(target))}")
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     loaded, detail = _sl._native_loads_ok()
     if loaded:
@@ -447,7 +448,7 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
         # report success on a library that will not load. Exit non-zero with a
         # clear reason rather than leaving a broken runtime behind.
         console.print(f"[red]Copied, but the library did not load[/red] "
-                      f"({detail}) - is it built for this OS/GPU? "
+                      f"({escape(str(detail))}) - is it built for this OS/GPU? "
                       "See docs/gpu-setup.md.")
         sys.exit(1)
 
@@ -457,7 +458,7 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
     """Install a prebuilt archive from an explicit URL (``--url``)."""
     if not sha256:
         console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
-    console.print(f"[dim]Fetching:[/dim] {url}")
+    console.print(f"[dim]Fetching:[/dim] {escape(url)}")
     def _fill(staging: Path) -> None:
         _sl._fetch_and_place(url, staging, sha256)
         if not (staging / lib_name).exists():
@@ -475,12 +476,12 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
                       "Try a different --url or use --from.")
         sys.exit(1)
     except ArtifactError as e:
-        console.print(f"[red]Refusing to install:[/red] {e}")
+        console.print(f"[red]Refusing to install:[/red] {escape(str(e))}")
         console.print("Provide a local build with --from instead, or a different "
                       "--url (and --sha256 if you pin one).")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[red]Download failed:[/red] {e}")
+        console.print(f"[red]Download failed:[/red] {escape(str(e))}")
         console.print("Provide a local build with --from instead, or a different --url.")
         sys.exit(1)
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
@@ -493,7 +494,7 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
         # A user-pinned --url: do not fall back, but do not claim success on a
         # library that will not load. Exit non-zero with a clear reason.
         console.print(f"[red]Placed, but the library did not load[/red] "
-                      f"({detail}). Is this build right for your OS/GPU? "
+                      f"({escape(str(detail))}). Is this build right for your OS/GPU? "
                       "See docs/gpu-setup.md.")
         sys.exit(1)
 
@@ -505,7 +506,7 @@ def _refuse_without_prebuilt(chosen: str) -> None:
     try:
         _require_prebuilt(chosen, _sl._platform_key(), _sl._machine_arch())
     except click.ClickException as e:
-        console.print(f"[red]{e.message}[/red]")
+        console.print(f"[red]{escape(e.message)}[/red]")
         sys.exit(1)
 
 
@@ -580,7 +581,7 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     _record_runtime_history(result, build)
     if keep_choice and _read_backend_choice(target) is not None:
         if not_used_reason:
-            console.print(f"[yellow]{result} installed:[/yellow] {not_used_reason}")
+            console.print(f"[yellow]{result} installed:[/yellow] {escape(not_used_reason)}")
         _print_pending_choice(target)
     elif keep_choice and requested == result:
         return
@@ -597,7 +598,7 @@ def _settle_backend_choice(target: Path, requested: Optional[str], result: str,
     if requested is None:
         _record_backend_choice(target, None)
         if reason:
-            console.print(f"[yellow]auto chose {result}:[/yellow] {reason}")
+            console.print(f"[yellow]auto chose {result}:[/yellow] {escape(reason)}")
         return
     if requested == result:
         _record_backend_choice(target, None)
@@ -606,7 +607,7 @@ def _settle_backend_choice(target: Path, requested: Optional[str], result: str,
     console.print(f"[bold yellow]Your choice '{requested}' is kept, but '{result}' is "
                   f"what is installed and in use now.[/bold yellow]")
     if reason:
-        console.print(f"[yellow]Why:[/yellow] {reason}")
+        console.print(f"[yellow]Why:[/yellow] {escape(reason)}")
     console.print(f"[dim]'localm doctor' and Settings show this until it changes. Retry "
                   f"your choice: localm setup-llama --backend {requested} --force  -  or "
                   f"keep {result}: localm setup-llama --backend {result}[/dim]")
@@ -648,7 +649,7 @@ def _warn_if_overridden() -> None:
             else "the binary_dir setting")
     backend = f" ({use['backend']})" if use["backend"] else ""
     console.print(f"[bold yellow]localm does not load this runtime:[/bold yellow] {what} "
-                  f"points at {use['dir']}{backend}, which is used instead.")
+                  f"points at {escape(str(use['dir']))}{backend}, which is used instead.")
     fix = ("unset LLAMA_CPP_LIB" if use["source"] == "LLAMA_CPP_LIB"
            else "clear 'llama.cpp binary folder' in Settings (binary_dir in config.json)")
     console.print(f"[dim]To use the runtime installed here, {fix}.[/dim]")

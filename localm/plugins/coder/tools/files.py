@@ -14,8 +14,9 @@ import re
 import stat as _stat
 import textwrap
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import (
     _MAX_OUTPUT, RESTRICTED_UNWRITABLE_MESSAGE, ToolResult, _confine, _truncate,
@@ -646,6 +647,102 @@ def _restore_snapshots(snapshots: dict, written: list) -> list[str]:
     return failures
 
 
+@dataclass
+class EditFilesPlan:
+    """What an ``edit_files`` call would write, worked out without writing.
+
+    ``targets``: each file once, in first-mention order. ``labels``: each
+    target's path as the call first wrote it. ``snapshots``: each target's
+    bytes on disk. ``before``: each target's text as read (``\\n`` line ends).
+    ``after``: each target's text once every edit to it is applied.
+    ``n_edits``: how many edits the call holds."""
+    targets: list[Path]
+    labels: dict[Path, str]
+    snapshots: dict[Path, bytes]
+    before: dict[Path, str]
+    after: dict[Path, str]
+    n_edits: int
+
+
+def plan_edit_files(cwd: Path, edits: object,
+                    read: Optional[Callable[[str], str]] = None) -> EditFilesPlan | str:
+    """Validate and compose an ``edit_files`` batch, reading but writing
+    nothing. Returns the :class:`EditFilesPlan`, or the error message
+    ``edit_files`` reports when it refuses the whole batch: a malformed item,
+    a path outside *cwd*, a missing file, an ``old`` that matches no single
+    region (exact first, else one whitespace-tolerant match, as edit_file), or
+    a result that breaks a ``.py``/``.toml`` file that parsed before.
+
+    *read*, when given, supplies each file's current text from its path as the
+    call wrote it (a patch-mode overlay) instead of the disk; then no file has
+    to exist and ``snapshots`` stays empty."""
+    if not isinstance(edits, list) or not edits:
+        return ("`edits` must be a non-empty list of {path, old, new} objects. "
+                "For a single file, edit_file is simpler.")
+    targets: list[Path] = []
+    labels: dict[Path, str] = {}
+    snapshots: dict[Path, bytes] = {}
+    before: dict[Path, str] = {}
+    current: dict[Path, str] = {}
+    for i, edit in enumerate(edits):
+        label = f"edits[{i}]"
+        if not isinstance(edit, dict):
+            return (f"{label} is not an object - each edit must be "
+                    '{"path": ..., "old": ..., "new": ...}.')
+        path = edit.get("path") or ""
+        old  = edit.get("old")
+        new  = edit.get("new")
+        if not path:
+            return f"{label} has no `path`."
+        if old is None or new is None:
+            return f"{label} ({path}) needs both `old` and `new`."
+        old, new = str(old), str(new)
+        if not old:
+            return (f"{label} ({path}): `old` is empty - pass the exact text to "
+                    "replace (read the file first and copy the snippet). To "
+                    "replace the whole file, use write_file.")
+        try:
+            p = _confine(cwd, str(path))
+        except PermissionError as e:
+            return f"{label}: {e}"
+        if read is None and not p.exists():
+            return f"{label}: File not found: {p}"
+        if read is None and not p.is_file():
+            return f"{label}: Not a file: {p}"
+
+        # Later edits to one file see the text as earlier edits left it.
+        if p in current:
+            text = current[p]
+        else:
+            try:
+                if read is None:
+                    snapshots[p] = p.read_bytes()
+                    text = p.read_text(encoding="utf-8", errors="replace")
+                else:
+                    text = read(str(path))
+            except Exception as e:
+                return f"{label} ({path}): {e}"
+            targets.append(p)
+            labels[p] = str(path)
+            before[p] = text
+
+        located = _resolve_edit(text, old)
+        if located is None:
+            return f"{label}: " + _edit_miss_message(str(path), old, text)
+        start, end, _count, _tolerant = located
+        current[p] = text[:start] + new + text[end:]
+
+    for p in targets:
+        base = snapshots[p].decode("utf-8", "replace") if p in snapshots else before[p]
+        broken = _broken_by_edit(p, base, current[p])
+        if broken:
+            rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+            return (f"Edits NOT applied - no file was changed: {rel} would have a "
+                    f"{broken}. Check the indentation of each `new` against the lines "
+                    "around it.")
+    return EditFilesPlan(targets, labels, snapshots, before, current, len(edits))
+
+
 def tool_edit_files(cwd: Path, edits: list, _restricted: bool = True) -> ToolResult:
     """
     Apply the same class of exact-string edit as ``edit_file`` across several
@@ -661,83 +758,13 @@ def tool_edit_files(cwd: Path, edits: list, _restricted: bool = True) -> ToolRes
     and the whole call reports which edit failed and why. A caller therefore
     never has to reason about a half-applied multi-file change.
     """
-    if not isinstance(edits, list) or not edits:
-        return ToolResult.error(
-            "`edits` must be a non-empty list of {path, old, new} objects. "
-            "For a single file, edit_file is simpler."
-        )
-
     # ---- Phase 1: validate every edit and snapshot every target, no writes ----
-    planned: list[tuple[Path, str]] = []   # (abs path, text after this edit)
-    snapshots: dict[Path, bytes] = {}      # abs path -> original bytes on disk
-    current: dict[Path, str] = {}          # abs path -> text as edits so far left it
-    for i, edit in enumerate(edits):
-        label = f"edits[{i}]"
-        if not isinstance(edit, dict):
-            return ToolResult.error(
-                f"{label} is not an object - each edit must be "
-                '{"path": ..., "old": ..., "new": ...}.')
-        path = edit.get("path") or ""
-        old  = edit.get("old")
-        new  = edit.get("new")
-        if not path:
-            return ToolResult.error(f"{label} has no `path`.")
-        if old is None or new is None:
-            return ToolResult.error(
-                f"{label} ({path}) needs both `old` and `new`.")
-        old, new = str(old), str(new)
-
-        # Reject an empty old, exactly as edit_file does.
-        if not old:
-            return ToolResult.error(
-                f"{label} ({path}): `old` is empty - pass the exact text to "
-                "replace (read the file first and copy the snippet). To "
-                "replace the whole file, use write_file."
-            )
-        try:
-            p = _confine(cwd, str(path))
-        except PermissionError as e:
-            return ToolResult.error(f"{label}: {e}")
-        if not p.exists():
-            return ToolResult.error(f"{label}: File not found: {p}")
-        if not p.is_file():
-            return ToolResult.error(f"{label}: Not a file: {p}")
-
-        # Later edits in the batch see the text as earlier edits left it, so several
-        # edits to one file compose. The snapshot stays the original on-disk bytes so
-        # a rollback undoes the whole batch.
-        if p in current:
-            text = current[p]
-        else:
-            try:
-                snapshots[p] = p.read_bytes()
-                text = p.read_text(encoding="utf-8", errors="replace")
-            except Exception as e:
-                return ToolResult.error(f"{label} ({path}): {e}")
-
-        located = _resolve_edit(text, old)
-        if located is None:
-            return ToolResult.error(
-                f"{label}: " + _edit_miss_message(str(path), old, text))
-        start, end, _count, _tolerant = located
-        current[p] = text[:start] + new + text[end:]
-        planned.append((p, current[p]))
+    plan = plan_edit_files(cwd, edits)
+    if isinstance(plan, str):
+        return ToolResult.error(plan)
+    targets, snapshots, current = plan.targets, plan.snapshots, plan.after
 
     # ---- Phase 2: write, rolling every file back if any write fails ----
-    # One write per file: several edits to one file were composed in phase 1.
-    targets: list[Path] = []
-    for p, _text in planned:
-        if p not in targets:
-            targets.append(p)
-    # Nothing is written when the batch would break a file that parsed before.
-    for p in targets:
-        broken = _broken_by_edit(p, snapshots[p].decode("utf-8", "replace"), current[p])
-        if broken:
-            rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
-            return ToolResult.error(
-                f"Edits NOT applied - no file was changed: {rel} would have a "
-                f"{broken}. Check the indentation of each `new` against the lines "
-                "around it.")
     written: list[Path] = []
     for p in targets:
         try:
@@ -773,11 +800,11 @@ def tool_edit_files(cwd: Path, edits: list, _restricted: bool = True) -> ToolRes
             syntax_ok.append(p)
 
     touched = len(targets)
-    lines = [f"Applied {len(planned)} edit(s) across {touched} file(s):"]
+    lines = [f"Applied {plan.n_edits} edit(s) across {touched} file(s):"]
     for p in targets:
         rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
         lines.append(f"  - {rel}")
-    summary = f"edited {touched} file(s) ({len(planned)} edit(s))"
+    summary = f"edited {touched} file(s) ({plan.n_edits} edit(s))"
     output  = "\n".join(lines)
     if warnings:
         output += "\n\n[syntax check] " + "\n[syntax check] ".join(warnings)

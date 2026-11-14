@@ -110,9 +110,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/share-target", dependencies=[Depends(_require_auth)],
               include_in_schema=False)
     async def share_target(request: Request):
-        """Stage a share-sheet payload and redirect to the app. 413 when one
-        share exceeds ``_SHARE_MAX_BYTES`` or, in privacy mode, when the memory
-        inbox would exceed ``_SHARE_MEMORY_MAX_BYTES`` with it."""
+        """Stage a share-sheet payload and redirect to the app with
+        ``?shared=<staged count>``, plus ``&skipped=<count>`` when shared files
+        were not staged (empty, or not an image). 413 when one share exceeds
+        ``_SHARE_MAX_BYTES`` or, in privacy mode, when the memory inbox would
+        exceed ``_SHARE_MEMORY_MAX_BYTES`` with it."""
         import uuid as _uuid
         try:
             form = await read_form(
@@ -126,12 +128,18 @@ def register(app: FastAPI, ctx) -> None:
         # Names are all checked BEFORE anything is written, so a refused share
         # never leaves a partial inbox entry behind.
         accepted = []
+        empty = not_image = 0
         for upload in (u for group in form.files.values() for u in group):
             filename, data = upload.filename, upload.data
             if not data:
+                # A part with no file name and no data is the empty file field
+                # of a share that carried only text, not a skipped file.
+                empty += bool(filename)
                 continue
-            # Only images are ingested (the chat vision path); ignore other types.
+            # Only images are ingested (the chat vision path); other types are
+            # skipped and counted.
             if Path(filename or "").suffix.lower() not in _web._SHARE_IMAGE_EXTS:
+                not_image += 1
                 continue
             safe = Path(filename or "shared").name[:80] or "shared"
             # Path().name alone is NOT a sufficient sanitizer: it leaves
@@ -166,9 +174,15 @@ def register(app: FastAPI, ctx) -> None:
             else:
                 (inbox / name).write_bytes(data)
             n += 1
+        skipped = empty + not_image
+        if skipped:
+            logger.info("share-target: staged %d item(s), skipped %d file(s) (%d "
+                        "empty, %d not an image)", n, skipped, empty, not_image)
         # 303 so the browser GETs the app shell (a POST-redirect-GET); the app
-        # reads ?shared and pulls the inbox.
-        return RedirectResponse(url=f"/?shared={n}", status_code=303)
+        # reads ?shared and pulls the inbox, and ?skipped counts the files that
+        # were not staged.
+        url = f"/?shared={n}" + (f"&skipped={skipped}" if skipped else "")
+        return RedirectResponse(url=url, status_code=303)
 
     @app.get("/api/share/pending", dependencies=[Depends(_require_auth)])
     async def share_pending(request: Request):

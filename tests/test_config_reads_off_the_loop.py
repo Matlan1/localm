@@ -195,6 +195,7 @@ def test_a_slow_registry_read_does_not_hold_the_loop_for_config_reads(monkeypatc
 
 def test_a_change_by_another_process_is_in_force_within_the_kept_read_bound(monkeypatch):
     monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 1.0)
+    monkeypatch.setattr(config, "LOOP_FRESH_READ_WAIT_S", 5.0)
     _write_config({"temperature": 0.25})
     gate = _Gate()
 
@@ -228,6 +229,7 @@ def test_a_change_by_another_process_is_in_force_within_the_kept_read_bound(monk
 
 def test_past_the_bound_the_loop_waits_for_the_fresh_read(monkeypatch):
     monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 0.3)
+    monkeypatch.setattr(config, "LOOP_FRESH_READ_WAIT_S", 5.0)
     _write_config({"temperature": 0.25})
     gate = _Gate()
 
@@ -247,6 +249,111 @@ def test_past_the_bound_the_loop_waits_for_the_fresh_read(monkeypatch):
         gate.release.set()
     assert value == 0.9
     assert took >= 0.7, took
+
+
+def test_past_the_bound_a_fresh_read_slower_than_its_wait_is_refused(monkeypatch, caplog):
+    monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 0.2)
+    monkeypatch.setattr(config, "LOOP_FRESH_READ_WAIT_S", 0.6)
+    _write_config({"temperature": 0.25})
+    gate = _Gate()
+
+    async def scenario():
+        config.load_config()
+        time.sleep(0.3)
+        monkeypatch.setattr(config, "_read_json_checked", gate.wrap(config._read_json_checked))
+        results = []
+        for _ in range(3):
+            t0 = time.monotonic()
+            try:
+                results.append((config.load_config()["temperature"], time.monotonic() - t0))
+            except config.ConfigReadSlow as e:
+                results.append((e, time.monotonic() - t0))
+        gate.release.set()
+        settled = _wait_for(lambda: "config.json" not in config._loop_inflight)
+        return results, settled, config.load_config()["temperature"]
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        try:
+            results, settled, after = asyncio.run(scenario())
+        finally:
+            gate.release.set()
+    assert all(isinstance(r[0], config.ConfigReadSlow) for r in results), results
+    assert results[0][0].name == "config.json"
+    assert results[0][1] < 0.6 + 0.5, results
+    assert max(r[1] for r in results[1:]) < 0.2, results
+    assert settled and after == 0.25
+    refused = [r.getMessage() for r in caplog.records
+               if "are refused until the read finishes" in r.getMessage()]
+    assert len(refused) == 1, refused
+
+
+def test_the_idle_unload_check_survives_a_slow_settings_read(monkeypatch):
+    from localm.inference import http_server as hs
+
+    def slow():
+        raise config.ConfigReadSlow("config.json", 2.5)
+
+    monkeypatch.setattr(config, "load_config", slow)
+    assert hs._idle_unload_ttl() == 0
+
+
+def test_the_fresh_read_wait_is_at_least_the_kept_read_wait():
+    assert config.LOOP_READ_WAIT_S <= config.LOOP_FRESH_READ_WAIT_S
+
+
+def test_a_request_whose_settings_read_is_too_slow_gets_a_503(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    _write_config({"temperature": 0.3})
+    app = create_app(None)
+    gate = _Gate()
+    with TestClient(app) as client:
+        client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+        assert client.get("/v1/config").status_code == 200
+        monkeypatch.setattr(config, "LOOP_KEPT_MAX_AGE_S", 0.0)
+        monkeypatch.setattr(config, "LOOP_FRESH_READ_WAIT_S", 0.3)
+        monkeypatch.setattr(config, "_read_json_checked", gate.wrap(config._read_json_checked))
+        try:
+            t0 = time.monotonic()
+            refused = client.get("/v1/config")
+            took = time.monotonic() - t0
+        finally:
+            gate.release.set()
+    assert gate.calls >= 1
+    assert refused.status_code == 503, refused.text
+    assert refused.headers["retry-after"] == "5"
+    assert "config.json" in refused.json()["detail"]
+    assert took < 0.3 + 2.0, took
+
+
+def test_a_slow_read_raised_by_a_middleware_or_a_route_is_answered_503():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from localm.inference.app_assembly import errors
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _reads_settings(request, call_next):
+        if request.url.path == "/in-middleware":
+            raise config.ConfigReadSlow("config.json", 2.5)
+        return await call_next(request)
+
+    @app.get("/in-route")
+    async def _route():
+        raise config.ConfigReadSlow("registry.json", 2.5)
+
+    errors.add_config_read_slow_answer(app)
+    errors.register_exception_handlers(app)
+    client = TestClient(app)
+    for path, name in (("/in-middleware", "config.json"), ("/in-route", "registry.json")):
+        r = client.get(path)
+        assert r.status_code == 503, (path, r.text)
+        assert r.headers["retry-after"] == "5"
+        assert name in r.json()["detail"]
 
 
 def test_a_change_made_by_another_process_is_read_fresh_on_the_loop():

@@ -41,7 +41,7 @@ class CatalogEntry:
                                   # it out of every listing while an explicit
                                   # `localm plugin install <name>` still works
     opt_in: bool = False          # never part of "install everything"
-    needs_nvidia_linux: bool = False  # listed only on Linux with an NVIDIA GPU
+    needs_nvidia_linux: bool = False  # runs only on Linux with an NVIDIA GPU
 
     def source_url(self) -> str:
         """Repo to fetch from when the plugin is missing from the bundled store."""
@@ -141,9 +141,25 @@ def runnable_here(entry: CatalogEntry) -> bool:
     return not entry.needs_nvidia_linux or _nvidia_linux()
 
 
+def not_runnable_reason(entry: CatalogEntry) -> str:
+    """Why *entry* cannot run on this machine, or "" when it can."""
+    if runnable_here(entry):
+        return ""
+    return "needs Linux with an NVIDIA GPU, which this machine does not have"
+
+
 def offered_entry(entry: CatalogEntry) -> bool:
-    """Whether *entry* is listed as available to install on this machine."""
+    """Whether *entry* is offered by setup on this machine: offered, and able
+    to run here."""
     return entry.offered and runnable_here(entry)
+
+
+def listed(name: str) -> bool:
+    """Whether *name* is listed as available to install: False only for a
+    catalog entry that is not offered. An entry that cannot run on this
+    machine is listed, with :func:`not_runnable_reason` saying why."""
+    entry = _BY_NAME.get(name)
+    return entry is None or entry.offered
 
 
 def offered(name: str) -> bool:

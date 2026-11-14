@@ -794,8 +794,7 @@ def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> 
         plan.fallback = (
             f"The configured bind address ({plan.host}) was not applied: {_why}. "
             f"The server is on 127.0.0.1 (this computer only). Set a long, "
-            f"random API key (Settings > Security > Owner key, or run: localm "
-            f"key generate), then restart the server.")
+            f"random API key (run: localm key generate), then restart the server.")
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print(
             "[bold yellow]  Ignoring the configured bind address and binding "

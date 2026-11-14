@@ -87,6 +87,10 @@ export function _catalogRow(p) {
     descTd.appendChild(el("div", "sub plugin-missing-dep",
       t("plugins.missingDeps", { missing: missingDeps.join(", ") })));
   }
+  // The server's reason this first-party plugin cannot run on this machine.
+  if (p.not_runnable_reason) {
+    descTd.appendChild(el("div", "sub plugin-not-runnable", p.not_runnable_reason));
+  }
   tr.appendChild(descTd);
   const actions = el("td", "actions-cell");
   const title = pluginTitle(p);

@@ -432,19 +432,31 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 )
 
 
-# Raised after a reply that asked for a grammar when the grammar constraint
-# failed while it was generated.
-GRAMMAR_FAILED_THIS_REPLY_MESSAGE = (
+# Raised after a reply that asked for a forced grammar when the grammar
+# constraint failed while it was generated: by the GGUF backend, and by the
+# HuggingFace backend.
+GRAMMAR_FAILED_THIS_REPLY_HEAD = (
     "The grammar constraint failed while this reply was generated, so the reply "
     "does not follow the requested grammar. Grammar-constrained sampling is off for "
-    "this model until localm restarts. Restart localm, or update the runtime with "
-    "`localm setup-llama`.")
+    "this model until localm restarts.")
 
+GRAMMAR_FAILED_THIS_REPLY_MESSAGE = (
+    GRAMMAR_FAILED_THIS_REPLY_HEAD
+    + " Restart localm, or update the runtime with `localm setup-llama`.")
+
+GRAMMAR_FAILED_THIS_REPLY_HF_MESSAGE = (
+    GRAMMAR_FAILED_THIS_REPLY_HEAD
+    + " Restart localm, or update the grammar extra with: "
+    "pip install -U 'localm[grammar]'.")
+
+# Shown when a grammar is requested of a GGUF model whose grammar sampler
+# faulted earlier. Contains "would be ignored", which the GUI's web-tool retry
+# matches on. See test_grammar_refusals_carry_the_retry_phrase.
 GRAMMAR_FAULTED_MESSAGE = (
     "This model's llama.cpp runtime faulted while applying a grammar earlier, so "
-    "grammar-constrained sampling is off for it until localm restarts, and the "
-    "reply would not match the requested grammar. Restart localm, or update the "
-    "runtime with `localm setup-llama`.")
+    "grammar-constrained sampling is off for it until localm restarts: the "
+    "requested grammar would be ignored and the reply would not match it. Restart "
+    "localm, or update the runtime with `localm setup-llama`.")
 
 # Shown when any grammar, lazy or forced, is requested of a diffusion language
 # model. Contains "would be ignored", which the GUI's web-tool retry matches

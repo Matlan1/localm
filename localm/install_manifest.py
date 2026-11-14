@@ -37,7 +37,7 @@ uninstall treats a journaled shortcut or command it never got to record as if it
 been recorded (through the same checks). A step that was begun but never finished
 while it could touch the user's profile is reported as a note.
 
-Stdlib only.
+Stdlib only, plus ``localm._home_cfg`` (itself stdlib only).
 """
 
 from __future__ import annotations
@@ -53,12 +53,14 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
+from localm import _home_cfg
+
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
 JOURNAL_NAME = ".localm-setup-journal"
 SETUP_TMP_NAME = ".localm-setup-tmp"
 DATA_MARKER = ".localm-data"
-HOME_CFG_NAME = "localm-home.cfg"
+HOME_CFG_NAME = _home_cfg.NAME
 PORTABLE_HOME = "home"
 SCHEMA_VERSION = 3
 
@@ -598,19 +600,19 @@ def _others_using(folder, root: Path, marker: Optional[dict]) -> list[str]:
 
 def configured_data_dir(root) -> tuple[str, bool]:
     """(folder, exists) for the data folder the clone at *root* is set up to
-    use: the full path named in ``localm-home.cfg``, else ``<root>/home``
-    when it exists. ("", False) when there is none or the setting cannot be
-    read."""
+    use: the path named in ``localm-home.cfg`` (a relative one taken relative
+    to *root*), else ``<root>/home`` when it exists. ("", False) when there is
+    none or the setting cannot be read."""
     root = Path(root).resolve()
     cfg = root / HOME_CFG_NAME
     if cfg.is_file():
         try:
-            line = _read_cfg_line(cfg)
+            line = _home_cfg.read_line(cfg)
         except (OSError, ValueError, LookupError):
             return "", False
-        path = os.path.expanduser(line) if line else ""
-        if not (path and os.path.isabs(path)):
+        if not line:
             return "", False
+        path = str(_home_cfg.data_dir(line, root))
         return _plain_abs(path), os.path.isdir(path)
     home = root / PORTABLE_HOME
     return (str(home), True) if home.is_dir() else ("", False)
@@ -1248,37 +1250,23 @@ def _data_dirs(root: Path, m: Optional[dict]) -> list:
     if portable.is_dir():
         add(str(portable), False)
     line = _cfg_data_dir(root)
-    if line and os.path.isabs(os.path.expanduser(line)):
+    if line:
         add(_plain_abs(line), False)
     return out
 
 
-def _read_cfg_line(path: Path) -> str:
-    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM),
-    or on Windows, when that fails, the console (OEM) code page that cmd.exe's
-    ``echo`` writes. Raises OSError or ValueError when it cannot be read."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _cfg_data_dir(root: Path) -> str:
-    """The data folder ``localm-home.cfg`` names, or "" when there is none or
-    it cannot be read (_plan reports the unreadable case)."""
+    """The data folder ``localm-home.cfg`` names (a relative line taken
+    relative to *root*), or "" when there is none or it cannot be read (_plan
+    reports the unreadable case)."""
     cfg = root / HOME_CFG_NAME
     if not cfg.is_file():
         return ""
     try:
-        return _read_cfg_line(cfg)
+        line = _home_cfg.read_line(cfg)
     except (OSError, ValueError, LookupError):
         return ""
+    return str(_home_cfg.data_dir(line, root)) if line else ""
 
 
 def _kept_venv_folders(root: Path) -> list[Path]:
@@ -1432,7 +1420,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     cfg = root / HOME_CFG_NAME
     if cfg.is_file():
         try:
-            _read_cfg_line(cfg)
+            _home_cfg.read_line(cfg)
         except (OSError, ValueError, LookupError) as e:
             items.append(_Item(cfg, "note", "note",
                                f"cannot read it ({e}); the data folder it names "

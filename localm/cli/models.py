@@ -1918,9 +1918,8 @@ def _fmt_age(seconds) -> str:
 
 
 def _print_activity(scheme: str, port, instance_token=None,
-                    bind_host=None, mode=None) -> None:
-    """Render what the server is doing, or why that could not be determined.
-    *mode* is the instance's recorded surface (``"api"`` for ``localm serve``)."""
+                    bind_host=None) -> None:
+    """Render what the server is doing, or why that could not be determined."""
     from rich.markup import escape
 
     state, payload = read_activity(scheme, port, instance_token, bind_host)
@@ -1941,12 +1940,8 @@ def _print_activity(scheme: str, port, instance_token=None,
                       "it is doing.[/dim]")
         return
     if state == "unsupported":
-        if mode == "api":
-            console.print("[dim]An API-only server (localm serve) does not report "
-                          "activity; a server started with localm gui does.[/dim]")
-        else:
-            console.print("[dim]This server does not report activity (it predates "
-                          "this feature).[/dim]")
+        console.print("[dim]This server does not report activity (it predates "
+                      "this feature).[/dim]")
         return
     if state == "http":
         console.print(f"[yellow]![/yellow]  Could not read activity (HTTP {payload}).")
@@ -2038,7 +2033,7 @@ def status_cmd(project):
     # when the server cannot be reached.
     _print_more_servers(instances, home_dir(), root, entry)
     _print_activity(scheme, entry.get("port"), entry.get("token"),
-                    entry.get("host"), entry.get("mode"))
+                    entry.get("host"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 
@@ -2166,6 +2161,11 @@ def config_cmd(key, value):
     if validated.get("require_auth") is True:
         from localm.auth import require_auth_refusal
         refusal = require_auth_refusal()
+        if refusal:
+            raise click.ClickException(refusal)
+    if str(validated.get("embedding_model") or "").strip():
+        from localm.inference.embedder import embedding_model_refusal
+        refusal = embedding_model_refusal(str(validated["embedding_model"]))
         if refusal:
             raise click.ClickException(refusal)
     # update_config() is the atomic read-modify-write helper; a bare

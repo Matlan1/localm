@@ -350,7 +350,29 @@ async function latestRelease(request, env, url) {
   // 0.3.1 on that is a JSON signature envelope the client verifies against the key
   // set it trusts (updater.verify_signature); the 0.3.0 .sig is a bare base64
   // signature for 0.2.0 clients. Absent -> null: the client refuses the unsigned build.
-  return json({ ok: true, ...(await releaseMeta(env, rel, [/\.sig$/i])), ...ceiling });
+  const meta = await releaseMeta(env, rel, [/\.sig$/i]);
+  const after = maxTag === null ? null : await newerAfterCeiling(env, wantsPrerelease, rel);
+  if (after) {
+    meta.notes = nextUpdateNote(after) + "\n\n" + meta.notes;
+    ceiling.newer_after = after;
+  }
+  return json({ ok: true, ...meta, ...ceiling });
+}
+
+// The tag of the newest app release above *rel*, which a held-back client reaches
+// with one more update after installing *rel*; null when there is none or the
+// lookup fails.
+async function newerAfterCeiling(env, includePrerelease, rel) {
+  const newest = await latestAppRelease(env, includePrerelease, null);
+  if (!newest || tagAtMost(newest.tag_name, rel.tag_name)) return null;
+  return newest.tag_name;
+}
+
+// The line put first in the notes of a release offered under a client ceiling,
+// which every client version shows with the offer.
+function nextUpdateNote(tag) {
+  return `A newer version (${tag}) follows this one: after this update and a restart, ` +
+    "update again to reach it.";
 }
 
 // The build asset and signature text of *rel*. *sigPatterns* are tried in order;
