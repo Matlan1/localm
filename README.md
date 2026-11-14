@@ -2,7 +2,7 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Local by default - chat, the coder and generation run on your machine, and cloud providers are always opt-in. The one automatic request is the periodic update check, which you can turn off, and which stays off when `net_mode` is `off`.</p>
+<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Runs GGUF and HuggingFace models on your own machine, and serves them as a drop-in OpenAI, Anthropic and Ollama API. Cloud providers are always opt-in.</p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey" alt="Platform: Windows | Linux">
 </p>
 
-At its core LocaLM is a **model loader plus a plugin engine**: GGUF and HuggingFace models ([which ones](docs/models.md)) through an OpenAI-compatible server, with chat always on and everything else - the coder agent, image/music/video generation, Knowledge (RAG), durable memory, voice, scheduled jobs, and MCP - a plugin you install when you want it. See [Offline first](#features) for exactly what does and does not touch the network.
+At its core LocaLM is a model loader plus a plugin engine: chat works out of the box, and everything else, from the coding agent to music generation, is a plugin you install only if you want it, or write yourself. See [Offline first](#features) for exactly what does and does not touch the network.
 
 <p align="center">
   <a href=".github/images/chat.png"><img src=".github/images/chat.png" width="560" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"></a><br>
