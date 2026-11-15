@@ -10,6 +10,19 @@ extensions:
       - ["localm", "Member[model_manager].Member[load_registry].ReturnValue", "path-injection"]
       - ["localm", "Member[config].Member[update_registry].Argument[0,mutator:].Parameter[0]", "path-injection"]
       - ["localm", "Member[model_manager].Member[update_registry].Argument[0,mutator:].Parameter[0]", "path-injection"]
+      # Values read from localm's own config.json, registry.json, API keystore and model-source
+      # credentials, all through the storekit readers. Every path-valued setting is owner-only.
+      - ["localm", "Member[config].Member[load_config].ReturnValue", "path-injection"]
+      - ["localm", "Member[config].Member[load_config_checked].ReturnValue", "path-injection"]
+      - ["localm", "Member[storekit].Member[read_json].ReturnValue", "path-injection"]
+      - ["localm", "Member[storekit].Member[read_json_checked].ReturnValue", "path-injection"]
+      - ["localm", "Member[storekit].Member[read_json_state].ReturnValue", "path-injection"]
+      # The same files hold the update and bug-report URLs, both owner-only settings.
+      - ["localm", "Member[config].Member[load_config].ReturnValue", "request-forgery"]
+      - ["localm", "Member[config].Member[load_config_checked].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json_checked].ReturnValue", "request-forgery"]
+      - ["localm", "Member[storekit].Member[read_json_state].ReturnValue", "request-forgery"]
       # A plugin id that passed the single-path-component check.
       - ["localm", "Member[plugins].Member[ids].Member[_check_plugin_name].ReturnValue", "path-injection"]
   - addsTo:

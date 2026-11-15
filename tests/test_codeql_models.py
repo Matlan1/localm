@@ -54,7 +54,7 @@ def test_model_file_has_rows():
 @pytest.mark.parametrize("row", _rows("barrierModel"), ids=lambda r: r[1])
 def test_barrier_row_names_a_real_function(row):
     type_, path, kind = row
-    assert kind == "path-injection"
+    assert kind in ("path-injection", "request-forgery")
     fn, rest = _resolve(type_, path)
     assert callable(fn), path
     if rest == ["ReturnValue"]:
