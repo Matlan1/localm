@@ -242,7 +242,9 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
 
         result = cli_runner.invoke(_cli.doctor, [])
 
-        assert result.exit_code == 0, result.output
+        # No llama library is a failure line, so doctor ends with exit 1, not a crash.
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
         poisoned.cuda.is_available.assert_not_called()
         # The very last thing doctor() prints.
         assert "ComfyUI" in result.output
@@ -266,7 +268,9 @@ class TestCheckVramTorchSkipsTorchWhenNativeLibLoaded:
 
         result = cli_runner.invoke(_cli.doctor, [])
 
-        assert result.exit_code == 0, result.output
+        # No llama library is a failure line, so doctor ends with exit 1, not a crash.
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
         # Every later check ran to completion, not just a warning for this one.
         assert "ComfyUI" in result.output
 

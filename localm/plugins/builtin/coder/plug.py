@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from localm.pathsafe import confined_file as _confined_file
@@ -74,6 +74,7 @@ from localm.pathsafe import is_unc_or_device_path as _is_unc_or_device_path
 from localm.plugins.coder.backends.base import ModelSwitchUnsupported
 from localm.plugins.coder.sessions import CoderSession, SessionUnavailable
 from localm.executor import get_plugin_executor
+from localm.streaming_response import StreamingResponse
 
 _safe_router = APIRouter()
 _session_router = APIRouter()

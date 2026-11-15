@@ -977,6 +977,41 @@ def test_a_git_clone_with_a_stale_record_and_a_missing_dependency_is_a_problem(
     assert any("click missing" in p for p in parts["problems"])
 
 
+def test_the_container_image_checks_the_venv_it_runs_from(install, tmp_path, monkeypatch):
+    import sys
+
+    from localm import updater_parts
+    inst, site = install
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    image_venv = tmp_path / "opt-venv"
+    shutil.move(str(inst / ".venv"), str(image_venv))
+    image_site = image_venv / "Lib" / "site-packages"
+    _uninstall(image_site, "click")
+    monkeypatch.setattr(sys, "prefix", str(image_venv))
+    monkeypatch.delenv(updater.CONTAINER_IMAGE_ENV, raising=False)
+    assert updater_parts.installed_parts(inst)["install_record"] is None
+    monkeypatch.setenv(updater.CONTAINER_IMAGE_ENV, "1")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record"] == "0.3.1"
+    assert parts["consistent"] is False
+    assert any("click missing" in p for p in parts["problems"])
+
+
+def test_the_container_image_refuses_a_repair_before_anything(install, monkeypatch):
+    from localm import updater_parts
+    from localm.bugreport import LocalmError
+    inst, site = install
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    monkeypatch.setenv(updater.CONTAINER_IMAGE_ENV, "1")
+    ran = []
+    with pytest.raises(LocalmError) as ei:
+        updater_parts.repair(runner=lambda c: ran.append(c) or 0)
+    assert ei.value.summary.startswith(
+        "this localm runs from its container image, so no repair was made")
+    assert ran == []
+    _assert_venv_is_031(site)
+
+
 def test_a_git_clone_install_still_gets_its_dependencies_checked(install, monkeypatch):
     from localm import updater_parts
     inst, site = install
@@ -1924,6 +1959,8 @@ def test_the_health_check_still_rolls_back_a_build_that_never_answers_its_versio
     assert [r.returncode for r in ran] == [1], [(r.stdout, r.stderr) for r in ran]
     assert not sentinel.exists()
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert "something already answers on" in ran[0].stdout, (
+        "with a server answering on the port, the previous version is not started again")
 
 
 def test_a_restart_whose_steps_worked_gets_its_health_check(install, home, monkeypatch):
@@ -2333,7 +2370,7 @@ def test_a_build_without_a_finishing_step_runs_the_built_in_steps_only(install, 
     assert sorted(res) == sorted(
         ["applied", "version", "klass", "backup", "restart_needed", "verified", "verify_reason",
          "downgrade", "data_backup", "runtime", "runtime_note", "components", "components_note",
-         "kept_for_updates"])
+         "kept_for_updates", "git_clone"])
 
 
 def test_finishing_step_output_goes_to_stdout_without_a_say(install, capfd):

@@ -128,8 +128,9 @@ def test_the_window_records_the_shortcut_and_command_before_the_plugins(tmp_path
     monkeypatch.setattr(gui, "_query",
                         lambda args: str(shim.parent) if "path-dir" in args else str(shim))
     plan = gui.Plan(backend="own", shortcut="launcher", add_to_path=True, plugins=("image",))
-    for step in gui.build_steps(plan):
-        step.run(lambda _s: None)
+    failures, fatal = gui.run_steps(gui.build_steps(plan), lambda _s: None)
+    assert fatal is None, fatal
+    assert [f for f in failures if "no model can load" not in f] == [], failures
     got = seen["at_plugins"]
     assert got[0] and os.path.normcase(got[0]) == os.path.normcase(str(lnk.resolve()))
     assert got[1] and os.path.normcase(got[1]) == os.path.normcase(str(shim))

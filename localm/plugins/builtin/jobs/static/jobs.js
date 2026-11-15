@@ -90,15 +90,25 @@ function iconElFor(name, cls) {
   return el("span", cls);
 }
 
-// Confirm a destructive action with the app's own themed modal. The native
-// confirm() fallback is the pre-existing behaviour, kept only for the no-shell
-// case: it still blocks the action, so a delete is never silently unconfirmed.
+// Confirm a destructive action with the app's own themed modal. Without the
+// shell, a minimal in-page dialog asks instead; the action runs only on its
+// confirm button.
 function confirmDangerous(title, message, confirmLabel, onConfirm) {
   if (typeof window !== "undefined" && typeof window.confirmDanger === "function") {
     window.confirmDanger(title, message, confirmLabel, onConfirm);
     return;
   }
-  if (confirm(`${title} ${message}`)) onConfirm();
+  const box = el("div", "jobs-confirm");
+  box.setAttribute("role", "dialog");
+  box.appendChild(el("p", null, `${title} ${message}`));
+  const cancel = el("button", "secondary", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => box.remove();
+  const ok = el("button", "danger", confirmLabel);
+  ok.type = "button";
+  ok.onclick = () => { box.remove(); onConfirm(); };
+  box.append(cancel, ok);
+  document.body.appendChild(box);
 }
 
 // --- schedule / time formatting -------------------------------------------
@@ -320,10 +330,8 @@ export function register(ctx) {
     refresh();
   }
 
-  // Deleting is confirmed with the app's themed modal, like every other
-  // destructive action in the GUI. window.confirm() is suppressed outright by
-  // some mobile / PWA browsers, which would have made this delete fire with no
-  // prompt at all on exactly those clients.
+  // Deleting is confirmed in the in-page dialog, like every other destructive
+  // action in the GUI.
   function remove(job) {
     confirmDangerous(`Delete job "${job.name}"?`, "This also removes its results.",
       "Delete", async () => {

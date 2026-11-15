@@ -43,7 +43,7 @@ def register(app: FastAPI, ctx) -> None:
     async def create_key_ep(request: Request, response: Response, body: dict):
         from localm import auth
         from localm.auth import create_key
-        from localm.config import ConfigUnreadable
+        from localm.config import ConfigLockTimeout, ConfigUnreadable
         # Capture BEFORE minting: True only when this is the very first key on an
         # otherwise-keyless install (the open -> protected transition).
         was_open = not auth.any_key_configured()
@@ -132,20 +132,32 @@ def register(app: FastAPI, ctx) -> None:
         # persistent owner key and hand THIS browser an owner session cookie
         # (future `localm gui` loads re-establish it; web.py). Loopback plus
         # open-mode only.
+        owner = None
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
-            existing_owner = auth.get_api_key()
-            owner = existing_owner or auth.regenerate_key()
-            created = {**created, "owner_key_created": existing_owner is None}
+            try:
+                owner, owner_created = auth.ensure_owner_key()
+            except (ConfigUnreadable, ConfigLockTimeout, OSError) as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("first key: the owner key was not seeded: %s", e)
+                created = {**created, "owner_key_created": False, "warnings": [
+                    *created.get("warnings", []),
+                    "No owner session was set up for this browser: the owner "
+                    "key could not be checked or written. The new key was "
+                    "created."]}
+            else:
+                created = {**created, "owner_key_created": owner_created}
+        if owner is not None:
             # An OPAQUE owner session (id in the cookie, never the key), so this
             # browser keeps full access across a later key roll.
             from localm import sessions
             # owner_key_minted: see sessions.create. _is_owner_key re-compares
             # against the live value, so a seed that did not take reports False.
             from fastapi.concurrency import run_in_threadpool
+            seeded: str = owner
             sid = await run_in_threadpool(
                 lambda: sessions.create(scopes={scopes.ADMIN},
-                                        key_hash=auth._hash_key(owner), fs_access="host",
-                                        owner_key_minted=auth._is_owner_key(owner)))
+                                        key_hash=auth._hash_key(seeded), fs_access="host",
+                                        owner_key_minted=auth._is_owner_key(seeded)))
             secure = request.url.scheme == "https"
             response.set_cookie(_hs.session_cookie_name(request), sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",

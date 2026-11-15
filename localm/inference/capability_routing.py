@@ -126,13 +126,16 @@ class Fit:
     on disk (0 for a resident one). *disk_read_bytes* is what it would read
     from disk while answering, for ``FIT_DISK``. *error* is set when the model
     could not even be prepared for loading; such a model is never chosen or
-    suggested, and the error is reported as a load error."""
+    suggested, and the error is reported as a load error. *configured_layers*
+    is the GPU layer count the model's configuration sets when that count, not
+    the room on the GPU, puts no layer there; None otherwise."""
 
     cls: int
     evicts_user: tuple[str, ...] = ()
     load_bytes: int = 0
     disk_read_bytes: int = 0
     error: str = ""
+    configured_layers: Optional[int] = None
 
     @property
     def needs_ask(self) -> bool:
@@ -152,6 +155,9 @@ class Fit:
             size = f" {gb:.1f} GB of" if gb >= 0.1 else ""
             parts.append("it does not fit in this machine's VRAM and RAM, so it would "
                          f"read{size} its weights from disk while answering (very slow)")
+        elif self.cls == FIT_CPU_ONLY and self.configured_layers is not None:
+            parts.append("it would run on the CPU only, because the GPU layers setting "
+                         f"(n_gpu_layers) is {self.configured_layers}")
         elif self.cls == FIT_CPU_ONLY:
             parts.append("it would run on the CPU only, because no layer fits on the GPU")
         elif self.cls == FIT_UNSIZED:

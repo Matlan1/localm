@@ -129,7 +129,10 @@ def test_the_response_itself_is_unchanged(_debug_on, client_no_model, caplog):
     r = _empty_model(client_no_model)
 
     assert r.status_code == 400
-    assert r.json() == {"detail": "Model parameter is required and cannot be empty"}
+    message = "Model parameter is required and cannot be empty"
+    assert r.json() == {"detail": message, "error": {
+        "message": message, "type": "invalid_request_error", "param": None,
+        "code": None}}
 
 
 def test_no_reason_line_when_debug_is_off(client, caplog, monkeypatch):

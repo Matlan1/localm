@@ -158,6 +158,13 @@ automatically. For a bind mount, make the directory writable by uid 10001
 Session persistence defaults to privacy mode (nothing is saved). Change it with
 `--mode` or in the settings, as on any other install.
 
+## Updating
+
+localm in a container is updated by pulling the newer image and recreating the
+container; `/data` carries over. `localm update`, its rollback and repair, and
+the GUI's Update now refuse inside the image, because a change made inside a
+container is lost when the container is replaced.
+
 ## Certificate
 
 The certificate is signed by a local CA created on first start under

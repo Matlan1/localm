@@ -75,8 +75,21 @@ def test_share_ignores_non_image_files(share_client):
         "/share-target",
         files={"files": ("evil.exe", b"MZ\x90\x00", "application/octet-stream")},
         follow_redirects=False)
-    assert r.headers["location"] == "/?shared=0"      # non-image skipped
+    assert r.headers["location"] == "/?shared=0&skipped=1"
     assert share_client.get("/api/share/pending").json()["items"] == []
+
+
+def test_share_counts_empty_and_non_image_files_it_skips(share_client):
+    r = share_client.post(
+        "/share-target",
+        files=[("files", ("photo.png", _PNG, "image/png")),
+               ("files", ("blank.png", b"", "image/png")),
+               ("files", ("notes.pdf", b"%PDF-1.4", "application/pdf"))],
+        follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/?shared=1&skipped=2"
+    items = share_client.get("/api/share/pending").json()["items"]
+    assert [it["name"] for it in items] == ["photo.png"]
 
 
 def test_share_text_lands_as_a_note(share_client):

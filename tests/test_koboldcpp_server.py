@@ -778,7 +778,40 @@ def test_a_crash_on_every_backend_marks_none_of_them(two_backends):
     ("vulkan", "1", None),
 ])
 def test_device_for_maps_the_main_gpu_setting(backend, main_gpu, expected):
-    assert server.device_for(backend, main_gpu) == expected
+    assert server.device_for(backend, main_gpu, gpus=list) == expected
+
+
+# torch numbers the faster card first; KoboldCpp counts by PCI bus.
+_TWO_GPUS = [{"index": 0, "name": "fast", "pci_bus_id": 9},
+             {"index": 1, "name": "slow", "pci_bus_id": 1}]
+
+
+@pytest.mark.parametrize("main_gpu,expected", [(0, 1), (1, 0)])
+def test_a_cuda_main_gpu_is_turned_into_koboldcpps_pci_order(main_gpu, expected):
+    assert server.device_for("cuda", main_gpu, gpus=lambda: _TWO_GPUS) == expected
+
+
+@pytest.mark.parametrize("gpus", [
+    [{"index": 0, "pci_bus_id": 9}, {"index": 1}],
+    [{"index": 0, "pci_bus_id": 3}, {"index": 1, "pci_bus_id": 3}],
+])
+def test_an_unknown_pci_order_passes_the_index_and_warns(gpus, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert server.device_for("cuda", 1, gpus=lambda: gpus) == 1
+    assert "PCI order" in caplog.text
+
+
+def test_vulkan_takes_the_index_as_it_is():
+    assert server.device_for("vulkan", 0, gpus=lambda: _TWO_GPUS) == 0
+
+
+def test_without_a_gpu_list_the_cuda_index_is_passed_as_it_is():
+    assert server.device_for("cuda", 1) == 1
+
+
+def test_pci_order_index_of_a_device_not_listed_is_none():
+    assert server.pci_order_index(5, _TWO_GPUS) is None
 
 
 @pytest.mark.parametrize("backend,device,tail", [
@@ -809,6 +842,44 @@ def test_a_job_starts_koboldcpp_on_the_configured_main_gpu(two_backends, monkeyp
     assert keys and keys[-1].device == 1
     argv = server.build_argv(keys[-1], 1)
     assert argv[argv.index("--usecuda") + 1] == "1"
+
+
+def test_a_job_starts_koboldcpp_on_the_main_gpu_in_pci_order(two_backends, monkeypatch):
+    import localm.config as cfgmod
+    monkeypatch.setattr(cfgmod, "load_config", lambda: {"main_gpu_index": 0})
+    keys = []
+    real_build = server.build_argv
+
+    def build(key, port):
+        keys.append(key)
+        return real_build(key, port)
+    monkeypatch.setattr(server, "build_argv", build)
+    music.generate_wav({}, "cuda", REQUEST, plan=False, gpus=lambda: list(_TWO_GPUS))
+    assert keys and keys[-1].device == 1
+
+
+def test_the_setup_music_test_track_counts_the_main_gpu_in_the_same_gpu_list(monkeypatch):
+    import localm.cli.maintenance  # noqa: F401
+    from localm import discover
+    from localm.media.koboldcpp import cli as kcli
+    assert kcli.gpu_list is discover.listed_gpus
+    listed = [{"index": 0, "pci_bus_id": 3}]
+    monkeypatch.setattr(discover, "list_gpus", lambda *a, **k: listed)
+    seen = {}
+
+    def fake(native_cfg, choice, request, **kw):
+        seen["gpus"] = kw.get("gpus")
+        raise music.NativeMusicError("stop here")
+    monkeypatch.setattr(music, "generate_wav", fake)
+    monkeypatch.setattr(server, "stop", lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        kcli._test(_NullConsole(), "cpu", lambda m: None)
+    assert seen["gpus"]() == listed
+
+
+class _NullConsole:
+    def print(self, *a, **k):
+        pass
 
 
 def test_another_main_gpu_starts_a_fresh_server():

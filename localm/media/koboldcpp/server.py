@@ -106,20 +106,63 @@ def _free_port() -> int:
 CUDA_DEVICE_IDS = range(4)
 
 
-def device_for(backend: str, main_gpu_index) -> Optional[int]:
+def pci_order_index(index: int, gpus: list) -> Optional[int]:
+    """The position of ``list_gpus`` device *index* when the devices in *gpus*
+    (``discover.list_gpus`` entries) are ordered by PCI bus, the CUDA device
+    order KoboldCpp sets (``CUDA_DEVICE_ORDER=PCI_BUS_ID``) before it reads
+    ``--usecuda <id>``. None when *index* is not in *gpus* or a device has no
+    PCI bus or shares one with another."""
+    buses = [g.get("pci_bus_id") for g in gpus]
+    if not all(isinstance(b, int) and not isinstance(b, bool) for b in buses):
+        return None
+    if len(set(buses)) != len(buses):
+        return None
+    for g in gpus:
+        if g.get("index") == index:
+            return sorted(buses).index(g["pci_bus_id"])
+    return None
+
+
+def device_for(backend: str, main_gpu_index,
+               gpus: Optional[Callable[[], list]] = None) -> Optional[int]:
     """The GPU id to start KoboldCpp's *backend* on for the configured
     ``main_gpu_index``, or None for KoboldCpp's own choice: None for the cpu
     backend, an unset or invalid index, and a CUDA index KoboldCpp cannot take
-    (it accepts 0 to 3)."""
+    (it accepts 0 to 3).
+
+    ``main_gpu_index`` counts devices as ``discover.list_gpus`` does (the CUDA
+    runtime's order). For the cuda backend it is turned into KoboldCpp's PCI
+    bus order with :func:`pci_order_index` over the devices *gpus* returns
+    (``discover.list_gpus``; called only then). Without *gpus* the index is
+    passed as it is, logged at DEBUG; when the order cannot be told and more
+    than one GPU is listed, it is passed as it is and a WARNING says so. The
+    vulkan backend takes the index as it is."""
     if backend not in ("cuda", "vulkan") or isinstance(main_gpu_index, bool):
         return None
     if not isinstance(main_gpu_index, int) or main_gpu_index < 0:
         return None
-    if backend == "cuda" and main_gpu_index not in CUDA_DEVICE_IDS:
+    if backend == "cuda":
         from localm.debuglog import logger
-        logger.warning("koboldcpp music: main GPU %d is past the GPUs KoboldCpp's CUDA "
-                       "build can be pointed at (0 to 3); it picks its own", main_gpu_index)
-        return None
+        listed: list = []
+        if gpus is None:
+            logger.debug("koboldcpp music: no GPU list given; main GPU %d is passed "
+                         "to KoboldCpp as it is", main_gpu_index)
+        else:
+            listed = gpus()
+        mapped = pci_order_index(main_gpu_index, listed)
+        if mapped is None and len(listed) > 1:
+            logger.warning("koboldcpp music: the PCI order of the %d GPUs is not known, so "
+                           "main GPU %d is passed to KoboldCpp as it is and may name "
+                           "another GPU there", len(listed), main_gpu_index)
+        elif mapped is not None and mapped != main_gpu_index:
+            logger.info("koboldcpp music: main GPU %d is GPU %d in KoboldCpp's PCI order",
+                        main_gpu_index, mapped)
+        index = main_gpu_index if mapped is None else mapped
+        if index not in CUDA_DEVICE_IDS:
+            logger.warning("koboldcpp music: main GPU %d is past the GPUs KoboldCpp's CUDA "
+                           "build can be pointed at (0 to 3); it picks its own", index)
+            return None
+        return index
     return main_gpu_index
 
 

@@ -467,6 +467,15 @@ test("the Plugins page shows a first-party description translated and a third-pa
   assert.ok(rows[1].includes("their own text"), rows[1]);
 });
 
+test("a plugin this machine cannot run shows the server's reason in its row", async () => {
+  const { window } = await loadIn(null, { withPages: true });
+  runScript(window, `window.__row = _catalogRow({ name: "exllama", builtin: true,
+    description: "x", not_runnable_reason: "needs a GPU this machine does not have" });`);
+  const sub = window.__row.querySelector(".plugin-not-runnable");
+  assert.ok(sub, window.__row.outerHTML);
+  assert.equal(sub.textContent, "needs a GPU this machine does not have");
+});
+
 test("the privacy hint the app itself paints follows a later language change", async () => {
   // Driven through refreshCtxLimit, the real code path that creates the hint:
   // it is built once and never repainted, so it only follows the language if

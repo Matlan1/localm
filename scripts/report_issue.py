@@ -66,36 +66,39 @@ NET_OFF_REFUSAL = ("Network access is off (net_mode=off), so the report was not 
                    f"{NET_OFF_REMEDY}.")
 
 
-def _home_cfg_line(marker: Path) -> str:
-    """The first line of localm-home.cfg as localm reads it: UTF-8 (with or
-    without a BOM), else on Windows the console (OEM) code page. Raises OSError,
-    ValueError or LookupError when it cannot be read."""
-    raw = marker.read_bytes()
+def _load_home_cfg():
+    """The clone's ``localm/_home_cfg.py`` loaded by file path (it imports only
+    the standard library). Raises OSError when it is missing or fails to load."""
+    import importlib.util
+    path = REPO_ROOT / "localm" / "_home_cfg.py"
     try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
+        spec = importlib.util.spec_from_file_location("_localm_report_issue_home_cfg", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        raise OSError(f"{path} could not be loaded ({e.__class__.__name__})") from e
+    return mod
 
 
 def localm_home() -> Path:
     """The data dir localm uses: LOCALM_HOME, else (in a clone) the first line of
-    localm-home.cfg, else the clone's ./home."""
+    localm-home.cfg (a relative line taken relative to the clone), else the
+    clone's ./home. Raises OSError when localm-home.cfg exists but its reader,
+    ``localm/_home_cfg.py``, cannot be loaded."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
-        return Path(env).expanduser()
+        return Path(env).expanduser().absolute()
     marker = REPO_ROOT / "localm-home.cfg"
     if (REPO_ROOT / "pyproject.toml").is_file() and marker.is_file():
+        reader = _load_home_cfg()
         try:
-            line = _home_cfg_line(marker)
+            line = reader.read_line(marker)
         except (OSError, ValueError, LookupError):
             line = ""
         if line:
-            return Path(line).expanduser()
+            return reader.data_dir(line, REPO_ROOT)
     return REPO_ROOT / "home"
 
 
@@ -120,8 +123,9 @@ def network_mode() -> tuple:
     (``LOCALM_NET_MODE``, else ``net_mode`` in the data dir's config.json, or its
     ``.bak`` when config.json is absent; an unset or unknown value, or a file that
     is not a JSON object, means ``ask``). None when neither file exists, or when
-    one is present and cannot be read the way localm reads it (strict UTF-8 JSON),
-    where localm itself turns network access off; *why* says which."""
+    one is present and cannot be read the way localm reads it (strict UTF-8 JSON,
+    with or without a BOM), where localm itself turns network access off; *why*
+    says which."""
     env = os.environ.get("LOCALM_NET_MODE", "").strip().lower()
     if env in NET_MODES:
         return env, ""
@@ -130,12 +134,12 @@ def network_mode() -> tuple:
         bak = main.with_name("config.json.bak")
         present = [p for p in (main, bak) if p.is_file()]
     except OSError as e:
-        return None, f"the data directory could not be read ({e.__class__.__name__})"
+        return None, f"the data directory could not be read ({e or e.__class__.__name__})"
     if not present:
         return None, f"{main} does not exist"
     path = present[0]
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except (ValueError, OSError, RecursionError) as e:
         return None, f"{path} could not be read ({e.__class__.__name__})"
@@ -743,13 +747,66 @@ def _timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
+#: The start of the line ``--save-only`` ends with, followed by the saved path.
+SAVED_REPORT_PREFIX = "SAVED_REPORT="
+
+
+def send_saved(path: Path, summary: str) -> int:
+    """Send the report saved at *path* as it is, titled *summary*: the second
+    step of a caller that first had the report saved (no terminal) and then
+    asked whether to send it. Nothing new is built or saved. Network access off,
+    or a setting that cannot be read (no one here can confirm), sends nothing.
+    Returns 0 when it was sent, else 1."""
+    try:
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"  The saved report could not be read ({e.__class__.__name__}), so "
+              f"nothing was sent: {path}")
+        return 1
+    url, token = read_proxy()
+    if not url:
+        print(f"  No bug-report endpoint is configured. The report is saved at {path}; "
+              f"email it to {MAINTAINER_EMAIL}.")
+        return 1
+    mode, why = network_mode()
+    if mode == "off":
+        print(f"  {NET_OFF_REFUSAL}")
+        print(f"  The report is saved at {path}; email it to {MAINTAINER_EMAIL} if you "
+              "prefer.")
+        return 1
+    if mode is None:
+        print(f"  localm's Network access setting could not be read: {why}. No one can "
+              f"confirm sending here, so nothing was sent. The report is saved at {path}; "
+              f"email it to {MAINTAINER_EMAIL}.")
+        return 1
+    try:
+        res = post_report(url, token, scrub(summary or "localm bug report"), body)
+    except Exception as e:
+        print(f"  Could not send it ({e}). The report is saved at {path} - email it "
+              f"to {MAINTAINER_EMAIL} instead.")
+        return 1
+    link = res.get("url") if isinstance(res, dict) else None
+    print("  Sent to the maintainer. Thank you!"
+          + (f" Tracking issue: {link}" if link else ""))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(add_help=True, description=__doc__)
     ap.add_argument("--summary", default="")
     ap.add_argument("--detail", default="")
     ap.add_argument("--log", default="")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--save-only", action="store_true",
+                    help="save the report and send nothing; the last line of the "
+                         f"output is {SAVED_REPORT_PREFIX}<path>")
+    ap.add_argument("--send-saved", default="",
+                    help="send the report already saved at this path, without "
+                         "building or saving another one")
     args = ap.parse_args(argv)
+
+    if args.send_saved:
+        return send_saved(Path(args.send_saved), args.summary.strip())
 
     interactive = stdin_is_interactive()
 
@@ -795,6 +852,15 @@ def main(argv=None) -> int:
     print()
 
     when = _timestamp()
+
+    if args.save_only:
+        path = save_report(body, when)
+        if path is None:
+            print("  The report could not be saved.")
+            return 1
+        print(f"  The report is saved at {path}.")
+        print(f"{SAVED_REPORT_PREFIX}{path}")
+        return 0
 
     mode, why = network_mode() if url else ("ask", "")
     if mode == "off":

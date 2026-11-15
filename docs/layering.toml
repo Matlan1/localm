@@ -75,24 +75,25 @@ units = [
 
 [[tier]]
 name = "platform"
-role = "The host as localm sees it, built on the foundation alone: identity and keys, the audit and session mode, TLS and the verified HTTPS opener, network policy, DNS pinning, naming, the port multiplexer, peer routing, the self client, instance discovery, the listening-port reader, hardware and VRAM facts, native-app, shell and Windows console integration, the install ledger, the settings schema, model-source credentials, the model metadata and rag stores, failure reporting and its log digest."
+role = "The host as localm sees it, built on the foundation alone: identity and keys, the audit and session mode, TLS and the verified HTTPS opener, network policy, DNS pinning, naming, the port multiplexer, peer routing, the self client, instance discovery, the listening-port reader, hardware and VRAM facts, native-app, shell and Windows console integration, the install ledger, the settings schema, model-source credentials, the model metadata and rag stores, failure reporting and its log digest, replacing an installed folder."
 units = [
     "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
     "peer_routing", "selfclient", "instances", "listeners", "gpu_usage", "hwdetect",
     "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest", "uv_tool", "update_package", "pyinstall",
     "setup_spec",
     "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
-    "bugreport", "_log_digest",
+    "bugreport", "_log_digest", "folder_swap",
 ]
 
 [[tier]]
 name = "foundation"
-role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL helpers, path and text helpers, ELF dependency inspection, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix, the standard-stream setup, the multipart upload parser, the transcription output formats, WAV reading, the KV cache element type, the status-bar sampler that tabs subscribe to."
+role = "Primitives that import nothing from localm at module level: configuration, the debug log, the shared console, JSONL helpers, path and text helpers, ELF dependency inspection, the bounded thread pool, the bind-host and listening-socket helpers, scopes, readline privacy, the version, the venv guard, the spawn fix, the standard-stream setup, the multipart upload parser, the transcription output formats, WAV reading, the KV cache element type, the status-bar sampler that tabs subscribe to, the streaming response every route returns."
 units = [
     "config", "debuglog", "console", "jsonl", "jsonreply", "storeformat", "pathsafe", "pathscrub",
     "textguard", "textnorm", "elf_deps", "executor", "bindhost", "netlisten", "scopes",
     "readline_privacy", "_version", "_venvguard", "_mp_spawn", "stdio", "kv_cache",
     "multipartform", "voice_formats", "wav_audio", "livefeed", "loopback_http",
+    "streaming_response",
 ]
 
 [[tier]]
@@ -114,3 +115,8 @@ units = ["procid", "sysprog"]
 name = "events"
 role = "The management-event log: an append-only record of key, login, update, config and plugin events. Imports nothing from localm and is handed the data directory by its caller, so configuration itself can record a save."
 units = ["mgmt_events"]
+
+[[tier]]
+name = "install-files"
+role = "Files of the clone read before anything else: the localm-home.cfg reader. Stdlib only and free of localm imports, so configuration, the install ledger and the standalone rollback and report scripts share one reader."
+units = ["_home_cfg"]

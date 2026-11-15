@@ -46,7 +46,7 @@ def test_clear_at_an_interactive_terminal_still_works(monkeypatch):
     auth.set_api_key(STRONG_KEY)
     r = CliRunner().invoke(main, ["key", "clear", "--yes"], input="y\n")
     assert r.exit_code == 0, r.output
-    assert "Clear the API key?" in r.output
+    assert "Clear the owner key and delete every named key?" in r.output
     assert "API key cleared" in r.output
     assert not auth.key_file().exists()
 
@@ -74,7 +74,7 @@ def test_clear_removes_named_keys_when_no_owner_key_is_set(monkeypatch):
     r = CliRunner().invoke(main, ["key", "clear"], input="y\n")
     assert r.exit_code == 0, r.output
     assert "already open mode" not in r.output
-    assert "Clear the API key?" in r.output
+    assert "Clear the owner key and delete every named key?" in r.output
     assert "API key cleared" in r.output
     assert auth.list_keys() == []
     assert not auth.keystore_file().exists()

@@ -50,7 +50,8 @@ function Expand-Home([string]$p) {
 }
 
 # The data dir localm uses: LOCALM_HOME, else (in a clone) the first line of
-# localm-home.cfg, else the clone's home folder.
+# localm-home.cfg (a relative line taken relative to the clone), else the clone's
+# home folder.
 function Get-LocalmHome {
   if ($env:LOCALM_HOME -and $env:LOCALM_HOME.Trim()) { return (Expand-Home $env:LOCALM_HOME.Trim()) }
   $marker = Join-Path $root 'localm-home.cfg'
@@ -58,7 +59,11 @@ function Get-LocalmHome {
       (Test-Path -LiteralPath $marker -PathType Leaf)) {
     try {
       $line = Get-Content -LiteralPath $marker -Encoding UTF8 | Where-Object { $_.Trim() } | Select-Object -First 1
-      if ($line) { return (Expand-Home $line.Trim()) }
+      if ($line) {
+        $h = Expand-Home $line.Trim()
+        if (-not [System.IO.Path]::IsPathRooted($h)) { $h = Join-Path $root $h }
+        return $h
+      }
     } catch { }
   }
   return (Join-Path $root 'home')
@@ -91,7 +96,8 @@ function Test-StrictJson([string]$t) {
 # net_mode in the data dir's config.json, or its .bak when config.json is absent;
 # an unset or unknown value, or a file that is not a JSON object, means ask), or
 # unknown when neither file exists, or one is present and cannot be read the way
-# localm reads it (strict UTF-8 JSON), where localm itself turns network access off.
+# localm reads it (strict UTF-8 JSON, with or without a BOM), where localm itself
+# turns network access off.
 function Get-NetMode {
   $modes = @('off', 'ask', 'allow')
   $e = "$env:LOCALM_NET_MODE".Trim().ToLowerInvariant()
@@ -104,10 +110,9 @@ function Get-NetMode {
     }
     if (-not $p) { return @('unknown', "$main does not exist") }
     $bytes = [System.IO.File]::ReadAllBytes($p)
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-      return @('unknown', "$p could not be read (it starts with a byte order mark)")
-    }
-    $raw = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+    $start = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+    $raw = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes, $start, $bytes.Length - $start)
     if (-not (Test-StrictJson $raw)) { return @('unknown', "$p could not be read (not valid JSON)") }
     $cfg = $raw | ConvertFrom-Json
   } catch {

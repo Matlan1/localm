@@ -1767,17 +1767,20 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             if done.get("grammar_unsupported") and not self._grammar_unsupported:
                 # First time this model has shown it cannot do grammar: latch it, so
                 # later calls skip sending grammar at all, and surface the degrade.
+                # A forced grammar fails the reply; a lazy one (a tool grammar
+                # with tool_choice auto) leaves the reply as generated, without it.
                 self._grammar_unsupported = True
+                grammar_failed = bool(grammar) and not grammar_lazy
+                outcome = ("this reply is reported as failed" if grammar_failed
+                           else "this reply was generated without the grammar")
                 from localm.debuglog import logger as _dbg
-                _dbg.warning("native grammar sampler faulted; this reply is "
-                             "reported as failed and later grammar requests to "
-                             "this model are refused")
+                _dbg.warning("native grammar sampler faulted; %s and later grammar "
+                             "requests to this model are refused", outcome)
                 console.print(
                     "[yellow]grammar is not supported by this native llama "
-                    "build; this reply is reported as failed and later grammar "
-                    "requests to this model are refused.[/yellow]"
+                    f"build; {outcome} and later grammar requests to this model "
+                    "are refused.[/yellow]"
                 )
-                grammar_failed = bool(grammar)
             if done.get("chatml_fallback_reason") and not self._chatml_fallback:
                 # First time this model has needed the ChatML fallback: latch it and
                 # surface the degrade on the console, not only in the debug log.

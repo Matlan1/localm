@@ -337,3 +337,25 @@ def owned_names(request: Request, media_kind: str, names: list[str]) -> list[str
     except GalleryIndexUnreadable:
         return list(names) if _privileged(request) else []
     return [n for n in names if job_owner_ok(request, idx.get(n))]
+
+
+def read_sidecar(media_kind: str, path: Path) -> dict:
+    """The settings sidecar (``<file>.json``) of the generated file *path*: its
+    JSON object, or ``{}`` when there is none. One that cannot be read or is not
+    a JSON object gives ``{}`` and a WARNING naming the file."""
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if not sidecar.is_file():
+        return {}
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:
+        meta, why = None, str(e) or type(e).__name__
+    else:
+        why = "it is not a JSON object"
+    if isinstance(meta, dict):
+        return meta
+    from localm.debuglog import logger
+    logger.warning("%s: the settings file of %s could not be read (%s); it is listed "
+                   "without them", media_kind, path.name, why)
+    return {}
+

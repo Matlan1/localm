@@ -3,6 +3,7 @@
 issue_tracker so no network). Apply is user-initiated; failures are surfaced, not
 faked."""
 
+import pytest
 from click.testing import CliRunner
 
 from localm import config, issue_tracker, updater
@@ -36,6 +37,30 @@ def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkey
     out = " ".join(r.output.split())
     assert "Could not tell" in out
     assert "localm is up to date" not in out
+
+
+@pytest.mark.parametrize("current,latest,says,never", [
+    ("0.1.4", "nightly", "Could not tell", "localm is up to date"),
+    ("0.2.0", "v0.2.0", "up to date", "Could not tell"),
+])
+def test_update_check_reads_what_the_real_check_returns(monkeypatch, current, latest, says, never):
+    """`localm update --check` on the real updater.check(), with only the proxy
+    reply faked: the CLI and check() agree on the fields they share."""
+    import json
+
+    from localm import _version
+    from tests._net_config import set_config
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: current)
+
+    def opener(method, url, data, headers, timeout):
+        return 200, json.dumps({"version": latest}).encode("utf-8")
+    real_check = updater.check
+    monkeypatch.setattr(updater, "check", lambda **kw: real_check(opener=opener, **kw))
+    r = CliRunner().invoke(main, ["update", "--check"])
+    out = " ".join(r.output.split())
+    assert says in out, out
+    assert never not in out, out
 
 
 def test_update_check_blocked_by_net_policy(monkeypatch):
@@ -104,8 +129,24 @@ def test_update_setup_class_warns_to_run_setup(monkeypatch):
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
     monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
         "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
-    r = CliRunner().invoke(main, ["update", "--yes"])
-    assert "setup.bat" in r.output
+    for script in ("setup.bat", "setup.sh"):
+        monkeypatch.setattr(updater, "setup_script", lambda script=script: script)
+        r = CliRunner().invoke(main, ["update", "--yes"])
+        assert f"needs {script} re-run" in r.output, script
+
+
+def test_update_of_a_git_clone_says_git_lists_the_replaced_files(monkeypatch):
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
+    for clone in (True, False):
+        monkeypatch.setattr(updater, "apply", lambda aid, clone=clone, **kw: {
+            "applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b",
+            "git_clone": clone})
+        r = CliRunner().invoke(main, ["update", "--yes"])
+        output = " ".join(r.output.split())
+        assert ("This install is a git clone, so git now lists the files the update "
+                "replaced as changed" in output) is clone
 
 
 def test_update_rollback(monkeypatch):

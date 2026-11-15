@@ -346,12 +346,15 @@ def embedding_model_refusal(spec: str) -> str:
 
     Accepted: a KNOWN_EMBEDDING_MODELS key, a registered model whose recorded
     type is ``embedding`` or ``unknown`` (or that records no type) and is not a
-    reranker, and a
-    local GGUF file that is not a reranker. Refused: a reranker (see
-    :func:`reranker_as_embedding_model`), a registered model of another recorded
-    type, and a UNC/device path or URL. A name that names nothing yet is not
-    refused here (see :func:`embedding_model_unresolved`). Reads the registry
-    and may stat *spec* and read a GGUF header; run it off the event loop."""
+    reranker, and a local file that is not a reranker and whose own GGUF header
+    types it ``embedding`` (or cannot be read as GGUF metadata). Refused: a
+    reranker (see :func:`reranker_as_embedding_model`), a registered model of
+    another recorded type, a local GGUF file whose header types it as another
+    model type (a chat model among them), and a UNC/device path or URL. A name
+    that names nothing yet is not refused here (see
+    :func:`embedding_model_unresolved`). Every writer of the ``embedding_model``
+    setting calls this before it writes. Reads the registry and may stat *spec*
+    and read a GGUF header; run it off the event loop."""
     spec = (spec or "").strip()
     if not spec or spec in KNOWN_EMBEDDING_MODELS:
         return ""
@@ -371,6 +374,13 @@ def embedding_model_refusal(spec: str) -> str:
     path = Path(spec).expanduser()
     if not path.is_file():
         return ""
+    from localm.model_manager.registry import gguf_file_model_type
+    kind = gguf_file_model_type(path)
+    if kind is not None and kind not in ("embedding", "unknown"):
+        return (f"'{path.name}' is not an embedding model: its GGUF header marks "
+                f"it as a {kind} model. Choose an embedding model, or if it is "
+                "one, register it with 'localm add <path>' and run "
+                "'localm set-type <name> embedding' first.")
     return reranker_as_embedding_model(spec)
 
 
@@ -456,7 +466,8 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     Order: an explicit filesystem path -> a registered model name -> a known key
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
-    force the fetch); default follows net_mode (automatic under 'ask' and 'allow').
+    force the fetch); the default downloads only under net_mode 'allow'
+    (``netpolicy.automatic_download_allowed``).
     ``allow_download=True`` also re-hashes an already-present known model file
     against its pin and fetches it again when it differs; every other call
     trusts a present file without reading it.
@@ -771,19 +782,24 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     policy-gated branches log at INFO regardless of whether the write is
     skipped; only the download-failure branch warns, deduped the same way as
     ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
-    from localm.netpolicy import download_refusal, downloads_allowed_when_off, network_mode
+    from localm.netpolicy import (automatic_download_allowed, download_refusal,
+                                  downloads_allowed_when_off, network_mode)
     mode = network_mode()
     probe_only = allow_download is False
+    automatic = automatic_download_allowed()
     if allow_download is None:
-        allow_download = mode in ("allow", "ask")
+        allow_download = automatic
     if not allow_download:
+        off_note = (" (with net_mode=off this also needs net_allow_model_downloads)"
+                    if mode == "off" else "")
         reason = (
             f"embedding model {name!r} not present and not auto-downloading "
-            f"(net_mode={mode}); use the one-time download action, "
-            "or set net_mode=ask or allow, to enable semantic search (memory/RAG use "
-            "lexical BM25 until then)")
+            f"(net_mode={mode}); download it once with the Download button on the "
+            f"Knowledge or memory page, or run localm setup-embeddings{off_note}, "
+            "or set net_mode=allow. Memory and Knowledge use keyword (BM25) "
+            "search until then")
         if probe_only:
-            if mode in ("allow", "ask"):
+            if automatic:
                 if _TRIED_DOWNLOAD:
                     logger.debug("embedding model %r not present after the first-use "
                                  "download attempt", name)
@@ -1809,7 +1825,9 @@ _EMBEDDER: Optional[IsolatedEmbedder] = None
 # from the same broken one: see get_embedder for how a changed spec clears the
 # stale latch, and _set_resolve_outcome for the matching resolve-side guard.
 _LOAD_FAILED_SPEC: Optional[str] = None
-_TRIED_DOWNLOAD = False          # one-time auto-download attempt (net_mode ask or allow)
+_TRIED_DOWNLOAD = False          # one-time auto-download attempt (net_mode allow)
+# Specs whose skipped automatic download was already logged at INFO this process.
+_DOWNLOAD_SKIP_NOTED: set = set()
 # Why the last LOAD or RESOLVE failed, for the GUI picker. See last_error() and
 # _record_resolve_failure/_record_resolve_success above.
 _LAST_ERROR: Optional[str] = None
@@ -2000,18 +2018,21 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
         # Cheap filesystem-only re-check every call (NO download): finds a model a
         # user just installed into this running server.
         path = resolve_embedding_model_path(allow_download=False)
-        from localm.netpolicy import network_mode
-        if not path and not _TRIED_DOWNLOAD and network_mode() in ("allow", "ask"):
-            # First miss under net_mode ask or allow: one auto-download attempt.
+        from localm.netpolicy import automatic_download_allowed
+        automatic = automatic_download_allowed()
+        if not path and not _TRIED_DOWNLOAD and automatic:
+            # First miss under net_mode allow: one auto-download attempt.
             # Latched so a batch of embed calls does not re-attempt the download on
-            # every chunk; under off nothing is latched, so a later switch to ask or
-            # allow still downloads on first use.
+            # every chunk; under ask or off nothing is latched, so a later switch
+            # to allow still downloads on first use.
             _TRIED_DOWNLOAD = True
             _emit_stage(on_progress, "Not found locally - attempting a download...")
             path = resolve_embedding_model_path(
                 on_progress=(lambda t: _emit_stage(on_progress, t))
                 if on_progress is not None else None)
         if not path:
+            if not automatic:
+                _note_download_skipped()
             _emit_stage(on_progress, last_error()
                         or "No embedding model is configured or available.")
             return None
@@ -2172,15 +2193,28 @@ def active_requests() -> int:
         return _EMBEDDER.active_requests if _EMBEDDER is not None else 0
 
 
+def _note_download_skipped() -> None:
+    """Log at INFO, once per process for each configured known model, that a
+    missing embedding model was not downloaded because net_mode does not allow
+    automatic downloads, with the action that downloads it (``last_error()``).
+    Later skips for the same model stay at DEBUG via the resolve path."""
+    spec = _current_spec()
+    if spec not in KNOWN_EMBEDDING_MODELS or spec in _DOWNLOAD_SKIP_NOTED:
+        return
+    _DOWNLOAD_SKIP_NOTED.add(spec)
+    logger.info("embedder: %s", last_error() or
+                f"embedding model {spec!r} not present and not auto-downloading")
+
+
 def will_download_on_first_use() -> bool:
     """True when the next ``get_embedder()`` call will download the configured
     model first: nothing is loaded yet, no download was attempted, net_mode is
-    ``allow`` or ``ask``, the model is a known key, and its file is not on disk.
+    ``allow``, the model is a known key, and its file is not on disk.
     Does no network I/O."""
     if _EMBEDDER is not None or _TRIED_DOWNLOAD:
         return False
-    from localm.netpolicy import network_mode
-    if network_mode() not in ("allow", "ask"):
+    from localm.netpolicy import automatic_download_allowed
+    if not automatic_download_allowed():
         return False
     spec = _current_spec()
     if spec not in KNOWN_EMBEDDING_MODELS:

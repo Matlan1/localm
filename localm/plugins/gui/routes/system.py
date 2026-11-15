@@ -134,7 +134,7 @@ def register(app: FastAPI, ctx) -> None:
         mgr = getattr(app.state, "plugin_manager", None)
         plugins, suggest = [], True
         if mgr is not None:
-            await mgr.load_enabled_pending_off_loop()
+            await mgr.reconcile_off_loop()
             from starlette.concurrency import run_in_threadpool
 
             from localm.plugins import catalog

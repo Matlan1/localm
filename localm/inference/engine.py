@@ -739,6 +739,16 @@ class Engine:
         size = getattr(self._backend, "full_offload_vram_bytes", None)
         return size() if callable(size) else None
 
+    def configured_gpu_layers(self) -> Optional[int]:
+        """The GPU layer count the next load uses as configured
+        (``configured_gpu_layers`` of a GGUF backend); None when auto sizing
+        decides it or the backend does not size GPU layers."""
+        configured = getattr(self._backend, "configured_gpu_layers", None)
+        if not callable(configured):
+            return None
+        answer = configured()
+        return answer if isinstance(answer, int) else None
+
     def predict_placement(self, free_vram: Optional[int] = None,
                           total_vram: Optional[int] = None,
                           ram_available: Optional[int] = None,

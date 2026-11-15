@@ -36,7 +36,9 @@ def build() -> dict[str, dict]:
         for p in plugins:
             status = "enabled" if p.get("active") else ("disabled" if p.get("installed") else "available")
             desc = f" - {p['description']}" if p.get("description") else ""
-            lines.append(f"{p['name']}  [{status}]{desc}")
+            reason = (f" ({p['not_runnable_reason']})"
+                      if p.get("not_runnable_reason") else "")
+            lines.append(f"{p['name']}  [{status}]{desc}{reason}")
         return _text_result("\n".join(lines))
 
     def install_plugin(args: dict) -> dict:

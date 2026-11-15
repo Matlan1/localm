@@ -943,6 +943,12 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     return (gpus, status) if return_status else gpus
 
 
+def listed_gpus() -> list:
+    """:func:`list_gpus` with its defaults: every GPU device visible right
+    now, in its order, or ``[]``."""
+    return list(list_gpus())
+
+
 # The calling thread's shared list_gpus reading: {"gpus": list | None} between
 # start_shared_gpu_reading() and end_shared_gpu_reading(), else absent or None.
 _shared_reading = threading.local()

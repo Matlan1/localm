@@ -347,7 +347,8 @@ class TestRoleLists:
         image = _names_by_role(IMAGE_ROLES, real_files)
         video = _names_by_role(VIDEO_ROLES, real_files)
         assert image["image-unet"] == ["flux", "sdxl"]
-        assert image["image-vae"] == ["ae"]
+        # The 3D VAE classified wan2.1 is the one Qwen-Image and Anima decode with.
+        assert image["image-vae"] == ["ae", "wanvae"]
         assert video["video-unet"] == ["wan"]
         assert video["video-vae"] == ["wanvae"]
         assert video["video-clip"] == ["clip_l", "t5xxl", "unread"]
@@ -362,6 +363,15 @@ class TestRoleLists:
             {"role_id": "someplugin-te", "model_type": "text-encoder"}, real_files)
         assert [m["name"] for m in out] == ["clip_l", "t5xxl", "unread"]
 
+    def test_the_first_image_text_encoder_role_lists_an_llm_encoder(self, real_files, tmp_path):
+        from tests.test_sdcpp_families import QWEN3_4B_GGUF, write_gguf
+        reg = dict(real_files, qwen3={
+            "path": str(write_gguf(tmp_path / "qwen3-4b.gguf", QWEN3_4B_GGUF, "qwen3")),
+            "model_type": "text-encoder"})
+        out = _names_by_role(IMAGE_ROLES, reg)
+        assert out["image-clip1"] == ["clip_l", "qwen3", "unread"]
+        assert out["image-clip2"] == ["t5xxl", "unread"]
+
     def test_every_role_the_built_in_plugins_declare_has_a_rule(self):
         import re
         declared = set()
@@ -373,6 +383,70 @@ class TestRoleLists:
         lora = {r for r in declared if r.endswith("-lora")}
         assert declared, "no role declarations found"
         assert declared - lora == rules, (declared - lora) ^ rules
+
+
+def _unet_slots(unet: str) -> list:
+    return [
+        {"node_id": "1", "class_type": "UNETLoader", "input_name": "unet_name",
+         "current": unet, "options": [unet]},
+        {"node_id": "2", "class_type": "CLIPLoader", "input_name": "clip_name",
+         "current": "te.safetensors", "options": ["te.safetensors"]},
+        {"node_id": "3", "class_type": "VAELoader", "input_name": "vae_name",
+         "current": "vae.safetensors", "options": ["vae.safetensors"]},
+    ]
+
+
+@pytest.fixture
+def family_files(real_files, tmp_path):
+    """real_files plus a Z-Image model and its Qwen3 text encoder."""
+    from tests.test_sdcpp_families import QWEN3_4B_GGUF, Z_IMAGE, write_gguf, write_safetensors
+    return dict(
+        real_files,
+        zimg={"path": str(write_safetensors(tmp_path / "z_image.safetensors", Z_IMAGE)),
+              "model_type": "diffusion-unet"},
+        qwen3={"path": str(write_gguf(tmp_path / "qwen3-4b.gguf", QWEN3_4B_GGUF, "qwen3")),
+               "model_type": "text-encoder"},
+    )
+
+
+class TestRoleListsFollowTheWorkflowFamily:
+    """With the workflow's diffusion model known, the text-encoder and VAE
+    roles list what that family can use, whatever slot position they pair with."""
+
+    def _names(self, unet, reg):
+        return {r["role_id"]: [m["name"] for m in r["registry_models"]]
+                for r in media_roles.describe_roles(IMAGE_ROLES, _unet_slots(unet), reg)}
+
+    def test_family_is_read_from_the_registered_unet(self, family_files):
+        assert media_roles.workflow_family(
+            _unet_slots("flux1-dev.safetensors"), family_files) == ("flux", None)
+        assert media_roles.workflow_family(
+            _unet_slots("Z_Image.safetensors"), family_files) == ("z-image", None)
+
+    def test_family_is_unknown_without_a_registered_unet(self, family_files):
+        assert media_roles.workflow_family(None, family_files) == (None, None)
+        assert media_roles.workflow_family(
+            _unet_slots("not_registered.safetensors"), family_files) == (None, None)
+
+    def test_a_z_image_workflow_offers_its_llm_encoder_in_the_first_slot(self, family_files):
+        out = self._names("z_image.safetensors", family_files)
+        assert out["image-clip1"] == ["qwen3", "unread"]
+        assert out["image-vae"] == ["ae"]
+
+    def test_a_flux_workflow_offers_both_its_encoders_and_only_its_vae(self, family_files):
+        out = self._names("flux1-dev.safetensors", family_files)
+        assert out["image-clip1"] == ["clip_l", "t5xxl", "unread"]
+        assert out["image-clip2"] == ["clip_l", "t5xxl", "unread"]
+        assert out["image-vae"] == ["ae"]
+
+    def test_a_qwen_image_workflow_offers_the_3d_vae(self, family_files, tmp_path):
+        from tests.test_sdcpp_families import QWEN_IMAGE, write_safetensors
+        reg = dict(family_files, qwen={
+            "path": str(write_safetensors(tmp_path / "qwen_image.safetensors", QWEN_IMAGE)),
+            "model_type": "diffusion-unet"})
+        assert media_roles.workflow_family(
+            _unet_slots("qwen_image.safetensors"), reg)[0] == "qwen-image"
+        assert self._names("qwen_image.safetensors", reg)["image-vae"] == ["wanvae"]
 
 
 # --------------------------------------------------------------------------- #

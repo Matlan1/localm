@@ -2,7 +2,7 @@
   <img src=".github/images/logo.svg" width="300" alt="LocaLM">
 </p>
 
-<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Local by default - chat, the coder and generation run on your machine, and cloud providers are always opt-in. The one automatic request is the periodic update check, which you can turn off, and which stays off when `net_mode` is `off`.</p>
+<p align="center"><b>Chat, an autonomous coding agent, image/music/video generation, and RAG - one local tool instead of five.</b><br>Runs GGUF and HuggingFace models on your own machine, and serves them as a drop-in OpenAI, Anthropic and Ollama API. Cloud providers are always opt-in.</p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Matlan1/localm?label=release" alt="Latest release">
@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey" alt="Platform: Windows | Linux">
 </p>
 
-At its core LocaLM is a **model loader plus a plugin engine**: GGUF and HuggingFace models ([which ones](docs/models.md)) through an OpenAI-compatible server, with chat always on and everything else - the coder agent, image/music/video generation, Knowledge (RAG), durable memory, voice, scheduled jobs, and MCP - a plugin you install when you want it. See [Offline first](#features) for exactly what does and does not touch the network.
+At its core LocaLM is a model loader plus a plugin engine: chat works out of the box, and everything else, from the coding agent to music generation, is a plugin you install only if you want it, or write yourself. See [Offline first](#features) for exactly what does and does not touch the network.
 
 <p align="center">
   <a href=".github/images/chat.png"><img src=".github/images/chat.png" width="560" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"></a><br>
@@ -109,7 +109,7 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 
 ### Prefer a window? Use the graphical installer
 
-Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and, after one or two questions in the console (keep the Python tooling inside the folder, or share it; and, when uv is not there yet, whether to install it), the install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, and your hardware's recommendation is preselected); where models and data live; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and, after one or two questions in the console (keep the Python tooling inside the folder, or share it; and, when uv is not there yet, whether to install it), the install happens in a window, over four pages you can step back through: your inference runtime (only the ones with a build for your machine are listed, your hardware's recommendation is preselected, and on a machine with a GPU one tick switches to CPU only); where models and data live; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut (not on macOS), and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, offers to report the problem if setup could not finish, and offers to start LocaLM when it is done. The window cannot be closed while the install runs.
 
 It performs the same install as the console setup below and covers the same choices, grouped into those pages (so not in the console's order). Everything after this section describes the console path; if you used the window, you are already finished.
 
@@ -193,7 +193,7 @@ self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
 describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
-The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` (run as `.venv/bin/localm`, or `localm` once the venv is activated) is required after a manual install to fetch the native backend (`setup.bat` and `setup.sh` do this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `uv pip install -p .venv -e ".[hf]"` adds the Transformers stack on top of it (the installers run `.[hf,audio]`).
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` (run as `.venv/bin/localm`, or `localm` once the venv is activated) is required after a manual install to fetch the native backend (`setup.bat` and `setup.sh` do this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `.venv/bin/python -m localm.hwdetect torch-pins --out .venv/localm-torch-pins.txt` and `uv pip install -p .venv -e ".[hf]" -c .venv/localm-torch-pins.txt` add the Transformers stack on top of it, held to the PyTorch build just installed (the installers run `.[hf,audio]` the same way).
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 
@@ -373,7 +373,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, `mcp`, and `exllama` (opt-in, offered only on Linux with an NVIDIA GPU), plus the protected `chat`. For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, `mcp`, and `exllama` (opt-in; it runs only on Linux with an NVIDIA GPU, and elsewhere it is listed with that note), plus the protected `chat`. For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 

@@ -26,6 +26,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from localm.inference.app_assembly.errors import error_body
+
 import localm.inference.http_server as _hs
 from localm.bindhost import (LOCAL_ORIGIN_PATTERN, host_header_name,
                              normalize_host_name)
@@ -236,9 +238,9 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                 _hs._note_refusal(request.scope, "cross-origin request")
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Cross-origin request refused "
-                             "(only same-origin requests or a configured "
-                             "'cors_origins' may use this endpoint)."},
+                    content=error_body(_path, 403, "Cross-origin request refused "
+                                       "(only same-origin requests or a configured "
+                                       "'cors_origins' may use this endpoint)."),
                 )
             # Open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
@@ -331,9 +333,11 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                         "open-mode management read from another origin")
                     return JSONResponse(
                         status_code=403,
-                        content={"detail": "Open-mode management requires the "
-                                 "localm GUI shell on this machine, or an API key "
-                                 "(run 'localm key generate')."},
+                        content=error_body(
+                            request.url.path, 403,
+                            "Open-mode management requires the localm GUI shell "
+                            "on this machine, or an API key (run 'localm key "
+                            "generate')."),
                         headers=({SHELL_REJECTED_HEADER: "1"}
                                  if not token_ok else None),
                     )
@@ -374,7 +378,8 @@ def add_keyless_network_gate(app: FastAPI) -> None:
         _hs._note_refusal(request.scope,
                           "no API key is configured on a network bind")
         return JSONResponse(status_code=401,
-                            content={"detail": _hs.KEYLESS_NETWORK_DETAIL})
+                            content=error_body(request.url.path, 401,
+                                               _hs.KEYLESS_NETWORK_DETAIL))
 
 
 def canvas_navigation_allowed() -> bool:

@@ -24,13 +24,13 @@ import asyncio
 import json
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
 
 import localm.plugins.gui.web as _web
 from localm import livefeed, portmux
 from localm.executor import get_plugin_executor
 from localm.inference.http_server import _require_auth
 from localm.plugins.gui.routes.jobs import activity_snapshot
+from localm.streaming_response import StreamingResponse
 
 FRESH_WAIT_S = 2.5     # longest a forced reading waits for the VRAM probe
 FRESH_BUDGET_S = 3.5   # longest a forced sample takes in all; above FRESH_WAIT_S

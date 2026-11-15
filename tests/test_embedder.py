@@ -634,11 +634,11 @@ def test_no_warning_for_the_default_bge_setup(monkeypatch):
 
 def test_embed_texts_none_when_no_model(monkeypatch):
     """No embedding model -> None (lexical fallback), and the network auto-download
-    is attempted AT MOST once - a batch of embed calls must not re-download per
-    chunk. (The filesystem is still re-checked each call; only the download probe
-    is latched.)"""
+    (net_mode allow) is attempted AT MOST once - a batch of embed calls must not
+    re-download per chunk. (The filesystem is still re-checked each call; only the
+    download probe is latched.)"""
     set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
-                                 "n_gpu_layers": 99, "net_mode": "ask"})
+                                 "n_gpu_layers": 99, "net_mode": "allow"})
     downloads = {"n": 0}
 
     def _resolve(*, allow_download=None, on_progress=None):

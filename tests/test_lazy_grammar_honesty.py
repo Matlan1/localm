@@ -374,7 +374,8 @@ def test_grammar_refusals_carry_the_retry_phrase():
     that phrase; the lazy-without-triggers 400 is a caller error and does not."""
     with open(_SETTINGS_PERF_JS, encoding="utf-8") as f:
         assert 'String(e.detail).includes("would be ignored")' in f.read()
+    from localm.inference.backends.base import GRAMMAR_FAULTED_MESSAGE
     for message in (GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
-                    GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE):
+                    GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GRAMMAR_FAULTED_MESSAGE):
         assert "would be ignored" in message
     assert "would be ignored" not in GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE

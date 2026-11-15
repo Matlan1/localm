@@ -163,3 +163,27 @@ def test_copying_a_deep_user_comfyui_keeps_every_tracked_file(tmp_path):
     assert _read(managed / _DEEP_REL) == "deep\n"
     assert sorted(source_archive.tree_files(managed)) == sorted([_DEEP_REL, "main.py"])
     assert not os.path.lexists(managed.with_name("comfyui.copying"))
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git writes the index")
+def test_the_copied_source_is_moved_in_by_the_shared_folder_move(tmp_path, monkeypatch):
+    from localm import folder_swap
+    user = _user_comfyui(tmp_path)
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    for args in (["init", "-q"], ["-c", "core.longpaths=true", "add", "-A"]):
+        subprocess.run(["git", *args], cwd=str(user), env=env, check=True,
+                       capture_output=True, creationflags=_NO_WINDOW)
+    managed = tmp_path / "m" / "comfyui"
+    managed.parent.mkdir()
+    real_move = folder_swap.move_dir
+    moves = []
+
+    def counted(src, dst):
+        moves.append((os.path.basename(str(src)), os.path.basename(str(dst))))
+        real_move(src, dst)
+    monkeypatch.setattr(folder_swap, "move_dir", counted)
+
+    ok, out = provision._clone_source(user, managed, "a" * 40, None)
+    assert ok, out
+    assert moves == [("comfyui.copying", "comfyui")]
+    assert _read(managed / "main.py") == "main\n"

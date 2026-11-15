@@ -10,6 +10,7 @@ import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, createJobFollower, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
+import { chatPageModelChoice } from "../app/slash.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -198,17 +199,15 @@ $("video-generate").onclick = async () => {
     if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
   }
   const native = videoBackend.active === "native";
-  if (!native && modelOverrides.video && Object.keys(modelOverrides.video).length) {
-    body.model_overrides = modelOverrides.video;
-  }
   if (native && videoWorkflowCard.pending) {
     $("video-generate").disabled = true;
     let ready;
     try { ready = await videoWorkflowCard.prepare(); } finally { $("video-generate").disabled = false; }
     if (!ready) return;
   }
-  const nativeChoice = native ? videoModelPicker.choice() : {};
-  Object.assign(body, nativeChoice);
+  const picked = videoModelFields(native);
+  const nativeChoice = native ? picked : {};
+  Object.assign(body, picked);
   if (native) {
     Object.assign(body, videoGen.body());
     const shift = nwfNumber("video-flow-shift");
@@ -228,6 +227,30 @@ $("video-generate").onclick = async () => {
     return data.job_id;
   }));
 };
+
+/* The model fields Generate sends: the native picker's models and LoRAs on the
+   native backend, the workflow panel's model picks on ComfyUI (none when
+   nothing was picked). */
+function videoModelFields(native) {
+  if (native) return videoModelPicker.choice();
+  const picks = modelOverrides.video;
+  return picks && Object.keys(picks).length ? { model_overrides: picks } : {};
+}
+
+/* The model fields of this page's pick for the chat's /generate-video, read
+   against the active backend and the registered models; null when this
+   page's Generate would refuse (an applied workflow's main model is still
+   not registered). */
+export async function videoPageModelChoice() {
+  await refreshVideoBackend();
+  const native = videoBackend.active === "native";
+  if (native) {
+    await videoModelPicker.refresh();
+    if (videoWorkflowCard.pending && !(await videoWorkflowCard.prepare())) return null;
+  }
+  return videoModelFields(native);
+}
+chatPageModelChoice.video = videoPageModelChoice;
 
 /* Run one video job on this page: *start(log)* resolves to the job id to
    follow (null when nothing was started); its log lines, live preview and

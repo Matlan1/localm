@@ -121,23 +121,22 @@ test("a page shell that brings no new token falls back to the reload recovery", 
   assert.equal(recoveryStarted(window), true, "the reload recovery took over");
 });
 
-test("a reload with unsaved Settings asks in the page and the browser prompt stays away", async () => {
+test("a reload with unsaved Settings asks in the page, and Discard reloads without the draft", async () => {
   const { dom, window } = loadApp({ fetchImpl: async () => ok(), shellToken: OLD });
   const reload = countReloads(dom);
   window.settingsDirty = () => true;
+  let discarded = 0;
+  window.discardSettingsDraft = () => { discarded += 1; };
   const asked = window.reloadApp();
   const modal = window.document.getElementById("modal");
   assert.ok(await waitFor(() => modal.style.display === "flex"), "the in-page dialog is shown");
   assert.equal(reload.reloads, 0, "nothing reloads before the answer");
-  const before = new window.Event("beforeunload", { cancelable: true });
-  window.dispatchEvent(before);
-  assert.equal(before.defaultPrevented, true, "premise: an unconfirmed leave still raises the browser prompt");
-  window.document.getElementById("modal-body").querySelector(".btn-danger").click();
+  const body = window.document.getElementById("modal-body");
+  assert.equal(body.querySelector(".btn-secondary").textContent, "Stay", "the dialog offers to stay");
+  body.querySelector(".btn-danger").click();
   assert.equal(await asked, true);
   assert.equal(reload.reloads, 1, "the page reloads once the person chose to");
-  const after = new window.Event("beforeunload", { cancelable: true });
-  window.dispatchEvent(after);
-  assert.equal(after.defaultPrevented, false, "the confirmed reload raises no browser prompt");
+  assert.equal(discarded, 1, "the unsaved edits are not kept for the next load");
 });
 
 test("staying on the page keeps it, and a restart with unsaved Settings shows the page again", async () => {
@@ -164,9 +163,11 @@ test("staying on the page keeps it, and a restart with unsaved Settings shows th
 
 test("every reload init.js starts goes through reloadApp", () => {
   const src = readFileSync(join(STATIC, "app", "init.js"), "utf8");
-  assert.equal((src.match(/location\.reload\(/g) || []).length, 1, "init.js calls location.reload() in one place");
-  const body = src.slice(src.indexOf("export async function reloadApp"));
-  assert.match(body.slice(0, body.indexOf("\n}")), /location\.reload\(/, "and that place is reloadApp");
+  assert.equal((src.match(/location\.reload\(/g) || []).length, 0, "init.js never calls location.reload() itself");
+  assert.match(src, /^import \{[^}]*\breloadApp\b[^}]*\} from "\.\/helpers\.js";$/m, "it uses the reloadApp of helpers.js");
+  const helpers = readFileSync(join(STATIC, "app", "helpers.js"), "utf8");
+  const body = helpers.slice(helpers.indexOf("export async function reloadApp"));
+  assert.match(body.slice(0, body.indexOf("\n}")), /location\.reload\(/, "and that reloadApp is where the reload happens");
 });
 
 test("the service worker passes a no-store request to the network and caches nothing", async () => {

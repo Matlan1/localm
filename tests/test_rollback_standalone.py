@@ -132,12 +132,34 @@ def test_detect_home_honors_localm_home(tmp_path, monkeypatch):
     assert rb._detect_home(tmp_path / "install") == tmp_path / "custom"
 
 
-def _clone_with_cfg(tmp_path, raw: bytes) -> Path:
+def _clone_with_cfg(tmp_path, raw: bytes, *, with_reader=True) -> Path:
     install = tmp_path / "install"
     install.mkdir()
     (install / "pyproject.toml").write_text("", encoding="utf-8")
     (install / "localm-home.cfg").write_bytes(raw)
+    if with_reader:
+        (install / "localm").mkdir()
+        shutil.copy(REPO / "localm" / "_home_cfg.py", install / "localm" / "_home_cfg.py")
     return install
+
+
+def test_detect_home_takes_a_relative_cfg_line_relative_to_the_install(
+        tmp_path, monkeypatch):
+    rb = _load_rb()
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    install = _clone_with_cfg(tmp_path, b"data\n")
+    assert rb._detect_home(install) == install / "data"
+
+
+def test_detect_home_says_so_when_the_cfg_reader_cannot_be_loaded(
+        tmp_path, monkeypatch, capsys):
+    rb = _load_rb()
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    install = _clone_with_cfg(tmp_path, str(tmp_path / "elsewhere").encode("utf-8"),
+                              with_reader=False)
+    assert rb._detect_home(install) == install / "home"
+    assert "_home_cfg.py could not be loaded" in capsys.readouterr().err
 
 
 def test_detect_home_reads_a_cfg_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
@@ -162,12 +184,14 @@ def test_detect_home_reads_a_cfg_written_in_the_console_code_page(tmp_path, monk
     assert rb._detect_home(_clone_with_cfg(tmp_path, raw)) == target
 
 
-def test_detect_home_falls_back_when_the_cfg_cannot_be_decoded(tmp_path, monkeypatch):
+def test_detect_home_falls_back_when_the_cfg_cannot_be_decoded(tmp_path, monkeypatch,
+                                                                capsys):
     rb = _load_rb()
     monkeypatch.delenv("LOCALM_HOME", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     install = _clone_with_cfg(tmp_path, b"/data/\xff\xfe\n")
     assert rb._detect_home(install) == install / "home"
+    assert "Cannot read" in capsys.readouterr().err
 
 
 def test_shims_invoke_the_rollback_script():

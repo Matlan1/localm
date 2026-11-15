@@ -196,8 +196,16 @@ def test_every_chat_stream_call_in_the_repl_is_inside_a_native_console_pause():
                 return True
         return False
 
+    def in_delegating_wrapper(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.FunctionDef) and node.name == "chat_stream":
+                return True
+        return False
+
     calls = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "chat_stream"]
+             if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "chat_stream"
+             and not in_delegating_wrapper(n)]
 
     assert calls
     assert [n.lineno for n in calls if not inside_pause(n)] == []

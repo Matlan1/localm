@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
+import { $, SHELL_TOKEN, authHeaders, confirmDangerAsync, el, instanceCacheTrusted, refreshCsrf, reloadApp, safeStorageGet, sentPreviousShellToken, sentShellToken, setShellToken, toast } from "./helpers.js";
 import { syncLanguageFromConfig, t } from "./i18n.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
@@ -192,6 +192,7 @@ async function _clearClientSession() {
     });
   } catch { /* ignore */ }
   try { sessionStorage.clear(); } catch { /* ignore */ }
+  if (window.discardSettingsDraft) window.discardSettingsDraft();
   try { await resetServiceWorkerAndCaches(); } catch { /* ignore */ }
 }
 
@@ -276,33 +277,6 @@ export function showShellStaleOverlay() {
 }
 window.showShellStaleOverlay = showShellStaleOverlay;
 
-/** Reload the page. While Settings holds unsaved edits it first asks in the
- *  in-page dialog (the reconnect overlays are hidden for it): the page reloads
- *  only when the person chooses to, and the browser's own leave prompt is not
- *  shown for that reload. When the person chooses to stay, every overlay it hid
- *  is shown again. Resolves true when the reload starts, false when the person
- *  chose to stay. Every reload this page starts itself goes through here. */
-export async function reloadApp() {
-  if (window.settingsDirty && window.settingsDirty()) {
-    const hidden = [];
-    for (const id of ["reconnect-overlay", "shell-stale-overlay"]) {
-      const ov = $(id);
-      if (ov && ov.style.display !== "none") {
-        hidden.push([ov, ov.style.display]);
-        ov.style.display = "none";
-      }
-    }
-    const go = await confirmDangerAsync(t("nav.leaveSettings.title"),
-      t("reconnect.reloadUnsaved"), t("reconnect.reloadDiscard"));
-    if (!go) {
-      for (const [ov, display] of hidden) ov.style.display = display;
-      return false;
-    }
-    window.__localmUnloadConfirmed = true;
-  }
-  location.reload();
-  return true;
-}
 window.reloadApp = reloadApp;
 
 // Matches the shell-token snippet the server writes into the page shell.
@@ -838,10 +812,9 @@ window.bootAuthProbe = bootAuthProbe;
         // `pull_token` so ITS OWN deep link can redeem it here and
         // auto-start with zero clicks - unattended launches keep working.
         // A forged link cannot know that secret, so the redeem call below
-        // 403s and we fall back to an explicit human confirmation instead.
-        // window.confirm is a native browser-chrome dialog a page cannot
-        // script past, auto-dismiss, or hide, so that fallback holds even
-        // from an invisible iframe.
+        // 403s and the person confirms in the in-page dialog instead. The
+        // shell cannot be framed, so that dialog never shows inside another
+        // site's frame. See test_csp_enforcing_and_locked_down.
         let authorized = false;
         if (pullToken) {
           try {
@@ -852,7 +825,8 @@ window.bootAuthProbe = bootAuthProbe;
             authorized = r.ok;
           } catch { authorized = false; }
         }
-        if (authorized || confirm(t("init.pullConfirm", { spec: pullSpec }))) {
+        if (authorized || await confirmDangerAsync(t("init.pullTitle"),
+          t("init.pullConfirm", { spec: pullSpec }), t("common.modelDownload.download"))) {
           $("pull-start").click();   // kick off the pull with progress
         }
       }

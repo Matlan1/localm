@@ -434,7 +434,8 @@ def _install(build: str, *, force: bool, say: Progress,
         if rt is not None:
             return rt
     from localm import netpolicy
-    from localm.media.runtime_files import ReplaceError, refused_download_message, replace_dir
+    from localm.folder_swap import ReplaceError, replace_dir
+    from localm.media.runtime_files import refused_download_message
     name, size, sha = pins.ASSETS[(plat, build)]
     root = runtimes_root()
     dest = runtime_dir(build)

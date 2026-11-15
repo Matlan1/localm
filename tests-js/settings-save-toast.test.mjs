@@ -25,13 +25,13 @@ const FIELDS = [
     owner: "core", applies: "live", default: 40 },
 ];
 
-function makeFetch() {
+function makeFetch(patchReply = {}) {
   return async (url, opts = {}) => {
     if (url === "/v1/config/schema") {
       return { ok: true, status: 200, json: async () => ({ fields: FIELDS }), text: async () => "" };
     }
     if (url === "/v1/config" && opts.method === "PATCH") {
-      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+      return { ok: true, status: 200, json: async () => patchReply, text: async () => "" };
     }
     return {
       ok: true, status: 200, text: async () => "",
@@ -44,8 +44,8 @@ async function settle() {
   for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-async function saveWith(key, value, section) {
-  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+async function saveWith(key, value, section, patchReply) {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patchReply) });
   runScript(win, "refreshSettingsPage();");
   await settle();
   const doc = win.document;
@@ -56,7 +56,9 @@ async function saveWith(key, value, section) {
   runScript(win, `window.__saved = saveSettingsSection(${JSON.stringify(section)});`);
   await settle();
   assert.equal(await win.__saved, true, "the save succeeds");
-  return doc.getElementById("toast").textContent;
+  const toastEl = doc.getElementById("toast");
+  saveWith.lastToastClass = toastEl.className;
+  return toastEl.textContent;
 }
 
 test("a changed restart field says a restart is needed", async () => {
@@ -87,4 +89,17 @@ test("a blank text field left blank does not count as changed", async () => {
 test("an unchanged restart field does not ask for a restart", async () => {
   const text = await saveWith("mdns_name", "localm", "core-Server");
   assert.equal(text.trim(), "Nothing changed", "a value typed back to the saved one is not sent");
+});
+
+test("a save the server took with a warning shows the warning in an error toast", async () => {
+  const text = await saveWith("temperature", 0.5, "core-Chat",
+    { warnings: ["'nomic' names no model yet; pull or add it before indexing."] });
+  assert.match(text, /^Saved\. 'nomic' names no model yet; pull or add it before indexing\.$/);
+  assert.equal(saveWith.lastToastClass, "error");
+});
+
+test("a save with an empty warnings list is a plain Saved", async () => {
+  const text = await saveWith("temperature", 0.5, "core-Chat", { warnings: [] });
+  assert.equal(text.trim(), "Saved");
+  assert.equal(saveWith.lastToastClass, "show");
 });

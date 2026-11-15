@@ -905,6 +905,102 @@ def test_rollback_last_removes_newly_added_entry_via_manifest(tmp_path, monkeypa
     assert not (install / "brand_new").exists()   # added entry removed -> pre-apply state
 
 
+def test_rollback_last_reports_a_failed_restore_as_a_localm_error(tmp_path, monkeypatch):
+    install = _stage_rollback(tmp_path, monkeypatch,
+                              manifest=["existing.txt", "brand_new"])
+
+    def refuse(*a, **k):
+        raise RuntimeError("refused unsafe name from the update manifest: '..'")
+    monkeypatch.setattr(updater, "_restore_all", refuse)
+    with pytest.raises(LocalmError) as ei:
+        updater.rollback_last(installed=install)
+    assert ei.value.summary.startswith("the rollback did not finish")
+    assert ei.value.stage == updater.ROLLBACK_INCOMPLETE
+    assert "refused unsafe name" in ei.value.reason
+    assert "backup is kept at" in ei.value.reason
+
+
+def test_setup_script_names_this_platforms_script(monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    assert updater.setup_script() == "setup.sh"
+    assert "setup.sh" in updater.class_summary("setup")
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    assert updater.setup_script() == "setup.bat"
+    assert "setup.bat" in updater.class_summary("setup")
+
+
+@pytest.mark.parametrize("what, call", [
+    ("update", lambda: updater.apply(5, signature="x")),
+    ("rollback", lambda: updater.rollback_last()),
+])
+def test_the_container_image_refuses_an_update_and_a_rollback_before_anything(
+        tmp_path, monkeypatch, what, call):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    downloads = []
+    monkeypatch.setattr(updater, "download", lambda *a, **k: downloads.append(a))
+    monkeypatch.setenv(updater.CONTAINER_IMAGE_ENV, "1")
+    with pytest.raises(LocalmError) as ei:
+        call()
+    assert ei.value.summary.startswith(
+        f"this localm runs from its container image, so no {what} was made")
+    assert "pull the newer localm image" in ei.value.reason
+    assert downloads == []
+    assert not (home / "updates").exists(), "nothing was written before the refusal"
+
+
+def test_the_container_marker_is_set_by_the_image_and_read_exactly():
+    dockerfile = pathlib.Path(updater.__file__).resolve().parents[1] / "docker" / "Dockerfile"
+    assert f"{updater.CONTAINER_IMAGE_ENV}=1" in dockerfile.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value, expected", [("1", True), (" 1 ", True), ("", False),
+                                             ("0", False), ("yes", False)])
+def test_in_container_image_reads_the_marker(monkeypatch, value, expected):
+    monkeypatch.setenv(updater.CONTAINER_IMAGE_ENV, value)
+    assert updater.in_container_image() is expected
+
+
+def test_an_update_of_a_git_clone_says_so(tmp_path, monkeypatch, sig_env):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    op, sig = _signed_build("0.2.0", ["click"])
+    assert updater.apply(5, installed=inst, signature=sig, download_opener=op)[
+        "git_clone"] is False
+    (inst / ".git").mkdir()
+    op, sig = _signed_build("0.3.0", ["click"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert res["git_clone"] is True
+    assert (inst / ".git").is_dir(), "the update leaves the clone's .git alone"
+
+
+def test_a_signed_archive_with_an_unsafe_path_is_a_named_refusal(tmp_path, monkeypatch, sig_env):
+    import io
+    import zipfile
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", "0.2.0")
+        z.writestr("pyproject.toml", _pyproject_str(["click"]))
+        z.writestr("../escape.txt", "x")
+    data = buf.getvalue()
+
+    def opener(url, headers, timeout, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
+                      download_opener=opener)
+    assert ei.value.summary == "refusing to install: the download is not a localm build"
+    assert "unsafe path" in ei.value.reason
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, monkeypatch):
     # No manifest (an older backup): backed-up entries still restore correctly; the
     # brand-new entry is not known to the fallback and survives (documented limitation).
@@ -1231,8 +1327,9 @@ def test_apply_preserves_run_backup_when_swap_and_rollback_both_fail(tmp_path, m
     monkeypatch.setattr(au, "apply_files", lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
     monkeypatch.setattr(au, "rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("rollback boom")))
     op, sig = _signed_build("0.2.0", ["click"])
-    with pytest.raises(RuntimeError, match="rollback also failed"):
+    with pytest.raises(LocalmError, match="manual recovery needed") as ei:
         updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert "rollback also failed" in ei.value.reason
 
     runs_dir = home / "updates" / "runs"
     backups = list(runs_dir.glob("*/backup")) if runs_dir.exists() else []
@@ -1279,8 +1376,9 @@ def test_a_swap_that_was_undone_leaves_no_run_behind_and_keeps_the_previous_mani
     monkeypatch.setattr(au, "apply_files",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
     op, sig = _signed_build("0.3.0", ["click"])
-    with pytest.raises(OSError, match="swap boom"):
+    with pytest.raises(LocalmError, match="so it was rolled back") as ei:
         updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert "swap boom" in ei.value.reason
     runs = home / "updates" / "runs"
     assert not runs.exists() or list(runs.iterdir()) == []
     assert manifest.read_text(encoding="utf-8") == recorded
@@ -1325,6 +1423,34 @@ def test_spawn_health_watchdog_builds_expected_argv_and_env(tmp_path, monkeypatc
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
     assert kwargs["env"]["LOCALM_HOME"] == str(home)
+    assert "--relaunch-argv" not in argv
+
+
+def test_spawn_health_watchdog_passes_the_command_line_to_start_again(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    calls = []
+    relaunch = [sys.executable, "-m", "localm", "gui", "--no-browser", "-p", "8642"]
+    assert updater.spawn_health_watchdog(
+        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
+        relaunch_argv=relaunch, popen=_capturing_popen(calls)) is True
+    argv = calls[0][0]
+    assert json.loads(argv[argv.index("--relaunch-argv") + 1]) == relaunch
+
+
+def test_spawn_health_watchdog_leaves_the_relaunch_out_for_an_older_watchdog(tmp_path,
+                                                                            monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    old = tmp_path / "scripts" / "update_watchdog.py"
+    old.parent.mkdir()
+    old.write_text("ap.add_argument('--log-file')\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "_watchdog_script", lambda: old)
+    calls = []
+    assert updater.spawn_health_watchdog(
+        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
+        relaunch_argv=["python", "-m", "localm", "gui"], popen=_capturing_popen(calls)) is True
+    argv = calls[0][0]
+    assert argv[1] == str(old)
+    assert "--relaunch-argv" not in argv
 
 
 def test_spawn_health_watchdog_posix_uses_start_new_session(tmp_path, monkeypatch):

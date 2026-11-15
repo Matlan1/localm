@@ -143,6 +143,15 @@ def test_menu_cancel_changes_nothing(tmp_path, venv_template):
     assert (clone / ".venv").is_dir() and (p["lib"] / "libllama.so").exists()
 
 
+def test_a_menu_answer_it_does_not_list_is_asked_again(tmp_path, venv_template):
+    clone = tmp_path / "clone"
+    p = _install(clone, venv_template)
+    out = _run(clone, tmp_path, stdin="p\n9\n3\n")
+    assert out.stderr.count("Type a number from 1 to 3.") == 2, (out.stdout, out.stderr)
+    assert "Nothing changed." in out.stdout, out.stdout
+    assert (clone / ".venv").is_dir() and (p["lib"] / "libllama.so").exists()
+
+
 def test_a_running_localm_is_stopped_first(tmp_path, venv_template):
     clone = tmp_path / "clone"
     _install(clone, venv_template)
@@ -219,6 +228,15 @@ def test_setup_gui_finishes_an_uninstall_the_window_left_pending(tmp_path):
     assert out.returncode == 0, (out.stdout, out.stderr)
     assert _runtime_gone(clone)
     assert not (clone / im.MANIFEST_NAME).exists()
+    assert "LocaLM was uninstalled." in out.stdout
+
+
+def test_setup_gui_names_the_exit_code_of_a_window_that_could_not_run(tmp_path):
+    clone = tmp_path / "clone"
+    out = _gui_after_window(clone, 3)
+    assert out.returncode == 3, (out.stdout, out.stderr)
+    assert "The setup window could not run (exit 3)." in out.stdout
+    assert "LocaLM was uninstalled." not in out.stdout
 
 
 @pytest.mark.parametrize("code, rc, message, finished", [
@@ -272,11 +290,11 @@ def test_a_data_folder_that_is_not_deleted_is_not_reported_as_removed(tmp_path, 
 
 
 def _data_probe(clone: Path) -> Path:
-    """setup.sh's say/ask helpers and its data-folder section, verbatim."""
+    """setup.sh's say/ask/ask_pick helpers and its data-folder section, verbatim."""
     text = (ROOT / "setup.sh").read_text(encoding="utf-8")
     start = text.index("say() {")
-    ask = re.search(r"(?m)^ask\(\) \{", text)
-    helpers = text[start:text.index("\n}\n", ask.start()) + 3]
+    last = re.search(r"(?m)^ask_pick\(\) \{", text)
+    helpers = text[start:text.index("\n}\n", last.start()) + 3]
     block = text[text.index("# ---- data directory"):
                  text.index("# ---- browser tab or standalone app window?")]
     probe = clone / "probe.sh"

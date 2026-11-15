@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from ..plugins.media_config import REQUEST_RANGES
 from ._core import console, main
 
 
@@ -237,7 +238,7 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
 @click.option("--image", "input_image", type=click.Path(exists=True), default=None,
               help="Use this picture as a base (image-to-image) instead of noise.")
-@click.option("--denoise", type=float, default=None,
+@click.option("--denoise", type=click.FloatRange(*REQUEST_RANGES["denoise"][:2]), default=None,
               help="img2img strength 0-1 (lower keeps more of the base image).")
 @click.option("--lora", "lora_name", default=None,
               help="Optional LoRA file name (in ComfyUI's loras dir) to apply.")
@@ -304,7 +305,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
               help="Lyrics file ([verse]/[chorus] markers supported); "
                    "omit for an instrumental.")
 @click.option("-d", "--duration", default=120.0, show_default=True,
-              help="Track length in seconds - arbitrary.")
+              help="Track length in seconds, 1 to 3600.")
 @click.option("-o", "--out", default=None,
               help="Output path [default: ./music_<timestamp>.wav with the native backend, "
                    ".flac with ComfyUI]")
@@ -353,7 +354,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
 @click.option("--negative", default=None,
               help="Negative prompt (default suppresses blur/watermarks).")
 @click.option("-d", "--duration", default=5.0, show_default=True,
-              help="Clip length in seconds (snapped to Wan's 4k+1 frame "
+              help="Clip length in seconds, 1 to 20 (snapped to Wan's 4k+1 frame "
                    "rule; ~5s is the model's native length).")
 @click.option("--fps", default=24, show_default=True, help="Frame rate.")
 @click.option("--width", type=int, default=None,

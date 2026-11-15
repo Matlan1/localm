@@ -258,6 +258,33 @@ class TestPluginLifecycle:
         assert backend_registry.registered() == []
         assert isinstance(create_backend(str(d)), HFBackend)
 
+    def test_a_backend_plugin_disabled_by_another_process_unloads_its_models(
+            self, tmp_path, monkeypatch):
+        """On the server's next plugin list, a backend plugin another process
+        disabled is unloaded through PluginManager._unload, so
+        PluginHost.unmount drops its backend and schedules the unload of the
+        models running on it."""
+        from fastapi.testclient import TestClient
+
+        import localm.plugins.engine as eng
+        _make_backend_plugin(tmp_path / "home" / "plugins")
+        _enable("fakeexl")
+        unloaded, evicted = [], []
+        real_unload = eng.PluginManager._unload
+        monkeypatch.setattr(eng.PluginManager, "_unload",
+                            lambda self, n: (unloaded.append(n), real_unload(self, n))[1])
+        monkeypatch.setattr(eng, "_evict_backend_models", evicted.append)
+        app = FastAPI()
+        eng.attach_engine(app)
+        client = TestClient(app)
+        assert [x.plugin_name for x in backend_registry.registered()] == ["fakeexl"]
+
+        eng.PluginManager(None).set_enabled_state("fakeexl", False)
+        assert client.get("/api/plugins").status_code == 200
+        assert unloaded == ["fakeexl"]
+        assert evicted == ["fakeexl"]
+        assert backend_registry.registered() == []
+
     def test_the_host_rejects_anything_but_a_descriptor(self):
         from localm.plugins.engine import PluginHost, PluginSpec
         host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
@@ -399,14 +426,16 @@ class TestAdmission:
 
 
 class TestCatalogGate:
-    def test_exllama_is_not_listed_without_an_nvidia_linux_machine(self, tmp_path, monkeypatch):
+    def test_exllama_is_listed_with_the_reason_without_an_nvidia_linux_machine(
+            self, tmp_path, monkeypatch):
         from localm.plugins import catalog
         from localm.plugins.engine import PluginManager
         monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
         mgr = PluginManager(FastAPI(), installed_root=tmp_path / "installed")
-        names = {p["name"] for p in mgr.api_state()["plugins"]}
-        assert "exllama" not in names
-        assert "memory" in names
+        rows = {p["name"]: p for p in mgr.api_state()["plugins"]}
+        assert rows["exllama"]["available"] is True
+        assert "NVIDIA" in rows["exllama"]["not_runnable_reason"]
+        assert rows["memory"]["not_runnable_reason"] == ""
 
     def test_exllama_is_listed_as_available_on_an_nvidia_linux_machine(self, tmp_path, monkeypatch):
         from localm.plugins import catalog
@@ -416,6 +445,7 @@ class TestCatalogGate:
         rows = {p["name"]: p for p in mgr.api_state()["plugins"]}
         assert rows["exllama"]["available"] is True
         assert rows["exllama"]["installed"] is False
+        assert rows["exllama"]["not_runnable_reason"] == ""
 
     def test_an_explicit_install_still_works(self, tmp_path, monkeypatch):
         from localm.plugins import catalog

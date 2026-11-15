@@ -72,51 +72,27 @@ def compute_multifile_diff(cwd: Path, edits: object) -> Optional[str]:
     """
     Unified diff an ``edit_files`` call would produce, concatenated over every
     file it touches, or None when nothing would change OR when the batch would
-    be REJECTED (a malformed item, or an ``old`` that does not match).
+    be REJECTED.
 
-    Each file is read once and successive edits to it compose, so the diff
-    matches what the tool would actually write. The whole batch is rejected on a
-    miss, matching tool_edit_files' all-or-nothing contract. Unlike the
-    single-file helpers this needs *cwd*, because the paths live inside the edit
-    items.
+    The batch is planned by ``edit_files``' own planner (``plan_edit_files``),
+    so the diff is what the tool writes: the same match rules (exact, else one
+    whitespace-tolerant match), successive edits to one file composed, paths
+    confined to *cwd*, and the whole batch rejected on any miss or syntax
+    break. Unlike the single-file helpers this needs *cwd*, because the paths
+    live inside the edit items.
     """
-    if not isinstance(edits, list) or not edits:
+    from .tools.files import plan_edit_files
+    plan = plan_edit_files(cwd, edits)
+    if isinstance(plan, str):
         return None
-    current: dict[str, str] = {}
-    order:   list[str] = []
-    labels:  dict[str, str] = {}   # canonical key -> the path as the caller wrote it
-    for item in edits:
-        if not isinstance(item, dict):
-            return None
-        path_arg = str(item.get("path") or "")
-        old_str  = str(item.get("old") or "")
-        new_str  = str(item.get("new") or "")
-        if not path_arg or not old_str:
-            return None
-        # Key on the RESOLVED path, as tool_edit_files does, so "a.py" and
-        # "./a.py" in one batch compose into one hunk instead of two
-        # contradictory ones.
-        try:
-            key = str((cwd / path_arg).resolve())
-        except Exception:
-            key = path_arg
-        if key not in current:
-            current[key] = read_old_content(cwd, path_arg)
-            order.append(key)
-            labels[key] = path_arg
-        if old_str not in current[key]:
-            # The real tool rejects the WHOLE batch on a miss.
-            return None
-        current[key] = current[key].replace(old_str, new_str, 1)
     chunks = []
-    for key in order:
-        path_arg = labels[key]
-        old_content = read_old_content(cwd, path_arg)
+    for p in plan.targets:
+        label = plan.labels[p]
         diff_lines = list(difflib.unified_diff(
-            old_content.splitlines(keepends=True),
-            current[key].splitlines(keepends=True),
-            fromfile=f"a/{path_arg}",
-            tofile=f"b/{path_arg}",
+            plan.before[p].splitlines(keepends=True),
+            plan.after[p].splitlines(keepends=True),
+            fromfile=f"a/{label}",
+            tofile=f"b/{label}",
         ))
         if diff_lines:
             chunks.append("".join(diff_lines))

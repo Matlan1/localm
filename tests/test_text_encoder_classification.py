@@ -451,7 +451,6 @@ class TestChoosingATextEncoderForEmbeddings:
         with TestClient(app) as c:
             r = c.post("/api/rag/embedding", headers=headers,
                        json={"model": "my-encoder", "confirm": True})
-            assert r.status_code == 200, r.text
-            events = c.get(f"/api/jobs/{r.json()['job_id']}/events", headers=headers).text
-        assert "is a text encoder" in events
-        assert "not a known embedding key" not in events
+        assert r.status_code == 400, r.text
+        assert "registered as a text-encoder model, not an embedding model" in r.text
+        assert "not a known embedding key" not in r.text

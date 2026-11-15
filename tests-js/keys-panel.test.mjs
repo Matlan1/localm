@@ -96,6 +96,42 @@ test("keys panel: create posts {name, scopes} and shows the secret once", async 
   assert.equal(window.document.querySelector(".key-secret-value").value, "secret-xyz");
 });
 
+for (const [name, clipboard, expectToast, expectWritten] of [
+  ["a blocked clipboard says the copy failed, never 'Copied'",
+   (written) => ({ writeText: async (s) => { written.push(s); throw new Error("denied"); } }),
+   /Could not copy/, ["secret-xyz"]],
+  ["no clipboard at all (an insecure page) says the copy failed",
+   () => undefined, /Could not copy/, []],
+  ["a working clipboard gets the key and the toast says Copied",
+   (written) => ({ writeText: async (s) => { written.push(s); } }),
+   /^Copied$/, ["secret-xyz"]],
+]) {
+  test(`keys panel: Copy of a new key: ${name}`, async () => {
+    const written = [];
+    const { window } = loadAppWithPages({
+      fetchImpl: router({
+        "GET /v1/keys": () => ({ status: 200, body: { keys: [] } }),
+        "POST /v1/keys": () => ({ status: 200,
+          body: { id: "new1", name: "phone", scopes: ["coder"], key: "secret-xyz" } }),
+      }),
+    });
+    Object.defineProperty(window.navigator, "clipboard",
+      { value: clipboard(written), configurable: true });
+    await bootSettled(window);
+    await window.refreshKeysPanel();
+    window.document.getElementById("key-name").value = "phone";
+    [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "coder").checked = true;
+    await window.document.getElementById("key-create").onclick();
+    window.document.getElementById("toast").textContent = "";
+    const copy = [...window.document.querySelectorAll("#key-secret button")]
+      .find((b) => b.textContent === "Copy");
+    assert.ok(copy, "the Copy button is shown");
+    await copy.onclick();
+    assert.deepEqual(written, expectWritten);
+    assert.match(window.document.getElementById("toast").textContent, expectToast);
+  });
+}
+
 // The first key on an open-mode server turns authentication on: the shell
 // token is refused from then on, and the create reply set an owner session.
 test("keys panel: the first key on an open-mode server still shows its secret", async () => {

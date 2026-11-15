@@ -756,6 +756,95 @@ def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
         assert auth._read_key_file() is None
 
 
+def test_ensure_owner_key_creates_one_key_and_then_keeps_it(auth):
+    key, created = auth.ensure_owner_key()
+    assert created is True
+    assert auth.get_api_key() == key
+    again, created_again = auth.ensure_owner_key()
+    assert (again, created_again) == (key, False)
+
+
+def test_ensure_owner_key_keeps_a_key_written_after_its_first_check(auth, monkeypatch):
+    """A key another process wrote between ensure_owner_key's first check and
+    its write is kept: the check is repeated under the key file's lock."""
+    other = auth.regenerate_key()
+    monkeypatch.setattr(auth, "get_api_key", lambda: None)
+    key, created = auth.ensure_owner_key()
+    assert (key, created) == (other, False)
+    assert auth._read_key_file() == other
+
+
+def test_ensure_owner_key_never_writes_over_an_unreadable_key_file(auth, monkeypatch):
+    from localm.storekit import ConfigUnreadable
+    auth.key_file().parent.mkdir(parents=True, exist_ok=True)
+    auth.key_file().write_text("kept-as-it-is\n", encoding="utf-8")
+    monkeypatch.setattr(auth, "get_api_key", lambda: None)
+    monkeypatch.setattr(auth, "_read_owner_key_file",
+                        lambda: (auth._KEY_UNREADABLE, None, OSError("denied")))
+    with pytest.raises(ConfigUnreadable):
+        auth.ensure_owner_key()
+    assert auth.key_file().read_text(encoding="utf-8") == "kept-as-it-is\n"
+
+
+def test_ensure_owner_key_returns_the_env_key_and_writes_nothing(auth, monkeypatch):
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    assert auth.ensure_owner_key() == ("ownersecret", False)
+    assert auth._read_key_file() is None
+
+
+@pytest.mark.parametrize("failure", ["lock", "unreadable", "oserror"])
+def test_first_key_route_returns_the_named_key_when_the_owner_seed_fails(
+        auth, monkeypatch, failure):
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.config import ConfigLockTimeout
+    from localm.inference.http_server import create_app
+    from localm.storekit import ConfigUnreadable
+
+    raised = {"lock": ConfigLockTimeout("auth.key is locked"),
+              "unreadable": ConfigUnreadable("the owner key file cannot be read"),
+              "oserror": PermissionError("denied")}[failure]
+
+    def fail():
+        raise raised
+
+    monkeypatch.setattr(auth, "ensure_owner_key", fail)
+    app = create_app(None)
+    with TestClient(app) as client:
+        r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
+                        headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["key"] and auth.verify(body["key"])
+    assert body["owner_key_created"] is False
+    assert any("No owner session" in w for w in body["warnings"])
+    assert not r.headers.get_list("set-cookie")
+
+
+def test_first_key_route_seeds_through_the_locked_owner_key_check(auth, monkeypatch):
+    """The first-key route keeps an owner key that appears between its open-mode
+    check and its seeding, and reports that it created none."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    app = create_app(None)
+    real = auth.ensure_owner_key
+    written = {}
+
+    def other_process_first():
+        written["key"] = auth.regenerate_key()
+        return real()
+
+    monkeypatch.setattr(auth, "ensure_owner_key", other_process_first)
+    with TestClient(app) as client:
+        r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
+                        headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["owner_key_created"] is False
+    assert auth.get_api_key() == written["key"]
+
+
 # --------------------------------------------------------------------------- #
 #  resolve_bearer_token / resolve_bearer_headers precedence: the owner key wins #
 #  over an instance token wherever a self-call resolves its own credential.    #

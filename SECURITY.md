@@ -356,8 +356,9 @@ this section states the security properties and, more importantly, their edges.
   ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
   (or a media plugin's own `comfy.api_url`, the model scan included) that
   targets a link-local / cloud-metadata address is refused
-  (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, fd00:ec2::/32, and a
-  link-local IPv4 address in IPv4-mapped, IPv4-compatible, NAT64
+  (CHK-COMFY-APIURL): 169.254.0.0/16, fe80::/10, 100.100.100.200,
+  fd00:ec2::/32, and a link-local or metadata IPv4 address in IPv4-mapped,
+  IPv4-compatible, NAT64
   (64:ff9b::/96, 64:ff9b:1::/48) or 6to4 form, which the search backend refuses too. The
   connection itself refuses any HTTP redirect outright, so a hostile or compromised ComfyUI cannot use a 3xx response to
   steer the request elsewhere. Loopback and LAN are both
@@ -425,8 +426,8 @@ this section states the security properties and, more importantly, their edges.
   Setting `net_allow_private` true narrows both the pre-flight check and the
   pin-time re-check, for every request, to link-local addresses (`169.254.0.0/16`,
   which holds the common cloud metadata address `169.254.169.254`, and
-  `fe80::/10`) and the `fd00:ec2::/32` metadata range, in any embedded IPv6
-  form, which stay refused; a name that also resolves to another address is
+  `fe80::/10`) and the cloud metadata addresses `100.100.100.200` and
+  `fd00:ec2::/32`, in any embedded IPv6 form, which stay refused; a name that also resolves to another address is
   dialled on that address only. The one narrower
   exception is the search backend: when the configured `net_search_url` names
   a local host (an IP address, `localhost`, a dotless name or a local-network

@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import math
 import random
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -193,6 +195,36 @@ class _Starvation:
         self._t.join(5)
 
 
+class _RunnerStall:
+    """A separate process that sleeps 10 ms at a time while the block runs and
+    reports its worst lateness: how long the machine itself kept a process
+    from running. Nothing in this process can make it late."""
+
+    def __init__(self) -> None:
+        self.worst = 0.0
+        self._proc = None
+
+    def __enter__(self):
+        code = ("import sys, time, threading\n"
+                "w = [0.0]\n"
+                "def run():\n"
+                "    while True:\n"
+                "        t = time.perf_counter(); time.sleep(0.01)\n"
+                "        w[0] = max(w[0], time.perf_counter() - t - 0.01)\n"
+                "threading.Thread(target=run, daemon=True).start()\n"
+                "sys.stdin.read()\n"
+                "print(w[0])\n")
+        self._proc = subprocess.Popen(
+            [sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        time.sleep(0.05)
+        return self
+
+    def __exit__(self, *exc):
+        out, _ = self._proc.communicate("", timeout=10)
+        self.worst = float(out.strip() or 0.0)
+
+
 _MAX_STARVED_S = 0.5
 
 
@@ -203,14 +235,15 @@ def test_indexing_into_a_large_collection_never_starves_another_thread(big_colle
     docs.mkdir()
     (docs / "new.txt").write_text("a new document about compressors", encoding="utf-8")
     vec = [0.5] * _DIM
-    with _Starvation() as s:
+    with _RunnerStall() as runner, _Starvation() as s:
         result = Collection("big", base=big_collection, load=False, cache=False).add_paths(
             [docs], embed_fn=lambda texts: [vec for _ in texts])
     assert result["added"] == 1
     reread = Collection("big", base=big_collection, cache=False)
     assert len(reread._vectors) == result["chunks"] > _ROWS
     assert reread._vectors[-1] == vec
-    assert s.worst < _MAX_STARVED_S, f"another thread was starved {s.worst:.2f} s"
+    assert s.worst - runner.worst < _MAX_STARVED_S, (
+        f"another thread was starved {s.worst:.2f} s ({runner.worst:.2f} s of it the machine's)")
 
 
 _MAX_HEALTH_S = 0.75
@@ -235,7 +268,7 @@ def test_health_answers_while_a_large_collection_is_indexed(big_collection, tmp_
     worker = threading.Thread(target=index)
     worst = 0.0
     answers = 0
-    with TestClient(create_app(None)) as client:
+    with _RunnerStall() as runner, TestClient(create_app(None)) as client:
         client.get("/health")
         worker.start()
         while worker.is_alive():
@@ -247,7 +280,8 @@ def test_health_answers_while_a_large_collection_is_indexed(big_collection, tmp_
     worker.join()
     assert result["added"] == 1
     assert answers > 10
-    assert worst < _MAX_HEALTH_S, f"/health took {worst:.2f} s during indexing"
+    assert worst - runner.worst < _MAX_HEALTH_S, (
+        f"/health took {worst:.2f} s during indexing ({runner.worst:.2f} s of it the machine's)")
 
 
 def test_the_saved_file_is_exactly_what_a_single_dumps_wrote(big_collection):

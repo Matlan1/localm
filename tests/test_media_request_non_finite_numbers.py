@@ -78,3 +78,41 @@ def test_a_finite_number_still_starts_a_job(tmp_path, plugin):
     response = _post(client, plugin, field, "1.5")
     assert response.status_code == 200, response.text[:300]
     assert app.state.jobs.started == [_REQUIRED[plugin][0].rsplit("/", 1)[-1]]
+
+
+@pytest.mark.parametrize("token", ["-0.1", "1.5"])
+def test_a_denoise_outside_0_to_1_is_refused_before_a_job_starts(tmp_path, token):
+    app, client = _client(tmp_path, "image")
+    response = _post(client, "image", "denoise", token)
+    assert response.status_code == 422, response.text[:300]
+    assert app.state.jobs.started == []
+
+
+@pytest.mark.parametrize("token", ["0", "0.6", "1"])
+def test_a_denoise_from_0_to_1_still_starts_a_job(tmp_path, token):
+    app, client = _client(tmp_path, "image")
+    response = _post(client, "image", "denoise", token)
+    assert response.status_code == 200, response.text[:300]
+    assert app.state.jobs.started == ["imagine"]
+
+
+@pytest.mark.parametrize("plugin,field,limit", [("music", "duration_seconds", 3600),
+                                                ("video", "seconds", 20)])
+@pytest.mark.parametrize("value", ["0.5", "0.99"])
+def test_a_duration_under_one_second_is_refused_as_the_text_says(tmp_path, plugin, field,
+                                                                 limit, value):
+    app, client = _client(tmp_path, plugin)
+    response = _post(client, plugin, field, value)
+    assert response.status_code == 400, response.text[:300]
+    assert response.json()["detail"] == f"Duration must be between 1 and {limit} seconds"
+    assert app.state.jobs.started == []
+
+
+def test_the_cli_refuses_a_denoise_outside_0_to_1():
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    result = CliRunner().invoke(main, ["image", "a cat", "--denoise", "1.5"])
+    assert result.exit_code == 2, result.output
+    assert "--denoise" in result.output
+    assert "0<=x<=1" in result.output.replace(" ", "")

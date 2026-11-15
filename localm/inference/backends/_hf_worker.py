@@ -1284,22 +1284,54 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
 
 _DECODER_STACK_NAMES = ("layers", "h", "blocks", "layer")
 
+# Module names of image and audio encoders inside a multimodal model.
+_TOWER_NAMES = frozenset({
+    "visual", "vision", "vision_tower", "vision_model", "vision_encoder",
+    "image_encoder", "audio", "audio_tower", "audio_model", "audio_encoder"})
 
-def _decoder_layers(model) -> Optional[Sequence]:
-    """The longest ``ModuleList`` in *model* named ``layers``, ``h``, ``blocks`` or
-    ``layer`` (the text decoder's layer stack), or None when the model has none
-    with more than one entry."""
+
+def _longest_stack(module, *, skip_towers: bool) -> Optional[Sequence]:
+    """The longest ``ModuleList`` in *module* named as in ``_DECODER_STACK_NAMES``
+    with more than one entry, leaving out those inside a ``_TOWER_NAMES`` module
+    when *skip_towers* is set, or None."""
     best = None
     try:
-        modules = model.named_modules()
+        modules = module.named_modules()
     except Exception:
         return None
     for name, mod in modules:
-        if (name.rsplit(".", 1)[-1] in _DECODER_STACK_NAMES
+        parts = name.split(".")
+        if (parts[-1] in _DECODER_STACK_NAMES
                 and type(mod).__name__ == "ModuleList" and len(mod) > 1
+                and not (skip_towers and _TOWER_NAMES.intersection(parts))
                 and (best is None or len(mod) > len(best))):
             best = mod
     return best
+
+
+def _decoder_layers(model) -> Optional[Sequence]:
+    """The text decoder's layer stack in *model*, or None when it has none.
+
+    For a decoder-only model the stack is searched first inside
+    ``model.get_decoder()`` (the language model of a vision-language model).
+    Otherwise, or when that finds none, it is the longest ``ModuleList`` named
+    ``layers``, ``h``, ``blocks`` or ``layer`` outside an image or audio encoder,
+    and last the longest such list anywhere in *model*."""
+    config = getattr(model, "config", None)
+    get_decoder = getattr(model, "get_decoder", None)
+    if callable(get_decoder) and not getattr(config, "is_encoder_decoder", False):
+        try:
+            decoder = get_decoder()
+        except Exception as e:
+            logger.debug("prefill progress: get_decoder() failed (%s); searching "
+                         "the whole model for its layer stack", e)
+            decoder = None
+        if decoder is not None:
+            stack = _longest_stack(decoder, skip_towers=True)
+            if stack is not None:
+                return stack
+    stack = _longest_stack(model, skip_towers=True)
+    return stack if stack is not None else _longest_stack(model, skip_towers=False)
 
 
 class _PrefillLayerProgress:

@@ -156,7 +156,10 @@ def _job_line(report) -> str:
         return f"diagnostics could not run: {report.error}"
     bad = [c.label for c in report.checks
            if c.status in (diagnostics.FAIL, diagnostics.WARN)]
+    skipped = [c.label for c in report.checks if c.status == diagnostics.SKIPPED]
+    not_run = f"; not run: {', '.join(skipped)}" if skipped else ""
     if not bad:
-        return (f"diagnostics: all {len(report.checks)} active checks passed "
+        ran = len(report.checks) - len(skipped)
+        return (f"diagnostics: all {ran} active checks passed{not_run} "
                 "(this covers the active probes only, not the whole system)")
-    return "diagnostics: " + ", ".join(bad) + " need attention"
+    return "diagnostics: " + ", ".join(bad) + " need attention" + not_run

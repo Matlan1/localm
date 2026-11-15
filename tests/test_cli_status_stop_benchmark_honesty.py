@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm status`, `localm stop` and `localm benchmark` say what is true: an
-API-only server is not called old, an idle activity list says what it covers,
+"""`localm status`, `localm stop` and `localm benchmark` say what is true: a
+server without the activity route is called old whatever its surface, an idle activity list says what it covers,
 two servers for one folder are named, and the benchmark counts tokens."""
 
 import importlib
@@ -49,20 +49,19 @@ def test_live_entries_skip_an_entry_that_does_not_answer(tmp_path):
     assert [e["instance_id"] for e in live] == ["bbbb0000"]
 
 
-@pytest.mark.parametrize("mode,expected", [
-    ("api", "An API-only server (localm serve) does not report activity"),
-    ("full", "it predates this feature"),
-])
-def test_a_server_without_the_activity_route_is_described_by_its_kind(
-        monkeypatch, mode, expected):
+@pytest.mark.parametrize("mode", ["api", "full"])
+def test_a_server_without_the_activity_route_is_called_old_whatever_its_surface(
+        monkeypatch, mode):
     monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: _entry("abcd1234", mode))
     monkeypatch.setattr(instances, "live_entries", lambda *a, **k: [])
     monkeypatch.setattr(models_mod, "read_activity", lambda *a, **k: ("unsupported", 404))
 
     res = CliRunner().invoke(main, ["status"])
 
+    out = " ".join(res.output.split())
     assert res.exit_code == 0, res.output
-    assert expected in " ".join(res.output.split())
+    assert "it predates this feature" in out
+    assert "API-only" not in out
 
 
 def test_an_idle_activity_list_says_a_chat_reply_is_not_listed(monkeypatch):

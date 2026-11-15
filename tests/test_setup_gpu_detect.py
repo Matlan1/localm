@@ -323,15 +323,26 @@ def _backend_menu_block() -> str:
     return src[start:end]
 
 
+def _answers_ask(tmp_path: Path, answers: list[str]) -> str:
+    """An ask() that prints its prompt on stderr and answers with the next of
+    *answers* (its default once they run out), counting in a file, since each
+    answer is read in a subshell."""
+    (tmp_path / "answers.txt").write_text("".join(a + "\n" for a in answers),
+                                          encoding="utf-8", newline="\n")
+    return ('ask() { printf "%s" "$1" >&2; n=$(( $(cat .asked 2>/dev/null || echo 0) + 1 )); '
+            'echo "$n" > .asked; a="$(sed -n "${n}p" answers.txt)"; echo "${a:-$2}"; }\n')
+
+
 def _run_menu(tmp_path: Path, *, rec: str, bpick: str, rows: str | None = ROWS,
-              env: dict | None = None) -> subprocess.CompletedProcess:
+              env: dict | None = None, then: tuple = ()) -> subprocess.CompletedProcess:
     if rows is not None or env is None:
         _write_python_stub(tmp_path, hw=None, hint=None, menu=rows)
     script = (
         'set -euo pipefail\n'
         'say() { printf "%s\\n" "$*"; }\n'
-        f'ask() {{ printf "%s" "$1" >&2; echo "{bpick}"; }}\n'
-        f'REC="{rec}"\n'
+        + _answers_ask(tmp_path, [bpick, *then])
+        + _function_body("ask_pick")
+        + f'REC="{rec}"\n'
         + _backend_menu_block()
         + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
     )
@@ -368,17 +379,19 @@ def test_a_listed_number_picks_its_backend(tmp_path, bpick, backend):
     assert "is not offered" not in r.stdout
 
 
-@pytest.mark.parametrize("bpick", ["6", "8", "11"])
-def test_an_unlisted_number_says_what_it_used_instead(tmp_path, bpick):
-    r = _run_menu(tmp_path, rec="cuda", bpick=bpick)
-    assert f"  [{bpick}] is not offered on this machine; using cuda." in r.stdout
-    assert _backend(r) == "cuda"
-
-
-def test_a_junk_answer_takes_the_recommendation_silently(tmp_path):
-    r = _run_menu(tmp_path, rec="cuda", bpick="zz")
+@pytest.mark.parametrize("bpick", ["6", "8", "11", "0", "zz", "y"])
+def test_an_answer_the_menu_does_not_list_is_asked_again(tmp_path, bpick):
+    r = _run_menu(tmp_path, rec="cuda", bpick=bpick, then=("3",))
+    assert r.stderr.count("Pick 1-5 [1]: ") == 2
+    assert "  [!] Type a number from 1 to 5." in r.stderr
     assert "is not offered" not in r.stdout
     assert _backend(r) == "cuda"
+
+
+def test_a_blank_answer_takes_the_first_row(tmp_path):
+    r = _run_menu(tmp_path, rec="cuda", bpick="")
+    assert r.stderr.count("Pick 1-5 [1]: ") == 1
+    assert _backend(r) == "vulkan"
 
 
 def test_no_rows_from_the_spec_says_so_and_uses_the_recommendation(tmp_path):

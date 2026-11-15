@@ -794,8 +794,7 @@ def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> 
         plan.fallback = (
             f"The configured bind address ({plan.host}) was not applied: {_why}. "
             f"The server is on 127.0.0.1 (this computer only). Set a long, "
-            f"random API key (Settings > Security > Owner key, or run: localm "
-            f"key generate), then restart the server.")
+            f"random API key (run: localm key generate), then restart the server.")
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print(
             "[bold yellow]  Ignoring the configured bind address and binding "
@@ -1134,8 +1133,11 @@ def _print_reach_hints(console, plan: _BindPlan, adv_name, *, api_mode: bool,
 def _start_preload(console, engine) -> None:
     """Load *engine* on a daemon thread named "preload"; a request that arrives
     mid-load waits on Engine.load's lock. A failure is reported by
-    _report_preload_failure. No-op when engine is None."""
-    if engine is None:
+    _report_preload_failure. No-op when engine is None, and when
+    ``LOCALM_FINISH_UPDATE_AFTER_START`` is set (the server restarts shortly to
+    install this version's runtime and components, and loads the model then)."""
+    import os
+    if engine is None or os.environ.get("LOCALM_FINISH_UPDATE_AFTER_START"):
         return
 
     def _preload():

@@ -2812,6 +2812,15 @@ class VramSizingMixin:
             decision = decision._replace(reason="cpu_exceeds_ram")
         return decision
 
+    def configured_gpu_layers(self) -> Optional[int]:
+        """The n_gpu_layers a load uses as configured: the configured value
+        when auto sizing is off or n_gpu_layers is set to anything but the
+        "everything" default; None when auto sizing decides it."""
+        if (not getattr(self, "n_gpu_layers_auto", False)
+                or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS):
+            return int(self.n_gpu_layers)
+        return None
+
     def predict_placement(self, free_vram: Optional[int] = None,
                           total_vram: Optional[int] = None,
                           ram_available: Optional[int] = None,
@@ -2843,9 +2852,9 @@ class VramSizingMixin:
         if free_vram is None or self._model_bytes() <= 0:
             return None
         configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
-        if (not getattr(self, "n_gpu_layers_auto", False)
-                or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS):
-            layers, n_cpu_moe = int(self.n_gpu_layers), configured_moe
+        configured_layers = self.configured_gpu_layers()
+        if configured_layers is not None:
+            layers, n_cpu_moe = configured_layers, configured_moe
         else:
             budget = self._auto_gpu_layers_budget(reading=(int(free_vram), total_vram))
             if budget is None:

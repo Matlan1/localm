@@ -89,12 +89,13 @@ def test_the_capabilities_route_runs_the_check_off_the_loop(spy):
     assert spy.on_loop == [False]
 
 
-def test_a_machine_without_the_hardware_does_not_list_the_plugin(spy):
+def test_a_machine_without_the_hardware_lists_the_plugin_with_the_reason(spy):
     spy.vendors = []
     with TestClient(_engine_app()) as client:
         r = client.get("/api/plugins")
     assert spy.on_loop == [False]
-    assert "exllama" not in {p["name"] for p in r.json()["plugins"]}
+    rows = {p["name"]: p for p in r.json()["plugins"]}
+    assert "NVIDIA" in rows["exllama"]["not_runnable_reason"]
 
 
 def test_the_check_runs_once_across_requests(spy):

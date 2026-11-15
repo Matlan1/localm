@@ -288,6 +288,9 @@ class SlotScheduler:
         stream = SlotStream(self, list(prompt), budget, sampler, reserve,
                             on_status, stop_requested, scorer)
         stream.timed = timed
+        # Open native stderr scopes start redacting when this reply's mode withholds content.
+        from localm.debuglog import refresh_native_content_gate
+        refresh_native_content_gate()
         with self._cond:
             if self._closed:
                 raise RuntimeError(UNLOADED_MESSAGE)

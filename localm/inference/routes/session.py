@@ -204,8 +204,13 @@ def register(app: FastAPI, ctx) -> None:
             return {"cleared": False, "warnings": warnings}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         from localm.auth import any_key_configured, require_auth_enabled
+        from localm.config import ConfigReadSlow
+        try:
+            auth_required = require_auth_enabled()
+        except ConfigReadSlow:
+            auth_required = True
         still_protected = ("key" if any_key_configured()
-                           else "require_auth" if require_auth_enabled() else None)
+                           else "require_auth" if auth_required else None)
         return {"cleared": True, "warnings": [], "still_protected": still_protected}
 
     @app.post("/api/auth/key/rotate",

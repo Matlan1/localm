@@ -567,6 +567,33 @@ def test_doctor_says_unrecorded_rather_than_guessing(monkeypatch, tmp_path, caps
     assert "build not recorded" in capsys.readouterr().out
 
 
+def test_doctor_names_a_build_you_supplied_instead_of_calling_it_old(
+        monkeypatch, tmp_path, capsys, home):
+    from localm.cli.doctor import _check_runtime_build
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    sl._record_provisioned_backend(tmp_path, "custom")
+
+    _check_runtime_build(lambda: tmp_path)
+
+    out = capsys.readouterr().out
+    assert "llama.cpp build: your own" in out
+    assert "predates build recording" not in out
+
+
+def test_doctor_says_a_pin_does_not_apply_to_amd_rocm(monkeypatch, tmp_path, capsys, home):
+    from localm.cli.doctor import _check_runtime_build
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    from localm.setup_llama.pins import _ROCM_BUILD
+    sl._record_provisioned_backend(tmp_path, "amd-rocm", build=_ROCM_BUILD)
+    sl.set_pinned_tag("b12086")
+
+    _check_runtime_build(lambda: tmp_path)
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert f"but {_ROCM_BUILD} is installed" not in out
+    assert "the pin does not apply to the amd-rocm backend" in out
+
+
 def test_doctor_stays_quiet_when_nothing_is_provisioned(capsys, home):
     """_check_llama_lib has already said the dir is missing; repeating it adds
     noise to a report people read under stress."""

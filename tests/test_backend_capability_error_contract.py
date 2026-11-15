@@ -363,7 +363,9 @@ class TestAGenuineBugStillReturnsAnOpaque500:
         r = _post_observing_500(
             _mock_engine(stream_exc=AttributeError("'Mock' has no 'foo'")),
             {"model": "test-model", "messages": _TEXT_MSG, "stream": False})
-        assert r.json() == {"detail": "Internal server error"}
+        assert r.json() == {"detail": "Internal server error", "error": {
+            "message": "Internal server error", "type": "server_error",
+            "param": None, "code": None}}
         assert r.status_code == 500
         # The internal detail does not reach a user-facing body.
         assert "Mock" not in r.text
@@ -373,7 +375,9 @@ class TestAGenuineBugStillReturnsAnOpaque500:
         r = _post_observing_500(
             _mock_engine(stream_exc=ValueError("int() got a str")),
             {"model": "test-model", "messages": _TEXT_MSG, "stream": False})
-        assert r.json() == {"detail": "Internal server error"}
+        assert r.json() == {"detail": "Internal server error", "error": {
+            "message": "Internal server error", "type": "server_error",
+            "param": None, "code": None}}
         assert r.status_code == 500
         assert "int() got a str" not in r.text
 
@@ -645,7 +649,9 @@ class TestTheRuntimeCatchIsNotWidened:
             _mock_engine(stream_exc=AttributeError("'Mock' has no 'foo'")),
             {"model": "test-model", "prompt": "hi", "stream": False},
             path="/v1/completions")
-        assert r.json() == {"detail": "Internal server error"}
+        assert r.json() == {"detail": "Internal server error", "error": {
+            "message": "Internal server error", "type": "server_error",
+            "param": None, "code": None}}
         assert r.status_code == 500
         assert "Mock" not in r.text
 
@@ -656,7 +662,9 @@ class TestTheRuntimeCatchIsNotWidened:
             _mock_engine(stream_exc=ValueError("int() got a str")),
             {"model": "test-model", "prompt": "hi", "stream": False},
             path="/v1/completions")
-        assert r.json() == {"detail": "Internal server error"}
+        assert r.json() == {"detail": "Internal server error", "error": {
+            "message": "Internal server error", "type": "server_error",
+            "param": None, "code": None}}
         assert r.status_code == 500
         assert "int() got a str" not in r.text
 

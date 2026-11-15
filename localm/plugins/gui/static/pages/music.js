@@ -10,6 +10,7 @@ import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, createJobFollower, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { createNativeWorkflowCard, nwfNumber, nwfSetField } from "../app/native-workflows.js";
+import { chatPageModelChoice } from "../app/slash.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -178,17 +179,15 @@ $("music-generate").onclick = async () => {
   }
   if (musicBackend.active === null) await refreshMusicBackend();
   const native = musicBackend.active === "native";
-  if (!native && modelOverrides.music && Object.keys(modelOverrides.music).length) {
-    body.model_overrides = modelOverrides.music;
-  }
   if (native && musicWorkflowCard.pending) {
     $("music-generate").disabled = true;
     let ready;
     try { ready = await musicWorkflowCard.prepare(); } finally { $("music-generate").disabled = false; }
     if (!ready) return;
   }
-  const nativeChoice = native ? musicModelPicker.choice() : {};
-  Object.assign(body, nativeChoice);
+  const picked = musicModelFields(native);
+  const nativeChoice = native ? picked : {};
+  Object.assign(body, picked);
   if (native) {
     const shift = nwfNumber("music-shift");
     if (shift !== null) body.shift = shift;
@@ -205,6 +204,29 @@ $("music-generate").onclick = async () => {
     return data.job_id;
   }));
 };
+
+/* The model fields Generate sends: the native picker's components on the
+   native backend, the workflow panel's model picks on ComfyUI (none when
+   nothing was picked). */
+function musicModelFields(native) {
+  if (native) return musicModelPicker.choice();
+  const picks = modelOverrides.music;
+  return picks && Object.keys(picks).length ? { model_overrides: picks } : {};
+}
+
+/* The model fields of this page's pick for the chat's /generate-music, read
+   against the active backend and the registered models; null when this page's Generate would refuse
+   (an applied workflow's main model is still not registered). */
+export async function musicPageModelChoice() {
+  await refreshMusicBackend();
+  const native = musicBackend.active === "native";
+  if (native) {
+    await musicModelPicker.refresh();
+    if (musicWorkflowCard.pending && !(await musicWorkflowCard.prepare())) return null;
+  }
+  return musicModelFields(native);
+}
+chatPageModelChoice.music = musicPageModelChoice;
 
 /* Run one music job on this page: *start(log)* resolves to the job id to
    follow (null when nothing was started); its log lines and the track fill

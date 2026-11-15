@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from localm.rag import store as _st
 
@@ -14,6 +14,12 @@ from .types import EmbedFn, ProgressFn
 class _CollectionEmbedding:
     """Mixin of ``Collection``: the recorded embedding model and re-embedding from
     the stored text."""
+
+    if TYPE_CHECKING:
+        def _save_holding_progress_errors(
+                self, on_progress: Optional[ProgressFn] = None) -> Optional[Exception]:
+            """Provided by ``_CollectionFiles`` (files.py)."""
+            ...
 
     def embedding_model(self) -> Optional[str]:
         """The model NAME this collection's vectors were built with, if recorded."""
@@ -77,9 +83,11 @@ class _CollectionEmbedding:
         self._vectors_file_rejected = False
         self.vector_degrade_reason = None
         self.corrupt = False
-        self._save(on_progress)
+        stopped = self._save_holding_progress_errors(on_progress)
         with _files_changing(self.dir):
             self._discard_rejected_vectors(
                 f"re-embedded to {self._vec_dim} dimensions"
                 + (f" with {model_name}" if model_name else ""))
+        if stopped is not None:
+            raise stopped
         return {"chunks": total, "dim": self._vec_dim, "model": model_name}

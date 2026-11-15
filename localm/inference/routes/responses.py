@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -31,6 +31,7 @@ from localm.inference.protocol import ChatRequest
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
 )
+from localm.streaming_response import StreamingResponse
 
 
 class ResponsesRoute(APIRoute):

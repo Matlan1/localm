@@ -256,6 +256,25 @@ test("a report the server did not file offers Download but not Retry", async () 
   assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
 });
 
+test("a send refused because network access is off offers Download but not Retry", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [{
+    uploaded: false, upload_stage: "network_off",
+    upload_message: "Network access is off (net_mode=off), so the report was not sent.",
+    upload_error: "Network access is off (net_mode=off), so the report was not sent.",
+    maintainer: "owner@example.com",
+  }]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "network is off";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.match(doc.getElementById("bug-result").textContent, /Network access is off/);
+  assert.equal(doc.getElementById("bug-retry").hidden, true, "a retry would be refused again");
+  assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
+});
+
 test("R47: Retry re-sends the SAME reviewed report and Download hands back its markdown", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [

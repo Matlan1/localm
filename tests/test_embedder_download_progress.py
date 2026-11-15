@@ -110,9 +110,9 @@ class TestWillDownloadOnFirstUse:
     def test_a_missing_known_model_under_allow_will_download(self, fresh):
         assert embedder.will_download_on_first_use() is True
 
-    def test_a_missing_known_model_under_ask_will_download(self, fresh, monkeypatch):
+    def test_a_missing_known_model_under_ask_will_not_download(self, fresh, monkeypatch):
         monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "ask")
-        assert embedder.will_download_on_first_use() is True
+        assert embedder.will_download_on_first_use() is False
 
     def test_a_model_on_disk_will_not(self, fresh):
         _repo, filename = embedder.KNOWN_EMBEDDING_MODELS["bge-small-en-v1.5"]

@@ -109,6 +109,18 @@ def downloads_allowed_when_off() -> bool:
         return False
 
 
+def automatic_download_allowed() -> bool:
+    """Whether a download nobody asked for may start: a model fetched on first
+    use by a background task (memory consolidation, recall, a scheduled job).
+    True only under ``net_mode=allow``.
+
+    Under ``ask`` such a download needs the user's own action, passed as a
+    one-call authorization (``allow_download=True``) by the code that collected
+    it; under ``off`` it never starts, and ``net_allow_model_downloads`` does
+    not change that (it exempts only downloads the user triggers)."""
+    return network_mode() == "allow"
+
+
 def _canonical_host(host: str) -> str:
     """*host* lowercased, without a trailing dot, and with a non-ASCII name
     converted to its IDNA A-label form (UTS #46 mapping, the same encoding
@@ -271,6 +283,7 @@ def is_search_backend_origin(url: str, cfg: dict) -> bool:
             and _origin(url) == mine)
 
 
+_METADATA_V4_NETS = (ipaddress.ip_network("100.100.100.200/32"),)
 _METADATA_V6_NETS = (ipaddress.ip_network("fd00:ec2::/32"),)
 _NAT64_NETS = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 _IPV4_COMPATIBLE_NET = ipaddress.ip_network("::/96")
@@ -293,19 +306,25 @@ def _embedded_ipv4(ip) -> Optional[ipaddress.IPv4Address]:
     return None
 
 
+def _is_link_local_or_metadata_v4(ip: ipaddress.IPv4Address) -> bool:
+    """True for a link-local IPv4 address or one in ``_METADATA_V4_NETS``."""
+    return ip.is_link_local or any(ip in net for net in _METADATA_V4_NETS)
+
+
 def is_link_local_or_metadata_ip(ip) -> bool:
     """True for a link-local address (169.254.0.0/16, fe80::/10), the cloud
-    metadata range fd00:ec2::/32, and an IPv6 address carrying a link-local
-    IPv4 address in IPv4-mapped, IPv4-compatible, NAT64 (64:ff9b::/96,
-    64:ff9b:1::/48) or 6to4 form (:func:`_embedded_ipv4`)."""
+    metadata addresses 100.100.100.200 and fd00:ec2::/32, and an IPv6 address
+    carrying a link-local or cloud-metadata IPv4 address in IPv4-mapped,
+    IPv4-compatible, NAT64 (64:ff9b::/96, 64:ff9b:1::/48) or 6to4 form
+    (:func:`_embedded_ipv4`)."""
+    if ip.version == 4:
+        return _is_link_local_or_metadata_v4(ip)
     if ip.is_link_local:
         return True
-    if ip.version != 6:
-        return False
     if any(ip in net for net in _METADATA_V6_NETS):
         return True
     embedded = _embedded_ipv4(ip)
-    return embedded is not None and embedded.is_link_local
+    return embedded is not None and _is_link_local_or_metadata_v4(embedded)
 
 
 def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -447,7 +466,7 @@ def _only_link_local(host: str) -> bool:
     connection (:func:`_resolve_pinned_all`) dials only its other addresses."""
     lit = _literal_ipv4(host)
     if lit is not None:
-        return lit.is_link_local
+        return is_link_local_or_metadata_ip(lit)
     try:
         return is_link_local_or_metadata_ip(ipaddress.ip_address(host))
     except ValueError:
@@ -583,8 +602,9 @@ def _check_public_address(host: str) -> None:
 def is_link_local_host(host: str) -> bool:
     """True if *host* is (or resolves to) an address
     :func:`is_link_local_or_metadata_ip` flags (link-local 169.254.0.0/16 and
-    fe80::/10, the metadata range fd00:ec2::/32, and a link-local IPv4 address
-    in IPv4-mapped, IPv4-compatible, NAT64 or 6to4 form) - including every
+    fe80::/10, the metadata addresses 100.100.100.200 and fd00:ec2::/32, and a
+    link-local or metadata IPv4 address in IPv4-mapped, IPv4-compatible, NAT64
+    or 6to4 form) - including every
     numeric/short-form IPv4
     spelling of one (see _literal_ipv4), which ipaddress.ip_address() and
     socket.getaddrinfo alike can fail to classify directly. Unresolvable or
@@ -597,7 +617,7 @@ def is_link_local_host(host: str) -> bool:
     cloud-metadata addresses."""
     lit = _literal_ipv4(host)
     if lit is not None:
-        return lit.is_link_local
+        return is_link_local_or_metadata_ip(lit)
     try:
         return is_link_local_or_metadata_ip(ipaddress.ip_address(host))
     except ValueError:

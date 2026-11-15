@@ -252,7 +252,7 @@ def test_an_upload_that_outruns_its_budget_is_reported_not_claimed(client, monke
     assert Path(data["path"]).is_file()
 
 
-def test_a_report_overwritten_by_a_later_save_is_not_sent_as_the_first(client, monkeypatch):
+def test_a_second_save_in_the_same_second_leaves_the_first_report_sendable(client, monkeypatch):
     import time as _time
 
     c, hdrs, uploads, _ = client
@@ -261,8 +261,10 @@ def test_a_report_overwritten_by_a_later_save_is_not_sent_as_the_first(client, m
         "20261014-000000" if fmt == "%Y%m%d-%H%M%S" else real(fmt, *a)))
     first = _save(c, hdrs, what_happened="the first report")
     second = _save(c, hdrs, what_happened="a different second report")
-    assert first["filename"] == second["filename"]
+    assert first["filename"] != second["filename"]
     r = c.post("/api/bug-report/send", headers=hdrs,
                json={"filename": first["filename"], "sha256": first["report_sha256"]})
-    assert r.status_code == 409
-    assert uploads == []
+    assert r.status_code == 200, r.text
+    assert len(uploads) == 1
+    assert "the first report" in uploads[0][1]
+    assert "a different second report" not in uploads[0][1]

@@ -435,9 +435,11 @@ def test_a_disk_full_during_the_swap_rolls_everything_back(env, monkeypatch):
             raise OSError(errno.ENOSPC, "No space left on device")
         return real(src, dst, *a, **k)
     monkeypatch.setattr(shutil, "copytree", full)
-    with pytest.raises(OSError) as ei:
+    with pytest.raises(LocalmError) as ei:
         _apply(inst, _build())
-    assert ei.value.errno == errno.ENOSPC
+    assert ei.value.summary == ("the update could not replace the installed files, so it "
+                                "was rolled back")
+    assert f"[Errno {errno.ENOSPC}] No space left on device" in ei.value.reason
     assert fired == [inst / "localm"]
     monkeypatch.setattr(shutil, "copytree", real)
     assert _snapshot(inst) == before

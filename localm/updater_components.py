@@ -715,10 +715,11 @@ def torch_step(tree: Path, spec: str) -> tuple:
     for a in args:
         if a.startswith("--torch-backend="):
             line = a.split("=", 1)[1]
+    from localm.hwdetect import TORCH_PINS_FILE
     return (_requirements_in(args) + _extras(tree, ["hf", "audio"]),
             [["pip", "install", "-p", ".venv", *args],
              ["pip", "install", "-p", ".venv", "-r", "pyproject.toml",
-              "--extra", "hf", "--extra", "audio"]], line)
+              "--extra", "hf", "--extra", "audio", "-c", TORCH_PINS_FILE]], line)
 
 
 def _local_label(version: str) -> Optional[str]:
@@ -1783,25 +1784,48 @@ def _tree_text(root: Path, rel: str) -> str:
         return ""
 
 
-def _commands(p: dict, root: Path) -> list:
-    """The argv lists that update component *p* with the localm tree at *root*."""
+def _commands(p: dict, root: Path):
+    """The argv lists that update component *p* with the localm tree at *root*,
+    one at a time: for PyTorch, a command that constrains the install with
+    ``hwdetect.TORCH_PINS_FILE`` is produced after the commands before it ran,
+    with that file written from the torch packages then installed
+    (:func:`_write_torch_pins`)."""
     if p["name"] == "pytorch":
         from localm import updater
+        from localm.hwdetect import TORCH_PINS_FILE
         uv = updater._uv_for_deps(root)
-        return [[uv, *c] for c in p["items"]]
+        for c in p["items"]:
+            if TORCH_PINS_FILE in c:
+                _write_torch_pins(root)
+            yield [uv, *c]
+        return
     if p["name"] == "sdcpp":
-        return [[sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
-                for b in p["items"]]
+        yield from ([sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
+                    for b in p["items"])
+        return
     if p["name"] == "koboldcpp":
-        return [[sys.executable, "-m", "localm", "setup-music", "--backend",
-                 _KOBOLD_BUILD_BACKEND.get(b, b), "--no-models", "--no-test"]
-                for b in p["items"]]
+        yield from ([sys.executable, "-m", "localm", "setup-music", "--backend",
+                     _KOBOLD_BUILD_BACKEND.get(b, b), "--no-models", "--no-test"]
+                    for b in p["items"])
+        return
     if p["name"] == "comfyui":
         cmd = [sys.executable, "-m", "localm", "comfy", "update"]
         if '"--reinstall-requirements"' in _tree_text(root, "localm/cli/comfy.py"):
             cmd.append("--reinstall-requirements")
-        return [cmd]
-    return []
+        yield cmd
+
+
+def _write_torch_pins(root: Path) -> None:
+    """Write ``hwdetect.TORCH_PINS_FILE`` in the install at *root*: the exact
+    versions of the torch packages its venv has now (``hwdetect.torch_pins``),
+    one per line, empty when it has none. Raises OSError when it cannot be
+    written."""
+    from localm.hwdetect import TORCH_PINS_FILE, torch_pins
+    site = site_packages(Path(root) / ".venv")
+    installed = {name: (info or {}).get("version")
+                 for name, info in (dists(site) if site is not None else {}).items()}
+    path = Path(root) / TORCH_PINS_FILE
+    path.write_text("".join(f"{line}\n" for line in torch_pins(installed)), encoding="utf-8")
 
 
 def _verify(p: dict, root: Path, home: Path) -> Optional[str]:
@@ -1847,20 +1871,12 @@ def _update_uv(p: dict, root: Path, say: Callable, bootstrap: Optional[Callable]
     if got != p["target"]:
         shutil.rmtree(staging, ignore_errors=True)
         return f"the installed uv reports {got or 'no version'}, not {p['target']}"
-    live = root / ".uv"
-    old = root / ".uv-previous"
+    from localm.folder_swap import replace_dir
     try:
-        shutil.rmtree(old, ignore_errors=True)
-        os.replace(live, old)
-        try:
-            os.replace(staging, live)
-        except OSError:
-            os.replace(old, live)
-            raise
+        replace_dir(staging, root / ".uv")
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
         return f"could not swap in the new uv: {e}"
-    shutil.rmtree(old, ignore_errors=True)
     return None
 
 

@@ -155,6 +155,16 @@ def test_menu_cancel_changes_nothing(tmp_path, venv_template):
     assert (clone / im.MANIFEST_NAME).exists()
 
 
+def test_a_menu_answer_it_does_not_list_is_asked_again(tmp_path, venv_template):
+    clone = tmp_path / "bang!clone"
+    p = _install(clone, venv_template)
+    out = _run(clone, stdin="p\r\n9\r\n3\r\n")
+    assert out.stdout.count("Type a number from 1 to 3.") == 2, out.stdout
+    assert out.stdout.count("LocaLM is already set up in this folder.") == 3, out.stdout
+    assert "Nothing changed." in out.stdout, out.stdout
+    assert (clone / ".venv").is_dir() and (p["lib"] / "llama.dll").exists()
+
+
 def test_declining_the_final_question_changes_nothing(tmp_path, venv_template):
     clone = tmp_path / "clone"
     p = _install(clone, venv_template)

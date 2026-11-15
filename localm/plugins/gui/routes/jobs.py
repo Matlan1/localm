@@ -23,12 +23,12 @@ import json
 import time
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import StreamingResponse
 
 from localm.inference.http_server import (
     _require_auth, job_owner_ok, path_formatter, require_owner,
 )
 from localm.pathscrub import map_strings
+from localm.streaming_response import StreamingResponse
 
 
 def activity_snapshot(request: Request, jobs) -> dict:

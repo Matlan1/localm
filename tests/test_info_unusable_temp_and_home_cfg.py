@@ -70,7 +70,7 @@ def test_an_unreadable_home_cfg_is_reported_once(tmp_path, monkeypatch, capsys):
     def unreadable(path):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(config, "_read_home_cfg", unreadable)
+    monkeypatch.setattr(config._home_cfg, "read_line", unreadable)
     capsys.readouterr()
     for _ in range(7):
         config._detect_home()

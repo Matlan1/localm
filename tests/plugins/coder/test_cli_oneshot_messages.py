@@ -27,6 +27,8 @@ from localm.plugins.coder.cli import _main
 def home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")

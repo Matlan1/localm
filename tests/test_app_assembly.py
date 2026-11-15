@@ -41,6 +41,7 @@ _EFFECTIVE_CHAIN = (
     ("RequestProgressMiddleware", None),
     ("_DisconnectSignalMiddleware", None),
     ("_BodyStreamCapMiddleware", None),
+    ("ConfigReadSlowAnswer", None),
     ("HostHeaderGuard", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
@@ -92,9 +93,10 @@ def test_transport_middleware_is_the_outermost_three(monkeypatch):
     this order: request progress outermost (a request wedged in any inner
     layer still counts as in flight), then the disconnect signal (bound to the
     raw receive, which BaseHTTPMiddleware would mask), then the body cap (sees
-    the raw body stream before anything buffers it). The Host header guard,
-    also pure ASGI, sits right inside them and outside every BaseHTTPMiddleware
-    handler. Debug mode adds the request log outside them."""
+    the raw body stream before anything buffers it). The settings-read 503
+    answer and the Host header guard, both pure ASGI, sit right inside them,
+    outside every BaseHTTPMiddleware handler. Debug mode adds the request log
+    outside them."""
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     chain = _effective_chain(create_app(None))
     first_base_http = next(i for i, (cls, _) in enumerate(chain)
@@ -103,6 +105,7 @@ def test_transport_middleware_is_the_outermost_three(monkeypatch):
         ("RequestProgressMiddleware", None),
         ("_DisconnectSignalMiddleware", None),
         ("_BodyStreamCapMiddleware", None),
+        ("ConfigReadSlowAnswer", None),
         ("HostHeaderGuard", None),
     )
 

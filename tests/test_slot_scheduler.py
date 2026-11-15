@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sys
 import threading
 import time
@@ -1738,3 +1739,55 @@ def test_two_requests_queued_while_idle_step_only_the_first(made):
     assert results["a"] == _reference(PROMPTS[0], 900)
     assert results["b"] == _reference(PROMPTS[1], 900)
     assert len(ctx.step_calls) == 1
+
+
+class _TracingSampler(_Sampler):
+    """Writes llama.cpp's lazy-grammar trace line, carrying *piece*, to fd 2
+    for every token it picks, as a native grammar sampler does."""
+
+    def __init__(self, piece, **kw):
+        super().__init__(**kw)
+        self.piece = piece
+        self.writes = 0
+
+    def pick(self, token):
+        os.write(2, f"Grammar still awaiting trigger after token {token} "
+                    f"(`{self.piece}`)\n".encode())
+        self.writes += 1
+        return super().pick(token)
+
+
+def test_a_privacy_reply_joining_a_running_reply_keeps_its_text_out_of_the_debug_log(
+        made, monkeypatch, tmp_path):
+    from localm import audit, debuglog
+    log = tmp_path / "debug.log"
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: None)
+    monkeypatch.setattr(
+        debuglog, "native_stderr_target",
+        lambda: os.open(str(log), os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                          | getattr(os, "O_BINARY", 0)))
+    monkeypatch.setattr(debuglog, "debug_enabled", lambda: True)
+    monkeypatch.setenv(audit.MODE_ENV_VAR, "full")
+    monkeypatch.setattr(audit, "_active_coder_privacy_count", 0)
+    monkeypatch.setattr(audit, "_inherited_coder_privacy", None)
+    assert debuglog.debug_content_enabled() is True
+
+    ctx = _SimContext()
+    ctx.step_delay = 0.005
+    ctx.stderr_scope = debuglog.dedup_native_stderr
+    sched = made(ctx, 2)
+    full_sampler = _TracingSampler("full mode reply")
+    first = sched.submit(PROMPTS[0], 200, full_sampler)
+    next(first)
+    private_sampler = _TracingSampler("ZQX private reply")
+    with audit.request_privacy(True):
+        out, reason = _drain(sched.submit(PROMPTS[1], 5, private_sampler))
+    assert (out, reason) == _reference(PROMPTS[1], 5)
+    _drain(first)
+    sched.close(timeout=10)
+
+    data = log.read_bytes()
+    assert private_sampler.writes >= len(out) == 5
+    assert data.count(b"Grammar still awaiting trigger after token ") == (
+        full_sampler.writes + private_sampler.writes), data
+    assert b"ZQX" not in data, data

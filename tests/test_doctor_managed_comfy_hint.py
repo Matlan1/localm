@@ -101,7 +101,7 @@ def test_doctor_hint_when_not_installed(cli_runner, monkeypatch):
     assert mc.is_managed_comfy_installed() is False   # throwaway home: nothing set up
 
     result = cli_runner.invoke(cli.doctor, [])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if _fail_lines(result.output) else 0), result.output
     out = result.output
     assert _SETUP_HINT in out
     assert "manage its own ComfyUI" in out
@@ -116,7 +116,7 @@ def test_doctor_status_when_installed_replaces_hint(cli_runner, monkeypatch):
     paths = _install_managed()
 
     result = cli_runner.invoke(cli.doctor, [])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if _fail_lines(result.output) else 0), result.output
     out = result.output
     assert "installed" in out.lower()
     assert str(paths.root) in out                     # names the managed root
@@ -143,5 +143,4 @@ def test_doctor_hint_is_informational_never_a_failure(cli_runner, monkeypatch):
 
     # Managed-ComfyUI state changes NOTHING about doctor's failures.
     assert fails_hint == fails_status
-    assert res_hint.exit_code == 0
-    assert res_status.exit_code == 0
+    assert res_hint.exit_code == res_status.exit_code

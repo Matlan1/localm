@@ -102,7 +102,7 @@ def _consents_to_save(*, interactive: bool, assume_yes: bool, prompt) -> bool:
 def offer_to_send(summary: str, path: Optional[Path], text: str, *,
                    interactive: bool = True, assume_yes: bool = False,
                    auto_send: bool = False,
-                   open_browser=webbrowser.open, prompt=None) -> None:
+                   open_browser=webbrowser.open, prompt=None) -> Optional[bool]:
     """Offer to send an ALREADY-BUILT, already-saved report (upload / email /
     self), or send it immediately with ``auto_send``.
 
@@ -114,13 +114,15 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     body (used when *path* is None because the save itself failed); when a
     file exists, the sent title and body are read from it after the channel is
     picked, and again before each retry, so a user's edits are what gets sent, and
-    nothing is sent when the file cannot be read."""
+    nothing is sent when the file cannot be read.
+
+    Returns, for *auto_send*, True when the report was sent and False when it was
+    not; None otherwise."""
     up_url, up_token = _br.upload_config()
     can_upload = up_url is not None
 
     if auto_send:
-        _auto_send(summary, path, text, can_upload, up_url, up_token)
-        return
+        return _auto_send(summary, path, text, can_upload, up_url, up_token)
 
     if not interactive or assume_yes:
         if can_upload:
@@ -180,18 +182,18 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
 
 
 def _auto_send(summary: str, path: Optional[Path], text: str,
-               can_upload: bool, up_url, up_token) -> None:
+               can_upload: bool, up_url, up_token) -> bool:
     """Send the report at *path* (*text* when there is no file) straight away,
     the ``auto_send`` branch of offer_to_send. Nothing is sent when no endpoint
     is configured; a rate limit is waited out and retried once; every failure
-    says where the report is."""
+    says where the report is. Returns True when the report was sent."""
     body = path.read_text(encoding="utf-8") if path is not None else text
     where = str(path) if path is not None else "the text above"
     if not can_upload:
         console.print("[yellow]No hosted send channel is configured - the report is "
                       f"saved at {markup_safe(where)}; email it to {MAINTAINER_EMAIL} "
                       "instead.[/yellow]", soft_wrap=True)
-        return
+        return False
     try:
         res = _br.upload_report(summary, body, url=up_url, token=up_token)
     except RateLimitedError as e:
@@ -205,14 +207,14 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
                           f"{e2.hint or e2.reason}")
             console.print(f"[dim]The report is at {where} - email it to "
                           f"{MAINTAINER_EMAIL} instead.[/dim]")
-            return
+            return False
     except LocalmError as e:
         console.print(f"[yellow]Could not send it.[/yellow] {markup_safe(e.hint or e.reason)}")
         console.print(f"[dim]The report is at {where} - email it to "
                       f"{MAINTAINER_EMAIL} instead.[/dim]")
-        return
+        return False
     _print_sent(res)
-    return
+    return True
 
 
 def _print_sent(res) -> None:

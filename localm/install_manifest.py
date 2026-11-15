@@ -37,7 +37,7 @@ uninstall treats a journaled shortcut or command it never got to record as if it
 been recorded (through the same checks). A step that was begun but never finished
 while it could touch the user's profile is reported as a note.
 
-Stdlib only.
+Stdlib only, plus ``localm._home_cfg`` (itself stdlib only).
 """
 
 from __future__ import annotations
@@ -53,12 +53,14 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
+from localm import _home_cfg
+
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
 JOURNAL_NAME = ".localm-setup-journal"
 SETUP_TMP_NAME = ".localm-setup-tmp"
 DATA_MARKER = ".localm-data"
-HOME_CFG_NAME = "localm-home.cfg"
+HOME_CFG_NAME = _home_cfg.NAME
 PORTABLE_HOME = "home"
 SCHEMA_VERSION = 3
 
@@ -598,19 +600,19 @@ def _others_using(folder, root: Path, marker: Optional[dict]) -> list[str]:
 
 def configured_data_dir(root) -> tuple[str, bool]:
     """(folder, exists) for the data folder the clone at *root* is set up to
-    use: the full path named in ``localm-home.cfg``, else ``<root>/home``
-    when it exists. ("", False) when there is none or the setting cannot be
-    read."""
+    use: the path named in ``localm-home.cfg`` (a relative one taken relative
+    to *root*), else ``<root>/home`` when it exists. ("", False) when there is
+    none or the setting cannot be read."""
     root = Path(root).resolve()
     cfg = root / HOME_CFG_NAME
     if cfg.is_file():
         try:
-            line = _read_cfg_line(cfg)
+            line = _home_cfg.read_line(cfg)
         except (OSError, ValueError, LookupError):
             return "", False
-        path = os.path.expanduser(line) if line else ""
-        if not (path and os.path.isabs(path)):
+        if not line:
             return "", False
+        path = str(_home_cfg.data_dir(line, root))
         return _plain_abs(path), os.path.isdir(path)
     home = root / PORTABLE_HOME
     return (str(home), True) if home.is_dir() else ("", False)
@@ -635,6 +637,40 @@ def _already_used(root: Path, folder) -> bool:
     return any(isinstance(p, str) and p and _same(p, folder) for p in recorded)
 
 
+def check_data_dir(root, data_dir) -> Path:
+    """The data folder *data_dir* names for the install at *root*, as a full
+    path, after the checks :func:`prepare_data` makes before it creates
+    anything. Writes nothing. Raises ValueError for an empty or relative path, a
+    path that is a file, or a folder uninstall could never safely delete (a drive
+    root, the home folder, this install folder or one that contains it, or a
+    folder inside the environment, runtime or tooling folders uninstall
+    removes)."""
+    root = Path(root).resolve()
+    text = str(data_dir or "").strip().strip('"')
+    if not text:
+        raise ValueError("no data folder given")
+    target = Path(os.path.expanduser(text))
+    if not target.is_absolute():
+        raise ValueError(f"{text} is not a full path (it must start at a "
+                         "drive or /, for example D:\\LocaLM-data)")
+    target = Path(_plain_abs(target))
+    reason = _unsafe_data_dir(str(target), root, allow_link=True)
+    if not reason:
+        inside = next((n for n in DEFERRABLE + ("runtime",) if _inside(target, root / n)),
+                      None)
+        if inside:
+            reason = f"it is inside {root / inside}, which uninstall removes"
+    if reason == HOME_UNKNOWN:
+        raise ValueError(f"{HOME_UNKNOWN}, so no data folder can be checked against "
+                         "it; set HOME (USERPROFILE on Windows) and try again")
+    if reason:
+        raise ValueError(f"{target} cannot be the data folder ({reason}); "
+                         "choose a folder of its own")
+    if (target.exists() or target.is_symlink()) and not target.is_dir():
+        raise ValueError(f"{target} is a file, not a folder")
+    return target
+
+
 def prepare_data(root, *, data_dir="", portable=False) -> Path:
     """Create the data folder, point the clone at it, and record ownership.
 
@@ -652,35 +688,15 @@ def prepare_data(root, *, data_dir="", portable=False) -> Path:
     dropped from that list.
 
     Returns the data folder. Raises ValueError for a relative path, a path that
-    is a file, or a folder uninstall could never safely delete (a drive root,
-    the home folder, this install folder or one that contains it, or a folder
-    inside the environment, runtime or tooling folders uninstall removes),
-    OSError when the folder cannot be created or the marker written."""
+    is a file, or a folder uninstall could never safely delete
+    (:func:`check_data_dir`), OSError when the folder cannot be created or the
+    marker written."""
     root = Path(root).resolve()
     cfg = root / HOME_CFG_NAME
     if portable:
         target = root / PORTABLE_HOME
     else:
-        text = str(data_dir or "").strip().strip('"')
-        if not text:
-            raise ValueError("no data folder given")
-        target = Path(os.path.expanduser(text))
-        if not target.is_absolute():
-            raise ValueError(f"{text} is not a full path (it must start at a "
-                             "drive or /, for example D:\\LocaLM-data)")
-        target = Path(_plain_abs(target))
-        reason = _unsafe_data_dir(str(target), root, allow_link=True)
-        if not reason:
-            inside = next((n for n in DEFERRABLE + ("runtime",) if _inside(target, root / n)),
-                          None)
-            if inside:
-                reason = f"it is inside {root / inside}, which uninstall removes"
-        if reason == HOME_UNKNOWN:
-            raise ValueError(f"{HOME_UNKNOWN}, so no data folder can be checked against "
-                             "it; set HOME (USERPROFILE on Windows) and try again")
-        if reason:
-            raise ValueError(f"{target} cannot be the data folder ({reason}); "
-                             "choose a folder of its own")
+        target = check_data_dir(root, data_dir)
     existed = target.exists() or target.is_symlink()
     if existed and not target.is_dir():
         raise ValueError(f"{target} is a file, not a folder")
@@ -1234,37 +1250,23 @@ def _data_dirs(root: Path, m: Optional[dict]) -> list:
     if portable.is_dir():
         add(str(portable), False)
     line = _cfg_data_dir(root)
-    if line and os.path.isabs(os.path.expanduser(line)):
+    if line:
         add(_plain_abs(line), False)
     return out
 
 
-def _read_cfg_line(path: Path) -> str:
-    """The first line of a ``localm-home.cfg``: UTF-8 (with or without a BOM),
-    or on Windows, when that fails, the console (OEM) code page that cmd.exe's
-    ``echo`` writes. Raises OSError or ValueError when it cannot be read."""
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        if sys.platform != "win32":
-            raise
-        import ctypes
-        text = raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
-    lines = text.strip().splitlines()
-    return lines[0].strip() if lines else ""
-
-
 def _cfg_data_dir(root: Path) -> str:
-    """The data folder ``localm-home.cfg`` names, or "" when there is none or
-    it cannot be read (_plan reports the unreadable case)."""
+    """The data folder ``localm-home.cfg`` names (a relative line taken
+    relative to *root*), or "" when there is none or it cannot be read (_plan
+    reports the unreadable case)."""
     cfg = root / HOME_CFG_NAME
     if not cfg.is_file():
         return ""
     try:
-        return _read_cfg_line(cfg)
+        line = _home_cfg.read_line(cfg)
     except (OSError, ValueError, LookupError):
         return ""
+    return str(_home_cfg.data_dir(line, root)) if line else ""
 
 
 def _kept_venv_folders(root: Path) -> list[Path]:
@@ -1418,7 +1420,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     cfg = root / HOME_CFG_NAME
     if cfg.is_file():
         try:
-            _read_cfg_line(cfg)
+            _home_cfg.read_line(cfg)
         except (OSError, ValueError, LookupError) as e:
             items.append(_Item(cfg, "note", "note",
                                f"cannot read it ({e}); the data folder it names "

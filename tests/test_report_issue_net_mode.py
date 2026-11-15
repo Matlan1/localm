@@ -212,6 +212,7 @@ def home(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("text, mode", [
     ('{"net_mode": "off"}', "off"),
+    ('\ufeff{"net_mode": "off"}', "off"),
     ('{"net_mode": " OFF "}', "off"),
     ('{"net_mode": "allow"}', "allow"),
     ('{"net_mode": "ask"}', "ask"),
@@ -227,7 +228,6 @@ def test_the_setting_is_read_from_config_json(home, text, mode):
 @pytest.mark.parametrize("text, why", [
     (None, "does not exist"),
     ("{not json", "could not be read (JSONDecodeError)"),
-    ('﻿{"net_mode": "ask"}', "could not be read (JSONDecodeError)"),
 ])
 def test_a_missing_or_unreadable_setting_is_unknown(home, text, why):
     if text is not None:
@@ -251,6 +251,7 @@ def test_the_data_dir_comes_from_localm_home_cfg(tmp_path, monkeypatch):
     data.mkdir()
     (data / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
     (tmp_path / "localm-home.cfg").write_text(f"\n{data}\n", encoding="utf-8")
+    _with_home_cfg_reader(tmp_path)
     (tmp_path / "home").mkdir()
     assert ri.network_mode()[0] is None
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
@@ -259,6 +260,37 @@ def test_the_data_dir_comes_from_localm_home_cfg(tmp_path, monkeypatch):
     (tmp_path / "home" / "config.json").write_text('{"net_mode": "allow"}',
                                                    encoding="utf-8")
     assert ri.network_mode() == ("allow", "")
+
+
+def _with_home_cfg_reader(clone):
+    (clone / "localm").mkdir()
+    shutil.copy(_REPO / "localm" / "_home_cfg.py", clone / "localm" / "_home_cfg.py")
+
+
+def test_a_relative_localm_home_cfg_line_is_relative_to_the_clone(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    clone = tmp_path / "clone"
+    monkeypatch.setattr(ri, "REPO_ROOT", clone)
+    monkeypatch.chdir(tmp_path)
+    (clone / "data").mkdir(parents=True)
+    (clone / "pyproject.toml").write_text("", encoding="utf-8")
+    (clone / "localm-home.cfg").write_text("data\n", encoding="utf-8")
+    _with_home_cfg_reader(clone)
+    (clone / "data" / "config.json").write_text('{"net_mode": "off"}', encoding="utf-8")
+    assert ri.localm_home() == clone / "data"
+    assert ri.network_mode() == ("off", "")
+
+
+def test_a_cfg_whose_reader_cannot_be_loaded_is_an_unknown_setting(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / "localm-home.cfg").write_text("data\n", encoding="utf-8")
+    mode, why = ri.network_mode()
+    assert mode is None
+    assert "_home_cfg.py could not be loaded" in why
 
 
 def _tty(monkeypatch, interactive, answers=()):
@@ -397,7 +429,7 @@ def test_powershell_off_sends_nothing(tmp_path, recorder):
     assert REFUSAL in out
 
 
-@pytest.mark.parametrize("config_text", [None, "{not json", "\ufeff{\"net_mode\": \"ask\"}"])
+@pytest.mark.parametrize("config_text", [None, "{not json"])
 def test_powershell_unreadable_setting_with_no_one_to_ask_sends_nothing(
         tmp_path, recorder, config_text):
     rc, out, hits = _ps1_case(tmp_path, recorder, config_text, "--yes")
@@ -457,7 +489,7 @@ def test_bash_fallback_off_sends_nothing(tmp_path):
     assert REFUSAL in out
 
 
-@pytest.mark.parametrize("config_text", [None, "{not json", "\ufeff{\"net_mode\": \"ask\"}"])
+@pytest.mark.parametrize("config_text", [None, "{not json"])
 @pytest.mark.parametrize("answer, sends", [("y", True), ("", False), ("n", False)])
 def test_bash_fallback_unreadable_setting_asks_and_defaults_to_no(tmp_path, config_text,
                                                                    answer, sends):

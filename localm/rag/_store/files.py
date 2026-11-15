@@ -304,10 +304,31 @@ class _CollectionFiles:
         *on_progress* is told about a vectors.json write of at least
         ``_REPORT_VECTORS_COMPONENTS`` components: once when it starts, every
         ``_REPORT_EVERY_S`` seconds and once at the end with
-        phase/done/total/unit."""
+        phase/done/total/unit. An exception *on_progress* raises (a stopped
+        job) does not interrupt the write: the callback is not called again,
+        and the exception is raised once all three files are written."""
+        stopped = self._save_holding_progress_errors(on_progress)
+        if stopped is not None:
+            raise stopped
+
+    def _save_holding_progress_errors(
+            self, on_progress: Optional[ProgressFn] = None) -> Optional[Exception]:
+        """``_save``, returning the exception *on_progress* raised during the
+        write instead of raising it, or None."""
+        stopped: list = []
+
+        def report(*args, **kwargs) -> None:
+            if stopped or on_progress is None:
+                return
+            try:
+                on_progress(*args, **kwargs)
+            except Exception as e:
+                stopped.append(e)
+
         with _files_changing(self.dir):
-            self._write_files(on_progress)
+            self._write_files(report if on_progress is not None else None)
         self._snapshot_ref = None
+        return stopped[0] if stopped else None
 
     def _vector_pieces(self, rows: list, on_progress: Optional[ProgressFn]):
         """``vectors_json_pieces`` for *rows*, reporting progress as above."""

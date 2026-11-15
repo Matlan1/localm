@@ -1139,3 +1139,24 @@ test("update: a dev client below a ceiling is held to that ceiling; at or above 
   assert.equal(legacy.version, "v0.3.2-dev1", "a dev build of the legacy ceiling is at or below it");
   assert.equal((await updateFor(legacyList, "")).version, "v0.3.1");
 });
+
+test("update: a client held at a ceiling is told a newer version follows, in the notes every client shows", async () => {
+  const list = [["v0.3.4", "2026-11-11T00:00:00Z", false], ["v0.3.3", "2026-11-01T00:00:00Z", false],
+    ["v0.3.2", "2026-10-20T00:00:00Z", false]];
+  const old = await updateFor(list, "?client=0.3.2");
+  assert.equal(old.version, "v0.3.3");
+  assert.equal(old.newer_after, "v0.3.4");
+  assert.match(old.notes, /^A newer version \(v0\.3\.4\) follows this one: after this update and a restart, update again to reach it\./);
+  const legacy = await updateFor(list, "");
+  assert.equal(legacy.version, "v0.3.2");
+  assert.equal(legacy.newer_after, "v0.3.4");
+  assert.match(legacy.notes, /^A newer version \(v0\.3\.4\)/);
+  const current = await updateFor(list, "?client=0.3.3");
+  assert.equal(current.version, "v0.3.4");
+  assert.equal(current.newer_after, undefined, "a client not held back gets no such line");
+  assert.doesNotMatch(current.notes, /A newer version/);
+  const atCeiling = await updateFor(list.slice(1), "?client=0.3.2");
+  assert.equal(atCeiling.version, "v0.3.3");
+  assert.equal(atCeiling.newer_after, undefined, "nothing above the ceiling: no line");
+  assert.doesNotMatch(atCeiling.notes, /A newer version/);
+});

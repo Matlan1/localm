@@ -221,7 +221,7 @@ def fetch_tree(repo: str, commit: str, dest: Path, *, on_progress: Progress = No
         staging = work / "tree"
         files = _unpack(archive, staging, commit)
         write_record(staging, repo, commit, files)
-        from localm.media.runtime_files import move_dir
+        from localm.folder_swap import move_dir
         try:
             move_dir(staging, dest)
         except OSError as e:

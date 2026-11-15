@@ -94,6 +94,7 @@ def _run(tmp_path: Path, body: str, stdin: str = "\n", env: dict[str, str] | Non
         + body
         + "\nexit /b 0\n"
         ":flush\nexit /b 0\n"
+        + _between(":check_pick\n", ":uv_portable_missing")
     )
     (tmp_path / "stmp").mkdir(exist_ok=True)
     driver = tmp_path / "driver.bat"
@@ -143,16 +144,17 @@ def test_a_listed_number_picks_its_backend(tmp_path, pick, backend):
 
 
 @pytest.mark.parametrize("pick", ["6", "9", "12"])
-def test_an_unlisted_number_returns_to_the_recommendation_with_a_message(tmp_path, pick):
+def test_an_unlisted_number_is_asked_again(tmp_path, pick):
     out = _menu(tmp_path, "cuda", pick=pick)
-    assert f"[{pick}] is not offered on this machine; using cuda." in out
+    assert "Type a number from 1 to 5." in out
     assert "BACKEND=cuda" in out
 
 
-def test_blank_and_junk_picks_take_the_recommendation_silently(tmp_path):
-    assert "BACKEND=cuda" in _menu(tmp_path, "cuda")
+def test_a_blank_pick_takes_the_recommendation_and_junk_is_asked_again(tmp_path):
+    out = _menu(tmp_path, "cuda")
+    assert "BACKEND=cuda" in out and "Type a number" not in out
     out = _menu(tmp_path, "cuda", pick="zz")
-    assert "BACKEND=cuda" in out and "is not offered" not in out
+    assert "Type a number from 1 to 5." in out and "BACKEND=cuda" in out
 
 
 def test_the_prompt_range_follows_the_number_of_rows(tmp_path):

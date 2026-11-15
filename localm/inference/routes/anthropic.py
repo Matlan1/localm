@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -36,6 +36,7 @@ from localm.inference.routes._chat_bridge import (
 from localm.inference.tool_calling import (
     ToolsError, has_tool_history, parse_tool_choice, render_messages, validate_tools,
 )
+from localm.streaming_response import StreamingResponse
 
 
 class AnthropicRoute(APIRoute):

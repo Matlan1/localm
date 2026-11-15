@@ -632,6 +632,15 @@ def _flush_block(bat_text):
     return bat_text[m.start():end]
 
 
+def _check_pick_block(bat_text):
+    """The real `:check_pick` subroutine, verbatim. Every numbered menu calls it
+    and asks again while it fails, so a probe without it never finishes."""
+    m = re.search(r"(?m)^:check_pick\s*$", bat_text)
+    assert m, "the :check_pick label moved or was renamed"
+    end = bat_text.index("exit /b 1", bat_text.index("Type a number from 1 to", m.start()))
+    return bat_text[m.start():end + len("exit /b 1")]
+
+
 def _uninstall_header_block(bat_text):
     """The `:uninstall` label's clone-path banner."""
     literal = 'setlocal DisableDelayedExpansion\necho    "%CD%"\nendlocal'
@@ -951,7 +960,8 @@ class TestDataFolderSubroutinesThroughCmd:
             "echo EXITED=[%errorlevel%]\r\n"
             "exit /b 0\r\n"
             + _data_folder_subroutines(bat) + "\r\n"
-            + _flush_block(bat) + "\r\n",
+            + _flush_block(bat) + "\r\n"
+            + _check_pick_block(bat) + "\r\n",
             encoding="utf-8")
         env = dict(os.environ)
         env["PYTHONPATH"] = str(ROOT)
@@ -1105,7 +1115,8 @@ class TestRepairOffersTheDataFolderInUse:
             "echo EXITED=[%errorlevel%]\r\n"
             "exit /b 0\r\n"
             + _data_folder_subroutines(bat) + "\r\n"
-            + _flush_block(bat) + "\r\n",
+            + _flush_block(bat) + "\r\n"
+            + _check_pick_block(bat) + "\r\n",
             encoding="utf-8")
         env = dict(os.environ)
         env["PYTHONPATH"] = str(ROOT)

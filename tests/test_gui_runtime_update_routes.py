@@ -547,3 +547,51 @@ def test_check_reports_the_runtime_localm_loads(app, runtime_dir, monkeypatch):
     with TestClient(app) as client:
         body = client.get("/api/runtime/check").json()
     assert body["in_use"] == "hip" and body["in_use_source"] == "binary_dir"
+
+
+_PLATFORMS = (("win32", "x64"), ("win32", "arm64"), ("linux", "x64"),
+              ("linux", "arm64"), ("darwin", "arm64"), ("darwin", "x64"))
+
+
+def _on(monkeypatch, plat, arch):
+    monkeypatch.setattr(sl, "_platform_key", lambda: plat)
+    monkeypatch.setattr(sl, "_machine_arch", lambda: arch)
+
+
+@pytest.mark.parametrize("plat,arch,offered", [
+    ("win32", "x64", {"auto", "vulkan", "cuda", "sycl", "hip", "cpu", "amd-rocm"}),
+    ("linux", "x64", {"auto", "vulkan", "cuda", "sycl", "hip", "cpu"}),
+    ("darwin", "arm64", {"auto", "cpu", "metal"}),
+])
+def test_check_lists_only_the_backends_this_platform_installs(
+        app, monkeypatch, plat, arch, offered):
+    _on(monkeypatch, plat, arch)
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["backends"] == [b for b in sl.BACKENDS if b in offered]
+
+
+@pytest.mark.parametrize("plat,arch", _PLATFORMS)
+def test_update_accepts_exactly_the_backends_check_lists(app, monkeypatch, no_subprocess,
+                                                        plat, arch):
+    _on(monkeypatch, plat, arch)
+    with TestClient(app) as client:
+        listed = client.get("/api/runtime/check").json()["backends"]
+        assert "auto" in listed
+        for backend in sl.BACKENDS:
+            r = client.post("/api/runtime/update", json={"backend": backend})
+            if backend in listed:
+                assert r.status_code == 200, (plat, arch, backend, r.text)
+            else:
+                assert r.status_code == 400, (plat, arch, backend, r.text)
+                assert f"'{backend}'" in r.json()["detail"], r.text
+    assert [c["args"][2] for c in no_subprocess] == listed
+
+
+def test_update_refuses_amd_rocm_off_windows_before_dispatching(app, monkeypatch, no_subprocess):
+    _on(monkeypatch, "linux", "x64")
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "amd-rocm"})
+    assert r.status_code == 400, r.text
+    assert "Windows-only" in r.json()["detail"]
+    assert no_subprocess == []

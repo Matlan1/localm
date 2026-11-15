@@ -236,6 +236,14 @@ def test_the_all_clear_job_line_does_not_claim_more_than_it_checked():
     assert "not the whole system" in line
 
 
+def test_the_all_clear_job_line_counts_only_the_checks_that_ran():
+    from localm.plugins.gui.routes import doctor as route
+
+    line = route._job_line(_report(d.OK, d.SKIPPED, d.OK, d.OK, d.OK))
+    assert "all 4 active checks passed" in line
+    assert f"not run: {d.CHECK_LABELS['native_abi']}" in line
+
+
 # --------------------------------------------------------------------------- #
 #  Gating                                                                      #
 # --------------------------------------------------------------------------- #
