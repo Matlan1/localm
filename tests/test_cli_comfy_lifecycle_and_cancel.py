@@ -414,9 +414,17 @@ def test_a_200_saying_ok_false_is_a_failure_not_a_success(monkeypatch):
 
 
 def test_stop_without_a_server_posts_nothing(monkeypatch):
+    """Without a server, stop acts from this process (see
+    test_comfy_stop_without_server.py) and sends nothing to a server."""
+    import localm.media.comfy_client as cc
     srv = _install(monkeypatch, comfy_cli, _Server({}), discovered=False)
+    monkeypatch.setattr(cc, "_spawned_procs", {})
+    monkeypatch.setattr(cc, "interrupt_comfy", lambda *a, **k: False)
+    monkeypatch.setattr(cc, "free_comfy_vram", lambda *a, **k: False)
+    monkeypatch.setattr(cc, "comfy_port_holder", lambda *a, **k: None)
+    _no_direct_comfy(monkeypatch, alive=False)
     result = _run(comfy_cli.comfy_stop)
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert srv.calls == []
 
 

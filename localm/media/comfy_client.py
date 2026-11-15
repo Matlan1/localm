@@ -2006,6 +2006,61 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     return True, "Stopped the ComfyUI that localm launched."
 
 
+_ADOPTED_EXIT_WAIT_S = 10.0
+
+
+def stop_recorded_comfy(*, skip_live_owner: bool = False) -> list[tuple[str, bool, str]]:
+    """Stop each ComfyUI a localm process launched in this data dir, found by
+    its launch record (:mod:`localm.media.comfy_launch_record`) rather than by
+    a handle held in this process.
+
+    A record whose process matches it is adopted into ``_spawned_procs`` and
+    stopped by :func:`stop_comfy` (abort the render, clear the queue, free
+    VRAM, end the process tree); the stop counts as done only once the process
+    has exited. A record whose process has exited is dropped silently. A record
+    whose pid now belongs to a different process is dropped and reported, and
+    that process is not signalled. A record that cannot be checked is reported
+    as a failure and kept. With *skip_live_owner*, a record whose launching
+    localm process is still running (or cannot be checked) is left to that
+    process.
+
+    Returns one ``(api_url, ok, message)`` per record acted on or reported, in
+    record order."""
+    from localm.media import comfy_launch_record as rec
+    results: list[tuple[str, bool, str]] = []
+    for record in rec.read_records():
+        api_url, pid = record["api_url"], record["pid"]
+        if skip_live_owner and rec.owner_alive(record):
+            continue
+        state, handle = rec.adopt(record)
+        if state == rec.GONE:
+            rec.drop(record)
+            continue
+        if state == rec.MISMATCH:
+            rec.drop(record)
+            results.append((api_url, True,
+                            f"The ComfyUI localm launched (process {pid}) has exited, "
+                            f"and process {pid} is now a different program, so it was "
+                            "left alone."))
+            continue
+        if state != rec.MATCH or handle is None:
+            results.append((api_url, False,
+                            f"localm launched ComfyUI as process {pid}, but could not "
+                            "confirm that process is still that ComfyUI (this needs "
+                            "psutil and permission to read the process), so nothing "
+                            "was stopped."))
+            continue
+        _remember_spawned(api_url, handle)
+        ok, message = stop_comfy(api_url)
+        if ok and not handle.gone_within(_ADOPTED_EXIT_WAIT_S):
+            ok, message = False, (f"Asked the ComfyUI localm launched (process {pid}) "
+                                  "to stop, but it is still running.")
+        if ok:
+            rec.drop(record)
+        results.append((api_url, ok, message))
+    return results
+
+
 _PORT_RELEASE_WAIT_S = 10.0
 _PORT_RELEASE_POLL_S = 0.25
 
@@ -2473,6 +2528,8 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
                          stderr=subprocess.STDOUT,
                          **_popen_kw)
         _remember_spawned(api_url, proc)   # retain the handle so Stop can reach it
+        from localm.media import comfy_launch_record
+        comfy_launch_record.write_record(api_url, getattr(proc, "pid", None))
         _t.sleep(0.5)
         if proc.poll() is not None and proc.returncode != 0:
             _take_spawned(api_url)         # it died; drop the dead handle

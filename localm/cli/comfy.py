@@ -17,6 +17,12 @@ localm server rather than acting in-process: the handle on a ComfyUI localm
 launched lives in `comfy_client`'s process-local `_spawned_procs`, so only the
 process that spawned it can end it. This is the same discover-instance-and-POST
 shape `localm stop` and `localm unload` use.
+
+`stop` also works without a server, and stops a ComfyUI whose launching localm
+process has exited (a `localm image` run leaves its ComfyUI running): every
+launch is also written to a record on disk (`comfy_launch_record`), and
+`comfy_client.stop_recorded_comfy` stops the recorded process once its pid,
+start time, executable and command line still match.
 """
 
 import time
@@ -140,7 +146,7 @@ def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
     console.print(f"  Launched by localm: [dim]unknown - {reason}, and only the "
                   "process that launched ComfyUI knows[/dim]")
     if not had_server:
-        console.print("  [dim]Start one with[/dim] localm gui  [dim]to stop or restart "
+        console.print("  [dim]Start one with[/dim] localm gui  [dim]to start or restart "
                       "ComfyUI from here.[/dim]")
 
 
@@ -284,16 +290,60 @@ def comfy_stop() -> None:
     When localm launched it, its process is also ended. When YOU launched it,
     localm only aborts and frees - it never kills a process it did not start,
     and says so rather than implying it stopped something it did not.
+
+    Works without a running localm server too: it then stops the ComfyUI a
+    localm command such as `localm image` launched and left running.
     """
     server = running_server()
     if server is None:
-        no_server_message("stopping ComfyUI")
-        raise SystemExit(1)
+        _stop_without_server()
+        return
+    orphans = _stop_orphaned()
     url, headers = server
     console.print("[dim]Stopping ComfyUI...[/dim]")
     st, pl = server_call(url, headers, "POST", "/v1/comfy/stop",
                          timeout=_STOP_TIMEOUT)
     _report_action(st, pl, "stop ComfyUI")
+    if not all(ok for _, ok, _ in orphans):
+        raise SystemExit(1)
+
+
+def _print_stop_results(results) -> bool:
+    """Print one line per ``(api_url, ok, message)``; True when all are ok."""
+    from rich.markup import escape
+
+    for api_url, ok, message in results:
+        colour = "green" if ok else "red"
+        console.print(f"[{colour}]ComfyUI at {escape(api_url)}: "
+                      f"{escape(str(message))}[/{colour}]")
+    return all(ok for _, ok, _ in results)
+
+
+def _stop_orphaned() -> list:
+    """With a server running: stop each recorded ComfyUI whose launching localm
+    process has exited, print the outcome, and return the results."""
+    from ..media.comfy_client import stop_recorded_comfy
+
+    results = stop_recorded_comfy(skip_live_owner=True)
+    _print_stop_results(results)
+    return results
+
+
+def _stop_without_server() -> None:
+    """`comfy stop` with no localm server: stop every ComfyUI localm launched
+    from this data dir by its launch record, then run the same stop on the
+    targeted ComfyUI when no record covered it. Exits 1 when any stop failed."""
+    from ..media.comfy_client import default_api_url, stop_comfy, stop_recorded_comfy
+
+    console.print("[dim]No localm server is running for this directory; stopping "
+                  "ComfyUI from here...[/dim]")
+    results = stop_recorded_comfy()
+    target = default_api_url().rstrip("/")
+    if target not in {api_url for api_url, _, _ in results}:
+        ok, message = stop_comfy(target)
+        results.append((target, ok, message))
+    if not _print_stop_results(results):
+        raise SystemExit(1)
 
 
 @comfy_group.command("restart")
