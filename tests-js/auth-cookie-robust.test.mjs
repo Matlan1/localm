@@ -76,3 +76,48 @@ test("a cookie-authed write that 403s on a stale CSRF token self-heals and retri
   assert.equal(unloadCalls, 2, "exactly one retry (the stale attempt + the healed one)");
   assert.equal(window.__LOCALM_CSRF__, "FRESH", "the token was refreshed from /api/session");
 });
+
+test("a 403 from another origin is never retried and never refreshes the CSRF token", async () => {
+  const sent = [];
+  const { window } = loadApp({
+    fetchImpl: async (url, init) => {
+      const u = String(url);
+      if (u.includes("/api/session")) {
+        return { ok: true, status: 200, json: async () => ({ authed: true, csrf: "FRESH" }), text: async () => "" };
+      }
+      if (u.includes("/v1/models/unload")) {
+        sent.push({ u, token: init && init.headers && init.headers["X-CSRF-Token"] });
+        return { ok: false, status: 403, json: async () => ({}), text: async () => "" };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    },
+  });
+  await tick();
+  const foreign = ["//other.example/v1/models/unload",
+    window.location.origin + ".evil.example/v1/models/unload",
+    "/\\evil.example/v1/models/unload",
+    "http://localhost:8642@evil.example/v1/models/unload",
+    new window.URL("https://other.example/v1/models/unload")];
+  for (const u of foreign) {
+    window.__LOCALM_CSRF__ = "STALE";
+    const res = await window.fetch(u, { method: "POST", headers: window.authHeaders() });
+    assert.equal(res.status, 403, `${u}: the refusal reaches the caller`);
+    assert.equal(window.__LOCALM_CSRF__, "STALE", `${u}: no token refresh`);
+  }
+  assert.deepEqual(sent.map((s) => s.token), foreign.map(() => "STALE"),
+    "each foreign call was sent once, never again with a fresh token");
+
+  window.__LOCALM_CSRF__ = "STALE";
+  sent.length = 0;
+  await window.fetch(window.location.origin + "/v1/models/unload",
+    { method: "POST", headers: window.authHeaders() });
+  assert.deepEqual(sent.map((s) => s.token), ["STALE", "FRESH"],
+    "control: an absolute URL of this origin is still refreshed and retried once");
+
+  window.__LOCALM_CSRF__ = "STALE";
+  sent.length = 0;
+  await window.fetch(new window.URL("/v1/models/unload", window.location.href),
+    { method: "POST", headers: window.authHeaders() });
+  assert.deepEqual(sent.map((s) => s.token), ["STALE", "FRESH"],
+    "control: a URL object of this origin is still refreshed and retried once");
+});
